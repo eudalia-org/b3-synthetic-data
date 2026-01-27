@@ -1,0 +1,28 @@
+[project]
+name = "data-gen"
+version = "0.1.0"
+description = "Synthetic data generation pipeline for Oracle Cloud"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "eudalia",
+    "langchain>=1.2.1",
+    "langchain-openai>=1.1.6",
+    "oci>=2.164.2",
+]
+
+[tool.uv.sources]
+eudalia = { path = "eudalia" }
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.3.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

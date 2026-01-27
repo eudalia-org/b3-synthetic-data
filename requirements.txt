@@ -1,0 +1,4 @@
+oci>=2.164.2
+langchain>=1.2.1
+langchain-openai>=1.1.6
+langchain-core>=0.1.0
