@@ -1,0 +1,47 @@
+name: Upload DataGen ETL Scripts to S3
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - extract.py
+      - transform.py
+      - load.py
+      - config.py
+      - secrets.py
+
+env:
+  AWS_REGION: us-east-1
+  S3_BUCKET: eudalia-production-datagen-us-east-1
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  upload-scripts:
+    name: Upload scripts to S3
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-actions-s3-upload-${{ github.run_id }}
+
+      - name: Upload scripts to S3
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for file in extract.py transform.py load.py config.py secrets.py; do
+            aws s3 cp "$file" "s3://${S3_BUCKET}/scripts/${file}"
+            echo "Uploaded ${file} to s3://${S3_BUCKET}/scripts/${file}"
+          done
