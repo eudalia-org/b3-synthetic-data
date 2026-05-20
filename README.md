@@ -11,10 +11,10 @@ Synthetic data generation pipeline for Oracle Cloud.
 ## Usage
 
 ```bash
-python extract.py <table> <YYYYMMDD>
-python transform.py <table> <YYYYMMDD> [key_columns]
-python load.py <table> <YYYYMMDD>
+python etl.py <table> <YYYYMMDD> [key_columns]
 ```
+
+The single `etl.py` entrypoint runs extract, transform, and load in one Spark session.
 
 ## OCI Data Flow Deployment
 
@@ -33,13 +33,10 @@ docker run --rm -v $(pwd):/app -w /app ghcr.io/oracle/oraclelinux8-python:3.11 \
 oci os object put --bucket-name datagen-apps --file archive.zip --name archive.zip --force
 ```
 
-### Upload ETL Scripts
+### Upload ETL Script
 
 ```bash
-oci os object put --bucket-name datagen-apps --file extract.py --name extract.py --force
-oci os object put --bucket-name datagen-apps --file transform.py --name transform.py --force
-oci os object put --bucket-name datagen-apps --file load.py --name load.py --force
-oci os object put --bucket-name datagen-apps --file secrets.py --name secrets.py --force
+oci os object put --bucket-name datagen-apps --file etl.py --name etl.py --force
 ```
 
 ### Run on Data Flow

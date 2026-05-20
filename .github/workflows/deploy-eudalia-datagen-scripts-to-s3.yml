@@ -1,4 +1,4 @@
-name: Upload DataGen ETL Scripts to S3
+name: Upload DataGen ETL Script to S3
 
 on:
   workflow_dispatch:
@@ -6,11 +6,7 @@ on:
     branches:
       - main
     paths:
-      - extract.py
-      - transform.py
-      - load.py
-      - config.py
-      - secrets.py
+      - etl.py
 
 env:
   AWS_REGION: us-east-1
@@ -22,7 +18,7 @@ permissions:
 
 jobs:
   upload-scripts:
-    name: Upload scripts to S3
+    name: Upload script to S3
     runs-on: ubuntu-latest
 
     steps:
@@ -36,12 +32,10 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: github-actions-s3-upload-${{ github.run_id }}
 
-      - name: Upload scripts to S3
+      - name: Upload script to S3
         shell: bash
         run: |
           set -euo pipefail
 
-          for file in extract.py transform.py load.py config.py secrets.py; do
-            aws s3 cp "$file" "s3://${S3_BUCKET}/scripts/${file}"
-            echo "Uploaded ${file} to s3://${S3_BUCKET}/scripts/${file}"
-          done
+          aws s3 cp etl.py "s3://${S3_BUCKET}/scripts/etl.py"
+          echo "Uploaded etl.py to s3://${S3_BUCKET}/scripts/etl.py"
