@@ -11,10 +11,36 @@ Synthetic data generation pipeline for Oracle Cloud.
 ## Usage
 
 ```bash
-python etl.py <table> <YYYYMMDD> [key_columns]
+python etl.py --config specs.json --date <YYYYMMDD>
 ```
 
-The single `etl.py` entrypoint runs extract, transform, and load in one Spark session.
+The single `etl.py` entrypoint runs extract, multi-table relational synthesis, and load in one Spark session.
+
+Example config:
+
+```json
+{
+  "tables": {
+    "CUSTOMERS": {
+      "pk_cols": ["CUSTOMER_ID"]
+    },
+    "ORDERS": {
+      "pk_cols": ["ORDER_ID"],
+      "foreign_keys": [
+        {
+          "columns": ["CUSTOMER_ID"],
+          "parent_table": "CUSTOMERS",
+          "parent_columns": ["CUSTOMER_ID"]
+        }
+      ]
+    }
+  },
+  "validate_mode": "full",
+  "relationship_policy": "warn_and_skip"
+}
+```
+
+The config path is read through Spark, so local paths and Spark-readable Object Storage URIs are supported when configured in the runtime environment.
 
 ## OCI Data Flow Deployment
 
