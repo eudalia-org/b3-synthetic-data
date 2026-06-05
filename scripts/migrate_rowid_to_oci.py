@@ -419,19 +419,76 @@ def execute_extent_query(
     )
 
 
-def rows_to_arrow_table(rows: list[tuple[Any, ...]], columns: list[str]) -> pa.Table:
+def rows_to_arrow_table(rows: list[tuple[Any, ...]], schema: pa.Schema) -> pa.Table:
     normalized_rows = [tuple(normalize_value(value) for value in row) for row in rows]
     column_values = (
-        list(zip(*normalized_rows, strict=False)) if rows else [[] for _ in columns]
+        list(zip(*normalized_rows, strict=False)) if rows else [[] for _ in schema.names]
     )
-    arrays = [pa.array(values) for values in column_values]
-    return pa.Table.from_arrays(arrays, names=columns)
+    arrays = [
+        pa.array(values, type=schema.field(index).type)
+        for index, values in enumerate(column_values)
+    ]
+    return pa.Table.from_arrays(arrays, schema=schema)
 
 
 def normalize_value(value: Any) -> Any:
     if isinstance(value, oracledb.LOB):
         return value.read()
     return value
+
+
+def arrow_schema_from_cursor(cursor: oracledb.Cursor) -> pa.Schema:
+    return pa.schema(
+        [
+            pa.field(description[0], arrow_type_from_oracle_description(description))
+            for description in cursor.description
+        ]
+    )
+
+
+def arrow_type_from_oracle_description(description: tuple[Any, ...]) -> pa.DataType:
+    db_type = description[1]
+    precision = description[4]
+    scale = description[5]
+
+    if db_type in (
+        oracledb.DB_TYPE_CHAR,
+        oracledb.DB_TYPE_CLOB,
+        oracledb.DB_TYPE_LONG,
+        oracledb.DB_TYPE_LONG_NVARCHAR,
+        oracledb.DB_TYPE_NCHAR,
+        oracledb.DB_TYPE_NCLOB,
+        oracledb.DB_TYPE_NVARCHAR,
+        oracledb.DB_TYPE_VARCHAR,
+    ):
+        return pa.string()
+    if db_type in (
+        oracledb.DB_TYPE_BFILE,
+        oracledb.DB_TYPE_BLOB,
+        oracledb.DB_TYPE_LONG_RAW,
+        oracledb.DB_TYPE_RAW,
+    ):
+        return pa.binary()
+    if db_type in (
+        oracledb.DB_TYPE_DATE,
+        oracledb.DB_TYPE_TIMESTAMP,
+        oracledb.DB_TYPE_TIMESTAMP_LTZ,
+        oracledb.DB_TYPE_TIMESTAMP_TZ,
+    ):
+        return pa.timestamp("us")
+    if db_type == oracledb.DB_TYPE_BINARY_DOUBLE:
+        return pa.float64()
+    if db_type == oracledb.DB_TYPE_BINARY_FLOAT:
+        return pa.float32()
+    if db_type == oracledb.DB_TYPE_NUMBER:
+        if scale in (None, 0):
+            return pa.int64()
+        if precision is not None and precision <= 38:
+            return pa.decimal128(precision, scale)
+        return pa.float64()
+
+    logger.warning("Mapping unsupported Oracle type %s to string", db_type)
+    return pa.string()
 
 
 def export_chunk_to_parquet(
@@ -454,7 +511,7 @@ def export_chunk_to_parquet(
     cursor.prefetchrows = fetch_size
     cursor.execute(query, start_rowid=start_rowid, end_rowid=end_rowid)
 
-    columns = [description[0] for description in cursor.description]
+    schema = arrow_schema_from_cursor(cursor)
     writer = None
     total_rows = 0
     parquet_compression = None if compression == "none" else compression
@@ -464,7 +521,7 @@ def export_chunk_to_parquet(
             rows = cursor.fetchmany(fetch_size)
             if not rows:
                 break
-            table = rows_to_arrow_table(rows, columns)
+            table = rows_to_arrow_table(rows, schema)
             if writer is None:
                 writer = pq.ParquetWriter(
                     output_file,
@@ -476,8 +533,8 @@ def export_chunk_to_parquet(
 
         if writer is None:
             empty_table = pa.Table.from_arrays(
-                [pa.array([]) for _ in columns],
-                names=columns,
+                [pa.array([], type=field.type) for field in schema],
+                schema=schema,
             )
             writer = pq.ParquetWriter(
                 output_file,
