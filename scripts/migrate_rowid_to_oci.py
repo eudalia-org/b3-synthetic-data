@@ -86,6 +86,17 @@ def parse_arguments() -> argparse.Namespace:
         help="Optional OCI CLI config file path, for example C:\\Users\\me\\.oci\\config.",
     )
     parser.add_argument(
+        "--cert-bundle",
+        help="Optional CA bundle path passed to OCI CLI for corporate/VDI SSL inspection.",
+    )
+    parser.add_argument(
+        "--auth",
+        help=(
+            "Optional OCI CLI auth mode, for example security_token, api_key, "
+            "or instance_principal."
+        ),
+    )
+    parser.add_argument(
         "--continue-on-error",
         action="store_true",
         help="Continue with remaining chunks/tables after a failure.",
@@ -351,6 +362,8 @@ def upload_with_oci_cli(
     namespace: str | None,
     profile: str | None,
     config_file: str | None,
+    cert_bundle: str | None,
+    auth: str | None,
 ) -> None:
     command = [
         "oci",
@@ -371,6 +384,10 @@ def upload_with_oci_cli(
         command.extend(["--profile", profile])
     if config_file:
         command.extend(["--config-file", config_file])
+    if cert_bundle:
+        command.extend(["--cert-bundle", cert_bundle])
+    if auth:
+        command.extend(["--auth", auth])
 
     subprocess.run(command, check=True)
 
@@ -449,6 +466,8 @@ def migrate_table(
                 namespace=args.namespace,
                 profile=args.profile,
                 config_file=args.config_file,
+                cert_bundle=args.cert_bundle,
+                auth=args.auth,
             )
             upload_seconds = time.monotonic() - upload_started
             total_seconds = export_seconds + upload_seconds
