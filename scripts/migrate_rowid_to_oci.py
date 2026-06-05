@@ -483,7 +483,12 @@ def arrow_type_from_oracle_description(description: tuple[Any, ...]) -> pa.DataT
     if db_type == oracledb.DB_TYPE_NUMBER:
         if scale in (None, 0):
             return pa.int64()
-        if precision is not None and precision <= 38:
+        if (
+            precision is not None
+            and scale is not None
+            and 1 <= precision <= 38
+            and 0 <= scale <= precision
+        ):
             return pa.decimal128(precision, scale)
         return pa.float64()
 
