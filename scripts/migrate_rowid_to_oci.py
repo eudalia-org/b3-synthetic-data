@@ -198,59 +198,11 @@ def fetch_rowid_ranges(
     connection: oracledb.Connection,
     owner: str,
     table_name: str,
+    table_ref: str,
     target_blocks: int,
 ) -> list[dict[str, Any]]:
-    query = """
-        SELECT
-            dbms_rowid.rowid_create(1, o.data_object_id, e.relative_fno, e.block_id, 0)
-                AS start_rowid,
-            dbms_rowid.rowid_create(
-                1,
-                o.data_object_id,
-                e.relative_fno,
-                e.block_id + e.blocks - 1,
-                32767
-            ) AS end_rowid,
-            e.blocks
-        FROM all_extents e
-        JOIN all_objects o
-          ON o.owner = e.owner
-         AND o.object_name = e.segment_name
-         AND o.object_type = 'TABLE'
-        WHERE e.owner = :owner
-          AND e.segment_name = :table_name
-          AND e.segment_type = 'TABLE'
-        ORDER BY e.relative_fno, e.block_id
-    """
-    try:
-        rows = connection.cursor().execute(
-            query,
-            owner=owner,
-            table_name=table_name,
-        )
-    except oracledb.DatabaseError as exc:
-        logger.warning("ALL_EXTENTS query failed for %s.%s: %s", owner, table_name, exc)
-        query = """
-            SELECT
-                dbms_rowid.rowid_create(1, o.data_object_id, e.relative_fno, e.block_id, 0)
-                    AS start_rowid,
-                dbms_rowid.rowid_create(
-                    1,
-                    o.data_object_id,
-                    e.relative_fno,
-                    e.block_id + e.blocks - 1,
-                    32767
-                ) AS end_rowid,
-                e.blocks
-            FROM user_extents e
-            JOIN user_objects o
-              ON o.object_name = e.segment_name
-             AND o.object_type = 'TABLE'
-            WHERE e.segment_name = :table_name
-              AND e.segment_type = 'TABLE'
-            ORDER BY e.relative_fno, e.block_id
-        """
-        rows = connection.cursor().execute(query, table_name=table_name)
+    data_object_id = get_data_object_id(connection, table_ref, owner, table_name)
+    rows = execute_extent_query(connection, owner, table_name, data_object_id)
 
     chunks = []
     current: dict[str, Any] | None = None
@@ -279,6 +231,192 @@ def fetch_rowid_ranges(
         chunks.append(current)
 
     return chunks
+
+
+def get_data_object_id(
+    connection: oracledb.Connection,
+    table_ref: str,
+    owner: str,
+    table_name: str,
+) -> int:
+    cursor = connection.cursor()
+    try:
+        row = cursor.execute(
+            f"SELECT dbms_rowid.rowid_object(ROWID) FROM {table_ref} WHERE ROWNUM = 1"
+        ).fetchone()
+        if row and row[0] is not None:
+            return int(row[0])
+    finally:
+        cursor.close()
+
+    attempts = [
+        (
+            "ALL_OBJECTS",
+            """
+                SELECT data_object_id
+                FROM all_objects
+                WHERE owner = :owner
+                  AND object_name = :table_name
+                  AND object_type = 'TABLE'
+            """,
+            {"owner": owner, "table_name": table_name},
+        ),
+        (
+            "USER_OBJECTS",
+            """
+                SELECT data_object_id
+                FROM user_objects
+                WHERE object_name = :table_name
+                  AND object_type = 'TABLE'
+            """,
+            {"table_name": table_name},
+        ),
+    ]
+    failures = []
+    for view_name, query, params in attempts:
+        try:
+            cursor = connection.cursor()
+            row = cursor.execute(query, params).fetchone()
+            cursor.close()
+            if row and row[0] is not None:
+                return int(row[0])
+        except oracledb.DatabaseError as exc:
+            failures.append(f"{view_name}: {exc}")
+            logger.warning(
+                "%s data object query failed for %s.%s: %s",
+                view_name,
+                owner,
+                table_name,
+                exc,
+            )
+
+    raise RuntimeError(
+        f"Could not determine Oracle data object ID for {table_ref}. "
+        "If the table is empty, ask for access to ALL_OBJECTS or USER_OBJECTS. Failures: "
+        + " | ".join(failures)
+    )
+
+
+def execute_extent_query(
+    connection: oracledb.Connection,
+    owner: str,
+    table_name: str,
+    data_object_id: int,
+) -> oracledb.Cursor:
+    attempts = [
+        (
+            "DBA_EXTENTS",
+            """
+                SELECT
+                    dbms_rowid.rowid_create(
+                        1,
+                        :data_object_id,
+                        e.relative_fno,
+                        e.block_id,
+                        0
+                    ) AS start_rowid,
+                    dbms_rowid.rowid_create(
+                        1,
+                        :data_object_id,
+                        e.relative_fno,
+                        e.block_id + e.blocks - 1,
+                        32767
+                    ) AS end_rowid,
+                    e.blocks
+                FROM dba_extents e
+                WHERE e.owner = :owner
+                  AND e.segment_name = :table_name
+                  AND e.segment_type = 'TABLE'
+                ORDER BY e.relative_fno, e.block_id
+            """,
+            {
+                "owner": owner,
+                "table_name": table_name,
+                "data_object_id": data_object_id,
+            },
+        ),
+        (
+            "ALL_EXTENTS",
+            """
+                SELECT
+                    dbms_rowid.rowid_create(
+                        1,
+                        :data_object_id,
+                        e.relative_fno,
+                        e.block_id,
+                        0
+                    ) AS start_rowid,
+                    dbms_rowid.rowid_create(
+                        1,
+                        :data_object_id,
+                        e.relative_fno,
+                        e.block_id + e.blocks - 1,
+                        32767
+                    ) AS end_rowid,
+                    e.blocks
+                FROM all_extents e
+                WHERE e.owner = :owner
+                  AND e.segment_name = :table_name
+                  AND e.segment_type = 'TABLE'
+                ORDER BY e.relative_fno, e.block_id
+            """,
+            {
+                "owner": owner,
+                "table_name": table_name,
+                "data_object_id": data_object_id,
+            },
+        ),
+        (
+            "USER_EXTENTS",
+            """
+                SELECT
+                    dbms_rowid.rowid_create(
+                        1,
+                        :data_object_id,
+                        e.relative_fno,
+                        e.block_id,
+                        0
+                    ) AS start_rowid,
+                    dbms_rowid.rowid_create(
+                        1,
+                        :data_object_id,
+                        e.relative_fno,
+                        e.block_id + e.blocks - 1,
+                        32767
+                    ) AS end_rowid,
+                    e.blocks
+                FROM user_extents e
+                WHERE e.segment_name = :table_name
+                  AND e.segment_type = 'TABLE'
+                ORDER BY e.relative_fno, e.block_id
+            """,
+            {"table_name": table_name, "data_object_id": data_object_id},
+        ),
+    ]
+
+    failures = []
+    for view_name, query, params in attempts:
+        try:
+            cursor = connection.cursor()
+            cursor.execute(query, params)
+            logger.info("Using %s for ROWID chunk discovery", view_name)
+            return cursor
+        except oracledb.DatabaseError as exc:
+            failures.append(f"{view_name}: {exc}")
+            logger.warning(
+                "%s query failed for %s.%s: %s",
+                view_name,
+                owner,
+                table_name,
+                exc,
+            )
+
+    raise RuntimeError(
+        "Could not generate ROWID chunks from extent metadata. "
+        "Ask the DBA for SELECT access to DBA_EXTENTS/ALL_EXTENTS with RELATIVE_FNO, "
+        "BLOCK_ID, and BLOCKS. Failures: "
+        + " | ".join(failures)
+    )
 
 
 def rows_to_arrow_table(rows: list[tuple[Any, ...]], columns: list[str]) -> pa.Table:
@@ -405,7 +543,13 @@ def migrate_table(
     table_ref = qualified_table(owner, table_name)
     table_slug = safe_path_part(f"{owner}.{table_name}")
 
-    chunks = fetch_rowid_ranges(connection, owner, table_name, args.target_blocks)
+    chunks = fetch_rowid_ranges(
+        connection,
+        owner,
+        table_name,
+        table_ref,
+        args.target_blocks,
+    )
     if not chunks:
         raise RuntimeError(f"No ROWID chunks found for {table_ref}")
 
