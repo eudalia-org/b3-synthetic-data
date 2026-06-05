@@ -1,0 +1,2 @@
+oracledb>=2.5.0
+pyarrow>=16.0.0
