@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -420,7 +421,13 @@ def execute_extent_query(
 
 
 def rows_to_arrow_table(rows: list[tuple[Any, ...]], schema: pa.Schema) -> pa.Table:
-    normalized_rows = [tuple(normalize_value(value) for value in row) for row in rows]
+    normalized_rows = [
+        tuple(
+            normalize_value(value, schema.field(index).type)
+            for index, value in enumerate(row)
+        )
+        for row in rows
+    ]
     column_values = (
         list(zip(*normalized_rows, strict=False)) if rows else [[] for _ in schema.names]
     )
@@ -431,9 +438,17 @@ def rows_to_arrow_table(rows: list[tuple[Any, ...]], schema: pa.Schema) -> pa.Ta
     return pa.Table.from_arrays(arrays, schema=schema)
 
 
-def normalize_value(value: Any) -> Any:
+def normalize_value(value: Any, arrow_type: pa.DataType) -> Any:
+    if value is None:
+        return None
     if isinstance(value, oracledb.LOB):
         return value.read()
+    if pa.types.is_integer(arrow_type) and isinstance(value, float):
+        if value.is_integer():
+            return int(value)
+        return value
+    if pa.types.is_decimal(arrow_type) and isinstance(value, float):
+        return Decimal(str(value))
     return value
 
 
@@ -481,7 +496,7 @@ def arrow_type_from_oracle_description(description: tuple[Any, ...]) -> pa.DataT
     if db_type == oracledb.DB_TYPE_BINARY_FLOAT:
         return pa.float32()
     if db_type == oracledb.DB_TYPE_NUMBER:
-        if scale in (None, 0):
+        if precision is not None and scale in (None, 0) and 1 <= precision <= 18:
             return pa.int64()
         if (
             precision is not None
