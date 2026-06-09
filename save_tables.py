@@ -4,6 +4,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,6 +16,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 DEFAULT_SOURCE_DB_USER = "ADMIN"
+DEFAULT_FETCH_SIZE = "50000"
+DEFAULT_NUM_PARTITIONS = "32"
+DEFAULT_ORACLE_FETCH_OPTIONS = {
+    "oracle.jdbc.useFetchSizeWithLongColumn": "true",
+    "defaultRowPrefetch": DEFAULT_FETCH_SIZE,
+}
 REQUIRED_ENV_VARS = (
     "DATAGEN_SOURCE_JDBC_URL",
     "DATAGEN_SOURCE_DB_PASSWORD",
@@ -45,7 +52,25 @@ def parse_arguments() -> argparse.Namespace:
         action="store_true",
         help="Try remaining tables after a read/write failure, then exit non-zero if any failed.",
     )
+    parser.add_argument(
+        "--limit",
+        type=positive_int,
+        help=(
+            "Read at most this many rows from each table and write to a *_limit_<N>.parquet "
+            "path for runtime testing."
+        ),
+    )
     return parser.parse_args()
+
+
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be an integer") from None
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
 
 
 def parse_tables(tables: str | None, tables_file: str | None) -> list[str]:
@@ -89,6 +114,15 @@ def get_extract_env() -> dict[str, str]:
     config["DATAGEN_SOURCE_DB_USER"] = os.environ.get(
         "DATAGEN_SOURCE_DB_USER", DEFAULT_SOURCE_DB_USER
     )
+    config["DATAGEN_JDBC_FETCH_SIZE"] = os.environ.get(
+        "DATAGEN_JDBC_FETCH_SIZE", DEFAULT_FETCH_SIZE
+    )
+    config["DATAGEN_JDBC_NUM_PARTITIONS"] = os.environ.get(
+        "DATAGEN_JDBC_NUM_PARTITIONS", DEFAULT_NUM_PARTITIONS
+    )
+    config["DATAGEN_JDBC_PARTITION_COLUMNS"] = os.environ.get(
+        "DATAGEN_JDBC_PARTITION_COLUMNS", ""
+    )
     return config
 
 
@@ -98,8 +132,9 @@ def create_spark_session(app_name: str) -> SparkSession:
     return SparkSession.builder.appName(app_name).getOrCreate()
 
 
-def build_raw_path(config: dict[str, str], table: str, date: str) -> str:
-    return f"{config['DATAGEN_RAW_BASE_URI']}/{table}/{date}_{table}.parquet"
+def build_raw_path(config: dict[str, str], table: str, date: str, limit: int | None = None) -> str:
+    suffix = f"_limit_{limit}" if limit is not None else ""
+    return f"{config['DATAGEN_RAW_BASE_URI']}/{table}/{date}_{table}{suffix}.parquet"
 
 
 def table_path_name(table: str) -> str:
@@ -110,12 +145,169 @@ def dbtable_name(source_user: str, table: str) -> str:
     return table if "." in table else f"{source_user}.{table}"
 
 
+def limited_dbtable_name(source_table: str, limit: int | None) -> str:
+    if limit is None:
+        return source_table
+    return f"(SELECT * FROM {source_table} FETCH FIRST {limit} ROWS ONLY) DATAGEN_LIMITED"
+
+
+def table_owner_and_name(source_user: str, table: str) -> tuple[str, str]:
+    if "." in table:
+        owner, table_name = table.split(".", 1)
+        return owner.upper(), table_name.upper()
+    return source_user.upper(), table.upper()
+
+
+def parse_partition_column_overrides(raw_overrides: str) -> dict[str, str]:
+    overrides = {}
+    for item in raw_overrides.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            logger.warning(
+                "Ignoring invalid partition override %r; expected TABLE=COLUMN",
+                item,
+            )
+            continue
+        table, column = item.split("=", 1)
+        table = table.strip().upper()
+        column = column.strip().upper()
+        if table and column:
+            overrides[table] = column
+    return overrides
+
+
+def read_single_value(spark: SparkSession, properties: dict[str, str], query: str):
+    rows = (
+        spark.read.format("jdbc")
+        .options(**properties)
+        .option("dbtable", f"({query}) DATAGEN_Q")
+        .load()
+        .take(1)
+    )
+    return rows[0] if rows else None
+
+
+def discover_numeric_pk_column(
+    spark: SparkSession,
+    properties: dict[str, str],
+    owner: str,
+    table_name: str,
+) -> str | None:
+    query = f"""
+        SELECT acc.column_name
+        FROM all_constraints ac
+        JOIN all_cons_columns acc
+          ON ac.owner = acc.owner
+         AND ac.constraint_name = acc.constraint_name
+         AND ac.table_name = acc.table_name
+        JOIN all_tab_columns atc
+          ON atc.owner = acc.owner
+         AND atc.table_name = acc.table_name
+         AND atc.column_name = acc.column_name
+        WHERE ac.owner = '{owner}'
+          AND ac.table_name = '{table_name}'
+          AND ac.constraint_type = 'P'
+          AND atc.data_type = 'NUMBER'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM all_cons_columns acc2
+              WHERE acc2.owner = acc.owner
+                AND acc2.constraint_name = acc.constraint_name
+                AND acc2.table_name = acc.table_name
+                AND acc2.position > 1
+          )
+        ORDER BY acc.position
+    """
+    row = read_single_value(spark, properties, query)
+    return row[0] if row else None
+
+
+def get_numeric_bounds(
+    spark: SparkSession,
+    properties: dict[str, str],
+    source_table: str,
+    partition_column: str,
+) -> tuple[str, str] | None:
+    query = f"""
+        SELECT MIN({partition_column}) AS lower_bound,
+               MAX({partition_column}) AS upper_bound
+        FROM {source_table}
+        WHERE {partition_column} IS NOT NULL
+    """
+    row = read_single_value(spark, properties, query)
+    if not row or row[0] is None or row[1] is None:
+        return None
+    if row[0] == row[1]:
+        return None
+    return str(row[0]), str(row[1])
+
+
+def build_jdbc_reader(
+    spark: SparkSession,
+    properties: dict[str, str],
+    config: dict[str, str],
+    source_user: str,
+    table: str,
+    source_table: str,
+):
+    reader = (
+        spark.read.format("jdbc")
+        .options(**properties)
+        .option("dbtable", source_table)
+        .option("fetchsize", config["DATAGEN_JDBC_FETCH_SIZE"])
+    )
+    owner, table_name = table_owner_and_name(source_user, table)
+    overrides = parse_partition_column_overrides(
+        config["DATAGEN_JDBC_PARTITION_COLUMNS"]
+    )
+    partition_column = overrides.get(f"{owner}.{table_name}") or overrides.get(table_name)
+
+    if not partition_column:
+        partition_column = discover_numeric_pk_column(spark, properties, owner, table_name)
+
+    if not partition_column:
+        logger.warning(
+            "No numeric partition column found for %s; using one JDBC partition",
+            source_table,
+        )
+        return reader
+
+    bounds = get_numeric_bounds(spark, properties, source_table, partition_column)
+    if not bounds:
+        logger.warning(
+            "No bounds found for %s.%s; using one JDBC partition",
+            source_table,
+            partition_column,
+        )
+        return reader
+
+    lower_bound, upper_bound = bounds
+    num_partitions = config["DATAGEN_JDBC_NUM_PARTITIONS"]
+    logger.info(
+        "Reading %s in %s JDBC partitions on %s [%s, %s]",
+        source_table,
+        num_partitions,
+        partition_column,
+        lower_bound,
+        upper_bound,
+    )
+    return (
+        reader.option("partitionColumn", partition_column)
+        .option("lowerBound", lower_bound)
+        .option("upperBound", upper_bound)
+        .option("numPartitions", num_partitions)
+    )
+
+
 def save_tables(
     spark: SparkSession,
     config: dict[str, str],
     tables: list[str],
     date: str,
     continue_on_error: bool = False,
+    limit: int | None = None,
 ) -> None:
     source_user = config["DATAGEN_SOURCE_DB_USER"]
     properties = {
@@ -123,27 +315,42 @@ def save_tables(
         "user": source_user,
         "password": config["DATAGEN_SOURCE_DB_PASSWORD"],
         "driver": "oracle.jdbc.OracleDriver",
+        **DEFAULT_ORACLE_FETCH_OPTIONS,
     }
     failures = []
 
     for table in tables:
         output_table = table_path_name(table)
-        output_path = build_raw_path(config, output_table, date)
+        output_path = build_raw_path(config, output_table, date, limit)
         source_table = dbtable_name(source_user, table)
+        read_table = limited_dbtable_name(source_table, limit)
         try:
-            logger.info("Reading %s", source_table)
-            df = (
-                spark.read.format("jdbc")
-                .options(**properties)
-                .option("dbtable", source_table)
-                .load()
-            )
-            row_count = df.count()
-            logger.info("Read %s rows from %s", row_count, source_table)
+            started_at = time.perf_counter()
+            if limit is None:
+                logger.info("Reading %s", source_table)
+            else:
+                logger.info("Reading up to %s rows from %s", limit, source_table)
+            df = build_jdbc_reader(
+                spark=spark,
+                properties=properties,
+                config=config,
+                source_user=source_user,
+                table=table,
+                source_table=read_table,
+            ).load()
 
             logger.info("Saving %s to %s", source_table, output_path)
             df.write.mode("overwrite").parquet(output_path)
-            logger.info("Saved %s rows from %s", row_count, source_table)
+            elapsed_seconds = time.perf_counter() - started_at
+            if limit is None:
+                logger.info("Saved %s in %.1fs", source_table, elapsed_seconds)
+            else:
+                logger.info(
+                    "Saved sample from %s in %.1fs (limit=%s)",
+                    source_table,
+                    elapsed_seconds,
+                    limit,
+                )
         except Exception as exc:
             logger.exception("Failed to save %s: %s", source_table, exc)
             failures.append(source_table)
@@ -161,7 +368,7 @@ def main() -> None:
     config = get_extract_env()
     spark = create_spark_session("DataGenSaveTables")
     try:
-        save_tables(spark, config, tables, args.date, args.continue_on_error)
+        save_tables(spark, config, tables, args.date, args.continue_on_error, args.limit)
     finally:
         spark.stop()
 
