@@ -85,6 +85,20 @@ DATAGEN_JDBC_PARTITION_COLUMNS=BIG_TABLE=ID,OTHER_SCHEMA.OTHER_TABLE=OTHER_ID
 Without `DATAGEN_JDBC_PARTITION_COLUMNS`, the script uses one JDBC partition and does not
 query Oracle metadata to discover one.
 
+To estimate how to split tables across multiple Data Flow jobs from the VDI/on-prem side,
+query Oracle statistics and segment sizes:
+
+```bash
+export ORACLE_DB_USER=YOUR_SCHEMA
+export ORACLE_DB_PASSWORD='YOUR_PASSWORD'
+export ORACLE_DSN='host:1521/service_name'
+
+python scripts/oracle_table_sizes.py --tables BIG_TABLE,OTHER_TABLE --format csv
+```
+
+The row count is Oracle's `NUM_ROWS` estimate from table statistics, so check
+`last_analyzed`/`stale_stats` before relying on it for exact job sizing.
+
 ## VDI One-Time ROWID Migration
 
 `scripts/migrate_rowid_to_oci.py` is for the on-prem access pattern where the VDI can reach both
