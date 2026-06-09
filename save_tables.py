@@ -43,11 +43,6 @@ def parse_arguments() -> argparse.Namespace:
         help="Local text file with one table per line. Blank lines and # comments are ignored.",
     )
     parser.add_argument(
-        "--date",
-        required=True,
-        help="Run date in YYYYMMDD format, used in raw object paths.",
-    )
-    parser.add_argument(
         "--continue-on-error",
         action="store_true",
         help="Try remaining tables after a read/write failure, then exit non-zero if any failed.",
@@ -123,6 +118,7 @@ def get_extract_env() -> dict[str, str]:
     config["DATAGEN_JDBC_PARTITION_COLUMNS"] = os.environ.get(
         "DATAGEN_JDBC_PARTITION_COLUMNS", ""
     )
+    config["DATAGEN_RAW_PREFIX"] = os.environ.get("DATAGEN_RAW_PREFIX", "").strip("/")
     return config
 
 
@@ -132,9 +128,13 @@ def create_spark_session(app_name: str) -> SparkSession:
     return SparkSession.builder.appName(app_name).getOrCreate()
 
 
-def build_raw_path(config: dict[str, str], table: str, date: str, limit: int | None = None) -> str:
+def build_raw_path(config: dict[str, str], table: str, limit: int | None = None) -> str:
     suffix = f"_limit_{limit}" if limit is not None else ""
-    return f"{config['DATAGEN_RAW_BASE_URI']}/{table}/{date}_{table}{suffix}.parquet"
+    path_parts = [config["DATAGEN_RAW_BASE_URI"]]
+    if config["DATAGEN_RAW_PREFIX"]:
+        path_parts.append(config["DATAGEN_RAW_PREFIX"])
+    path_parts.append(f"{table}{suffix}")
+    return "/".join(path_parts)
 
 
 def table_path_name(table: str) -> str:
@@ -305,7 +305,6 @@ def save_tables(
     spark: SparkSession,
     config: dict[str, str],
     tables: list[str],
-    date: str,
     continue_on_error: bool = False,
     limit: int | None = None,
 ) -> None:
@@ -321,7 +320,7 @@ def save_tables(
 
     for table in tables:
         output_table = table_path_name(table)
-        output_path = build_raw_path(config, output_table, date, limit)
+        output_path = build_raw_path(config, output_table, limit)
         source_table = dbtable_name(source_user, table)
         read_table = limited_dbtable_name(source_table, limit)
         try:
@@ -368,7 +367,7 @@ def main() -> None:
     config = get_extract_env()
     spark = create_spark_session("DataGenSaveTables")
     try:
-        save_tables(spark, config, tables, args.date, args.continue_on_error, args.limit)
+        save_tables(spark, config, tables, args.continue_on_error, args.limit)
     finally:
         spark.stop()
 

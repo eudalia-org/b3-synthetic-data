@@ -49,21 +49,30 @@ it now avoids a pre-write `count()` and tries to parallelize JDBC reads by disco
 single-column numeric primary key.
 
 ```bash
-python save_tables.py --tables BIG_TABLE --date 20260602
+python save_tables.py --tables BIG_TABLE
 ```
 
 Run a limited sample first to estimate runtime without overwriting the full extract path:
 
 ```bash
-python save_tables.py --tables BIG_TABLE --date 20260602 --limit 100000
+python save_tables.py --tables BIG_TABLE --limit 100000
 ```
 
-Limited runs write to `.../<TABLE>/<YYYYMMDD>_<TABLE>_limit_<N>.parquet` and log elapsed
-time per table.
+Full runs write to `.../<TABLE>` and limited runs write to `.../<TABLE>_limit_<N>`.
+Both log elapsed time per table.
+
+Set `DATAGEN_RAW_PREFIX` to place extracts under a prefix inside the target bucket:
+
+```bash
+DATAGEN_RAW_PREFIX=onprem-export python save_tables.py --tables BIG_TABLE
+```
+
+This writes to `.../onprem-export/<TABLE>`.
 
 Optional performance environment variables:
 
 ```text
+DATAGEN_RAW_PREFIX=onprem-export
 DATAGEN_JDBC_FETCH_SIZE=50000
 DATAGEN_JDBC_NUM_PARTITIONS=64
 DATAGEN_JDBC_PARTITION_COLUMNS=BIG_TABLE=ID,OTHER_SCHEMA.OTHER_TABLE=OTHER_ID
