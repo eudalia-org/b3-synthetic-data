@@ -189,41 +189,6 @@ def read_single_value(spark: SparkSession, properties: dict[str, str], query: st
     return rows[0] if rows else None
 
 
-def discover_numeric_pk_column(
-    spark: SparkSession,
-    properties: dict[str, str],
-    owner: str,
-    table_name: str,
-) -> str | None:
-    query = f"""
-        SELECT acc.column_name
-        FROM all_constraints ac
-        JOIN all_cons_columns acc
-          ON ac.owner = acc.owner
-         AND ac.constraint_name = acc.constraint_name
-         AND ac.table_name = acc.table_name
-        JOIN all_tab_columns atc
-          ON atc.owner = acc.owner
-         AND atc.table_name = acc.table_name
-         AND atc.column_name = acc.column_name
-        WHERE ac.owner = '{owner}'
-          AND ac.table_name = '{table_name}'
-          AND ac.constraint_type = 'P'
-          AND atc.data_type = 'NUMBER'
-          AND NOT EXISTS (
-              SELECT 1
-              FROM all_cons_columns acc2
-              WHERE acc2.owner = acc.owner
-                AND acc2.constraint_name = acc.constraint_name
-                AND acc2.table_name = acc.table_name
-                AND acc2.position > 1
-          )
-        ORDER BY acc.position
-    """
-    row = read_single_value(spark, properties, query)
-    return row[0] if row else None
-
-
 def get_numeric_bounds(
     spark: SparkSession,
     properties: dict[str, str],
@@ -265,13 +230,7 @@ def build_jdbc_reader(
     partition_column = overrides.get(f"{owner}.{table_name}") or overrides.get(table_name)
 
     if not partition_column:
-        partition_column = discover_numeric_pk_column(spark, properties, owner, table_name)
-
-    if not partition_column:
-        logger.warning(
-            "No numeric partition column found for %s; using one JDBC partition",
-            source_table,
-        )
+        logger.info("Reading %s with one JDBC partition", source_table)
         return reader
 
     bounds = get_numeric_bounds(spark, properties, source_table, partition_column)

@@ -44,9 +44,8 @@ The config path is read through Spark, so local paths and Spark-readable Object 
 
 ## Fast Raw Table Extract
 
-`save_tables.py` extracts source Oracle tables directly to raw Parquet. For large tables,
-it now avoids a pre-write `count()` and tries to parallelize JDBC reads by discovering a
-single-column numeric primary key.
+`save_tables.py` extracts source Oracle tables directly to raw Parquet. It avoids a
+pre-write `count()` and reads each table as one snapshot by default.
 
 ```bash
 python save_tables.py --tables BIG_TABLE
@@ -74,13 +73,17 @@ Optional performance environment variables:
 ```text
 DATAGEN_RAW_PREFIX=onprem-export
 DATAGEN_JDBC_FETCH_SIZE=50000
+```
+
+If a table does have a safe numeric split column, you can opt into Spark JDBC partitioning:
+
+```text
 DATAGEN_JDBC_NUM_PARTITIONS=64
 DATAGEN_JDBC_PARTITION_COLUMNS=BIG_TABLE=ID,OTHER_SCHEMA.OTHER_TABLE=OTHER_ID
 ```
 
-Use `DATAGEN_JDBC_PARTITION_COLUMNS` when the fastest split column is not the numeric
-primary key. Tune `DATAGEN_JDBC_NUM_PARTITIONS` to available Oracle sessions, Spark
-executors, network bandwidth, and Object Storage write throughput.
+Without `DATAGEN_JDBC_PARTITION_COLUMNS`, the script uses one JDBC partition and does not
+query Oracle metadata to discover one.
 
 ## VDI One-Time ROWID Migration
 
