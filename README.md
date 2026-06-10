@@ -86,7 +86,7 @@ Without `DATAGEN_JDBC_PARTITION_COLUMNS`, the script uses one JDBC partition and
 query Oracle metadata to discover one.
 
 To estimate how to split tables across multiple Data Flow jobs from the VDI/on-prem side,
-query Oracle statistics and segment sizes:
+query Oracle table statistics:
 
 ```bash
 export ORACLE_DB_USER=YOUR_SCHEMA
@@ -96,8 +96,12 @@ export ORACLE_DSN='host:1521/service_name'
 python scripts/oracle_table_sizes.py --tables BIG_TABLE,OTHER_TABLE --format csv
 ```
 
-The row count is Oracle's `NUM_ROWS` estimate from table statistics, so check
-`last_analyzed`/`stale_stats` before relying on it for exact job sizing.
+The helper uses `USER_TABLES` and `USER_TAB_STATISTICS`, so it avoids `SYS`/`DBA_*`/
+segment views that often require elevated catalog privileges. It reports tables owned by
+the connected `ORACLE_DB_USER`. Row count and size are estimates from Oracle statistics:
+`NUM_ROWS`, `AVG_ROW_LEN`, and `BLOCKS * --block-size` where `--block-size` defaults to
+8192 bytes. Check `last_analyzed`/`stale_stats` before relying on estimates for exact job
+sizing.
 
 ## VDI One-Time ROWID Migration
 

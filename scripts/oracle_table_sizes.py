@@ -34,6 +34,15 @@ def parse_arguments() -> argparse.Namespace:
         default="table",
         help="Output format.",
     )
+    parser.add_argument(
+        "--block-size",
+        type=int,
+        default=8192,
+        help=(
+            "Oracle database block size in bytes, used to estimate table size from "
+            "USER_TABLES.BLOCKS."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -93,84 +102,57 @@ def fetch_one(connection: oracledb.Connection, query: str, **binds: str) -> dict
     return dict(zip(columns, row, strict=True))
 
 
-def table_stats(connection: oracledb.Connection, owner: str, table_name: str) -> dict[str, Any]:
+def table_stats(connection: oracledb.Connection, table_name: str) -> dict[str, Any]:
     row = fetch_one(
         connection,
         """
-        SELECT t.owner,
-               t.table_name,
+        SELECT t.table_name,
                t.num_rows,
                t.blocks,
                t.avg_row_len,
                t.last_analyzed,
                s.stale_stats
-        FROM all_tables t
-        LEFT JOIN all_tab_statistics s
-          ON s.owner = t.owner
-         AND s.table_name = t.table_name
+        FROM user_tables t
+        LEFT JOIN user_tab_statistics s
+          ON s.table_name = t.table_name
          AND s.object_type = 'TABLE'
-        WHERE t.owner = :owner
-          AND t.table_name = :table_name
+        WHERE t.table_name = :table_name
         """,
-        owner=owner,
         table_name=table_name,
     )
     if row is None:
-        raise ValueError(f"Table not found or not visible: {owner}.{table_name}")
+        raise ValueError(f"Table not found in connected schema: {table_name}")
     return row
-
-
-def segment_bytes(connection: oracledb.Connection, owner: str, table_name: str) -> dict[str, Any]:
-    row = fetch_one(
-        connection,
-        """
-        WITH table_segments AS (
-            SELECT s.bytes
-            FROM all_segments s
-            WHERE s.owner = :owner
-              AND s.segment_name = :table_name
-              AND s.segment_type IN ('TABLE', 'TABLE PARTITION', 'TABLE SUBPARTITION')
-        ),
-        lob_segments AS (
-            SELECT s.bytes
-            FROM all_lobs l
-            JOIN all_segments s
-              ON s.owner = l.owner
-             AND s.segment_name = l.segment_name
-            WHERE l.owner = :owner
-              AND l.table_name = :table_name
-        )
-        SELECT COALESCE((SELECT SUM(bytes) FROM table_segments), 0) AS table_bytes,
-               COALESCE((SELECT SUM(bytes) FROM lob_segments), 0) AS lob_bytes
-        FROM dual
-        """,
-        owner=owner,
-        table_name=table_name,
-    )
-    return row or {"table_bytes": 0, "lob_bytes": 0}
 
 
 def collect_table_info(
     connection: oracledb.Connection,
     default_owner: str,
     table: str,
+    block_size: int,
 ) -> dict[str, Any]:
     owner, table_name = table_owner_and_name(default_owner, table)
-    stats = table_stats(connection, owner, table_name)
-    sizes = segment_bytes(connection, owner, table_name)
-    table_bytes = int(sizes["table_bytes"] or 0)
-    lob_bytes = int(sizes["lob_bytes"] or 0)
-    total_bytes = table_bytes + lob_bytes
+    if owner != default_owner.upper():
+        raise ValueError(
+            f"{owner}.{table_name} is outside connected schema {default_owner.upper()}; "
+            "USER_* dictionary views can only report tables owned by the current user."
+        )
+    stats = table_stats(connection, table_name)
+    blocks = int(stats["blocks"] or 0)
+    num_rows = int(stats["num_rows"] or 0)
+    avg_row_len = int(stats["avg_row_len"] or 0)
+    table_bytes_estimate = blocks * block_size
+    row_bytes_estimate = num_rows * avg_row_len
     last_analyzed = stats["last_analyzed"]
 
     return {
         "table": f"{owner}.{table_name}",
         "num_rows_estimate": stats["num_rows"],
-        "table_gb": round(table_bytes / 1024**3, 3),
-        "lob_gb": round(lob_bytes / 1024**3, 3),
-        "total_gb": round(total_bytes / 1024**3, 3),
+        "blocks_gb_estimate": round(table_bytes_estimate / 1024**3, 3),
+        "row_gb_estimate": round(row_bytes_estimate / 1024**3, 3),
         "avg_row_len": stats["avg_row_len"],
         "blocks": stats["blocks"],
+        "block_size": block_size,
         "last_analyzed": last_analyzed.isoformat() if last_analyzed else None,
         "stale_stats": stats["stale_stats"],
     }
@@ -180,10 +162,10 @@ def print_table(rows: list[dict[str, Any]]) -> None:
     headers = [
         "table",
         "num_rows_estimate",
-        "total_gb",
-        "table_gb",
-        "lob_gb",
+        "blocks_gb_estimate",
+        "row_gb_estimate",
         "avg_row_len",
+        "blocks",
         "last_analyzed",
         "stale_stats",
     ]
@@ -215,11 +197,14 @@ def main() -> None:
         dsn=env["ORACLE_DSN"],
     )
     try:
-        rows = [collect_table_info(connection, env["ORACLE_DB_USER"], table) for table in tables]
+        rows = [
+            collect_table_info(connection, env["ORACLE_DB_USER"], table, args.block_size)
+            for table in tables
+        ]
     finally:
         connection.close()
 
-    rows.sort(key=lambda row: row["total_gb"], reverse=True)
+    rows.sort(key=lambda row: row["blocks_gb_estimate"], reverse=True)
 
     if args.format == "json":
         print(json.dumps(rows, indent=2))
