@@ -85,6 +85,9 @@ DATAGEN_JDBC_PARTITION_COLUMNS=BIG_TABLE=ID,OTHER_SCHEMA.OTHER_TABLE=OTHER_ID
 Without `DATAGEN_JDBC_PARTITION_COLUMNS`, the script uses one JDBC partition and does not
 query Oracle metadata to discover one.
 
+The script writes Parquet with Spark's datetime rebase mode set to `CORRECTED` so Oracle
+DATE/TIMESTAMP values before Spark's ancient-date thresholds do not fail the raw extract.
+
 To estimate how to split tables across multiple Data Flow jobs from the VDI/on-prem side,
 query Oracle table statistics:
 

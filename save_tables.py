@@ -22,6 +22,10 @@ DEFAULT_ORACLE_FETCH_OPTIONS = {
     "oracle.jdbc.useFetchSizeWithLongColumn": "true",
     "defaultRowPrefetch": DEFAULT_FETCH_SIZE,
 }
+PARQUET_REBASE_CONF = {
+    "spark.sql.parquet.datetimeRebaseModeInWrite": "CORRECTED",
+    "spark.sql.parquet.int96RebaseModeInWrite": "CORRECTED",
+}
 REQUIRED_ENV_VARS = (
     "DATAGEN_SOURCE_JDBC_URL",
     "DATAGEN_SOURCE_DB_PASSWORD",
@@ -125,7 +129,10 @@ def get_extract_env() -> dict[str, str]:
 def create_spark_session(app_name: str) -> SparkSession:
     from pyspark.sql import SparkSession
 
-    return SparkSession.builder.appName(app_name).getOrCreate()
+    builder = SparkSession.builder.appName(app_name)
+    for key, value in PARQUET_REBASE_CONF.items():
+        builder = builder.config(key, value)
+    return builder.getOrCreate()
 
 
 def build_raw_path(config: dict[str, str], table: str, limit: int | None = None) -> str:
