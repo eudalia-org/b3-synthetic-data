@@ -5,6 +5,7 @@ import csv
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ import oracledb
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+IDENTIFIER_PATTERN = re.compile(r"^[A-Z][A-Z0-9_$#]*$")
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -41,6 +43,22 @@ def parse_arguments() -> argparse.Namespace:
         help=(
             "Oracle database block size in bytes, used to estimate table size from "
             "USER_TABLES.BLOCKS."
+        ),
+    )
+    parser.add_argument(
+        "--allow-external-count",
+        action="store_true",
+        help=(
+            "For schema-qualified tables outside ORACLE_DB_USER, run SELECT COUNT(*) instead "
+            "of USER_* stats. This can be expensive on large tables."
+        ),
+    )
+    parser.add_argument(
+        "--compressed-bytes-per-row",
+        type=float,
+        help=(
+            "Optional measured Parquet bytes per row, used to estimate output size for "
+            "COUNT(*) rows."
         ),
     )
     return parser.parse_args()
@@ -92,6 +110,12 @@ def table_owner_and_name(default_owner: str, table: str) -> tuple[str, str]:
     return default_owner.upper(), table.upper()
 
 
+def qualified_table_name(owner: str, table_name: str) -> str:
+    if not IDENTIFIER_PATTERN.fullmatch(owner) or not IDENTIFIER_PATTERN.fullmatch(table_name):
+        raise ValueError(f"Unsupported table identifier: {owner}.{table_name}")
+    return f"{owner}.{table_name}"
+
+
 def fetch_one(connection: oracledb.Connection, query: str, **binds: str) -> dict[str, Any] | None:
     with connection.cursor() as cursor:
         cursor.execute(query, binds)
@@ -125,18 +149,45 @@ def table_stats(connection: oracledb.Connection, table_name: str) -> dict[str, A
     return row
 
 
+def count_rows(connection: oracledb.Connection, owner: str, table_name: str) -> int:
+    table_ref = qualified_table_name(owner, table_name)
+    row = fetch_one(connection, f"SELECT COUNT(*) AS row_count FROM {table_ref}")
+    return int(row["row_count"])
+
+
 def collect_table_info(
     connection: oracledb.Connection,
     default_owner: str,
     table: str,
     block_size: int,
+    allow_external_count: bool,
+    compressed_bytes_per_row: float | None,
 ) -> dict[str, Any]:
     owner, table_name = table_owner_and_name(default_owner, table)
     if owner != default_owner.upper():
-        raise ValueError(
-            f"{owner}.{table_name} is outside connected schema {default_owner.upper()}; "
-            "USER_* dictionary views can only report tables owned by the current user."
+        if not allow_external_count:
+            raise ValueError(
+                f"{owner}.{table_name} is outside connected schema {default_owner.upper()}; "
+                "USER_* dictionary views can only report tables owned by the current user. "
+                "Pass --allow-external-count to run SELECT COUNT(*) for cross-schema tables."
+            )
+        row_count = count_rows(connection, owner, table_name)
+        output_bytes_estimate = (
+            row_count * compressed_bytes_per_row if compressed_bytes_per_row is not None else None
         )
+        return {
+            "table": f"{owner}.{table_name}",
+            "num_rows_estimate": row_count,
+            "blocks_gb_estimate": None,
+            "row_gb_estimate": round(output_bytes_estimate / 1024**3, 3)
+            if output_bytes_estimate is not None
+            else None,
+            "avg_row_len": None,
+            "blocks": None,
+            "block_size": block_size,
+            "last_analyzed": None,
+            "stale_stats": "COUNT_STAR",
+        }
     stats = table_stats(connection, table_name)
     blocks = int(stats["blocks"] or 0)
     num_rows = int(stats["num_rows"] or 0)
@@ -198,7 +249,14 @@ def main() -> None:
     )
     try:
         rows = [
-            collect_table_info(connection, env["ORACLE_DB_USER"], table, args.block_size)
+            collect_table_info(
+                connection,
+                env["ORACLE_DB_USER"],
+                table,
+                args.block_size,
+                args.allow_external_count,
+                args.compressed_bytes_per_row,
+            )
             for table in tables
         ]
     finally:

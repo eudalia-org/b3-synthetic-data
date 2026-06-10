@@ -103,6 +103,20 @@ the connected `ORACLE_DB_USER`. Row count and size are estimates from Oracle sta
 8192 bytes. Check `last_analyzed`/`stale_stats` before relying on estimates for exact job
 sizing.
 
+For a table in another schema that the connected user can query, opt into an exact count:
+
+```bash
+python scripts/oracle_table_sizes.py \
+  --tables CETIP.CREDITO \
+  --allow-external-count \
+  --compressed-bytes-per-row 54.5 \
+  --format csv
+```
+
+Cross-schema mode runs `COUNT(*)`, so it can be expensive on very large tables. It cannot
+read segment size without additional catalog grants; `--compressed-bytes-per-row` lets you
+estimate output size from a measured limited extract.
+
 ## VDI One-Time ROWID Migration
 
 `scripts/migrate_rowid_to_oci.py` is for the on-prem access pattern where the VDI can reach both
