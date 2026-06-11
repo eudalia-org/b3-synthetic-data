@@ -356,13 +356,14 @@ def get_numeric_bounds(
     return str(row[0]), str(row[1])
 
 
-def build_jdbc_reader(
+def load_source_dataframe(
     spark: SparkSession,
     properties: dict[str, str],
     config: dict[str, str],
     source_user: str,
     table: str,
     source_table: str,
+    limit: int | None,
 ):
     reader = (
         spark.read.format("jdbc")
@@ -370,41 +371,71 @@ def build_jdbc_reader(
         .option("dbtable", source_table)
         .option("fetchsize", config["DATAGEN_JDBC_FETCH_SIZE"])
     )
+    if limit is not None:
+        logger.info("Reading %s with one JDBC partition", source_table)
+        return reader.load()
+
     owner, table_name = table_owner_and_name(source_user, table)
     overrides = parse_partition_column_overrides(
         config["DATAGEN_JDBC_PARTITION_COLUMNS"]
     )
     partition_column = overrides.get(f"{owner}.{table_name}") or overrides.get(table_name)
 
-    if not partition_column:
-        logger.info("Reading %s with one JDBC partition", source_table)
-        return reader
-
-    bounds = get_numeric_bounds(spark, properties, source_table, partition_column)
-    if not bounds:
+    if partition_column:
+        bounds = get_numeric_bounds(spark, properties, source_table, partition_column)
+        if bounds:
+            lower_bound, upper_bound = bounds
+            num_partitions = config["DATAGEN_JDBC_NUM_PARTITIONS"]
+            logger.info(
+                "Reading %s in %s JDBC partitions on %s [%s, %s]",
+                source_table,
+                num_partitions,
+                partition_column,
+                lower_bound,
+                upper_bound,
+            )
+            return (
+                reader.option("partitionColumn", partition_column)
+                .option("lowerBound", lower_bound)
+                .option("upperBound", upper_bound)
+                .option("numPartitions", num_partitions)
+                .load()
+            )
         logger.warning(
-            "No bounds found for %s.%s; using one JDBC partition",
+            "No bounds found for %s.%s; trying ROWID partitioning",
             source_table,
             partition_column,
         )
-        return reader
 
-    lower_bound, upper_bound = bounds
-    num_partitions = config["DATAGEN_JDBC_NUM_PARTITIONS"]
-    logger.info(
-        "Reading %s in %s JDBC partitions on %s [%s, %s]",
-        source_table,
-        num_partitions,
-        partition_column,
-        lower_bound,
-        upper_bound,
-    )
-    return (
-        reader.option("partitionColumn", partition_column)
-        .option("lowerBound", lower_bound)
-        .option("upperBound", upper_bound)
-        .option("numPartitions", num_partitions)
-    )
+    try:
+        predicates = fetch_rowid_predicates(
+            spark,
+            properties,
+            owner,
+            table_name,
+            int(config["DATAGEN_JDBC_NUM_PARTITIONS"]),
+        )
+    except Exception as exc:
+        logger.warning("ROWID partitioning failed for %s: %s", source_table, exc)
+        predicates = []
+
+    if predicates:
+        logger.info(
+            "Reading %s in %d ROWID-range partitions", source_table, len(predicates)
+        )
+        jdbc_properties = {
+            key: value for key, value in properties.items() if key != "url"
+        }
+        jdbc_properties["fetchsize"] = config["DATAGEN_JDBC_FETCH_SIZE"]
+        return spark.read.jdbc(
+            url=properties["url"],
+            table=source_table,
+            predicates=predicates,
+            properties=jdbc_properties,
+        )
+
+    logger.info("Reading %s with one JDBC partition", source_table)
+    return reader.load()
 
 
 def save_tables(
@@ -435,14 +466,15 @@ def save_tables(
                 logger.info("Reading %s", source_table)
             else:
                 logger.info("Reading up to %s rows from %s", limit, source_table)
-            df = build_jdbc_reader(
+            df = load_source_dataframe(
                 spark=spark,
                 properties=properties,
                 config=config,
                 source_user=source_user,
                 table=table,
                 source_table=read_table,
-            ).load()
+                limit=limit,
+            )
 
             logger.info("Saving %s to %s", source_table, output_path)
             df.write.mode("overwrite").parquet(output_path)
