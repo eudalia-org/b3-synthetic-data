@@ -14,7 +14,12 @@ if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    stream=sys.stdout,
+)
 logger = logging.getLogger(__name__)
 
 DEFAULT_SOURCE_DB_USER = "ADMIN"
@@ -333,6 +338,16 @@ def fetch_rowid_predicates(
         logger.warning("No extents found for %s.%s", owner, table_name)
         return []
     chunks = merge_extents_into_chunks(extents, num_partitions)
+    total_blocks = sum(int(blocks) for _, _, blocks in extents)
+    logger.info(
+        "Planned %d ROWID chunks for %s.%s from %d extents (%d blocks, ~%.1f GiB at 8 KiB/block)",
+        len(chunks),
+        owner,
+        table_name,
+        len(extents),
+        total_blocks,
+        total_blocks * 8192 / 1024**3,
+    )
     return build_rowid_predicates(chunks)
 
 
@@ -454,8 +469,17 @@ def save_tables(
         **DEFAULT_ORACLE_FETCH_OPTIONS,
     }
     failures = []
+    total = len(tables)
+    run_started_at = time.perf_counter()
+    logger.info(
+        "Extracting %d table(s): fetchsize=%s, num_partitions=%s, output=%s",
+        total,
+        config["DATAGEN_JDBC_FETCH_SIZE"],
+        config["DATAGEN_JDBC_NUM_PARTITIONS"],
+        build_raw_path(config, "<TABLE>", limit),
+    )
 
-    for table in tables:
+    for index, table in enumerate(tables, start=1):
         output_table = table_path_name(table)
         output_path = build_raw_path(config, output_table, limit)
         source_table = dbtable_name(source_user, table)
@@ -463,9 +487,15 @@ def save_tables(
         try:
             started_at = time.perf_counter()
             if limit is None:
-                logger.info("Reading %s", source_table)
+                logger.info("[%d/%d] Reading %s", index, total, source_table)
             else:
-                logger.info("Reading up to %s rows from %s", limit, source_table)
+                logger.info(
+                    "[%d/%d] Reading up to %s rows from %s",
+                    index,
+                    total,
+                    limit,
+                    source_table,
+                )
             df = load_source_dataframe(
                 spark=spark,
                 properties=properties,
@@ -480,20 +510,30 @@ def save_tables(
             df.write.mode("overwrite").parquet(output_path)
             elapsed_seconds = time.perf_counter() - started_at
             if limit is None:
-                logger.info("Saved %s in %.1fs", source_table, elapsed_seconds)
+                logger.info(
+                    "[%d/%d] Saved %s in %.1fs", index, total, source_table, elapsed_seconds
+                )
             else:
                 logger.info(
-                    "Saved sample from %s in %.1fs (limit=%s)",
+                    "[%d/%d] Saved sample from %s in %.1fs (limit=%s)",
+                    index,
+                    total,
                     source_table,
                     elapsed_seconds,
                     limit,
                 )
         except Exception as exc:
-            logger.exception("Failed to save %s: %s", source_table, exc)
+            logger.exception(
+                "[%d/%d] Failed to save %s: %s", index, total, source_table, exc
+            )
             failures.append(source_table)
             if not continue_on_error:
                 raise
 
+    run_elapsed = time.perf_counter() - run_started_at
+    logger.info(
+        "Finished: %d/%d table(s) saved in %.1fs", total - len(failures), total, run_elapsed
+    )
     if failures:
         logger.error("Failed tables: %s", ", ".join(failures))
         sys.exit(1)
