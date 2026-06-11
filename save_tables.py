@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import re
 import sys
@@ -51,6 +52,31 @@ def build_rowid_predicates(chunks: list[tuple[str, str]]) -> list[str]:
                 raise ValueError(f"Unexpected ROWID value: {value!r}")
         predicates.append(f"ROWID BETWEEN '{start_rowid}' AND '{end_rowid}'")
     return predicates
+
+
+def merge_extents_into_chunks(
+    extents: list[tuple[str, str, int]], num_chunks: int
+) -> list[tuple[str, str]]:
+    """Merge ordered (start_rowid, end_rowid, blocks) extents into ~num_chunks ranges."""
+    if not extents or num_chunks <= 0:
+        return []
+    total_blocks = sum(int(blocks) for _, _, blocks in extents)
+    target_blocks = math.ceil(total_blocks / num_chunks)
+    chunks: list[tuple[str, str]] = []
+    current_start, current_end, current_blocks = None, None, 0
+    for start_rowid, end_rowid, blocks in extents:
+        blocks = int(blocks)
+        if current_start is None:
+            current_start, current_end, current_blocks = start_rowid, end_rowid, blocks
+        elif current_blocks + blocks <= target_blocks:
+            current_end = end_rowid
+            current_blocks += blocks
+        else:
+            chunks.append((current_start, current_end))
+            current_start, current_end, current_blocks = start_rowid, end_rowid, blocks
+    if current_start is not None:
+        chunks.append((current_start, current_end))
+    return chunks
 
 
 def parse_arguments() -> argparse.Namespace:
