@@ -45,7 +45,14 @@ The config path is read through Spark, so local paths and Spark-readable Object 
 ## Fast Raw Table Extract
 
 `save_tables.py` extracts source Oracle tables directly to raw Parquet. It avoids a
-pre-write `count()` and reads each table as one snapshot by default.
+pre-write `count()`. Full-table reads are parallelized across
+`DATAGEN_JDBC_NUM_PARTITIONS` (default 32) ROWID-range JDBC partitions computed from
+the table's extent map; no numeric partition column is required. Set
+`DATAGEN_JDBC_PARTITION_COLUMNS="OWNER.TABLE=COLUMN"` to use numeric-column
+partitioning for specific tables instead. If extent metadata is unavailable (missing
+privileges, empty table, or a view), the read falls back to a single JDBC partition.
+Note: parallel partitions read in separate Oracle sessions, so the extract is not a
+single consistent snapshot if the source changes mid-run.
 
 ```bash
 python save_tables.py --tables BIG_TABLE
