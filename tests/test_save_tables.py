@@ -87,3 +87,41 @@ class TestMergeExtentsIntoChunks:
 
     def test_invalid_chunk_count(self):
         assert save_tables.merge_extents_into_chunks([extent(0, 10)], num_chunks=0) == []
+
+
+class TestFetchRowidPredicates:
+    def test_builds_predicates_from_extents(self, monkeypatch):
+        monkeypatch.setattr(save_tables, "get_data_object_id", lambda *a: 12345)
+        monkeypatch.setattr(
+            save_tables,
+            "fetch_extents",
+            lambda *a: [(ROWID_A, ROWID_B, 64), (ROWID_C, ROWID_D, 64)],
+        )
+        predicates = save_tables.fetch_rowid_predicates(
+            None, {}, "admin", "orders", num_partitions=2
+        )
+        assert predicates == [
+            f"ROWID BETWEEN '{ROWID_A}' AND '{ROWID_B}'",
+            f"ROWID BETWEEN '{ROWID_C}' AND '{ROWID_D}'",
+        ]
+
+    def test_returns_empty_when_object_id_missing(self, monkeypatch):
+        monkeypatch.setattr(save_tables, "get_data_object_id", lambda *a: None)
+        predicates = save_tables.fetch_rowid_predicates(
+            None, {}, "ADMIN", "ORDERS", num_partitions=4
+        )
+        assert predicates == []
+
+    def test_returns_empty_when_no_extents(self, monkeypatch):
+        monkeypatch.setattr(save_tables, "get_data_object_id", lambda *a: 12345)
+        monkeypatch.setattr(save_tables, "fetch_extents", lambda *a: [])
+        predicates = save_tables.fetch_rowid_predicates(
+            None, {}, "ADMIN", "ORDERS", num_partitions=4
+        )
+        assert predicates == []
+
+    def test_rejects_bad_identifier(self):
+        with pytest.raises(ValueError):
+            save_tables.fetch_rowid_predicates(
+                None, {}, "ADMIN", "ORDERS; DROP", num_partitions=4
+            )

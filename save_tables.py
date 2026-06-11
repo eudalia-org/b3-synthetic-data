@@ -242,6 +242,100 @@ def read_single_value(spark: SparkSession, properties: dict[str, str], query: st
     return rows[0] if rows else None
 
 
+def read_rows(spark: SparkSession, properties: dict[str, str], query: str) -> list:
+    return (
+        spark.read.format("jdbc")
+        .options(**properties)
+        .option("dbtable", f"({query}) DATAGEN_Q")
+        .load()
+        .collect()
+    )
+
+
+def get_data_object_id(
+    spark: SparkSession,
+    properties: dict[str, str],
+    owner: str,
+    table_name: str,
+) -> int | None:
+    queries = (
+        f"SELECT dbms_rowid.rowid_object(ROWID) AS DATA_OBJECT_ID "
+        f"FROM {owner}.{table_name} WHERE ROWNUM = 1",
+        f"SELECT data_object_id FROM all_objects "
+        f"WHERE owner = '{owner}' AND object_name = '{table_name}' "
+        f"AND object_type = 'TABLE'",
+        f"SELECT data_object_id FROM user_objects "
+        f"WHERE object_name = '{table_name}' AND object_type = 'TABLE'",
+    )
+    for query in queries:
+        try:
+            row = read_single_value(spark, properties, query)
+        except Exception as exc:
+            logger.debug("Object id lookup failed for %s.%s: %s", owner, table_name, exc)
+            continue
+        if row and row[0] is not None:
+            return int(row[0])
+    return None
+
+
+def fetch_extents(
+    spark: SparkSession,
+    properties: dict[str, str],
+    owner: str,
+    table_name: str,
+    data_object_id: int,
+) -> list[tuple[str, str, int]]:
+    attempts = (
+        ("dba_extents", f"e.owner = '{owner}' AND "),
+        ("all_extents", f"e.owner = '{owner}' AND "),
+        ("user_extents", ""),
+    )
+    for view, owner_filter in attempts:
+        query = (
+            f"SELECT "
+            f"dbms_rowid.rowid_create(1, {int(data_object_id)}, e.relative_fno, "
+            f"e.block_id, 0) AS START_ROWID, "
+            f"dbms_rowid.rowid_create(1, {int(data_object_id)}, e.relative_fno, "
+            f"e.block_id + e.blocks - 1, 32767) AS END_ROWID, "
+            f"e.blocks AS BLOCKS "
+            f"FROM {view} e "
+            f"WHERE {owner_filter}e.segment_name = '{table_name}' "
+            f"AND e.segment_type = 'TABLE' "
+            f"ORDER BY e.relative_fno, e.block_id"
+        )
+        try:
+            rows = read_rows(spark, properties, query)
+        except Exception as exc:
+            logger.debug(
+                "Extent query via %s failed for %s.%s: %s", view, owner, table_name, exc
+            )
+            continue
+        if rows:
+            return [(row[0], row[1], int(row[2])) for row in rows]
+    return []
+
+
+def fetch_rowid_predicates(
+    spark: SparkSession,
+    properties: dict[str, str],
+    owner: str,
+    table_name: str,
+    num_partitions: int,
+) -> list[str]:
+    owner = validate_identifier(owner)
+    table_name = validate_identifier(table_name)
+    data_object_id = get_data_object_id(spark, properties, owner, table_name)
+    if data_object_id is None:
+        logger.warning("Could not resolve data object id for %s.%s", owner, table_name)
+        return []
+    extents = fetch_extents(spark, properties, owner, table_name, data_object_id)
+    if not extents:
+        logger.warning("No extents found for %s.%s", owner, table_name)
+        return []
+    chunks = merge_extents_into_chunks(extents, num_partitions)
+    return build_rowid_predicates(chunks)
+
+
 def get_numeric_bounds(
     spark: SparkSession,
     properties: dict[str, str],
