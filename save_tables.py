@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -31,6 +32,25 @@ REQUIRED_ENV_VARS = (
     "DATAGEN_SOURCE_DB_PASSWORD",
     "DATAGEN_RAW_BASE_URI",
 )
+IDENTIFIER_PATTERN = re.compile(r"^[A-Z][A-Z0-9_$#]*$")
+ROWID_PATTERN = re.compile(r"^[A-Za-z0-9/+]{18}$")
+
+
+def validate_identifier(name: str) -> str:
+    upper = name.upper()
+    if not IDENTIFIER_PATTERN.match(upper):
+        raise ValueError(f"Unsupported Oracle identifier: {name!r}")
+    return upper
+
+
+def build_rowid_predicates(chunks: list[tuple[str, str]]) -> list[str]:
+    predicates = []
+    for start_rowid, end_rowid in chunks:
+        for value in (start_rowid, end_rowid):
+            if not ROWID_PATTERN.match(str(value)):
+                raise ValueError(f"Unexpected ROWID value: {value!r}")
+        predicates.append(f"ROWID BETWEEN '{start_rowid}' AND '{end_rowid}'")
+    return predicates
 
 
 def parse_arguments() -> argparse.Namespace:
