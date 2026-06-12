@@ -89,6 +89,34 @@ class TestMergeExtentsIntoChunks:
         assert save_tables.merge_extents_into_chunks([extent(0, 10)], num_chunks=0) == []
 
 
+class TestBuildConnectionProperties:
+    CONFIG = {
+        "DATAGEN_SOURCE_JDBC_URL": "jdbc:oracle:thin:@host",
+        "DATAGEN_SOURCE_DB_USER": "ADMIN",
+        "DATAGEN_SOURCE_DB_PASSWORD": "secret",
+        "DATAGEN_JDBC_FETCH_SIZE": "5000",
+        "DATAGEN_JDBC_READ_TIMEOUT_MS": "600000",
+        "DATAGEN_JDBC_LOB_PREFETCH": "262144",
+    }
+
+    def test_sets_read_timeout_to_break_dead_connections(self):
+        properties = save_tables.build_connection_properties(self.CONFIG)
+        assert properties["oracle.jdbc.ReadTimeout"] == "600000"
+
+    def test_row_and_lob_prefetch_follow_config(self):
+        properties = save_tables.build_connection_properties(self.CONFIG)
+        assert properties["defaultRowPrefetch"] == "5000"
+        assert properties["oracle.jdbc.defaultLobPrefetchSize"] == "262144"
+
+    def test_core_jdbc_properties(self):
+        properties = save_tables.build_connection_properties(self.CONFIG)
+        assert properties["url"] == "jdbc:oracle:thin:@host"
+        assert properties["user"] == "ADMIN"
+        assert properties["password"] == "secret"
+        assert properties["driver"] == "oracle.jdbc.OracleDriver"
+        assert properties["oracle.jdbc.useFetchSizeWithLongColumn"] == "true"
+
+
 class TestFetchRowidPredicates:
     def test_builds_predicates_from_extents(self, monkeypatch):
         monkeypatch.setattr(save_tables, "get_data_object_id", lambda *a: 12345)

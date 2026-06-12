@@ -54,6 +54,14 @@ privileges, empty table, or a view), the read falls back to a single JDBC partit
 Note: parallel partitions read in separate Oracle sessions, so the extract is not a
 single consistent snapshot if the source changes mid-run.
 
+Connections abort socket reads after `DATAGEN_JDBC_READ_TIMEOUT_MS` (default
+600000 = 10 min) of silence, so a dropped network path fails the task and Spark
+retries it instead of hanging the job. LOB columns are prefetched inline up to
+`DATAGEN_JDBC_LOB_PREFETCH` bytes (default 262144) to avoid per-row locator round
+trips. For long-running extracts, also add `(ENABLE=BROKEN)` inside the
+`DESCRIPTION` of the JDBC connect string to enable TCP keepalive, which stops
+firewalls/load balancers from silently dropping busy connections.
+
 ```bash
 python save_tables.py --tables BIG_TABLE
 ```

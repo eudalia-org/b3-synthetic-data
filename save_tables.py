@@ -24,10 +24,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_SOURCE_DB_USER = "ADMIN"
 DEFAULT_FETCH_SIZE = "50000"
 DEFAULT_NUM_PARTITIONS = "32"
-DEFAULT_ORACLE_FETCH_OPTIONS = {
-    "oracle.jdbc.useFetchSizeWithLongColumn": "true",
-    "defaultRowPrefetch": DEFAULT_FETCH_SIZE,
-}
+# Abort socket reads that stay silent this long so dropped connections fail the
+# task (which Spark retries) instead of hanging the job forever.
+DEFAULT_READ_TIMEOUT_MS = "600000"
+# Inline LOB values up to this size in the row stream to avoid per-row locator
+# round trips.
+DEFAULT_LOB_PREFETCH_BYTES = "262144"
 PARQUET_REBASE_CONF = {
     "spark.sql.parquet.datetimeRebaseModeInWrite": "CORRECTED",
     "spark.sql.parquet.int96RebaseModeInWrite": "CORRECTED",
@@ -172,6 +174,12 @@ def get_extract_env() -> dict[str, str]:
     config["DATAGEN_JDBC_PARTITION_COLUMNS"] = os.environ.get(
         "DATAGEN_JDBC_PARTITION_COLUMNS", ""
     )
+    config["DATAGEN_JDBC_READ_TIMEOUT_MS"] = os.environ.get(
+        "DATAGEN_JDBC_READ_TIMEOUT_MS", DEFAULT_READ_TIMEOUT_MS
+    )
+    config["DATAGEN_JDBC_LOB_PREFETCH"] = os.environ.get(
+        "DATAGEN_JDBC_LOB_PREFETCH", DEFAULT_LOB_PREFETCH_BYTES
+    )
     config["DATAGEN_RAW_PREFIX"] = os.environ.get("DATAGEN_RAW_PREFIX", "").strip("/")
     return config
 
@@ -183,6 +191,19 @@ def create_spark_session(app_name: str) -> SparkSession:
     for key, value in PARQUET_REBASE_CONF.items():
         builder = builder.config(key, value)
     return builder.getOrCreate()
+
+
+def build_connection_properties(config: dict[str, str]) -> dict[str, str]:
+    return {
+        "url": config["DATAGEN_SOURCE_JDBC_URL"],
+        "user": config["DATAGEN_SOURCE_DB_USER"],
+        "password": config["DATAGEN_SOURCE_DB_PASSWORD"],
+        "driver": "oracle.jdbc.OracleDriver",
+        "oracle.jdbc.useFetchSizeWithLongColumn": "true",
+        "defaultRowPrefetch": config["DATAGEN_JDBC_FETCH_SIZE"],
+        "oracle.jdbc.ReadTimeout": config["DATAGEN_JDBC_READ_TIMEOUT_MS"],
+        "oracle.jdbc.defaultLobPrefetchSize": config["DATAGEN_JDBC_LOB_PREFETCH"],
+    }
 
 
 def build_raw_path(config: dict[str, str], table: str, limit: int | None = None) -> str:
@@ -460,13 +481,7 @@ def save_tables(
     limit: int | None = None,
 ) -> None:
     source_user = config["DATAGEN_SOURCE_DB_USER"]
-    properties = {
-        "url": config["DATAGEN_SOURCE_JDBC_URL"],
-        "user": source_user,
-        "password": config["DATAGEN_SOURCE_DB_PASSWORD"],
-        "driver": "oracle.jdbc.OracleDriver",
-        **DEFAULT_ORACLE_FETCH_OPTIONS,
-    }
+    properties = build_connection_properties(config)
     failures = []
     total = len(tables)
     run_started_at = time.perf_counter()
