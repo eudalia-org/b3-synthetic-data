@@ -43,50 +43,78 @@ class TestBuildRowidPredicates:
         assert save_tables.build_rowid_predicates([]) == []
 
 
-def extent(index: int, blocks: int) -> tuple[str, str, int]:
-    # Synthetic but pattern-valid 18-char rowids; index keeps them ordered/unique.
-    start = f"AAAS5MAAEAAA{index:04d}AA"
-    end = f"AAAS5MAAEAAA{index:04d}zz"
-    return (start, end, blocks)
+OBJ = 77388  # data_object_id of the AAAS5M... fixture rowid
 
 
-class TestMergeExtentsIntoChunks:
-    def test_merges_small_extents_to_target_chunk_count(self):
-        extents = [extent(i, 10) for i in range(8)]  # 80 blocks total
-        chunks = save_tables.merge_extents_into_chunks(extents, num_chunks=4)
+class TestEncodeRowid:
+    def test_matches_known_oracle_rowid(self):
+        # AAAS5MAAEAAAACXAAA = object 77388, relative file 4, block 151, row 0.
+        assert save_tables.encode_rowid(OBJ, 4, 151, 0) == "AAAS5MAAEAAAACXAAA"
+
+    def test_max_row_number(self):
+        rowid = save_tables.encode_rowid(OBJ, 4, 151, save_tables.ROWID_MAX_ROW)
+        assert rowid.startswith("AAAS5MAAEAAAACX")
+        assert save_tables.ROWID_PATTERN.match(rowid)
+
+    def test_rejects_component_overflow(self):
+        with pytest.raises(ValueError):
+            save_tables.encode_rowid(2**40, 4, 151, 0)
+
+
+class TestChunkExtents:
+    def test_splits_single_large_extent(self):
+        # One 100-block extent, 4 chunks of 25 blocks each.
+        chunks = save_tables.chunk_extents([(4, 1000, 100)], num_chunks=4, data_object_id=OBJ)
         assert len(chunks) == 4
-        # Coverage: first chunk starts at first extent, last chunk ends at last extent.
-        assert chunks[0][0] == extents[0][0]
-        assert chunks[-1][1] == extents[-1][1]
+        assert chunks[0] == (
+            save_tables.encode_rowid(OBJ, 4, 1000, 0),
+            save_tables.encode_rowid(OBJ, 4, 1024, save_tables.ROWID_MAX_ROW),
+        )
+        assert chunks[-1] == (
+            save_tables.encode_rowid(OBJ, 4, 1075, 0),
+            save_tables.encode_rowid(OBJ, 4, 1099, save_tables.ROWID_MAX_ROW),
+        )
 
-    def test_chunk_boundaries_follow_extent_order(self):
-        extents = [extent(i, 10) for i in range(6)]
-        chunks = save_tables.merge_extents_into_chunks(extents, num_chunks=3)
-        # Each chunk's start must be some extent's start and end some extent's end,
-        # and chunks must appear in input order with no overlap or gap.
-        starts = [e[0] for e in extents]
-        ends = [e[1] for e in extents]
-        covered = []
-        for chunk_start, chunk_end in chunks:
-            covered.append((starts.index(chunk_start), ends.index(chunk_end)))
-        flattened = [i for pair in covered for i in range(pair[0], pair[1] + 1)]
-        assert flattened == list(range(len(extents)))
+    def test_merges_small_extents(self):
+        extents = [(4, i * 10, 10) for i in range(8)]  # 80 blocks total
+        chunks = save_tables.chunk_extents(extents, num_chunks=4, data_object_id=OBJ)
+        assert len(chunks) == 4
+        assert chunks[0][0] == save_tables.encode_rowid(OBJ, 4, 0, 0)
+        assert chunks[-1][1] == save_tables.encode_rowid(OBJ, 4, 79, save_tables.ROWID_MAX_ROW)
 
-    def test_fewer_extents_than_chunks(self):
-        extents = [extent(0, 100), extent(1, 100)]
-        chunks = save_tables.merge_extents_into_chunks(extents, num_chunks=32)
-        assert len(chunks) == 2
+    def test_chunk_can_span_files(self):
+        extents = [(4, 100, 10), (5, 200, 10)]
+        chunks = save_tables.chunk_extents(extents, num_chunks=1, data_object_id=OBJ)
+        assert chunks == [
+            (
+                save_tables.encode_rowid(OBJ, 4, 100, 0),
+                save_tables.encode_rowid(OBJ, 5, 209, save_tables.ROWID_MAX_ROW),
+            )
+        ]
 
-    def test_single_extent(self):
-        extents = [extent(0, 5000)]
-        chunks = save_tables.merge_extents_into_chunks(extents, num_chunks=32)
-        assert chunks == [(extents[0][0], extents[0][1])]
+    def test_full_block_coverage_without_gaps(self):
+        def decode(rowid):
+            alphabet = save_tables.ROWID_ALPHABET
+            value = lambda chars: sum(  # noqa: E731
+                alphabet.index(c) * 64**i for i, c in enumerate(reversed(chars))
+            )
+            return value(rowid[6:9]), value(rowid[9:15])  # (file, block)
+
+        extents = [(4, 0, 33), (4, 64, 17), (5, 0, 50)]  # 100 blocks total
+        chunks = save_tables.chunk_extents(extents, num_chunks=7, data_object_id=OBJ)
+        assert 6 <= len(chunks) <= 8
+        # Every extent block must fall inside exactly one chunk's [start, end] span.
+        spans = [(decode(start), decode(end)) for start, end in chunks]
+        for fno, block_id, blocks in extents:
+            for block in range(block_id, block_id + blocks):
+                hits = [s for s in spans if s[0] <= (fno, block) <= s[1]]
+                assert len(hits) == 1, f"block ({fno},{block}) covered by {len(hits)} chunks"
 
     def test_empty_extents(self):
-        assert save_tables.merge_extents_into_chunks([], num_chunks=32) == []
+        assert save_tables.chunk_extents([], num_chunks=32, data_object_id=OBJ) == []
 
     def test_invalid_chunk_count(self):
-        assert save_tables.merge_extents_into_chunks([extent(0, 10)], num_chunks=0) == []
+        assert save_tables.chunk_extents([(4, 0, 10)], num_chunks=0, data_object_id=OBJ) == []
 
 
 class TestBuildConnectionProperties:
@@ -119,18 +147,22 @@ class TestBuildConnectionProperties:
 
 class TestFetchRowidPredicates:
     def test_builds_predicates_from_extents(self, monkeypatch):
-        monkeypatch.setattr(save_tables, "get_data_object_id", lambda *a: 12345)
+        monkeypatch.setattr(save_tables, "get_data_object_id", lambda *a: OBJ)
         monkeypatch.setattr(
             save_tables,
             "fetch_extents",
-            lambda *a: [(ROWID_A, ROWID_B, 64), (ROWID_C, ROWID_D, 64)],
+            lambda *a: [(4, 100, 64), (4, 164, 64)],
         )
         predicates = save_tables.fetch_rowid_predicates(
             None, {}, "admin", "orders", num_partitions=2
         )
+        first_start = save_tables.encode_rowid(OBJ, 4, 100, 0)
+        first_end = save_tables.encode_rowid(OBJ, 4, 163, save_tables.ROWID_MAX_ROW)
+        second_start = save_tables.encode_rowid(OBJ, 4, 164, 0)
+        second_end = save_tables.encode_rowid(OBJ, 4, 227, save_tables.ROWID_MAX_ROW)
         assert predicates == [
-            f"ROWID BETWEEN '{ROWID_A}' AND '{ROWID_B}'",
-            f"ROWID BETWEEN '{ROWID_C}' AND '{ROWID_D}'",
+            f"ROWID BETWEEN '{first_start}' AND '{first_end}'",
+            f"ROWID BETWEEN '{second_start}' AND '{second_end}'",
         ]
 
     def test_returns_empty_when_object_id_missing(self, monkeypatch):

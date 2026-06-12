@@ -41,6 +41,30 @@ REQUIRED_ENV_VARS = (
 )
 IDENTIFIER_PATTERN = re.compile(r"^[A-Z][A-Z0-9_$#]*$")
 ROWID_PATTERN = re.compile(r"^[A-Za-z0-9/+]{18}$")
+ROWID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+ROWID_MAX_ROW = 32767
+
+
+def encode_rowid_component(value: int, width: int) -> str:
+    chars = []
+    for _ in range(width):
+        chars.append(ROWID_ALPHABET[value & 63])
+        value >>= 6
+    if value:
+        raise ValueError(f"ROWID component too large for {width} characters")
+    return "".join(reversed(chars))
+
+
+def encode_rowid(
+    data_object_id: int, relative_fno: int, block_id: int, row_number: int
+) -> str:
+    """Build a restricted-format ROWID (OOOOOOFFFBBBBBBRRR base-64 layout)."""
+    return (
+        encode_rowid_component(data_object_id, 6)
+        + encode_rowid_component(relative_fno, 3)
+        + encode_rowid_component(block_id, 6)
+        + encode_rowid_component(row_number, 3)
+    )
 
 
 def validate_identifier(name: str) -> str:
@@ -60,28 +84,50 @@ def build_rowid_predicates(chunks: list[tuple[str, str]]) -> list[str]:
     return predicates
 
 
-def merge_extents_into_chunks(
-    extents: list[tuple[str, str, int]], num_chunks: int
+def chunk_extents(
+    extents: list[tuple[int, int, int]], num_chunks: int, data_object_id: int
 ) -> list[tuple[str, str]]:
-    """Merge ordered (start_rowid, end_rowid, blocks) extents into ~num_chunks ranges."""
+    """Split/merge ordered (relative_fno, block_id, blocks) extents into ~num_chunks
+    contiguous block ranges and return (start_rowid, end_rowid) pairs.
+
+    Unlike extent-boundary merging, large extents are subdivided, so the chunk
+    count is not capped by the extent count and chunk size stays near the target.
+    """
     if not extents or num_chunks <= 0:
         return []
     total_blocks = sum(int(blocks) for _, _, blocks in extents)
     target_blocks = math.ceil(total_blocks / num_chunks)
     chunks: list[tuple[str, str]] = []
-    current_start, current_end, current_blocks = None, None, 0
-    for start_rowid, end_rowid, blocks in extents:
-        blocks = int(blocks)
-        if current_start is None:
-            current_start, current_end, current_blocks = start_rowid, end_rowid, blocks
-        elif current_blocks + blocks <= target_blocks:
-            current_end = end_rowid
-            current_blocks += blocks
-        else:
-            chunks.append((current_start, current_end))
-            current_start, current_end, current_blocks = start_rowid, end_rowid, blocks
+    current_start: tuple[int, int] | None = None
+    current_end: tuple[int, int] | None = None
+    current_blocks = 0
+
+    def close_chunk() -> None:
+        nonlocal current_start, current_end, current_blocks
+        chunks.append(
+            (
+                encode_rowid(data_object_id, current_start[0], current_start[1], 0),
+                encode_rowid(
+                    data_object_id, current_end[0], current_end[1], ROWID_MAX_ROW
+                ),
+            )
+        )
+        current_start, current_end, current_blocks = None, None, 0
+
+    for relative_fno, block_id, blocks in extents:
+        relative_fno, block_id, blocks = int(relative_fno), int(block_id), int(blocks)
+        offset = 0
+        while offset < blocks:
+            take = min(blocks - offset, target_blocks - current_blocks)
+            if current_start is None:
+                current_start = (relative_fno, block_id + offset)
+            current_end = (relative_fno, block_id + offset + take - 1)
+            current_blocks += take
+            offset += take
+            if current_blocks >= target_blocks:
+                close_chunk()
     if current_start is not None:
-        chunks.append((current_start, current_end))
+        close_chunk()
     return chunks
 
 
@@ -308,8 +354,7 @@ def fetch_extents(
     properties: dict[str, str],
     owner: str,
     table_name: str,
-    data_object_id: int,
-) -> list[tuple[str, str, int]]:
+) -> list[tuple[int, int, int]]:
     attempts = (
         ("dba_extents", f"e.owner = '{owner}' AND "),
         ("all_extents", f"e.owner = '{owner}' AND "),
@@ -317,12 +362,7 @@ def fetch_extents(
     )
     for view, owner_filter in attempts:
         query = (
-            f"SELECT "
-            f"dbms_rowid.rowid_create(1, {int(data_object_id)}, e.relative_fno, "
-            f"e.block_id, 0) AS START_ROWID, "
-            f"dbms_rowid.rowid_create(1, {int(data_object_id)}, e.relative_fno, "
-            f"e.block_id + e.blocks - 1, 32767) AS END_ROWID, "
-            f"e.blocks AS BLOCKS "
+            f"SELECT e.relative_fno, e.block_id, e.blocks "
             f"FROM {view} e "
             f"WHERE {owner_filter}e.segment_name = '{table_name}' "
             f"AND e.segment_type = 'TABLE' "
@@ -336,7 +376,7 @@ def fetch_extents(
             )
             continue
         if rows:
-            return [(row[0], row[1], int(row[2])) for row in rows]
+            return [(int(row[0]), int(row[1]), int(row[2])) for row in rows]
     return []
 
 
@@ -353,11 +393,11 @@ def fetch_rowid_predicates(
     if data_object_id is None:
         logger.warning("Could not resolve data object id for %s.%s", owner, table_name)
         return []
-    extents = fetch_extents(spark, properties, owner, table_name, data_object_id)
+    extents = fetch_extents(spark, properties, owner, table_name)
     if not extents:
         logger.warning("No extents found for %s.%s", owner, table_name)
         return []
-    chunks = merge_extents_into_chunks(extents, num_partitions)
+    chunks = chunk_extents(extents, num_partitions, data_object_id)
     total_blocks = sum(int(blocks) for _, _, blocks in extents)
     logger.info(
         "Planned %d ROWID chunks for %s.%s from %d extents (%d blocks, ~%.1f GiB at 8 KiB/block)",
