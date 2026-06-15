@@ -254,3 +254,121 @@ def discover_constraints(
     query = build_constraint_discovery_query(owner, table_name)
     rows = read_rows(spark, properties, query)
     return [(row[0], row[1], row[2]) for row in rows]
+
+
+def load_table(
+    spark: SparkSession,
+    properties: dict[str, str],
+    config: dict[str, str],
+    target_user: str,
+    table: str,
+    manage_constraints: bool,
+    validate: bool,
+) -> None:
+    owner, table_name = table_owner_and_name(target_user, table)
+    dbtable = dbtable_name(target_user, table)
+    input_path = build_load_path(config, table_path_name(table))
+    num_partitions = resolve_num_partitions(config)
+    batch_size = config["DATAGEN_JDBC_BATCH_SIZE"]
+
+    def execute(sql: str) -> None:
+        execute_statement(spark, properties, sql)
+
+    constraints: list[tuple[str, str, str]] = []
+    if manage_constraints:
+        constraints = discover_constraints(spark, properties, owner, table_name)
+        logger.info("Disabling %d FK constraint(s) for %s", len(constraints), dbtable)
+
+    with constraints_disabled(execute, constraints, validate):
+        logger.info("Truncating %s", dbtable)
+        execute(truncate_sql(owner, table_name))
+
+        df = spark.read.parquet(input_path).repartition(num_partitions)
+        logger.info("Writing %s in %d partitions", dbtable, num_partitions)
+        (
+            df.write.format("jdbc")
+            .options(**properties)
+            .option("dbtable", dbtable)
+            .option("batchsize", batch_size)
+            .option("isolationLevel", DEFAULT_ISOLATION_LEVEL)
+            .mode("append")
+            .save()
+        )
+
+
+def load_tables(
+    spark: SparkSession,
+    config: dict[str, str],
+    tables: list[str],
+    continue_on_error: bool,
+    manage_constraints: bool,
+    validate: bool,
+) -> None:
+    target_user = config["DATAGEN_TARGET_DB_USER"]
+    properties = build_connection_properties(config)
+    failures = []
+    total = len(tables)
+    run_started_at = time.perf_counter()
+    logger.info(
+        "Loading %d table(s): num_partitions=%s, batchsize=%s, manage_constraints=%s",
+        total,
+        config["DATAGEN_JDBC_NUM_PARTITIONS"],
+        config["DATAGEN_JDBC_BATCH_SIZE"],
+        manage_constraints,
+    )
+
+    for index, table in enumerate(tables, start=1):
+        try:
+            started_at = time.perf_counter()
+            logger.info("[%d/%d] Loading %s", index, total, table)
+            load_table(
+                spark=spark,
+                properties=properties,
+                config=config,
+                target_user=target_user,
+                table=table,
+                manage_constraints=manage_constraints,
+                validate=validate,
+            )
+            logger.info(
+                "[%d/%d] Loaded %s in %.1fs",
+                index,
+                total,
+                table,
+                time.perf_counter() - started_at,
+            )
+        except Exception as exc:
+            logger.exception("[%d/%d] Failed to load %s: %s", index, total, table, exc)
+            failures.append(table)
+            if not continue_on_error:
+                raise
+
+    run_elapsed = time.perf_counter() - run_started_at
+    logger.info(
+        "Finished: %d/%d table(s) loaded in %.1fs", total - len(failures), total, run_elapsed
+    )
+    if failures:
+        logger.error("Failed tables: %s", ", ".join(failures))
+        sys.exit(1)
+
+
+def main() -> None:
+    args = parse_arguments()
+    tables = parse_tables(args.tables, args.tables_file)
+    config = get_load_env()
+    spark = create_spark_session("DataGenLoadTables")
+    try:
+        load_tables(
+            spark,
+            config,
+            tables,
+            continue_on_error=args.continue_on_error,
+            manage_constraints=not args.no_manage_constraints,
+            validate=args.validate_constraints,
+        )
+    finally:
+        spark.stop()
+
+
+if __name__ == "__main__":
+    main()
