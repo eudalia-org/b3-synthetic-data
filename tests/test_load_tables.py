@@ -140,3 +140,41 @@ class TestConnectionProperties:
 
     def test_resolve_num_partitions(self):
         assert load_tables.resolve_num_partitions(self.CONFIG) == 256
+
+
+class TestSqlBuilders:
+    def test_truncate_sql(self):
+        assert load_tables.truncate_sql("admin", "orders") == "TRUNCATE TABLE ADMIN.ORDERS"
+
+    def test_disable_constraint_sql(self):
+        assert (
+            load_tables.disable_constraint_sql("ADMIN", "ORDERS", "FK_CUST")
+            == "ALTER TABLE ADMIN.ORDERS DISABLE CONSTRAINT FK_CUST"
+        )
+
+    def test_enable_constraint_sql_novalidate(self):
+        assert (
+            load_tables.enable_constraint_sql("ADMIN", "ORDERS", "FK_CUST", validate=False)
+            == "ALTER TABLE ADMIN.ORDERS ENABLE NOVALIDATE CONSTRAINT FK_CUST"
+        )
+
+    def test_enable_constraint_sql_validate(self):
+        assert (
+            load_tables.enable_constraint_sql("ADMIN", "ORDERS", "FK_CUST", validate=True)
+            == "ALTER TABLE ADMIN.ORDERS ENABLE VALIDATE CONSTRAINT FK_CUST"
+        )
+
+    def test_discovery_query_includes_incoming_and_outgoing(self):
+        query = load_tables.build_constraint_discovery_query("ADMIN", "ORDERS")
+        assert "all_constraints" in query
+        assert "p.owner = 'ADMIN' AND p.table_name = 'ORDERS'" in query  # incoming
+        assert "owner = 'ADMIN' AND table_name = 'ORDERS'" in query      # outgoing
+        assert "UNION" in query
+
+    def test_builders_reject_bad_identifiers(self):
+        with pytest.raises(ValueError):
+            load_tables.truncate_sql("ADMIN", "ORDERS; DROP")
+        with pytest.raises(ValueError):
+            load_tables.disable_constraint_sql("ADMIN", "ORDERS", "X'); DROP")
+        with pytest.raises(ValueError):
+            load_tables.build_constraint_discovery_query("ADMIN", "O'R")

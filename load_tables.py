@@ -174,3 +174,40 @@ def build_connection_properties(config: dict[str, str]) -> dict[str, str]:
 
 def resolve_num_partitions(config: dict[str, str]) -> int:
     return int(config["DATAGEN_JDBC_NUM_PARTITIONS"])
+
+
+def truncate_sql(owner: str, table_name: str) -> str:
+    return f"TRUNCATE TABLE {validate_identifier(owner)}.{validate_identifier(table_name)}"
+
+
+def disable_constraint_sql(owner: str, table_name: str, name: str) -> str:
+    return (
+        f"ALTER TABLE {validate_identifier(owner)}.{validate_identifier(table_name)} "
+        f"DISABLE CONSTRAINT {validate_identifier(name)}"
+    )
+
+
+def enable_constraint_sql(owner: str, table_name: str, name: str, validate: bool) -> str:
+    mode = "ENABLE VALIDATE" if validate else "ENABLE NOVALIDATE"
+    return (
+        f"ALTER TABLE {validate_identifier(owner)}.{validate_identifier(table_name)} "
+        f"{mode} CONSTRAINT {validate_identifier(name)}"
+    )
+
+
+def build_constraint_discovery_query(owner: str, table_name: str) -> str:
+    owner = validate_identifier(owner)
+    table_name = validate_identifier(table_name)
+    return (
+        "SELECT c.owner, c.table_name, c.constraint_name "
+        "FROM all_constraints c "
+        "JOIN all_constraints p "
+        "ON c.r_owner = p.owner AND c.r_constraint_name = p.constraint_name "
+        "WHERE c.constraint_type = 'R' AND c.status = 'ENABLED' "
+        f"AND p.owner = '{owner}' AND p.table_name = '{table_name}' "
+        "UNION "
+        "SELECT owner, table_name, constraint_name "
+        "FROM all_constraints "
+        "WHERE constraint_type = 'R' AND status = 'ENABLED' "
+        f"AND owner = '{owner}' AND table_name = '{table_name}'"
+    )
