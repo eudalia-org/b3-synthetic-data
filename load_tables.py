@@ -137,3 +137,26 @@ def create_spark_session(app_name: str) -> SparkSession:
     for key, value in PARQUET_REBASE_CONF.items():
         builder = builder.config(key, value)
     return builder.getOrCreate()
+
+
+def table_path_name(table: str) -> str:
+    return table.split(".", 1)[1] if "." in table else table
+
+
+def table_owner_and_name(target_user: str, table: str) -> tuple[str, str]:
+    if "." in table:
+        owner, table_name = table.split(".", 1)
+        return owner.upper(), table_name.upper()
+    return target_user.upper(), table.upper()
+
+
+def dbtable_name(target_user: str, table: str) -> str:
+    return table if "." in table else f"{target_user}.{table}"
+
+
+def build_load_path(config: dict[str, str], table: str) -> str:
+    path_parts = [config["DATAGEN_LOAD_BASE_URI"]]
+    if config["DATAGEN_LOAD_PREFIX"]:
+        path_parts.append(config["DATAGEN_LOAD_PREFIX"])
+    path_parts.append(table)
+    return "/".join(path_parts)

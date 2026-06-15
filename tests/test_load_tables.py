@@ -79,3 +79,36 @@ REQUIRED = (
     "DATAGEN_TARGET_DB_PASSWORD",
     "DATAGEN_LOAD_BASE_URI",
 )
+
+
+class TestNameAndPathHelpers:
+    def test_table_path_name_strips_schema(self):
+        assert load_tables.table_path_name("CETIP.LANCAMENTO") == "LANCAMENTO"
+        assert load_tables.table_path_name("ORDERS") == "ORDERS"
+
+    def test_table_owner_and_name_with_schema(self):
+        assert load_tables.table_owner_and_name("ADMIN", "cetip.lancamento") == (
+            "CETIP",
+            "LANCAMENTO",
+        )
+
+    def test_table_owner_and_name_defaults_to_user(self):
+        assert load_tables.table_owner_and_name("admin", "orders") == ("ADMIN", "ORDERS")
+
+    def test_dbtable_name_qualifies_unqualified(self):
+        assert load_tables.dbtable_name("ADMIN", "ORDERS") == "ADMIN.ORDERS"
+        assert load_tables.dbtable_name("ADMIN", "CETIP.X") == "CETIP.X"
+
+    def test_build_load_path_with_prefix(self):
+        config = {
+            "DATAGEN_LOAD_BASE_URI": "oci://bucket@ns/load",
+            "DATAGEN_LOAD_PREFIX": "synthetic",
+        }
+        assert (
+            load_tables.build_load_path(config, "ORDERS")
+            == "oci://bucket@ns/load/synthetic/ORDERS"
+        )
+
+    def test_build_load_path_without_prefix(self):
+        config = {"DATAGEN_LOAD_BASE_URI": "oci://bucket@ns/load", "DATAGEN_LOAD_PREFIX": ""}
+        assert load_tables.build_load_path(config, "ORDERS") == "oci://bucket@ns/load/ORDERS"
