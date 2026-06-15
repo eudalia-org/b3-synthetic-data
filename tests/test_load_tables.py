@@ -36,3 +36,46 @@ class TestParseTables:
     def test_exits_when_empty(self):
         with pytest.raises(SystemExit):
             load_tables.parse_tables("", None)
+
+
+class TestGetLoadEnv:
+    BASE = {
+        "DATAGEN_TARGET_JDBC_URL": "jdbc:oracle:thin:@host",
+        "DATAGEN_TARGET_DB_PASSWORD": "secret",
+        "DATAGEN_LOAD_BASE_URI": "oci://bucket@ns/load/",
+    }
+
+    def test_applies_defaults(self, monkeypatch):
+        for key in list(os.environ):
+            if key.startswith("DATAGEN_"):
+                monkeypatch.delenv(key, raising=False)
+        for key, value in self.BASE.items():
+            monkeypatch.setenv(key, value)
+        config = load_tables.get_load_env()
+        assert config["DATAGEN_TARGET_DB_USER"] == "ADMIN"
+        assert config["DATAGEN_JDBC_NUM_PARTITIONS"] == "256"
+        assert config["DATAGEN_JDBC_BATCH_SIZE"] == "10000"
+        assert config["DATAGEN_JDBC_READ_TIMEOUT_MS"] == "600000"
+        assert config["DATAGEN_LOAD_PREFIX"] == ""
+        assert config["DATAGEN_TARGET_JDBC_URL"] == "jdbc:oracle:thin:@host"
+
+    def test_strips_trailing_slash_and_prefix_slashes(self, monkeypatch):
+        for key, value in self.BASE.items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setenv("DATAGEN_LOAD_PREFIX", "/synthetic/")
+        config = load_tables.get_load_env()
+        assert config["DATAGEN_LOAD_BASE_URI"] == "oci://bucket@ns/load"
+        assert config["DATAGEN_LOAD_PREFIX"] == "synthetic"
+
+    def test_exits_when_required_missing(self, monkeypatch):
+        for key in REQUIRED:
+            monkeypatch.delenv(key, raising=False)
+        with pytest.raises(SystemExit):
+            load_tables.get_load_env()
+
+
+REQUIRED = (
+    "DATAGEN_TARGET_JDBC_URL",
+    "DATAGEN_TARGET_DB_PASSWORD",
+    "DATAGEN_LOAD_BASE_URI",
+)

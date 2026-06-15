@@ -97,3 +97,43 @@ def parse_tables(tables: str | None, tables_file: str | None) -> list[str]:
         logger.error("No tables provided")
         sys.exit(1)
     return deduped
+
+
+def get_load_env() -> dict[str, str]:
+    config = {}
+    missing = []
+
+    for name in REQUIRED_ENV_VARS:
+        value = os.environ.get(name)
+        if not value:
+            missing.append(name)
+        else:
+            config[name] = value.rstrip("/")
+
+    if missing:
+        logger.error("Missing required environment variable(s): %s", ", ".join(missing))
+        sys.exit(1)
+
+    config["DATAGEN_TARGET_DB_USER"] = os.environ.get(
+        "DATAGEN_TARGET_DB_USER", DEFAULT_TARGET_DB_USER
+    )
+    config["DATAGEN_LOAD_PREFIX"] = os.environ.get("DATAGEN_LOAD_PREFIX", "").strip("/")
+    config["DATAGEN_JDBC_NUM_PARTITIONS"] = os.environ.get(
+        "DATAGEN_JDBC_NUM_PARTITIONS", DEFAULT_NUM_PARTITIONS
+    )
+    config["DATAGEN_JDBC_BATCH_SIZE"] = os.environ.get(
+        "DATAGEN_JDBC_BATCH_SIZE", DEFAULT_BATCH_SIZE
+    )
+    config["DATAGEN_JDBC_READ_TIMEOUT_MS"] = os.environ.get(
+        "DATAGEN_JDBC_READ_TIMEOUT_MS", DEFAULT_READ_TIMEOUT_MS
+    )
+    return config
+
+
+def create_spark_session(app_name: str) -> SparkSession:
+    from pyspark.sql import SparkSession
+
+    builder = SparkSession.builder.appName(app_name)
+    for key, value in PARQUET_REBASE_CONF.items():
+        builder = builder.config(key, value)
+    return builder.getOrCreate()
