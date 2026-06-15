@@ -215,13 +215,30 @@ def build_constraint_discovery_query(owner: str, table_name: str) -> str:
 
 @contextmanager
 def constraints_disabled(execute, constraints: list[tuple[str, str, str]], validate: bool):
-    for owner, table_name, name in constraints:
-        execute(disable_constraint_sql(owner, table_name, name))
+    disabled: list[tuple[str, str, str]] = []
     try:
+        for owner, table_name, name in constraints:
+            execute(disable_constraint_sql(owner, table_name, name))
+            disabled.append((owner, table_name, name))
         yield
     finally:
-        for owner, table_name, name in constraints:
-            execute(enable_constraint_sql(owner, table_name, name, validate))
+        if disabled:
+            logger.info("Re-enabling %d FK constraint(s)", len(disabled))
+        errors = []
+        for owner, table_name, name in disabled:
+            try:
+                execute(enable_constraint_sql(owner, table_name, name, validate))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+                logger.error(
+                    "Failed to re-enable constraint %s.%s.%s: %s",
+                    owner,
+                    table_name,
+                    name,
+                    exc,
+                )
+        if errors:
+            raise errors[0]
 
 
 def read_rows(spark: SparkSession, properties: dict[str, str], query: str) -> list:

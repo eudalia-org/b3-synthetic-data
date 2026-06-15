@@ -210,6 +210,38 @@ class TestConstraintsDisabled:
             calls.append("BODY")
         assert calls == ["BODY"]
 
+    def test_reenables_already_disabled_when_a_later_disable_fails(self):
+        # If the 2nd DISABLE fails, the 1st (already disabled) must be re-enabled.
+        calls = []
+
+        def execute(sql):
+            calls.append(sql)
+            if sql == "ALTER TABLE SALES.INVOICES DISABLE CONSTRAINT FK_ORD":
+                raise RuntimeError("disable failed")
+
+        with pytest.raises(RuntimeError):
+            with load_tables.constraints_disabled(execute, self.CONSTRAINTS, validate=False):
+                calls.append("BODY")
+
+        assert "ALTER TABLE ADMIN.ORDERS ENABLE NOVALIDATE CONSTRAINT FK_CUST" in calls
+        assert "BODY" not in calls  # body never ran because setup failed
+
+    def test_attempts_all_reenables_even_if_one_fails(self):
+        calls = []
+
+        def execute(sql):
+            calls.append(sql)
+            if sql == "ALTER TABLE ADMIN.ORDERS ENABLE NOVALIDATE CONSTRAINT FK_CUST":
+                raise RuntimeError("reenable failed")
+
+        with pytest.raises(RuntimeError):
+            with load_tables.constraints_disabled(execute, self.CONSTRAINTS, validate=False):
+                pass
+
+        # Both re-enables attempted despite the first failing.
+        assert "ALTER TABLE ADMIN.ORDERS ENABLE NOVALIDATE CONSTRAINT FK_CUST" in calls
+        assert "ALTER TABLE SALES.INVOICES ENABLE NOVALIDATE CONSTRAINT FK_ORD" in calls
+
 
 class TestDiscoverConstraints:
     def test_maps_rows_to_tuples(self, monkeypatch):
