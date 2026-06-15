@@ -222,3 +222,35 @@ def constraints_disabled(execute, constraints: list[tuple[str, str, str]], valid
     finally:
         for owner, table_name, name in constraints:
             execute(enable_constraint_sql(owner, table_name, name, validate))
+
+
+def read_rows(spark: SparkSession, properties: dict[str, str], query: str) -> list:
+    return (
+        spark.read.format("jdbc")
+        .options(**properties)
+        .option("dbtable", f"({query}) DATAGEN_Q")
+        .load()
+        .collect()
+    )
+
+
+def execute_statement(spark: SparkSession, properties: dict[str, str], sql: str) -> None:
+    conn = spark._sc._jvm.java.sql.DriverManager.getConnection(
+        properties["url"], properties["user"], properties["password"]
+    )
+    try:
+        stmt = conn.prepareStatement(sql)
+        try:
+            stmt.execute()
+        finally:
+            stmt.close()
+    finally:
+        conn.close()
+
+
+def discover_constraints(
+    spark: SparkSession, properties: dict[str, str], owner: str, table_name: str
+) -> list[tuple[str, str, str]]:
+    query = build_constraint_discovery_query(owner, table_name)
+    rows = read_rows(spark, properties, query)
+    return [(row[0], row[1], row[2]) for row in rows]

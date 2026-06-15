@@ -209,3 +209,24 @@ class TestConstraintsDisabled:
         with load_tables.constraints_disabled(calls.append, [], validate=False):
             calls.append("BODY")
         assert calls == ["BODY"]
+
+
+class TestDiscoverConstraints:
+    def test_maps_rows_to_tuples(self, monkeypatch):
+        monkeypatch.setattr(
+            load_tables,
+            "read_rows",
+            lambda spark, props, query: [
+                ("ADMIN", "ORDERS", "FK_CUST"),
+                ("SALES", "INVOICES", "FK_ORD"),
+            ],
+        )
+        result = load_tables.discover_constraints(None, {}, "ADMIN", "ORDERS")
+        assert result == [
+            ("ADMIN", "ORDERS", "FK_CUST"),
+            ("SALES", "INVOICES", "FK_ORD"),
+        ]
+
+    def test_empty_when_no_constraints(self, monkeypatch):
+        monkeypatch.setattr(load_tables, "read_rows", lambda *a: [])
+        assert load_tables.discover_constraints(None, {}, "ADMIN", "ORDERS") == []
