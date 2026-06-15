@@ -211,3 +211,14 @@ def build_constraint_discovery_query(owner: str, table_name: str) -> str:
         "WHERE constraint_type = 'R' AND status = 'ENABLED' "
         f"AND owner = '{owner}' AND table_name = '{table_name}'"
     )
+
+
+@contextmanager
+def constraints_disabled(execute, constraints: list[tuple[str, str, str]], validate: bool):
+    for owner, table_name, name in constraints:
+        execute(disable_constraint_sql(owner, table_name, name))
+    try:
+        yield
+    finally:
+        for owner, table_name, name in constraints:
+            execute(enable_constraint_sql(owner, table_name, name, validate))

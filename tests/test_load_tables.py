@@ -178,3 +178,34 @@ class TestSqlBuilders:
             load_tables.disable_constraint_sql("ADMIN", "ORDERS", "X'); DROP")
         with pytest.raises(ValueError):
             load_tables.build_constraint_discovery_query("ADMIN", "O'R")
+
+
+class TestConstraintsDisabled:
+    CONSTRAINTS = [("ADMIN", "ORDERS", "FK_CUST"), ("SALES", "INVOICES", "FK_ORD")]
+
+    def test_disables_then_reenables_in_order(self):
+        calls = []
+        with load_tables.constraints_disabled(calls.append, self.CONSTRAINTS, validate=False):
+            calls.append("BODY")
+        assert calls == [
+            "ALTER TABLE ADMIN.ORDERS DISABLE CONSTRAINT FK_CUST",
+            "ALTER TABLE SALES.INVOICES DISABLE CONSTRAINT FK_ORD",
+            "BODY",
+            "ALTER TABLE ADMIN.ORDERS ENABLE NOVALIDATE CONSTRAINT FK_CUST",
+            "ALTER TABLE SALES.INVOICES ENABLE NOVALIDATE CONSTRAINT FK_ORD",
+        ]
+
+    def test_reenables_even_when_body_raises(self):
+        calls = []
+        with pytest.raises(RuntimeError):
+            with load_tables.constraints_disabled(calls.append, self.CONSTRAINTS, validate=False):
+                raise RuntimeError("load failed")
+        # Both disabled constraints must still be re-enabled.
+        assert "ALTER TABLE ADMIN.ORDERS ENABLE NOVALIDATE CONSTRAINT FK_CUST" in calls
+        assert "ALTER TABLE SALES.INVOICES ENABLE NOVALIDATE CONSTRAINT FK_ORD" in calls
+
+    def test_empty_constraints_is_noop(self):
+        calls = []
+        with load_tables.constraints_disabled(calls.append, [], validate=False):
+            calls.append("BODY")
+        assert calls == ["BODY"]
