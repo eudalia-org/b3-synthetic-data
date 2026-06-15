@@ -160,3 +160,17 @@ def build_load_path(config: dict[str, str], table: str) -> str:
         path_parts.append(config["DATAGEN_LOAD_PREFIX"])
     path_parts.append(table)
     return "/".join(path_parts)
+
+
+def build_connection_properties(config: dict[str, str]) -> dict[str, str]:
+    return {
+        "url": config["DATAGEN_TARGET_JDBC_URL"],
+        "user": config["DATAGEN_TARGET_DB_USER"],
+        "password": config["DATAGEN_TARGET_DB_PASSWORD"],
+        "driver": "oracle.jdbc.OracleDriver",
+        "oracle.jdbc.ReadTimeout": config["DATAGEN_JDBC_READ_TIMEOUT_MS"],
+    }
+
+
+def resolve_num_partitions(config: dict[str, str]) -> int:
+    return int(config["DATAGEN_JDBC_NUM_PARTITIONS"])

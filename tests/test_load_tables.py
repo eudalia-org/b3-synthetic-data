@@ -112,3 +112,31 @@ class TestNameAndPathHelpers:
     def test_build_load_path_without_prefix(self):
         config = {"DATAGEN_LOAD_BASE_URI": "oci://bucket@ns/load", "DATAGEN_LOAD_PREFIX": ""}
         assert load_tables.build_load_path(config, "ORDERS") == "oci://bucket@ns/load/ORDERS"
+
+
+class TestConnectionProperties:
+    CONFIG = {
+        "DATAGEN_TARGET_JDBC_URL": "jdbc:oracle:thin:@host",
+        "DATAGEN_TARGET_DB_USER": "ADMIN",
+        "DATAGEN_TARGET_DB_PASSWORD": "secret",
+        "DATAGEN_JDBC_READ_TIMEOUT_MS": "600000",
+        "DATAGEN_JDBC_NUM_PARTITIONS": "256",
+    }
+
+    def test_base_connection_properties(self):
+        props = load_tables.build_connection_properties(self.CONFIG)
+        assert props["url"] == "jdbc:oracle:thin:@host"
+        assert props["user"] == "ADMIN"
+        assert props["password"] == "secret"
+        assert props["driver"] == "oracle.jdbc.OracleDriver"
+        assert props["oracle.jdbc.ReadTimeout"] == "600000"
+
+    def test_omits_write_only_options(self):
+        # batchsize / isolationLevel are applied at the write call, not in the
+        # base properties (which are also reused for metadata SELECTs).
+        props = load_tables.build_connection_properties(self.CONFIG)
+        assert "batchsize" not in props
+        assert "isolationLevel" not in props
+
+    def test_resolve_num_partitions(self):
+        assert load_tables.resolve_num_partitions(self.CONFIG) == 256
