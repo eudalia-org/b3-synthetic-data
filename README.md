@@ -135,6 +135,39 @@ Cross-schema mode runs `COUNT(*)`, so it can be expensive on very large tables. 
 read segment size without additional catalog grants; `--compressed-bytes-per-row` lets you
 estimate output size from a measured limited extract.
 
+## Fast Parallel Load
+
+`load_tables.py` is the inverse of `save_tables.py`: it loads per-table Parquet into
+the target Oracle database through many short-lived parallel JDBC partitions, so a
+load survives the Data Flow→ADB connection killer (each partition commits in seconds,
+and Spark retries any killed partition cleanly). Run one Data Flow job per big table.
+
+```bash
+python load_tables.py --tables BIG_TABLE
+```
+
+Reads `{DATAGEN_LOAD_BASE_URI}/{DATAGEN_LOAD_PREFIX}/<TABLE>` and overwrites the target
+table (`TRUNCATE` then parallel append), so reruns are idempotent. Point
+`DATAGEN_LOAD_BASE_URI` at the raw bucket for an Oracle→Oracle copy or at synthetic
+output.
+
+Foreign keys are managed automatically: enabled FKs referencing each target table
+(plus the target's own FKs) are disabled before truncate and re-enabled `NOVALIDATE`
+after (use `--validate-constraints` for `ENABLE VALIDATE`). Pass
+`--no-manage-constraints` to skip this when constraints are handled externally;
+cross-schema constraints need `ALTER` privileges in the referencing schema.
+
+Configuration: `DATAGEN_TARGET_JDBC_URL`, `DATAGEN_TARGET_DB_PASSWORD`,
+`DATAGEN_TARGET_DB_USER` (default `ADMIN`), `DATAGEN_LOAD_BASE_URI`,
+`DATAGEN_LOAD_PREFIX`, `DATAGEN_JDBC_NUM_PARTITIONS` (default 256),
+`DATAGEN_JDBC_BATCH_SIZE` (default 10000), `DATAGEN_JDBC_READ_TIMEOUT_MS`
+(default 600000). Set `spark.task.maxFailures` high (e.g. 8) in the Data Flow job so
+killed partitions are retried.
+
+Note: parallel JDBC append is at-least-once — a partition that commits but is then
+reported failed will be retried and duplicate that partition's rows. The per-run
+truncate bounds this to a single run.
+
 ## VDI One-Time ROWID Migration
 
 `scripts/migrate_rowid_to_oci.py` is for the on-prem access pattern where the VDI can reach both
