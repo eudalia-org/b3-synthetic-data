@@ -2236,3 +2236,80 @@ def load_specs(spark: SparkSession, specs_uri: str) -> dict:
     if not isinstance(parsed, dict) or not parsed:
         raise ValueError(f"specs.json at `{specs_uri}` must be a non-empty object.")
     return normalize_specs(parsed)
+
+
+def engorda(spark, config, specs, scale_factor, seed, continue_on_error) -> None:
+    components = connected_components(specs)
+    save_base = synthetic_base_path(config)
+    total = len(components)
+    logger.info("Loaded %d table(s) in %d component(s)", len(specs), total)
+    run_started = time.perf_counter()
+    failures: list[str] = []
+
+    for index, comp in enumerate(sorted(components, key=lambda c: sorted(c)[0]), start=1):
+        comp_specs = {t: specs[t] for t in comp}
+        label = ",".join(sorted(comp))
+        comp_tables = {}
+        synthetic = {}
+        try:
+            started = time.perf_counter()
+            comp_tables = {t: read_parquet(spark, raw_path(config, t)) for t in comp}
+            counts = {t: comp_tables[t].count() for t in comp}
+            for t in comp:
+                if comp_specs[t].get("static") and comp_specs[t].get("n_rows") is not None:
+                    logger.warning("Table %s is static; ignoring n_rows override", t)
+            n_rows = effective_n_rows(comp_specs, counts, scale_factor)
+            logger.info("[%d/%d] Component {%s}: n_rows=%s", index, total, label, n_rows)
+            synthetic = run_synthesis_from_tables(
+                comp_tables, comp_specs,
+                n_rows_by_table=n_rows, seed=seed,
+                save_path=save_base, save_format="parquet",
+                save_mode="overwrite", validate_mode="full", verbose=False,
+            )
+            logger.info("[%d/%d] Component {%s} done in %.1fs",
+                        index, total, label, time.perf_counter() - started)
+        except Exception as exc:
+            logger.exception("[%d/%d] Component {%s} failed: %s", index, total, label, exc)
+            failures.append(label)
+            if not continue_on_error:
+                raise
+        finally:
+            release(*comp_tables.values(), *synthetic.values())
+            try:
+                spark.catalog.clearCache()
+            except Exception:
+                pass
+
+    logger.info("Finished: %d/%d component(s) in %.1fs",
+                total - len(failures), total, time.perf_counter() - run_started)
+    if failures:
+        logger.error("Failed component(s): %s", "; ".join(failures))
+        sys.exit(1)
+
+
+def create_spark_session(app_name: str) -> SparkSession:
+    from pyspark.sql import SparkSession
+
+    builder = SparkSession.builder.appName(app_name)
+    for key, value in {
+        "spark.sql.parquet.datetimeRebaseModeInWrite": "CORRECTED",
+        "spark.sql.parquet.int96RebaseModeInWrite": "CORRECTED",
+    }.items():
+        builder = builder.config(key, value)
+    return builder.getOrCreate()
+
+
+def main() -> None:
+    args = parse_arguments()
+    config = get_engorda_env()
+    spark = create_spark_session("DataGenEngordaTables")
+    try:
+        specs_uri = args.specs or config["DATAGEN_SPECS_URI"]
+        specs = load_specs(spark, specs_uri)
+        engorda(spark, config, specs, args.scale_factor, args.seed, args.continue_on_error)
+    finally:
+        spark.stop()
+
+
+if __name__ == "__main__":
+    main()

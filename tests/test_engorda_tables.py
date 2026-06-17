@@ -237,3 +237,58 @@ class TestLoadSpecs:
         spark = self._fake_spark([("a", "{not json")])
         with pytest.raises(ValueError):
             engorda_tables.load_specs(spark, "oci://cfg/specs.json")
+
+
+class TestEngordaLoop:
+    def _config(self):
+        return {
+            "DATAGEN_RAW_BASE_URI": "oci://raw@ns", "DATAGEN_RAW_PREFIX": "",
+            "DATAGEN_SYNTHETIC_BASE_URI": "oci://syn@ns", "DATAGEN_SYNTHETIC_PREFIX": "",
+        }
+
+    def test_processes_each_component_and_releases(self, monkeypatch):
+        specs = {
+            "A": {"pk_cols": ["ID"]},
+            "B": {"pk_cols": ["ID"], "foreign_keys": [{"columns": ["AID"], "parent_table": "A"}]},
+            "C": {"pk_cols": ["ID"]},
+        }
+        synth_calls = []
+        released = []
+
+        class FakeDF:
+            def __init__(self, name): self.name = name
+            def count(self): return 10
+
+        monkeypatch.setattr(engorda_tables, "read_parquet",
+                            lambda spark, path: FakeDF(path))
+        monkeypatch.setattr(engorda_tables, "release",
+                            lambda *dfs: released.extend(dfs))
+
+        def fake_run(tables, comp_specs, **kwargs):
+            synth_calls.append((set(comp_specs), kwargs["n_rows_by_table"]))
+            return {t: FakeDF(t) for t in comp_specs}
+
+        monkeypatch.setattr(engorda_tables, "run_synthesis_from_tables", fake_run)
+
+        engorda_tables.engorda(spark=object(), config=self._config(), specs=specs,
+                               scale_factor=2.0, seed=42, continue_on_error=False)
+
+        processed = sorted(sorted(s) for s, _ in synth_calls)
+        assert processed == [["A", "B"], ["C"]]
+        assert released  # something was released between/after components
+
+    def test_continue_on_error_collects_and_exits(self, monkeypatch):
+        specs = {"A": {"pk_cols": ["ID"]}, "C": {"pk_cols": ["ID"]}}
+
+        class FakeDF:
+            def count(self): return 5
+        monkeypatch.setattr(engorda_tables, "read_parquet", lambda s, p: FakeDF())
+        monkeypatch.setattr(engorda_tables, "release", lambda *dfs: None)
+
+        def fake_run(tables, comp_specs, **kwargs):
+            raise RuntimeError("boom")
+        monkeypatch.setattr(engorda_tables, "run_synthesis_from_tables", fake_run)
+
+        with pytest.raises(SystemExit):
+            engorda_tables.engorda(spark=object(), config=self._config(), specs=specs,
+                                   scale_factor=1.0, seed=42, continue_on_error=True)
