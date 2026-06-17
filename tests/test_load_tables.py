@@ -247,3 +247,22 @@ class TestBuildExistingKeysQuery:
             load_tables.build_existing_keys_query("ADMIN", "T; DROP", "PK", 1, 2)
         with pytest.raises(ValueError):
             load_tables.build_existing_keys_query("ADMIN", "T", "P K", 1, 2)
+
+
+class TestManifest:
+    CFG = {"DATAGEN_LOAD_BASE_URI": "oci://bucket@ns/load"}
+
+    def test_manifest_path(self):
+        assert load_tables.manifest_path(self.CFG, "20260617T120000Z") == (
+            "oci://bucket@ns/load/_load_manifests/20260617T120000Z"
+        )
+
+    def test_build_manifest_shape(self):
+        entries = [{"table": "LANCAMENTO", "rollbackable": True}]
+        m = load_tables.build_manifest("RID", "2026-06-17T12:00:00Z", "ADMIN", entries)
+        assert m == {
+            "run_id": "RID",
+            "created_utc": "2026-06-17T12:00:00Z",
+            "target_user": "ADMIN",
+            "tables": entries,
+        }

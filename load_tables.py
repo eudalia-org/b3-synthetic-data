@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -73,6 +74,10 @@ def parse_arguments() -> argparse.Namespace:
         "--continue-on-error",
         action="store_true",
         help="Try remaining tables after a failure, then exit non-zero if any failed.",
+    )
+    parser.add_argument(
+        "--run-id",
+        help="Run id for the rollback manifest. Defaults to a UTC timestamp.",
     )
     return parser.parse_args()
 
@@ -463,6 +468,69 @@ def load_tables(
         sys.exit(1)
 
 
+def manifest_path(config: dict[str, str], run_id: str) -> str:
+    return f"{config['DATAGEN_LOAD_BASE_URI']}/_load_manifests/{run_id}"
+
+
+def build_manifest(run_id: str, created: str, target_user: str, entries: list[dict]) -> dict:
+    return {
+        "run_id": run_id,
+        "created_utc": created,
+        "target_user": target_user,
+        "tables": entries,
+    }
+
+
+def capture_manifest_entries(
+    spark: SparkSession,
+    properties: dict[str, str],
+    config: dict[str, str],
+    specs: dict,
+    target_user: str,
+    tables: list[str],
+) -> list[dict]:
+    from pyspark.sql.types import NumericType
+
+    entries = []
+    for table in tables:
+        owner, table_name = table_owner_and_name(target_user, table)
+        pk_cols = pk_cols_for(specs, table)
+        pk_col, max_before, rollbackable = None, None, False
+        if len(pk_cols) == 1:
+            schema = spark.read.parquet(
+                build_load_path(config, table_path_name(table))
+            ).schema
+            col_map = {f.name.upper(): f for f in schema.fields}
+            field = col_map.get(pk_cols[0].upper())
+            if field is not None and isinstance(field.dataType, NumericType):
+                rollbackable = True
+                pk_col = validate_identifier(pk_cols[0])
+                rows = read_rows(
+                    spark,
+                    properties,
+                    f"SELECT MAX({pk_col}) AS M "
+                    f"FROM {validate_identifier(owner)}.{validate_identifier(table_name)}",
+                )
+                max_before = int(rows[0][0]) if rows and rows[0][0] is not None else None
+        entries.append(
+            {
+                "table": table,
+                "owner": owner,
+                "name": table_name,
+                "pk_col": pk_col,
+                "max_pk_before": max_before,
+                "rollbackable": rollbackable,
+            }
+        )
+    return entries
+
+
+def write_manifest(spark: SparkSession, config: dict[str, str], run_id: str, manifest: dict) -> str:
+    path = manifest_path(config, run_id)
+    spark.sparkContext.parallelize([json.dumps(manifest)], 1).saveAsTextFile(path)
+    return path
+
+
 def main() -> None:
     args = parse_arguments()
     config = get_load_env()
@@ -475,6 +543,19 @@ def main() -> None:
             else None
         )
         tables = resolve_load_tables(specs, requested)
+
+        run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        target_user = config["DATAGEN_TARGET_DB_USER"]
+        properties = build_connection_properties(config)
+        entries = capture_manifest_entries(
+            spark, properties, config, specs, target_user, tables
+        )
+        manifest = build_manifest(
+            run_id, datetime.now(timezone.utc).isoformat(), target_user, entries
+        )
+        path = write_manifest(spark, config, run_id, manifest)
+        logger.info("Load run_id=%s; manifest written to %s", run_id, path)
+
         load_tables(
             spark,
             config,
