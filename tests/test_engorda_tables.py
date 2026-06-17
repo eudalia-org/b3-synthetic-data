@@ -186,18 +186,52 @@ class TestParseArguments:
         assert args.seed == 42
         assert args.continue_on_error is False
         assert args.specs is None
+        assert args.limit is None
 
     def test_overrides(self, monkeypatch):
         monkeypatch.setattr(
             sys, "argv",
             ["engorda_tables.py", "--scale-factor", "3", "--seed", "7",
-             "--continue-on-error", "--specs", "oci://cfg@ns/s.json"],
+             "--continue-on-error", "--limit", "1000", "--specs", "oci://cfg@ns/s.json"],
         )
         args = engorda_tables.parse_arguments()
         assert args.scale_factor == 3.0
         assert args.seed == 7
         assert args.continue_on_error is True
+        assert args.limit == 1000
         assert args.specs == "oci://cfg@ns/s.json"
+
+    def test_rejects_non_positive_limit(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["engorda_tables.py", "--limit", "0"])
+        with pytest.raises(SystemExit):
+            engorda_tables.parse_arguments()
+
+
+class TestReadParquet:
+    class _DF:
+        def __init__(self): self.limit_arg = None
+        def limit(self, n):
+            self.limit_arg = n
+            return self
+
+    class _Spark:
+        def __init__(self, df): self._df = df
+        @property
+        def read(self):
+            outer = self
+            class _Reader:
+                def parquet(self_inner, path): return outer._df
+            return _Reader()
+
+    def test_no_limit_returns_full_df(self):
+        df = self._DF()
+        out = engorda_tables.read_parquet(self._Spark(df), "p")
+        assert out is df and df.limit_arg is None
+
+    def test_applies_limit(self):
+        df = self._DF()
+        out = engorda_tables.read_parquet(self._Spark(df), "p", limit=250)
+        assert out is df and df.limit_arg == 250
 
 
 class TestLoadSpecs:
@@ -260,7 +294,7 @@ class TestEngordaLoop:
             def count(self): return 10
 
         monkeypatch.setattr(engorda_tables, "read_parquet",
-                            lambda spark, path: FakeDF(path))
+                            lambda spark, path, limit=None: FakeDF(path))
         monkeypatch.setattr(engorda_tables, "release",
                             lambda *dfs: released.extend(dfs))
 
@@ -282,7 +316,7 @@ class TestEngordaLoop:
 
         class FakeDF:
             def count(self): return 5
-        monkeypatch.setattr(engorda_tables, "read_parquet", lambda s, p: FakeDF())
+        monkeypatch.setattr(engorda_tables, "read_parquet", lambda s, p, limit=None: FakeDF())
         monkeypatch.setattr(engorda_tables, "release", lambda *dfs: None)
 
         def fake_run(tables, comp_specs, **kwargs):
@@ -292,6 +326,23 @@ class TestEngordaLoop:
         with pytest.raises(SystemExit):
             engorda_tables.engorda(spark=object(), config=self._config(), specs=specs,
                                    scale_factor=1.0, seed=42, continue_on_error=True)
+
+    def test_passes_limit_to_read_parquet(self, monkeypatch):
+        specs = {"A": {"pk_cols": ["ID"]}}
+        seen_limits = []
+
+        class FakeDF:
+            def count(self): return 3
+
+        monkeypatch.setattr(engorda_tables, "read_parquet",
+                            lambda spark, path, limit=None: seen_limits.append(limit) or FakeDF())
+        monkeypatch.setattr(engorda_tables, "release", lambda *dfs: None)
+        monkeypatch.setattr(engorda_tables, "run_synthesis_from_tables",
+                            lambda tables, comp_specs, **kwargs: {t: FakeDF() for t in comp_specs})
+
+        engorda_tables.engorda(spark=object(), config=self._config(), specs=specs,
+                               scale_factor=1.0, seed=42, continue_on_error=False, limit=500)
+        assert seen_limits == [500]
 
 
 pyspark = pytest.importorskip("pyspark")

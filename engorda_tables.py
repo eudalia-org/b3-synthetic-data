@@ -2197,6 +2197,16 @@ def effective_n_rows(
     return targets
 
 
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be an integer") from None
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate synthetic relational Parquet from ingested raw Parquet."
@@ -2208,13 +2218,19 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--continue-on-error", action="store_true",
                         help="Continue with remaining components after a failure, "
                              "then exit non-zero.")
+    parser.add_argument("--limit", type=positive_int, default=None,
+                        help="Read at most this many rows from each raw table before "
+                             "synthesizing (input sampling for fast test runs). Omit for no limit. "
+                             "Note: sampling parent and child tables independently can drop some "
+                             "FK matches, which the synthesizer warns about and skips.")
     parser.add_argument("--specs", default=None,
                         help="Override DATAGEN_SPECS_URI (URI of a single specs.json object).")
     return parser.parse_args()
 
 
-def read_parquet(spark: SparkSession, path: str) -> DataFrame:
-    return spark.read.parquet(path)
+def read_parquet(spark: SparkSession, path: str, limit: int | None = None) -> DataFrame:
+    df = spark.read.parquet(path)
+    return df.limit(limit) if limit is not None else df
 
 
 def release(*dataframes) -> None:
@@ -2243,10 +2259,12 @@ def load_specs(spark: SparkSession, specs_uri: str) -> dict:
     return normalize_specs(parsed)
 
 
-def engorda(spark, config, specs, scale_factor, seed, continue_on_error) -> None:
+def engorda(spark, config, specs, scale_factor, seed, continue_on_error, limit=None) -> None:
     components = connected_components(specs)
     save_base = synthetic_base_path(config)
     total = len(components)
+    if limit is not None:
+        logger.info("Input limit active: reading at most %d row(s) per raw table", limit)
     logger.info("Loaded %d table(s) in %d component(s)", len(specs), total)
     run_started = time.perf_counter()
     failures: list[str] = []
@@ -2258,7 +2276,7 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error) -> None
         synthetic = {}
         try:
             started = time.perf_counter()
-            comp_tables = {t: read_parquet(spark, raw_path(config, t)) for t in comp}
+            comp_tables = {t: read_parquet(spark, raw_path(config, t), limit) for t in comp}
             counts = {t: comp_tables[t].count() for t in comp}
             for t in comp:
                 if comp_specs[t].get("static") and comp_specs[t].get("n_rows") is not None:
@@ -2311,7 +2329,8 @@ def main() -> None:
     try:
         specs_uri = args.specs or config["DATAGEN_SPECS_URI"]
         specs = load_specs(spark, specs_uri)
-        engorda(spark, config, specs, args.scale_factor, args.seed, args.continue_on_error)
+        engorda(spark, config, specs, args.scale_factor, args.seed,
+                args.continue_on_error, args.limit)
     finally:
         spark.stop()
 
