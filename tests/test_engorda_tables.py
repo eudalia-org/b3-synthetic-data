@@ -104,3 +104,39 @@ class TestNormalizeSpecs:
     def test_passes_through_when_no_schema(self):
         raw = {"ORDERS": {"pk_cols": ["ID"], "n_rows": 10}}
         assert engorda_tables.normalize_specs(raw) == raw
+
+
+class TestConnectedComponents:
+    def _comps(self, specs):
+        return sorted(sorted(c) for c in engorda_tables.connected_components(specs))
+
+    def test_chain_is_one_component(self):
+        specs = {
+            "CUSTOMERS": {"pk_cols": ["CID"]},
+            "ORDERS": {"pk_cols": ["OID"],
+                       "foreign_keys": [{"columns": ["CID"], "parent_table": "CUSTOMERS"}]},
+            "ITEMS": {"pk_cols": ["IID"],
+                      "foreign_keys": [{"columns": ["OID"], "parent_table": "ORDERS"}]},
+        }
+        assert self._comps(specs) == [["CUSTOMERS", "ITEMS", "ORDERS"]]
+
+    def test_disjoint_components(self):
+        specs = {
+            "A": {"pk_cols": ["ID"]},
+            "B": {"pk_cols": ["ID"], "foreign_keys": [{"columns": ["AID"], "parent_table": "A"}]},
+            "C": {"pk_cols": ["ID"]},
+        }
+        assert self._comps(specs) == [["A", "B"], ["C"]]
+
+    def test_isolated_node(self):
+        specs = {"LOG": {"pk_cols": ["ID"]}}
+        assert self._comps(specs) == [["LOG"]]
+
+    def test_fk_to_absent_parent_is_no_edge(self):
+        specs = {
+            "ORDERS": {"pk_cols": ["OID"],
+                       "foreign_keys": [{"columns": ["CID"], "parent_table": "MISSING"}]},
+            "OTHER": {"pk_cols": ["ID"]},
+        }
+        # MISSING is not a node, so ORDERS stays isolated from OTHER.
+        assert self._comps(specs) == [["ORDERS"], ["OTHER"]]

@@ -84,3 +84,30 @@ def normalize_specs(specs: dict) -> dict:
                     fk["parent_table"] = table_path_name(str(fk["parent_table"]))
         out[name] = new_cfg
     return out
+
+
+def connected_components(specs: dict) -> list[list[str]]:
+    parent: dict[str, str] = {t: t for t in specs}
+
+    def find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        parent[find(a)] = find(b)
+
+    for table, cfg in specs.items():
+        for fk_key in ("foreign_keys", "fks"):
+            for fk in cfg.get(fk_key) or []:
+                if not isinstance(fk, dict):
+                    continue
+                p = fk.get("parent_table")
+                if p in specs:
+                    union(table, p)
+
+    groups: dict[str, list[str]] = {}
+    for table in specs:
+        groups.setdefault(find(table), []).append(table)
+    return [sorted(g) for g in groups.values()]
