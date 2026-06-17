@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import time
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -187,6 +188,25 @@ def resolve_load_tables(specs: dict, requested: list[str] | None) -> list[str]:
         logger.error("No tables to load")
         sys.exit(1)
     return result
+
+
+def guard_applies(pk_cols: list[str], pk_is_numeric: bool) -> bool:
+    return len(pk_cols) == 1 and pk_is_numeric
+
+
+def build_existing_keys_query(
+    owner: str, table_name: str, pk_col: str, lo, hi
+) -> str:
+    owner = validate_identifier(owner)
+    table_name = validate_identifier(table_name)
+    pk_col = validate_identifier(pk_col)
+    for bound in (lo, hi):
+        if isinstance(bound, bool) or not isinstance(bound, (int, float, Decimal)):
+            raise ValueError(f"PK bound must be numeric: {bound!r}")
+    return (
+        f"(SELECT {pk_col} FROM {owner}.{table_name} "
+        f"WHERE {pk_col} BETWEEN {lo} AND {hi}) DATAGEN_KEYS"
+    )
 
 
 def build_connection_properties(config: dict[str, str]) -> dict[str, str]:

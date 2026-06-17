@@ -1,4 +1,5 @@
 import os
+from decimal import Decimal
 
 import pytest
 
@@ -203,3 +204,46 @@ class TestResolveLoadTables:
     def test_empty_result_exits(self):
         with pytest.raises(SystemExit):
             load_tables.resolve_load_tables(SPECS, ["TIPO_DEBITO"])
+
+
+class TestGuardApplies:
+    def test_single_numeric_true(self):
+        assert load_tables.guard_applies(["NUM_ID"], True) is True
+
+    def test_single_non_numeric_false(self):
+        assert load_tables.guard_applies(["COD_X"], False) is False
+
+    def test_composite_false(self):
+        assert load_tables.guard_applies(["A", "B"], True) is False
+
+    def test_empty_false(self):
+        assert load_tables.guard_applies([], True) is False
+
+
+class TestBuildExistingKeysQuery:
+    def test_builds_bounded_subquery(self):
+        q = load_tables.build_existing_keys_query("ADMIN", "LANCAMENTO", "NUM_ID", 10, 99)
+        assert q == (
+            "(SELECT NUM_ID FROM ADMIN.LANCAMENTO "
+            "WHERE NUM_ID BETWEEN 10 AND 99) DATAGEN_KEYS"
+        )
+
+    def test_accepts_decimal_bounds(self):
+        q = load_tables.build_existing_keys_query(
+            "ADMIN", "T", "PK", Decimal("5"), Decimal("9")
+        )
+        assert "BETWEEN 5 AND 9" in q
+
+    def test_rejects_non_numeric_bounds(self):
+        with pytest.raises(ValueError):
+            load_tables.build_existing_keys_query("ADMIN", "T", "PK", "5", "9")
+
+    def test_rejects_boolean_bounds(self):
+        with pytest.raises(ValueError):
+            load_tables.build_existing_keys_query("ADMIN", "T", "PK", True, False)
+
+    def test_rejects_bad_identifiers(self):
+        with pytest.raises(ValueError):
+            load_tables.build_existing_keys_query("ADMIN", "T; DROP", "PK", 1, 2)
+        with pytest.raises(ValueError):
+            load_tables.build_existing_keys_query("ADMIN", "T", "P K", 1, 2)
