@@ -2283,6 +2283,9 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error, limit=N
                     logger.warning("Table %s is static; ignoring n_rows override", t)
             n_rows = effective_n_rows(comp_specs, counts, scale_factor)
             logger.info("[%d/%d] Component {%s}: n_rows=%s", index, total, label, n_rows)
+            for t in comp:
+                logger.info("[%d/%d] will write %s -> %s/%s",
+                            index, total, t, save_base, t)
             synthetic = run_synthesis_from_tables(
                 comp_tables, comp_specs,
                 n_rows_by_table=n_rows, seed=seed,
