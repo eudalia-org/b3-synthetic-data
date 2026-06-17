@@ -330,7 +330,8 @@ def apply_pk_guard(
         owner, table_name, pk_actual, lo, hi,
     )
     existing = existing.withColumnRenamed(existing.columns[0], pk_actual)
-    if not existing.take(1):
+    existing_count = existing.count()
+    if existing_count == 0:
         logger.info(
             "[%d/%d] %s: 0 existing keys in PK range [%s, %s] -> appending all rows",
             index, total, table, lo, hi,
@@ -338,13 +339,11 @@ def apply_pk_guard(
         return df, 0
 
     to_append = df.join(existing, on=pk_actual, how="left_anti")
-    appended = to_append.count()
-    skipped = df.count() - appended
     logger.info(
-        "[%d/%d] %s: %s existing keys in PK range [%s, %s] -> skipping %s already-loaded",
-        index, total, table, f"{skipped:,}", lo, hi, f"{skipped:,}",
+        "[%d/%d] %s: %s existing key(s) in PK range [%s, %s] -> skipping already-loaded",
+        index, total, table, f"{existing_count:,}", lo, hi,
     )
-    return to_append, skipped
+    return to_append, existing_count
 
 
 def load_table(
