@@ -24,3 +24,21 @@ REQUIRED_ENV_VARS = (
 )
 DEFAULT_SCALE_FACTOR = 1.0
 DEFAULT_SEED = 42
+
+
+def table_path_name(table: str) -> str:
+    return table.split(".", 1)[1] if "." in table else table
+
+
+def raw_path(config: dict[str, str], table: str) -> str:
+    parts = [config["DATAGEN_RAW_BASE_URI"]]
+    if config.get("DATAGEN_RAW_PREFIX"):
+        parts.append(config["DATAGEN_RAW_PREFIX"])
+    parts.append(table_path_name(table))
+    return "/".join(parts)
+
+
+def synthetic_base_path(config: dict[str, str]) -> str:
+    base = config["DATAGEN_SYNTHETIC_BASE_URI"]
+    prefix = config.get("DATAGEN_SYNTHETIC_PREFIX")
+    return f"{base}/{prefix}" if prefix else base
