@@ -267,6 +267,86 @@ def execute_statement(spark: SparkSession, properties: dict[str, str], sql: str)
         conn.close()
 
 
+def read_existing_keys(
+    spark: SparkSession,
+    properties: dict[str, str],
+    num_partitions: int,
+    owner: str,
+    table_name: str,
+    pk_col: str,
+    lo,
+    hi,
+):
+    query = build_existing_keys_query(owner, table_name, pk_col, lo, hi)
+    return (
+        spark.read.format("jdbc")
+        .options(**properties)
+        .option("dbtable", query)
+        .option("partitionColumn", validate_identifier(pk_col))
+        .option("lowerBound", str(lo))
+        .option("upperBound", str(hi))
+        .option("numPartitions", num_partitions)
+        .load()
+    )
+
+
+def apply_pk_guard(
+    spark: SparkSession,
+    properties: dict[str, str],
+    config: dict[str, str],
+    df,
+    specs: dict,
+    owner: str,
+    table_name: str,
+    table: str,
+    index: int,
+    total: int,
+):
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import NumericType
+
+    pk_cols = pk_cols_for(specs, table)
+    col_map = {c.upper(): c for c in df.columns}
+    pk_actual = col_map.get(pk_cols[0].upper()) if len(pk_cols) == 1 else None
+    pk_is_numeric = bool(
+        pk_actual is not None
+        and isinstance(df.schema[pk_actual].dataType, NumericType)
+    )
+
+    if not guard_applies(pk_cols, pk_is_numeric) or pk_actual is None:
+        logger.info(
+            "[%d/%d] %s: no PK guard (pk_cols=%s) -> appending all rows",
+            index, total, table, pk_cols,
+        )
+        return df, 0
+
+    bounds = df.agg(F.min(pk_actual), F.max(pk_actual)).first()
+    lo, hi = bounds[0], bounds[1]
+    if lo is None:  # empty DataFrame
+        return df, 0
+
+    existing = read_existing_keys(
+        spark, properties, resolve_num_partitions(config),
+        owner, table_name, pk_actual, lo, hi,
+    )
+    existing = existing.withColumnRenamed(existing.columns[0], pk_actual)
+    if not existing.take(1):
+        logger.info(
+            "[%d/%d] %s: 0 existing keys in PK range [%s, %s] -> appending all rows",
+            index, total, table, lo, hi,
+        )
+        return df, 0
+
+    to_append = df.join(existing, on=pk_actual, how="left_anti")
+    appended = to_append.count()
+    skipped = df.count() - appended
+    logger.info(
+        "[%d/%d] %s: %s existing keys in PK range [%s, %s] -> skipping %s already-loaded",
+        index, total, table, f"{skipped:,}", lo, hi, f"{skipped:,}",
+    )
+    return to_append, skipped
+
+
 def load_table(
     spark: SparkSession,
     properties: dict[str, str],
@@ -292,10 +372,14 @@ def load_table(
         df = df.limit(limit)
     df = df.repartition(num_partitions)
 
+    df, _ = apply_pk_guard(
+        spark, properties, config, df, specs, owner, table_name, table, index, total
+    )
+
     appended = df.count()
     limit_note = f" (limit {limit})" if limit is not None else ""
     logger.info(
-        "[%d/%d] %s: %s rows%s -> appending to %s in %d partitions",
+        "[%d/%d] %s: appending %s rows%s to %s in %d partitions",
         index,
         total,
         table,
