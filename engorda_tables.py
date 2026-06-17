@@ -2243,6 +2243,33 @@ def release(*dataframes) -> None:
             pass
 
 
+def _delete_path(spark: SparkSession, path: str) -> None:
+    """Recursively delete exactly `path` via the Hadoop FileSystem API.
+
+    Scoped to a single table prefix. Used instead of Spark's mode("overwrite"),
+    whose delete-before-write removes the shared parent prefix on the OCI HDFS
+    connector and clobbers sibling tables.
+    """
+    jvm = spark._jvm
+    hadoop_conf = spark._jsc.hadoopConfiguration()
+    jpath = jvm.org.apache.hadoop.fs.Path(path)
+    fs = jpath.getFileSystem(hadoop_conf)
+    if fs.exists(jpath):
+        fs.delete(jpath, True)
+
+
+def write_synthetic_table(spark: SparkSession, df: DataFrame, out_path: str) -> None:
+    """Write one synthetic table to its own prefix without touching siblings.
+
+    Delete only this table's prefix, then append. Equivalent to per-table
+    overwrite, but the destructive step is scoped to exactly `out_path`.
+    """
+    table_name = out_path.rstrip("/").rsplit("/", 1)[-1]
+    df_out = _sanitize_columns_for_save(df, table_name)
+    _delete_path(spark, out_path)
+    df_out.write.mode("append").parquet(out_path)
+
+
 def load_specs(spark: SparkSession, specs_uri: str) -> dict:
     records = spark.sparkContext.wholeTextFiles(specs_uri).collect()
     if len(records) != 1:
@@ -2283,15 +2310,18 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error, limit=N
                     logger.warning("Table %s is static; ignoring n_rows override", t)
             n_rows = effective_n_rows(comp_specs, counts, scale_factor)
             logger.info("[%d/%d] Component {%s}: n_rows=%s", index, total, label, n_rows)
-            for t in comp:
-                logger.info("[%d/%d] will write %s -> %s/%s",
-                            index, total, t, save_base, t)
+            # Synthesize only; engorda writes each table itself with a delete
+            # scoped to that table's prefix (Spark's overwrite clobbers siblings
+            # on the OCI connector by deleting the shared parent prefix).
             synthetic = run_synthesis_from_tables(
                 comp_tables, comp_specs,
                 n_rows_by_table=n_rows, seed=seed,
-                save_path=save_base, save_format="parquet",
-                save_mode="overwrite", validate_mode="full", verbose=False,
+                validate_mode="full", verbose=False,
             )
+            for name, df in synthetic.items():
+                out_path = f"{save_base}/{name}"
+                logger.info("[%d/%d] writing %s -> %s", index, total, name, out_path)
+                write_synthetic_table(spark, df, out_path)
             logger.info("[%d/%d] Component {%s} done in %.1fs",
                         index, total, label, time.perf_counter() - started)
         except Exception as exc:

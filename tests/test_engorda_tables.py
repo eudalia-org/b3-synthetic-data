@@ -293,10 +293,13 @@ class TestEngordaLoop:
             def __init__(self, name): self.name = name
             def count(self): return 10
 
+        writes = []
         monkeypatch.setattr(engorda_tables, "read_parquet",
                             lambda spark, path, limit=None: FakeDF(path))
         monkeypatch.setattr(engorda_tables, "release",
                             lambda *dfs: released.extend(dfs))
+        monkeypatch.setattr(engorda_tables, "write_synthetic_table",
+                            lambda spark, df, out_path: writes.append(out_path))
 
         def fake_run(tables, comp_specs, **kwargs):
             synth_calls.append((set(comp_specs), kwargs["n_rows_by_table"]))
@@ -310,6 +313,13 @@ class TestEngordaLoop:
         processed = sorted(sorted(s) for s, _ in synth_calls)
         assert processed == [["A", "B"], ["C"]]
         assert released  # something was released between/after components
+        # every table written to its own distinct prefix
+        assert sorted(writes) == [
+            "oci://syn@ns/A",
+            "oci://syn@ns/B",
+            "oci://syn@ns/C",
+        ]
+        assert len(writes) == len(set(writes))
 
     def test_continue_on_error_collects_and_exits(self, monkeypatch):
         specs = {"A": {"pk_cols": ["ID"]}, "C": {"pk_cols": ["ID"]}}
@@ -337,12 +347,44 @@ class TestEngordaLoop:
         monkeypatch.setattr(engorda_tables, "read_parquet",
                             lambda spark, path, limit=None: seen_limits.append(limit) or FakeDF())
         monkeypatch.setattr(engorda_tables, "release", lambda *dfs: None)
+        monkeypatch.setattr(engorda_tables, "write_synthetic_table",
+                            lambda spark, df, out_path: None)
         monkeypatch.setattr(engorda_tables, "run_synthesis_from_tables",
                             lambda tables, comp_specs, **kwargs: {t: FakeDF() for t in comp_specs})
 
         engorda_tables.engorda(spark=object(), config=self._config(), specs=specs,
                                scale_factor=1.0, seed=42, continue_on_error=False, limit=500)
         assert seen_limits == [500]
+
+
+class TestWriteSyntheticTable:
+    def test_deletes_only_table_prefix_then_appends(self, monkeypatch):
+        deleted = []
+        appended = {}
+
+        class FakeWriter:
+            def __init__(self, df): self.df = df
+            def mode(self, m):
+                self.df.mode_arg = m
+                return self
+            def parquet(self, path): appended[path] = self.df.mode_arg
+
+        class FakeDF:
+            @property
+            def write(self): return FakeWriter(self)
+
+        df = FakeDF()
+        # bypass column sanitization and the Hadoop FS plumbing
+        monkeypatch.setattr(engorda_tables, "_sanitize_columns_for_save",
+                            lambda d, name: d)
+        monkeypatch.setattr(engorda_tables, "_delete_path",
+                            lambda spark, path: deleted.append(path))
+
+        engorda_tables.write_synthetic_table(object(), df, "oci://syn@ns/synthetic/CONDICAO_IF")
+
+        # delete is scoped to exactly this table's prefix, never the parent
+        assert deleted == ["oci://syn@ns/synthetic/CONDICAO_IF"]
+        assert appended == {"oci://syn@ns/synthetic/CONDICAO_IF": "append"}
 
 
 pyspark = pytest.importorskip("pyspark")
