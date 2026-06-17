@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import logging
 import os
@@ -62,3 +63,24 @@ def get_engorda_env() -> dict[str, str]:
         "DATAGEN_SYNTHETIC_PREFIX", ""
     ).strip("/")
     return config
+
+
+def normalize_specs(specs: dict) -> dict:
+    out: dict = {}
+    for raw_name, cfg in specs.items():
+        name = table_path_name(str(raw_name))
+        if name in out:
+            raise ValueError(
+                f"Spec key collision after schema stripping: `{raw_name}` reduces to "
+                f"`{name}`, which is already present."
+            )
+        new_cfg = copy.deepcopy(dict(cfg))
+        for fk_key in ("foreign_keys", "fks"):
+            fks = new_cfg.get(fk_key)
+            if not isinstance(fks, (list, tuple)):
+                continue
+            for fk in fks:
+                if isinstance(fk, dict) and fk.get("parent_table"):
+                    fk["parent_table"] = table_path_name(str(fk["parent_table"]))
+        out[name] = new_cfg
+    return out

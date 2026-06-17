@@ -66,3 +66,41 @@ class TestGetEngordaEnv:
             monkeypatch.delenv(name, raising=False)
         with pytest.raises(SystemExit):
             engorda_tables.get_engorda_env()
+
+
+class TestNormalizeSpecs:
+    def test_reduces_keys_and_parent_table(self):
+        raw = {
+            "ADMIN.ORDERS": {
+                "pk_cols": ["ORDER_ID"],
+                "foreign_keys": [
+                    {"columns": ["CUSTOMER_ID"], "parent_table": "ADMIN.CUSTOMERS"}
+                ],
+            },
+            "ADMIN.CUSTOMERS": {"pk_cols": ["CUSTOMER_ID"], "static": True},
+        }
+        out = engorda_tables.normalize_specs(raw)
+        assert set(out) == {"ORDERS", "CUSTOMERS"}
+        assert out["ORDERS"]["foreign_keys"][0]["parent_table"] == "CUSTOMERS"
+
+    def test_handles_fks_alias_key(self):
+        raw = {
+            "ORDERS": {
+                "pk_cols": ["ORDER_ID"],
+                "fks": [{"columns": ["C_ID"], "parent_table": "X.CUSTOMERS"}],
+            }
+        }
+        out = engorda_tables.normalize_specs(raw)
+        assert out["ORDERS"]["fks"][0]["parent_table"] == "CUSTOMERS"
+
+    def test_rejects_collision(self):
+        raw = {
+            "A.ORDERS": {"pk_cols": ["ID"]},
+            "B.ORDERS": {"pk_cols": ["ID"]},
+        }
+        with pytest.raises(ValueError):
+            engorda_tables.normalize_specs(raw)
+
+    def test_passes_through_when_no_schema(self):
+        raw = {"ORDERS": {"pk_cols": ["ID"], "n_rows": 10}}
+        assert engorda_tables.normalize_specs(raw) == raw
