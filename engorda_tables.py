@@ -546,36 +546,91 @@ def _referenced_parent_columns(specs: Mapping[str, TableSpec]) -> Dict[str, set]
 
 def _with_contiguous_row_id(df: DataFrame, id_col: str) -> DataFrame:
     """
-    Adiciona um identificador contíguo 0..N-1 sem usar RDD/lambda.
+    Adiciona um identificador contíguo 0..N-1 de forma paralela.
 
-    Motivo:
-        Algumas combinações de PySpark + Python geram erro em cloudpickle.dumps
-        quando usamos df.rdd.zipWithIndex().map(lambda ...), por exemplo:
+    Substitui a versão anterior que usava Window.orderBy() sem partitionBy,
+    o que forçava toda a tabela em uma única tarefa (single-task sort). Em
+    tabelas de 600M+ linhas isso era um gargalo serial intransponível.
 
-            IndexError: tuple index out of range
-            Could not serialize object
+    Algoritmo:
+        1. mid = monotonically_increasing_id() — ordem determinística por
+           partição (codifica (partition_id, counter) nos bits altos/baixos).
+        2. part = spark_partition_id() — id da partição de origem.
+        3. part_row = row_number() over (partitionBy part orderBy mid) —
+           contador local, totalmente paralelo (sem shuffle entre partições).
+        4. sizes = groupBy(part).agg(count(*)) — uma linha por partição.
+           O map-side combine reduz N linhas a ~num_partições linhas antes
+           do shuffle, então a etapa é barota mas leve.
+        5. offset = soma cumulativa de sizes ordenada por part — única etapa
+           "global", sobre O(num_partições) linhas (trivial).
+        6. id_col = offset + part_row - 1.
 
-        Esta implementação usa apenas expressões Spark SQL/DataFrame, evitando
-        serialização de função Python para os executores.
+    Equivalência com a versão anterior:
+        monotonically_increasing_id() ordena por (partition_id, counter).
+        A ordenação global anterior era: partição 0 em ordem de counter,
+        depois partição 1, etc. Esta versão reproduz exatamente essa ordem
+        mas sem mover dados entre partições — cada partição calcula seu
+        row_number localmente e recebe apenas seu offset por broadcast.
 
-    Observação:
-        Window.orderBy(...) cria uma ordenação global. É mais segura para
-        compatibilidade do que a versão RDD, embora possa ser mais custosa em
-        tabelas muito grandes.
+    Determinismo:
+        A leitura Parquet é determinística (ordem de linhas por arquivo é
+        estável), então mid_col tem a mesma ordem nas duas materializações
+        (uma para sizes, outra para o join final). part_row é consistente
+        porque depende apenas da ordem de mid dentro de cada partição.
     """
-    ordering_col = f"__{id_col}_order_tmp"
+    part_col = f"__{id_col}_part"
+    while part_col in df.columns:
+        part_col = f"_{part_col}"
 
-    while ordering_col in df.columns:
-        ordering_col = f"_{ordering_col}"
+    part_row_col = f"__{id_col}_prow"
+    while part_row_col in df.columns:
+        part_row_col = f"_{part_row_col}"
 
-    w = Window.orderBy(F.col(ordering_col))
+    part_size_col = f"__{id_col}_psize"
+    while part_size_col in df.columns:
+        part_size_col = f"_{part_size_col}"
 
-    return (
+    offset_col = f"__{id_col}_poff"
+    while offset_col in df.columns:
+        offset_col = f"_{offset_col}"
+
+    mid_col = f"__{id_col}_mid"
+    while mid_col in df.columns:
+        mid_col = f"_{mid_col}"
+
+    df = (
         df
-        .withColumn(ordering_col, F.monotonically_increasing_id())
-        .withColumn(id_col, (F.row_number().over(w) - F.lit(1)).cast("long"))
-        .drop(ordering_col)
+        .withColumn(mid_col, F.monotonically_increasing_id())
+        .withColumn(part_col, F.spark_partition_id())
     )
+
+    w_part = Window.partitionBy(part_col).orderBy(F.col(mid_col))
+    df = df.withColumn(part_row_col, F.row_number().over(w_part))
+
+    sizes = (
+        df.groupBy(part_col)
+        .agg(F.count(F.lit(1)).cast("long").alias(part_size_col))
+    )
+
+    w_offset = Window.orderBy(F.col(part_col)).rowsBetween(
+        Window.unboundedPreceding, -1
+    )
+    sizes = sizes.withColumn(
+        offset_col,
+        F.coalesce(
+            F.sum(F.col(part_size_col)).over(w_offset),
+            F.lit(0).cast("long"),
+        ).cast("long"),
+    )
+
+    df = df.join(F.broadcast(sizes), on=part_col, how="left")
+
+    df = df.withColumn(
+        id_col,
+        (F.col(offset_col) + F.col(part_row_col) - F.lit(1)).cast("long"),
+    )
+
+    return df.drop(mid_col, part_col, part_row_col, part_size_col, offset_col)
 
 
 def _bootstrap_rows_exact(
