@@ -292,3 +292,63 @@ class TestEngordaLoop:
         with pytest.raises(SystemExit):
             engorda_tables.engorda(spark=object(), config=self._config(), specs=specs,
                                    scale_factor=1.0, seed=42, continue_on_error=True)
+
+
+pyspark = pytest.importorskip("pyspark")
+
+
+@pytest.fixture(scope="module")
+def spark():
+    from pyspark.sql import SparkSession
+    session = (
+        SparkSession.builder.appName("engorda-test")
+        .master("local[2]")
+        .config("spark.sql.shuffle.partitions", "2")
+        .getOrCreate()
+    )
+    yield session
+    session.stop()
+
+
+class TestEngordaIntegration:
+    def test_round_trip_preserves_keys_and_scales(self, spark, tmp_path):
+        raw = tmp_path / "raw"
+        syn = tmp_path / "syn"
+
+        customers = spark.createDataFrame(
+            [(i, f"name{i}") for i in range(1, 11)], ["CUSTOMER_ID", "NAME"]
+        )
+        orders = spark.createDataFrame(
+            [(i, (i % 10) + 1, i * 1.5) for i in range(1, 101)],
+            ["ORDER_ID", "CUSTOMER_ID", "AMOUNT"],
+        )
+        customers.write.parquet(str(raw / "CUSTOMERS"))
+        orders.write.parquet(str(raw / "ORDERS"))
+
+        config = {
+            "DATAGEN_RAW_BASE_URI": str(raw), "DATAGEN_RAW_PREFIX": "",
+            "DATAGEN_SYNTHETIC_BASE_URI": str(syn), "DATAGEN_SYNTHETIC_PREFIX": "",
+        }
+        specs = {
+            "CUSTOMERS": {"pk_cols": ["CUSTOMER_ID"]},
+            "ORDERS": {"pk_cols": ["ORDER_ID"],
+                       "foreign_keys": [{"columns": ["CUSTOMER_ID"],
+                                          "parent_table": "CUSTOMERS"}]},
+        }
+
+        engorda_tables.engorda(spark, config, specs, scale_factor=3.0, seed=1,
+                               continue_on_error=False)
+
+        out_customers = spark.read.parquet(str(syn / "CUSTOMERS"))
+        out_orders = spark.read.parquet(str(syn / "ORDERS"))
+
+        # CUSTOMERS is an FK parent: floored at source count (10), scaled up by 3 -> 30.
+        assert out_customers.count() == 30
+        # ORDERS scaled 100 -> 300.
+        assert out_orders.count() == 300
+        # PK uniqueness.
+        assert out_orders.select("ORDER_ID").distinct().count() == 300
+        assert out_customers.select("CUSTOMER_ID").distinct().count() == 30
+        # FK integrity: every synthetic ORDERS.CUSTOMER_ID exists in synthetic CUSTOMERS.
+        orphans = out_orders.join(out_customers, "CUSTOMER_ID", "left_anti").count()
+        assert orphans == 0
