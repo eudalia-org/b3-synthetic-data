@@ -176,3 +176,25 @@ class TestEffectiveNRows:
         specs = {"EMPTY": {"pk_cols": ["ID"], "n_rows": 100}}
         out = engorda_tables.effective_n_rows(specs, {"EMPTY": 0}, scale_factor=3.0)
         assert out["EMPTY"] == 0
+
+
+class TestParseArguments:
+    def test_defaults(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["engorda_tables.py"])
+        args = engorda_tables.parse_arguments()
+        assert args.scale_factor == 1.0
+        assert args.seed == 42
+        assert args.continue_on_error is False
+        assert args.specs is None
+
+    def test_overrides(self, monkeypatch):
+        monkeypatch.setattr(
+            sys, "argv",
+            ["engorda_tables.py", "--scale-factor", "3", "--seed", "7",
+             "--continue-on-error", "--specs", "oci://cfg@ns/s.json"],
+        )
+        args = engorda_tables.parse_arguments()
+        assert args.scale_factor == 3.0
+        assert args.seed == 7
+        assert args.continue_on_error is True
+        assert args.specs == "oci://cfg@ns/s.json"

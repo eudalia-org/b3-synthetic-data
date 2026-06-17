@@ -144,3 +144,18 @@ def effective_n_rows(
             target = max(target, count)  # parent floor: keep_all_source_rows needs target >= count
         targets[table] = target
     return targets
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate synthetic relational Parquet from ingested raw Parquet."
+    )
+    parser.add_argument("--scale-factor", type=float, default=DEFAULT_SCALE_FACTOR,
+                        help="Global row-count multiplier for non-static tables.")
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                        help="Synthesis seed.")
+    parser.add_argument("--continue-on-error", action="store_true",
+                        help="Continue with remaining components after a failure, then exit non-zero.")
+    parser.add_argument("--specs", default=None,
+                        help="Override DATAGEN_SPECS_URI (URI of a single specs.json object).")
+    return parser.parse_args()
