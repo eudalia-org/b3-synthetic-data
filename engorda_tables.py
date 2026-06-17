@@ -14,7 +14,7 @@ import zlib
 from collections.abc import Mapping as ABCMapping
 from dataclasses import dataclass, field
 from functools import reduce
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Tuple
 
 from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession, Window
@@ -1579,8 +1579,9 @@ def _build_specs_from_config(
                 "foreign_keys": [
                     {
                         "columns": ["ID_PAI"],
-                        "parent_table": "tabela_pai",          # opcional
-                        "parent_columns": ["ID_PAI"]           # opcional se parent_table tiver pk_cols
+                        # parent_table e parent_columns sao opcionais
+                        "parent_table": "tabela_pai",
+                        "parent_columns": ["ID_PAI"]
                     }
                 ]
             }
@@ -1627,7 +1628,8 @@ def _build_specs_from_config(
 
         for i, fk in enumerate(raw_fks):
             if isinstance(fk, ForeignKeySpec):
-                # Se vier objeto pronto e completo, mantém. Se estiver incompleto, saneamento posterior trata.
+                # Se vier objeto pronto e completo, mantém.
+                # Se estiver incompleto, saneamento posterior trata.
                 fks.append(fk)
                 continue
 
@@ -2204,7 +2206,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
                         help="Synthesis seed.")
     parser.add_argument("--continue-on-error", action="store_true",
-                        help="Continue with remaining components after a failure, then exit non-zero.")
+                        help="Continue with remaining components after a failure, "
+                             "then exit non-zero.")
     parser.add_argument("--specs", default=None,
                         help="Override DATAGEN_SPECS_URI (URI of a single specs.json object).")
     return parser.parse_args()
