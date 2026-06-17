@@ -111,3 +111,36 @@ def connected_components(specs: dict) -> list[list[str]]:
     for table in specs:
         groups.setdefault(find(table), []).append(table)
     return [sorted(g) for g in groups.values()]
+
+
+def _fk_parent_tables(specs: dict) -> set[str]:
+    parents: set[str] = set()
+    for cfg in specs.values():
+        for fk_key in ("foreign_keys", "fks"):
+            for fk in cfg.get(fk_key) or []:
+                if isinstance(fk, dict) and fk.get("parent_table") in specs:
+                    parents.add(fk["parent_table"])
+    return parents
+
+
+def effective_n_rows(
+    specs: dict, source_counts: dict[str, int], scale_factor: float
+) -> dict[str, int]:
+    parents = _fk_parent_tables(specs)
+    targets: dict[str, int] = {}
+    for table, cfg in specs.items():
+        count = int(source_counts[table])
+        static = bool(cfg.get("static", False))
+        override = cfg.get("n_rows")
+        if count == 0:
+            target = 0
+        elif static:
+            target = count  # static is terminal; override ignored (see warn in engorda)
+        elif override is not None:
+            target = int(override)
+        else:
+            target = int(round(count * scale_factor))
+        if not static and count > 0 and table in parents:
+            target = max(target, count)  # parent floor: keep_all_source_rows needs target >= count
+        targets[table] = target
+    return targets

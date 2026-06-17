@@ -140,3 +140,39 @@ class TestConnectedComponents:
         }
         # MISSING is not a node, so ORDERS stays isolated from OTHER.
         assert self._comps(specs) == [["ORDERS"], ["OTHER"]]
+
+
+class TestEffectiveNRows:
+    SPECS = {
+        "CUSTOMERS": {"pk_cols": ["CID"]},  # parent (referenced by ORDERS)
+        "ORDERS": {"pk_cols": ["OID"],
+                   "foreign_keys": [{"columns": ["CID"], "parent_table": "CUSTOMERS"}]},
+    }
+
+    def test_scales_non_static(self):
+        counts = {"CUSTOMERS": 100, "ORDERS": 1000}
+        out = engorda_tables.effective_n_rows(self.SPECS, counts, scale_factor=3.0)
+        assert out["ORDERS"] == 3000
+
+    def test_parent_floor_blocks_shrink(self):
+        counts = {"CUSTOMERS": 100, "ORDERS": 1000}
+        out = engorda_tables.effective_n_rows(self.SPECS, counts, scale_factor=0.5)
+        # CUSTOMERS is an FK parent: cannot go below its source count.
+        assert out["CUSTOMERS"] == 100
+        # ORDERS is a leaf: free to scale down.
+        assert out["ORDERS"] == 500
+
+    def test_override_wins_for_non_static(self):
+        specs = {"BIG": {"pk_cols": ["ID"], "n_rows": 50}}
+        out = engorda_tables.effective_n_rows(specs, {"BIG": 10}, scale_factor=3.0)
+        assert out["BIG"] == 50
+
+    def test_static_is_one_to_one_override_ignored(self):
+        specs = {"REF": {"pk_cols": ["ID"], "static": True, "n_rows": 999}}
+        out = engorda_tables.effective_n_rows(specs, {"REF": 7}, scale_factor=3.0)
+        assert out["REF"] == 7
+
+    def test_empty_source_is_zero(self):
+        specs = {"EMPTY": {"pk_cols": ["ID"], "n_rows": 100}}
+        out = engorda_tables.effective_n_rows(specs, {"EMPTY": 0}, scale_factor=3.0)
+        assert out["EMPTY"] == 0
