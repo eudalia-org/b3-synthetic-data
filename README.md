@@ -137,36 +137,58 @@ estimate output size from a measured limited extract.
 
 ## Fast Parallel Load
 
-`load_tables.py` is the inverse of `save_tables.py`: it loads per-table Parquet into
-the target Oracle database through many short-lived parallel JDBC partitions, so a
-load survives the Data Flow→ADB connection killer (each partition commits in seconds,
-and Spark retries any killed partition cleanly). Run one Data Flow job per big table.
+`load_tables.py` loads per-table Parquet into the target Oracle database through
+many short-lived parallel JDBC partitions (each partition commits in seconds, so a
+load survives the Data Flow→ADB connection killer; Spark retries any killed
+partition). It **appends** to existing target tables. Run one Data Flow job per big
+table, or omit `--tables` to load every non-static table from the specs.
 
 ```bash
-python load_tables.py --tables BIG_TABLE
+python load_tables.py --tables LANCAMENTO            # one table
+python load_tables.py                                # all non-static tables in specs.json
+python load_tables.py --tables LANCAMENTO --limit 100000   # sample load
 ```
 
-Reads `{DATAGEN_LOAD_BASE_URI}/{DATAGEN_LOAD_PREFIX}/<TABLE>` and overwrites the target
-table (`TRUNCATE` then parallel append), so reruns are idempotent. Point
-`DATAGEN_LOAD_BASE_URI` at the raw bucket for an Oracle→Oracle copy or at synthetic
-output.
+Reads `{DATAGEN_LOAD_BASE_URI}/{DATAGEN_LOAD_PREFIX}/<TABLE>`. Tables marked
+`"static": true` in `--specs` (default `specs.json`) are skipped — they are
+pre-loaded reference data. `--limit N` appends at most N rows per table into the
+real target (no separate sample target).
 
-Foreign keys are managed automatically: enabled FKs referencing each target table
-(plus the target's own FKs) are disabled before truncate and re-enabled `NOVALIDATE`
-after (use `--validate-constraints` for `ENABLE VALIDATE`). Pass
-`--no-manage-constraints` to skip this when constraints are handled externally;
-cross-schema constraints need `ALTER` privileges in the referencing schema.
+Duplicate guard: before appending, synthetic rows whose primary key already exists
+in the target are skipped. The check is bounded to the synthetic batch's
+`[min, max]` PK range (synthetic PKs are minted above the current max), so it reads
+only that range — never the full target — and is skipped entirely when the range is
+empty (the common first-load case). This makes rerunning failed tables
+duplicate-free. The guard applies to single-column numeric PKs (from specs
+`pk_cols`); other tables append without it and log a warning.
+
+Partial failures are handled gracefully: with `--continue-on-error` the run attempts
+every table, lists failed ones, and exits non-zero — rerun the failed tables (the PK
+guard keeps the rerun duplicate-free).
+
+Each run writes a rollback manifest to `{DATAGEN_LOAD_BASE_URI}/_load_manifests/<run_id>`
+(the `run_id` is auto-generated and logged; override with `--run-id`). To undo a load,
+delete the rows it appended:
+
+```bash
+python scripts/rollback_load.py --run-id <run_id>
+```
+
+It reads the manifest and deletes everything above each table's pre-load `MAX(pk)`,
+in PK chunks (`--chunk-size`, default 5,000,000), and is idempotent. Only
+single-column numeric-PK tables are rolled back; others are logged as needing a DB
+restore point.
 
 Configuration: `DATAGEN_TARGET_JDBC_URL`, `DATAGEN_TARGET_DB_PASSWORD`,
 `DATAGEN_TARGET_DB_USER` (default `ADMIN`), `DATAGEN_LOAD_BASE_URI`,
 `DATAGEN_LOAD_PREFIX`, `DATAGEN_JDBC_NUM_PARTITIONS` (default 256),
 `DATAGEN_JDBC_BATCH_SIZE` (default 10000), `DATAGEN_JDBC_READ_TIMEOUT_MS`
-(default 600000). Set `spark.task.maxFailures` high (e.g. 8) in the Data Flow job so
-killed partitions are retried.
+(default 600000). Set `spark.task.maxFailures` high (e.g. 8) in the Data Flow job.
 
-Note: parallel JDBC append is at-least-once — a partition that commits but is then
-reported failed will be retried and duplicate that partition's rows. The per-run
-truncate bounds this to a single run.
+Note: the guard makes reruns duplicate-free, but parallel JDBC append is
+at-least-once within a single run (a partition that commits then is reported failed
+is retried and re-inserts its rows). Closing that fully would need a server-side
+staging+MERGE (CREATE TABLE on the target), which is out of scope.
 
 ## VDI One-Time ROWID Migration
 
