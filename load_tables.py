@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import re
@@ -49,14 +50,24 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Load per-table Parquet into target Oracle with parallel JDBC writes."
     )
-    source = parser.add_mutually_exclusive_group(required=True)
+    source = parser.add_mutually_exclusive_group(required=False)
     source.add_argument(
         "--tables",
-        help="Comma-separated table list, for example CUSTOMERS,ORDERS,ORDER_ITEMS.",
+        help="Comma-separated table list. If omitted, all non-static tables in --specs load.",
     )
     source.add_argument(
         "--tables-file",
         help="Local text file with one table per line. Blank lines and # comments are ignored.",
+    )
+    parser.add_argument(
+        "--specs",
+        default="specs.json",
+        help="Path to specs JSON (static tables are skipped; pk_cols drive the dup guard).",
+    )
+    parser.add_argument(
+        "--limit",
+        type=positive_int,
+        help="Append at most this many rows per table (sample load into the real target).",
     )
     parser.add_argument(
         "--continue-on-error",
@@ -137,6 +148,15 @@ def create_spark_session(app_name: str) -> SparkSession:
     for key, value in PARQUET_REBASE_CONF.items():
         builder = builder.config(key, value)
     return builder.getOrCreate()
+
+
+def load_specs(spark: SparkSession, path: str) -> dict:
+    try:
+        text = "\n".join(spark.sparkContext.textFile(path).collect())
+        return json.loads(text)
+    except Exception as exc:
+        logger.error("Failed to read specs %s: %s", path, exc)
+        sys.exit(1)
 
 
 def table_path_name(table: str) -> str:
@@ -251,9 +271,13 @@ def load_table(
     spark: SparkSession,
     properties: dict[str, str],
     config: dict[str, str],
+    specs: dict,
     target_user: str,
     table: str,
-) -> None:
+    index: int,
+    total: int,
+    limit: int | None,
+) -> int:
     owner, table_name = table_owner_and_name(target_user, table)
     validate_identifier(owner)
     validate_identifier(table_name)
@@ -262,8 +286,24 @@ def load_table(
     num_partitions = resolve_num_partitions(config)
     batch_size = config["DATAGEN_JDBC_BATCH_SIZE"]
 
-    df = spark.read.parquet(input_path).repartition(num_partitions)
-    logger.info("Appending %s to %s in %d partitions", input_path, dbtable, num_partitions)
+    logger.info("[%d/%d] %s: reading %s", index, total, table, input_path)
+    df = spark.read.parquet(input_path)
+    if limit is not None:
+        df = df.limit(limit)
+    df = df.repartition(num_partitions)
+
+    appended = df.count()
+    limit_note = f" (limit {limit})" if limit is not None else ""
+    logger.info(
+        "[%d/%d] %s: %s rows%s -> appending to %s in %d partitions",
+        index,
+        total,
+        table,
+        f"{appended:,}",
+        limit_note,
+        dbtable,
+        num_partitions,
+    )
     (
         df.write.format("jdbc")
         .options(**properties)
@@ -273,53 +313,67 @@ def load_table(
         .mode("append")
         .save()
     )
+    return appended
 
 
 def load_tables(
     spark: SparkSession,
     config: dict[str, str],
+    specs: dict,
     tables: list[str],
     continue_on_error: bool,
+    limit: int | None,
 ) -> None:
     target_user = config["DATAGEN_TARGET_DB_USER"]
     properties = build_connection_properties(config)
     failures = []
+    appended_total = 0
     total = len(tables)
     run_started_at = time.perf_counter()
     logger.info(
-        "Loading %d table(s): num_partitions=%s, batchsize=%s",
-        total,
+        "Load run: mode=APPEND, partitions=%s, batchsize=%s, limit=%s",
         config["DATAGEN_JDBC_NUM_PARTITIONS"],
         config["DATAGEN_JDBC_BATCH_SIZE"],
+        limit if limit is not None else "none",
     )
+    logger.info("Resolved %d table(s) to load", total)
 
     for index, table in enumerate(tables, start=1):
         try:
             started_at = time.perf_counter()
-            logger.info("[%d/%d] Loading %s", index, total, table)
-            load_table(
+            appended = load_table(
                 spark=spark,
                 properties=properties,
                 config=config,
+                specs=specs,
                 target_user=target_user,
                 table=table,
+                index=index,
+                total=total,
+                limit=limit,
             )
+            appended_total += appended
             logger.info(
-                "[%d/%d] Loaded %s in %.1fs",
+                "[%d/%d] %s: appended %s rows in %.1fs",
                 index,
                 total,
                 table,
+                f"{appended:,}",
                 time.perf_counter() - started_at,
             )
         except Exception as exc:
-            logger.exception("[%d/%d] Failed to load %s: %s", index, total, table, exc)
+            logger.exception("[%d/%d] %s: FAILED: %s", index, total, table, exc)
             failures.append(table)
             if not continue_on_error:
                 raise
 
     run_elapsed = time.perf_counter() - run_started_at
     logger.info(
-        "Finished: %d/%d table(s) loaded in %.1fs", total - len(failures), total, run_elapsed
+        "Finished: loaded %d/%d table(s), %s rows in %.1fs",
+        total - len(failures),
+        total,
+        f"{appended_total:,}",
+        run_elapsed,
     )
     if failures:
         logger.error("Failed tables: %s", ", ".join(failures))
@@ -328,15 +382,23 @@ def load_tables(
 
 def main() -> None:
     args = parse_arguments()
-    tables = parse_tables(args.tables, args.tables_file)
     config = get_load_env()
     spark = create_spark_session("DataGenLoadTables")
     try:
+        specs = load_specs(spark, args.specs)
+        requested = (
+            parse_tables(args.tables, args.tables_file)
+            if (args.tables or args.tables_file)
+            else None
+        )
+        tables = resolve_load_tables(specs, requested)
         load_tables(
             spark,
             config,
+            specs,
             tables,
             continue_on_error=args.continue_on_error,
+            limit=args.limit,
         )
     finally:
         spark.stop()
