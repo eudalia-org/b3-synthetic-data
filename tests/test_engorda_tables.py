@@ -46,3 +46,23 @@ class TestPaths:
         assert (
             engorda_tables.synthetic_base_path(cfg) == "oci://syn@ns/datagen/synthetic"
         )
+
+
+class TestGetEngordaEnv:
+    def test_reads_required_and_normalizes(self, monkeypatch):
+        monkeypatch.setenv("DATAGEN_RAW_BASE_URI", "oci://raw@ns/")
+        monkeypatch.setenv("DATAGEN_SYNTHETIC_BASE_URI", "oci://syn@ns/")
+        monkeypatch.setenv("DATAGEN_SPECS_URI", "oci://cfg@ns/specs.json")
+        monkeypatch.setenv("DATAGEN_RAW_PREFIX", "/datagen/raw/")
+        monkeypatch.delenv("DATAGEN_SYNTHETIC_PREFIX", raising=False)
+        config = engorda_tables.get_engorda_env()
+        assert config["DATAGEN_RAW_BASE_URI"] == "oci://raw@ns"
+        assert config["DATAGEN_RAW_PREFIX"] == "datagen/raw"
+        assert config["DATAGEN_SYNTHETIC_PREFIX"] == ""
+        assert config["DATAGEN_SPECS_URI"] == "oci://cfg@ns/specs.json"
+
+    def test_exits_when_required_missing(self, monkeypatch):
+        for name in engorda_tables.REQUIRED_ENV_VARS:
+            monkeypatch.delenv(name, raising=False)
+        with pytest.raises(SystemExit):
+            engorda_tables.get_engorda_env()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from typing import TYPE_CHECKING
@@ -42,3 +43,22 @@ def synthetic_base_path(config: dict[str, str]) -> str:
     base = config["DATAGEN_SYNTHETIC_BASE_URI"]
     prefix = config.get("DATAGEN_SYNTHETIC_PREFIX")
     return f"{base}/{prefix}" if prefix else base
+
+
+def get_engorda_env() -> dict[str, str]:
+    config: dict[str, str] = {}
+    missing = []
+    for name in REQUIRED_ENV_VARS:
+        value = os.environ.get(name)
+        if not value:
+            missing.append(name)
+        else:
+            config[name] = value.rstrip("/")
+    if missing:
+        logger.error("Missing required environment variable(s): %s", ", ".join(missing))
+        sys.exit(1)
+    config["DATAGEN_RAW_PREFIX"] = os.environ.get("DATAGEN_RAW_PREFIX", "").strip("/")
+    config["DATAGEN_SYNTHETIC_PREFIX"] = os.environ.get(
+        "DATAGEN_SYNTHETIC_PREFIX", ""
+    ).strip("/")
+    return config
