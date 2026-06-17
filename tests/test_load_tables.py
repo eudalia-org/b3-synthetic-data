@@ -140,3 +140,66 @@ class TestConnectionProperties:
 
     def test_resolve_num_partitions(self):
         assert load_tables.resolve_num_partitions(self.CONFIG) == 256
+
+
+class TestPositiveInt:
+    def test_accepts_positive(self):
+        assert load_tables.positive_int("100") == 100
+
+    def test_rejects_non_integer(self):
+        import argparse
+        with pytest.raises(argparse.ArgumentTypeError):
+            load_tables.positive_int("abc")
+
+    def test_rejects_zero_and_negative(self):
+        import argparse
+        with pytest.raises(argparse.ArgumentTypeError):
+            load_tables.positive_int("0")
+        with pytest.raises(argparse.ArgumentTypeError):
+            load_tables.positive_int("-5")
+
+
+SPECS = {
+    "ENTIDADE": {"pk_cols": ["NUM_ID_ENTIDADE"]},
+    "TIPO_DEBITO": {"pk_cols": ["COD_TIPO_DEBITO"], "static": True},
+    "LANCAMENTO": {"pk_cols": ["NUM_ID_LANCAMENTO"]},
+}
+
+
+class TestPkColsFor:
+    def test_returns_pk_cols(self):
+        assert load_tables.pk_cols_for(SPECS, "LANCAMENTO") == ["NUM_ID_LANCAMENTO"]
+
+    def test_matches_schema_qualified_and_case(self):
+        assert load_tables.pk_cols_for(SPECS, "cetip.lancamento") == ["NUM_ID_LANCAMENTO"]
+
+    def test_empty_when_absent(self):
+        assert load_tables.pk_cols_for(SPECS, "NOPE") == []
+
+
+class TestIsStatic:
+    def test_true_for_static(self):
+        assert load_tables.is_static(SPECS, "TIPO_DEBITO") is True
+
+    def test_false_for_non_static(self):
+        assert load_tables.is_static(SPECS, "ENTIDADE") is False
+
+    def test_false_when_absent(self):
+        assert load_tables.is_static(SPECS, "NOPE") is False
+
+
+class TestResolveLoadTables:
+    def test_requested_drops_static_keeps_order(self):
+        assert load_tables.resolve_load_tables(
+            SPECS, ["LANCAMENTO", "TIPO_DEBITO", "ENTIDADE"]
+        ) == ["LANCAMENTO", "ENTIDADE"]
+
+    def test_requested_table_absent_is_kept(self):
+        assert load_tables.resolve_load_tables(SPECS, ["OTHER"]) == ["OTHER"]
+
+    def test_none_returns_all_non_static_in_order(self):
+        assert load_tables.resolve_load_tables(SPECS, None) == ["ENTIDADE", "LANCAMENTO"]
+
+    def test_empty_result_exits(self):
+        with pytest.raises(SystemExit):
+            load_tables.resolve_load_tables(SPECS, ["TIPO_DEBITO"])

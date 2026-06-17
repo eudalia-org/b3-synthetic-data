@@ -65,6 +65,16 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be an integer") from None
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
 def parse_tables(tables: str | None, tables_file: str | None) -> list[str]:
     if tables:
         parsed = [table.strip() for table in tables.split(",")]
@@ -149,6 +159,34 @@ def build_load_path(config: dict[str, str], table: str) -> str:
         path_parts.append(config["DATAGEN_LOAD_PREFIX"])
     path_parts.append(table)
     return "/".join(path_parts)
+
+
+def pk_cols_for(specs: dict, table: str) -> list[str]:
+    entry = specs.get(table_path_name(table).upper(), {})
+    return list(entry.get("pk_cols", []))
+
+
+def is_static(specs: dict, table: str) -> bool:
+    return bool(specs.get(table_path_name(table).upper(), {}).get("static"))
+
+
+def resolve_load_tables(specs: dict, requested: list[str] | None) -> list[str]:
+    if requested:
+        result = []
+        for table in requested:
+            if is_static(specs, table):
+                logger.info("Skipping static table %s", table)
+                continue
+            if table_path_name(table).upper() not in specs:
+                logger.info("Table %s not in specs; treating as non-static", table)
+            result.append(table)
+    else:
+        result = [name for name, entry in specs.items() if not entry.get("static")]
+
+    if not result:
+        logger.error("No tables to load")
+        sys.exit(1)
+    return result
 
 
 def build_connection_properties(config: dict[str, str]) -> dict[str, str]:
