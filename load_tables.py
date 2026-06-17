@@ -6,7 +6,6 @@ import os
 import re
 import sys
 import time
-from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -62,16 +61,6 @@ def parse_arguments() -> argparse.Namespace:
         "--continue-on-error",
         action="store_true",
         help="Try remaining tables after a failure, then exit non-zero if any failed.",
-    )
-    parser.add_argument(
-        "--no-manage-constraints",
-        action="store_true",
-        help="Do not disable/re-enable foreign keys; assume constraints are handled externally.",
-    )
-    parser.add_argument(
-        "--validate-constraints",
-        action="store_true",
-        help="Re-enable foreign keys with ENABLE VALIDATE instead of ENABLE NOVALIDATE.",
     )
     return parser.parse_args()
 
@@ -176,71 +165,6 @@ def resolve_num_partitions(config: dict[str, str]) -> int:
     return int(config["DATAGEN_JDBC_NUM_PARTITIONS"])
 
 
-def truncate_sql(owner: str, table_name: str) -> str:
-    return f"TRUNCATE TABLE {validate_identifier(owner)}.{validate_identifier(table_name)}"
-
-
-def disable_constraint_sql(owner: str, table_name: str, name: str) -> str:
-    return (
-        f"ALTER TABLE {validate_identifier(owner)}.{validate_identifier(table_name)} "
-        f"DISABLE CONSTRAINT {validate_identifier(name)}"
-    )
-
-
-def enable_constraint_sql(owner: str, table_name: str, name: str, validate: bool) -> str:
-    mode = "ENABLE VALIDATE" if validate else "ENABLE NOVALIDATE"
-    return (
-        f"ALTER TABLE {validate_identifier(owner)}.{validate_identifier(table_name)} "
-        f"{mode} CONSTRAINT {validate_identifier(name)}"
-    )
-
-
-def build_constraint_discovery_query(owner: str, table_name: str) -> str:
-    owner = validate_identifier(owner)
-    table_name = validate_identifier(table_name)
-    return (
-        "SELECT c.owner, c.table_name, c.constraint_name "
-        "FROM all_constraints c "
-        "JOIN all_constraints p "
-        "ON c.r_owner = p.owner AND c.r_constraint_name = p.constraint_name "
-        "WHERE c.constraint_type = 'R' AND c.status = 'ENABLED' "
-        f"AND p.owner = '{owner}' AND p.table_name = '{table_name}' "
-        "UNION "
-        "SELECT owner, table_name, constraint_name "
-        "FROM all_constraints "
-        "WHERE constraint_type = 'R' AND status = 'ENABLED' "
-        f"AND owner = '{owner}' AND table_name = '{table_name}'"
-    )
-
-
-@contextmanager
-def constraints_disabled(execute, constraints: list[tuple[str, str, str]], validate: bool):
-    disabled: list[tuple[str, str, str]] = []
-    try:
-        for owner, table_name, name in constraints:
-            execute(disable_constraint_sql(owner, table_name, name))
-            disabled.append((owner, table_name, name))
-        yield
-    finally:
-        if disabled:
-            logger.info("Re-enabling %d FK constraint(s)", len(disabled))
-        errors = []
-        for owner, table_name, name in disabled:
-            try:
-                execute(enable_constraint_sql(owner, table_name, name, validate))
-            except Exception as exc:  # noqa: BLE001
-                errors.append(exc)
-                logger.error(
-                    "Failed to re-enable constraint %s.%s.%s: %s",
-                    owner,
-                    table_name,
-                    name,
-                    exc,
-                )
-        if errors:
-            raise errors[0]
-
-
 def read_rows(spark: SparkSession, properties: dict[str, str], query: str) -> list:
     return (
         spark.read.format("jdbc")
@@ -265,52 +189,32 @@ def execute_statement(spark: SparkSession, properties: dict[str, str], sql: str)
         conn.close()
 
 
-def discover_constraints(
-    spark: SparkSession, properties: dict[str, str], owner: str, table_name: str
-) -> list[tuple[str, str, str]]:
-    query = build_constraint_discovery_query(owner, table_name)
-    rows = read_rows(spark, properties, query)
-    return [(row[0], row[1], row[2]) for row in rows]
-
-
 def load_table(
     spark: SparkSession,
     properties: dict[str, str],
     config: dict[str, str],
     target_user: str,
     table: str,
-    manage_constraints: bool,
-    validate: bool,
 ) -> None:
     owner, table_name = table_owner_and_name(target_user, table)
+    validate_identifier(owner)
+    validate_identifier(table_name)
     dbtable = dbtable_name(target_user, table)
     input_path = build_load_path(config, table_path_name(table))
     num_partitions = resolve_num_partitions(config)
     batch_size = config["DATAGEN_JDBC_BATCH_SIZE"]
 
-    def execute(sql: str) -> None:
-        execute_statement(spark, properties, sql)
-
-    constraints: list[tuple[str, str, str]] = []
-    if manage_constraints:
-        constraints = discover_constraints(spark, properties, owner, table_name)
-        logger.info("Disabling %d FK constraint(s) for %s", len(constraints), dbtable)
-
-    with constraints_disabled(execute, constraints, validate):
-        logger.info("Truncating %s", dbtable)
-        execute(truncate_sql(owner, table_name))
-
-        df = spark.read.parquet(input_path).repartition(num_partitions)
-        logger.info("Writing %s in %d partitions", dbtable, num_partitions)
-        (
-            df.write.format("jdbc")
-            .options(**properties)
-            .option("dbtable", dbtable)
-            .option("batchsize", batch_size)
-            .option("isolationLevel", DEFAULT_ISOLATION_LEVEL)
-            .mode("append")
-            .save()
-        )
+    df = spark.read.parquet(input_path).repartition(num_partitions)
+    logger.info("Appending %s to %s in %d partitions", input_path, dbtable, num_partitions)
+    (
+        df.write.format("jdbc")
+        .options(**properties)
+        .option("dbtable", dbtable)
+        .option("batchsize", batch_size)
+        .option("isolationLevel", DEFAULT_ISOLATION_LEVEL)
+        .mode("append")
+        .save()
+    )
 
 
 def load_tables(
@@ -318,8 +222,6 @@ def load_tables(
     config: dict[str, str],
     tables: list[str],
     continue_on_error: bool,
-    manage_constraints: bool,
-    validate: bool,
 ) -> None:
     target_user = config["DATAGEN_TARGET_DB_USER"]
     properties = build_connection_properties(config)
@@ -327,11 +229,10 @@ def load_tables(
     total = len(tables)
     run_started_at = time.perf_counter()
     logger.info(
-        "Loading %d table(s): num_partitions=%s, batchsize=%s, manage_constraints=%s",
+        "Loading %d table(s): num_partitions=%s, batchsize=%s",
         total,
         config["DATAGEN_JDBC_NUM_PARTITIONS"],
         config["DATAGEN_JDBC_BATCH_SIZE"],
-        manage_constraints,
     )
 
     for index, table in enumerate(tables, start=1):
@@ -344,8 +245,6 @@ def load_tables(
                 config=config,
                 target_user=target_user,
                 table=table,
-                manage_constraints=manage_constraints,
-                validate=validate,
             )
             logger.info(
                 "[%d/%d] Loaded %s in %.1fs",
@@ -380,8 +279,6 @@ def main() -> None:
             config,
             tables,
             continue_on_error=args.continue_on_error,
-            manage_constraints=not args.no_manage_constraints,
-            validate=args.validate_constraints,
         )
     finally:
         spark.stop()
