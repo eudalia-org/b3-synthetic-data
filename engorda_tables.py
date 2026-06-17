@@ -2206,3 +2206,33 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--specs", default=None,
                         help="Override DATAGEN_SPECS_URI (URI of a single specs.json object).")
     return parser.parse_args()
+
+
+def read_parquet(spark: SparkSession, path: str) -> DataFrame:
+    return spark.read.parquet(path)
+
+
+def release(*dataframes) -> None:
+    for df in dataframes:
+        if df is None:
+            continue
+        try:
+            df.unpersist()
+        except Exception:
+            pass
+
+
+def load_specs(spark: SparkSession, specs_uri: str) -> dict:
+    records = spark.sparkContext.wholeTextFiles(specs_uri).collect()
+    if len(records) != 1:
+        raise ValueError(
+            f"Expected exactly one specs object at `{specs_uri}`, found {len(records)}. "
+            "DATAGEN_SPECS_URI must point at a single specs.json file, not a prefix."
+        )
+    try:
+        parsed = json.loads(records[0][1])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"specs.json at `{specs_uri}` is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict) or not parsed:
+        raise ValueError(f"specs.json at `{specs_uri}` must be a non-empty object.")
+    return normalize_specs(parsed)

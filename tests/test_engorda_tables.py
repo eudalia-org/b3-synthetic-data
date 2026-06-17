@@ -198,3 +198,42 @@ class TestParseArguments:
         assert args.seed == 7
         assert args.continue_on_error is True
         assert args.specs == "oci://cfg@ns/s.json"
+
+
+class TestLoadSpecs:
+    def _fake_spark(self, records):
+        class _RDD:
+            def collect(self_inner):
+                return records
+        class _SC:
+            def wholeTextFiles(self_inner, uri):
+                return _RDD()
+        class _Spark:
+            sparkContext = _SC()
+        return _Spark()
+
+    def test_loads_and_normalizes(self):
+        content = json.dumps({"ADMIN.ORDERS": {"pk_cols": ["OID"]}})
+        spark = self._fake_spark([("oci://cfg/specs.json", content)])
+        specs = engorda_tables.load_specs(spark, "oci://cfg/specs.json")
+        assert set(specs) == {"ORDERS"}
+
+    def test_rejects_zero_records(self):
+        spark = self._fake_spark([])
+        with pytest.raises(ValueError):
+            engorda_tables.load_specs(spark, "oci://cfg/specs.json")
+
+    def test_rejects_multiple_records(self):
+        spark = self._fake_spark([("a", "{}"), ("b", "{}")])
+        with pytest.raises(ValueError):
+            engorda_tables.load_specs(spark, "oci://cfg/")
+
+    def test_rejects_empty_dict(self):
+        spark = self._fake_spark([("a", "{}")])
+        with pytest.raises(ValueError):
+            engorda_tables.load_specs(spark, "oci://cfg/specs.json")
+
+    def test_rejects_malformed_json(self):
+        spark = self._fake_spark([("a", "{not json")])
+        with pytest.raises(ValueError):
+            engorda_tables.load_specs(spark, "oci://cfg/specs.json")
