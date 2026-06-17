@@ -48,6 +48,7 @@ RelationshipPolicy = Literal["warn_and_skip", "raise"]
 SaveErrorPolicy = Literal["warn_and_continue", "raise"]
 
 
+@dataclass(frozen=True)
 class ForeignKeySpec:
     columns: Tuple[str, ...]
     parent_table: str
@@ -57,6 +58,7 @@ class ForeignKeySpec:
 PostProcessor = Callable[[DataFrame, Mapping[str, DataFrame]], DataFrame]
 
 
+@dataclass(frozen=True)
 class TableSpec:
     name: str
     pk_cols: Tuple[str, ...]
