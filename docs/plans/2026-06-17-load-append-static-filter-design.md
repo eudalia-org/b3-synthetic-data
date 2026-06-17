@@ -1,7 +1,7 @@
 # Load Append + Static Filter Design (load_tables.py)
 
 **Date:** 2026-06-17
-**Purpose:** Change `load_tables.py` to append (not overwrite/truncate), load only non-`static` tables from `specs.json`, skip synthetic rows whose primary key already exists (a no-DDL, PK-range-bounded anti-join so partial-failure reruns are duplicate-free), support sampled loads via `--limit`, and log the run clearly. Removes the FK/DDL constraint machinery that overwrite required.
+**Purpose:** Change `load_tables.py` to append (not overwrite/truncate), load only non-`static` tables from `specs.json`, skip synthetic rows whose primary key already exists (a no-DDL, PK-range-bounded anti-join so partial-failure reruns are duplicate-free), support sampled loads via `--limit`, log the run clearly, and write a per-run manifest enabling a companion `scripts/rollback_load.py` to undo a load. Removes the FK/DDL constraint machinery that overwrite required, but keeps the generic `execute_statement`/`read_rows` JDBC helpers (rollback and manifest capture use them).
 
 ## Motivation
 
@@ -12,20 +12,32 @@
 - **Recover from partial failures gracefully**: a run attempts every table, reports which failed, and a rerun of the failed tables must not duplicate rows the previous run already committed.
 - **Load a sample** for smoke tests / timing via `--limit`.
 
-With TRUNCATE gone, the FK-disable machinery loses its main reason to exist, so it is removed entirely (per decision) to simplify the script. The lost truncate also removed the per-run reset that previously bounded duplicate risk, so a PK-based guard (below) provides duplicate-free reruns instead.
+With TRUNCATE gone, the FK-disable machinery loses its main reason to exist, so it is removed entirely (per decision) to simplify the script. The lost truncate also removed the per-run reset that previously bounded duplicate risk, so a PK-based guard (below) provides duplicate-free reruns instead. The same `append_after_max_pk` property also enables rollback: record each table's pre-load `MAX(pk)` and a rollback can delete everything above it.
+
+**Schema property relied on:** in the current `specs.json`, every foreign key's
+`parent_table` is a `static` table. Static tables are never loaded or rolled back,
+so no non-static (loaded) table is an FK parent — making both append and
+rollback-delete **FK-order-independent**. If a future FK introduced a non-static
+parent, an out-of-order delete could hit ORA-02292; that surfaces as a graceful
+per-table error (continue-on-error), not corruption.
 
 ## Changes
 
 ### 1. Append instead of overwrite
 `load_table` no longer truncates. It reads the table's Parquet, repartitions, and writes with `mode("append")`. The connection-resilience design is unchanged: `repartition(DATAGEN_JDBC_NUM_PARTITIONS)` for short-lived per-partition transactions, `batchsize`, transactional `isolationLevel` (`READ_COMMITTED`), and `oracle.jdbc.ReadTimeout` so killed connections fail and Spark retries. Each partition is one transaction; a retried partition re-appends its rows (at-least-once — see Limitations).
 
-### 2. Remove FK / DDL machinery
-Delete these (nothing else uses them once truncate is gone):
+### 2. Remove FK-constraint machinery (keep the generic JDBC helpers)
+Delete the FK/constraint-specific code:
 - Functions: `truncate_sql`, `disable_constraint_sql`, `enable_constraint_sql`,
-  `build_constraint_discovery_query`, `constraints_disabled`, `read_rows`,
-  `execute_statement`, `discover_constraints`.
+  `build_constraint_discovery_query`, `constraints_disabled`,
+  `discover_constraints`.
 - CLI flags: `--no-manage-constraints`, `--validate-constraints`.
 - Tests: `TestSqlBuilders`, `TestConstraintsDisabled`, `TestDiscoverConstraints`.
+
+**Keep** the generic `read_rows(spark, properties, query)` and
+`execute_statement(spark, properties, sql)` helpers — they are no longer used by
+constraint code but are reused by manifest capture (`read_rows` for `MAX(pk)`) and
+by the rollback script (`execute_statement` for chunked `DELETE`).
 
 `validate_identifier` is **kept** and applied when building the `dbtable` owner/name, so the Spark JDBC `dbtable` option stays injection-safe even though raw DDL is gone.
 
@@ -135,8 +147,47 @@ consistent `[i/N] TABLE: <phase>` structure.
 5. `requested = parse_tables(args.tables, args.tables_file)` if either was given,
    else `None`.
 6. `tables = resolve_load_tables(specs, requested)`.
-7. `load_tables(spark, config, specs, tables, continue_on_error, limit)` — `specs`
+7. Generate `run_id` (auto, UTC timestamp; `--run-id` overrides) and write the
+   pre-load manifest (below).
+8. `load_tables(spark, config, specs, tables, continue_on_error, limit)` — `specs`
    is passed through so `load_table` can read each table's `pk_cols` for the guard.
+
+## Rollback (Option A): manifest + companion delete script
+
+Rollback removes exactly the rows a run appended, leveraging `append_after_max_pk`
+(synthetic PKs are minted above each table's pre-load max).
+
+**Manifest (written by `load_tables.py` before any append):**
+- `run_id`: auto `YYYYmmddTHHMMSSZ` (UTC), or `--run-id`. Logged prominently.
+- A pre-pass over the resolved tables records, per table:
+  `{table, owner, name, pk_col, max_pk_before, rollbackable}`.
+  - `rollbackable` ≡ single-column PK whose Parquet type is numeric (same rule as
+    the guard). `pk_col`/`max_pk_before` are null when not rollbackable.
+  - `max_pk_before` = `SELECT MAX(pk) FROM owner.table` before loading (fast — PK
+    is indexed). Null means the target was empty (rollback deletes all rows).
+- Written to `{DATAGEN_LOAD_BASE_URI}/_load_manifests/{run_id}` via Spark
+  (`sparkContext.parallelize([json], 1).saveAsTextFile(...)`), read back with
+  `textFile`. Crash-safe: it exists before the first append.
+
+**`scripts/rollback_load.py` (separate, self-contained):**
+- Args: `--run-id` (required), `--continue-on-error`, optional
+  `--chunk-size` (PK values per delete, default 5_000_000). Same target env vars
+  and `build_connection_properties` as the loader.
+- Reads the manifest. For each `rollbackable` entry:
+  - `current_max = SELECT MAX(pk) FROM owner.table`. If `current_max <=
+    max_pk_before` (or no rows above) → nothing to delete; log and skip.
+  - Delete `(max_pk_before, current_max]` in PK chunks of `--chunk-size`, one
+    `DELETE FROM owner.table WHERE pk BETWEEN lo AND hi` per chunk via
+    `execute_statement` (autocommits per chunk → short, connection-kill-safe and
+    rerunnable). When `max_pk_before` is null, delete from the table's `MIN(pk)`.
+  - Non-rollbackable entries are logged as skipped ("use a DB restore point").
+- Order-independent per the schema property above; `--continue-on-error` reports
+  failed tables and exits non-zero.
+- Idempotent: rerunning deletes only what still remains above `max_pk_before`.
+
+Pure, unit-testable helpers (shared style): `delete_above_sql(owner, table,
+pk_col, lo, hi)` (validated identifiers, numeric bounds) and
+`pk_chunk_ranges(lower_exclusive, upper, chunk_size) -> list[(lo, hi)]`.
 
 ## Error handling
 
@@ -187,11 +238,23 @@ Pure-Python unit tests (run via `uv run --no-project --with pytest python -m pyt
     identifiers, formats `lo`/`hi` as numeric literals, and rejects non-numeric
     bounds / bad identifiers.
 
-`load_specs`, the Spark read of existing keys, the anti-join, and the write need a
-live Spark session and are covered by the real-DB validation step:
+- Add `TestRollbackHelpers` (in a `tests/test_rollback_load.py`) for the pure
+  rollback pieces:
+  - `pk_chunk_ranges(lower_exclusive, upper, chunk_size)` covers
+    `(lower, upper]` with no gaps/overlap, handles `upper <= lower` (empty),
+    and a single short range.
+  - `delete_above_sql(owner, table, pk_col, lo, hi)` builds the bounded DELETE,
+    validates identifiers, rejects non-numeric bounds.
+
+`load_specs`, manifest read/write, the Spark read of existing keys, the anti-join,
+the write, and the rollback deletes need a live Spark session and are covered by the
+real-DB validation step:
 - Load a sample with `--limit`; confirm appended row counts and that static tables
-  are skipped in the log.
+  are skipped in the log; note the logged `run_id`.
 - Run a full table once, then **run it again**; confirm the second run logs
   "existing keys in range" and appends 0 new rows (idempotent rerun).
 - Confirm a non-numeric/composite-PK table (if any is introduced) logs the
   "no PK guard" warning and still appends.
+- **Rollback:** after a load, run `scripts/rollback_load.py --run-id <id>` and
+  confirm the target row counts return to the pre-load values; rerun rollback and
+  confirm it deletes nothing (idempotent).
