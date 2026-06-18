@@ -6,15 +6,20 @@ Synthetic data generation pipeline for Oracle Cloud.
 
 1. Install dependencies: `uv sync` or `pip install -r requirements.txt`
 2. Download Oracle JDBC drivers to project root (ojdbc8.jar, oraclepki.jar, osdt_cert.jar, osdt_core.jar, ucp.jar)
-3. Configure OCI Vault secrets (see secrets.py for required secrets)
 
 ## Usage
 
+The pipeline runs in stages, each a module under `datagen/`:
+
 ```bash
-python etl.py --config specs.json --date <YYYYMMDD>
+python -m datagen.save_tables --tables <TABLE>   # extract source Oracle -> raw Parquet
+python -m datagen.engorda_tables                  # synthesize FK-consistent data from raw Parquet
+python -m datagen.load_tables                     # load synthetic Parquet -> target Oracle tables
+python -m datagen.validate_tables                 # (optional) offline DB-constraint check
 ```
 
-The single `etl.py` entrypoint runs extract, multi-table relational synthesis, and load in one Spark session.
+See the per-stage sections below for the full flags. All stages share `specs.json`,
+which declares each table's primary key, foreign keys, and synthesis policy.
 
 Example config:
 
@@ -63,13 +68,13 @@ trips. For long-running extracts, also add `(ENABLE=BROKEN)` inside the
 firewalls/load balancers from silently dropping busy connections.
 
 ```bash
-python save_tables.py --tables BIG_TABLE
+python -m datagen.save_tables --tables BIG_TABLE
 ```
 
 Run a limited sample first to estimate runtime without overwriting the full extract path:
 
 ```bash
-python save_tables.py --tables BIG_TABLE --limit 100000
+python -m datagen.save_tables --tables BIG_TABLE --limit 100000
 ```
 
 Full runs write to `.../<TABLE>` and limited runs write to `.../<TABLE>_limit_<N>`.
@@ -78,7 +83,7 @@ Both log elapsed time per table.
 Set `DATAGEN_RAW_PREFIX` to place extracts under a prefix inside the target bucket:
 
 ```bash
-DATAGEN_RAW_PREFIX=onprem-export python save_tables.py --tables BIG_TABLE
+DATAGEN_RAW_PREFIX=onprem-export python -m datagen.save_tables --tables BIG_TABLE
 ```
 
 This writes to `.../onprem-export/<TABLE>`.
@@ -144,9 +149,9 @@ partition). It **appends** to existing target tables. Run one Data Flow job per 
 table, or omit `--tables` to load every non-static table from the specs.
 
 ```bash
-python load_tables.py --tables LANCAMENTO            # one table
-python load_tables.py                                # all non-static tables in specs.json
-python load_tables.py --tables LANCAMENTO --limit 100000   # sample load
+python -m datagen.load_tables --tables LANCAMENTO            # one table
+python -m datagen.load_tables                                # all non-static tables in specs.json
+python -m datagen.load_tables --tables LANCAMENTO --limit 100000   # sample load
 ```
 
 Reads `{DATAGEN_LOAD_BASE_URI}/{DATAGEN_LOAD_PREFIX}/<TABLE>`. Tables marked
@@ -219,9 +224,9 @@ FKs to static/code tables are judged faithfully):
   check only flags integer-part overflow).
 
 ```bash
-python validate_tables.py                                  # validate all tables
-python validate_tables.py --tables JUROS_FLUTUANTE         # subset
-python validate_tables.py --report-uri oci://bucket@ns/reports/run1.json
+python -m datagen.validate_tables                                  # validate all tables
+python -m datagen.validate_tables --tables JUROS_FLUTUANTE         # subset
+python -m datagen.validate_tables --report-uri oci://bucket@ns/reports/run1.json
 ```
 
 It writes a JSON report (per table, per check: violation count + a sample of
@@ -316,29 +321,8 @@ duration, and rough throughput so a small-table pilot can estimate large-table r
 Avoid table moves/shrinks/reorgs during the migration because those operations can change
 Oracle `ROWID` values.
 
-## OCI Data Flow Deployment
+## Deployment
 
-### Build Archive
-
-Use Oracle's recommended Docker image to build a compatible archive:
-
-```bash
-docker run --rm -v $(pwd):/app -w /app ghcr.io/oracle/oraclelinux8-python:3.11 \
-  bash -c "pip install -r requirements.txt -t python/ && zip -r archive.zip python/"
-```
-
-### Upload Archive
-
-```bash
-oci os object put --bucket-name datagen-apps --file archive.zip --name archive.zip --force
-```
-
-### Upload ETL Script
-
-```bash
-oci os object put --bucket-name datagen-apps --file etl.py --name etl.py --force
-```
-
-### Run on Data Flow
-
-Use `--archive-uri` to include the dependencies archive when creating or running Data Flow applications.
+The `datagen/` package is synced to S3 (`s3://eudalia-production-datagen-us-east-1/scripts/datagen/`)
+by `.github/workflows/deploy-eudalia-datagen-scripts-to-s3.yml` on every push to
+`main` that touches `datagen/`.
