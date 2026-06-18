@@ -107,3 +107,22 @@ class TestPlanChecks:
                                           "scale": 0, "nullable": False}}}}
         plan = vt.plan_checks(specs, schema, tables=["A"])
         assert {p["table"] for p in plan} == {"A"}
+
+
+class TestEnvAndArgs:
+    def test_get_env_collects_required(self, monkeypatch):
+        for name in vt.REQUIRED_ENV_VARS:
+            monkeypatch.setenv(name, f"oci://bucket@ns/{name}/")
+        cfg = vt.get_validate_env()
+        assert cfg["DATAGEN_SCHEMA_URI"] == "oci://bucket@ns/DATAGEN_SCHEMA_URI"  # rstripped
+
+    def test_get_env_exits_when_missing(self, monkeypatch):
+        for name in vt.REQUIRED_ENV_VARS:
+            monkeypatch.delenv(name, raising=False)
+        with pytest.raises(SystemExit):
+            vt.get_validate_env()
+
+    def test_parse_arguments_defaults(self):
+        args = vt.parse_arguments([])
+        assert args.tables is None
+        assert args.specs is None

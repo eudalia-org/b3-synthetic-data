@@ -297,3 +297,91 @@ def _parent_universe(spark, raw_base, synth_base, parent, parent_cols):
     for extra in frames[1:]:
         universe = universe.unionByName(extra)
     return universe
+
+
+def get_validate_env() -> dict:
+    config = {}
+    missing = []
+    for name in REQUIRED_ENV_VARS:
+        value = os.environ.get(name)
+        if not value:
+            missing.append(name)
+        else:
+            config[name] = value.rstrip("/")
+    if missing:
+        logger.error("Missing required env var(s): %s", ", ".join(missing))
+        sys.exit(1)
+    return config
+
+
+def parse_arguments(argv=None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Validate synthetic Parquet vs DB constraints.")
+    parser.add_argument("--specs", default=None, help="Override DATAGEN_SPECS_URI.")
+    parser.add_argument("--schema", default=None, help="Override DATAGEN_SCHEMA_URI.")
+    parser.add_argument("--report-uri", default=None,
+                        help="Where to write the JSON report (object storage).")
+    parser.add_argument("--tables", default=None,
+                        help="Comma-separated subset of tables to validate.")
+    return parser.parse_args(argv)
+
+
+def _read_json_object(spark, uri: str) -> dict:
+    records = spark.sparkContext.wholeTextFiles(uri).collect()
+    if len(records) != 1:
+        raise ValueError(
+            f"Expected exactly one JSON object at `{uri}`, found {len(records)}.")
+    return json.loads(records[0][1])
+
+
+def load_manifests(spark, specs_uri, schema_uri):
+    specs = specs_uri if isinstance(specs_uri, dict) else _read_json_object(spark, specs_uri)
+    schema = schema_uri if isinstance(schema_uri, dict) else _read_json_object(spark, schema_uri)
+    return normalize_specs(specs), normalize_schema(schema)
+
+
+def _write_report(spark, report: Report, uri: str) -> None:
+    blob = json.dumps(report_to_json(report), indent=2, ensure_ascii=False)
+    # one-object write via Hadoop FS (small file)
+    sc = spark.sparkContext
+    conf = sc._jsc.hadoopConfiguration()
+    jpath = sc._jvm.org.apache.hadoop.fs.Path(uri)
+    fs = jpath.getFileSystem(conf)
+    out = fs.create(jpath, True)
+    try:
+        out.write(bytearray(blob, "utf-8"))
+    finally:
+        out.close()
+
+
+def create_spark_session(app_name: str):
+    from pyspark.sql import SparkSession
+    builder = SparkSession.builder.appName(app_name)
+    builder = builder.config("spark.sql.parquet.aggregatePushdown", "true")
+    return builder.getOrCreate()
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO)
+    args = parse_arguments()
+    config = get_validate_env()
+    specs_uri = args.specs or config["DATAGEN_SPECS_URI"]
+    schema_uri = args.schema or config["DATAGEN_SCHEMA_URI"]
+    tables = [t.strip() for t in args.tables.split(",")] if args.tables else None
+
+    spark = create_spark_session("validate_tables")
+    specs, schema = load_manifests(spark, specs_uri, schema_uri)
+    report = validate(spark, specs, schema,
+                      config["DATAGEN_RAW_BASE_URI"],
+                      config["DATAGEN_SYNTHETIC_BASE_URI"], tables=tables)
+    summary = render_summary(report)
+    print(summary)
+    logger.info("%s", summary)
+    if args.report_uri:
+        _write_report(spark, report, args.report_uri)
+        logger.info("Report written to %s", args.report_uri)
+    sys.exit(1 if report.has_violations else 0)
+
+
+if __name__ == "__main__":
+    main()
