@@ -187,18 +187,21 @@ class TestParseArguments:
         assert args.continue_on_error is False
         assert args.specs is None
         assert args.limit is None
+        assert args.pk_offset is None
 
     def test_overrides(self, monkeypatch):
         monkeypatch.setattr(
             sys, "argv",
             ["engorda_tables.py", "--scale-factor", "3", "--seed", "7",
-             "--continue-on-error", "--limit", "1000", "--specs", "oci://cfg@ns/s.json"],
+             "--continue-on-error", "--limit", "1000", "--pk-offset", "10000000000000",
+             "--specs", "oci://cfg@ns/s.json"],
         )
         args = engorda_tables.parse_arguments()
         assert args.scale_factor == 3.0
         assert args.seed == 7
         assert args.continue_on_error is True
         assert args.limit == 1000
+        assert args.pk_offset == 10_000_000_000_000
         assert args.specs == "oci://cfg@ns/s.json"
 
     def test_rejects_non_positive_limit(self, monkeypatch):
@@ -300,6 +303,7 @@ class TestEngordaLoop:
                             lambda *dfs: released.extend(dfs))
         monkeypatch.setattr(engorda_tables, "write_synthetic_table",
                             lambda spark, df, out_path: writes.append(out_path))
+        monkeypatch.setattr(engorda_tables, "compute_pk_maxes", lambda *a, **k: {})
 
         def fake_run(tables, comp_specs, **kwargs):
             synth_calls.append((set(comp_specs), kwargs["n_rows_by_table"]))
@@ -328,6 +332,7 @@ class TestEngordaLoop:
             def count(self): return 5
         monkeypatch.setattr(engorda_tables, "read_parquet", lambda s, p, limit=None: FakeDF())
         monkeypatch.setattr(engorda_tables, "release", lambda *dfs: None)
+        monkeypatch.setattr(engorda_tables, "compute_pk_maxes", lambda *a, **k: {})
 
         def fake_run(tables, comp_specs, **kwargs):
             raise RuntimeError("boom")
@@ -349,12 +354,78 @@ class TestEngordaLoop:
         monkeypatch.setattr(engorda_tables, "release", lambda *dfs: None)
         monkeypatch.setattr(engorda_tables, "write_synthetic_table",
                             lambda spark, df, out_path: None)
+        monkeypatch.setattr(engorda_tables, "compute_pk_maxes", lambda *a, **k: {})
         monkeypatch.setattr(engorda_tables, "run_synthesis_from_tables",
                             lambda tables, comp_specs, **kwargs: {t: FakeDF() for t in comp_specs})
 
         engorda_tables.engorda(spark=object(), config=self._config(), specs=specs,
                                scale_factor=1.0, seed=42, continue_on_error=False, limit=500)
         assert seen_limits == [500]
+
+    def _run_capturing(self, monkeypatch, pk_offset, pk_maxes):
+        seen = {}
+        floors = []
+
+        class FakeDF:
+            def count(self): return 3
+
+        monkeypatch.setattr(engorda_tables, "read_parquet", lambda s, p, limit=None: FakeDF())
+        monkeypatch.setattr(engorda_tables, "release", lambda *dfs: None)
+        monkeypatch.setattr(engorda_tables, "write_synthetic_table",
+                            lambda spark, df, out_path: None)
+        monkeypatch.setattr(engorda_tables, "compute_pk_maxes",
+                            lambda spark, config, comp_specs, floor=0:
+                                floors.append(floor) or pk_maxes)
+
+        def fake_run(tables, comp_specs, **kwargs):
+            seen.update(kwargs)
+            return {t: FakeDF() for t in comp_specs}
+
+        monkeypatch.setattr(engorda_tables, "run_synthesis_from_tables", fake_run)
+        engorda_tables.engorda(spark=object(), config=self._config(),
+                               specs={"A": {"pk_cols": ["ID"]}}, scale_factor=1.0,
+                               seed=42, continue_on_error=False, pk_offset=pk_offset)
+        return seen, floors
+
+    def test_forwards_true_pk_maxes_to_synthesis(self, monkeypatch):
+        seen, _ = self._run_capturing(monkeypatch, pk_offset=None, pk_maxes={"A": 999})
+        assert seen["pk_max_by_table"] == {"A": 999}
+
+    def test_pk_offset_passed_as_floor(self, monkeypatch):
+        _, floors = self._run_capturing(monkeypatch, pk_offset=10**13, pk_maxes={"A": 10**13})
+        assert floors == [10**13]
+
+
+class TestComputePkMaxes:
+    CONFIG = {"DATAGEN_RAW_BASE_URI": "oci://raw@ns", "DATAGEN_RAW_PREFIX": ""}
+
+    def test_skips_static_floors_and_uses_last_pk(self, monkeypatch):
+        specs = {
+            "A": {"pk_cols": ["ID"]},                    # true max 100
+            "REF": {"pk_cols": ["C"], "static": True},   # skipped (static)
+            "B": {"pk_cols": ["X", "ID"]},               # composite -> last col; max 5 -> floor
+        }
+        seen_cols = {}
+        maxes = {"oci://raw@ns/A": 100, "oci://raw@ns/B": 5}
+
+        def fake_max(spark, path, pk_col):
+            seen_cols[path] = pk_col
+            return maxes[path]
+
+        monkeypatch.setattr(engorda_tables, "_read_pk_max", fake_max)
+        out = engorda_tables.compute_pk_maxes(object(), self.CONFIG, specs, floor=1000)
+        assert out == {"A": 1000, "B": 1000}            # max(true_max, floor); REF omitted
+        assert seen_cols["oci://raw@ns/B"] == "ID"      # last PK column
+
+    def test_no_floor_uses_true_max(self, monkeypatch):
+        specs = {"A": {"pk_cols": ["ID"]}}
+        monkeypatch.setattr(engorda_tables, "_read_pk_max", lambda s, p, c: 8_000_000_000)
+        assert engorda_tables.compute_pk_maxes(object(), self.CONFIG, specs) == {"A": 8_000_000_000}
+
+    def test_omits_unreadable_max(self, monkeypatch):
+        specs = {"A": {"pk_cols": ["ID"]}}
+        monkeypatch.setattr(engorda_tables, "_read_pk_max", lambda s, p, c: None)
+        assert engorda_tables.compute_pk_maxes(object(), self.CONFIG, specs) == {}
 
 
 class TestWriteSyntheticTable:

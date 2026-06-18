@@ -762,11 +762,19 @@ def _set_unique_pk_column(
     append_after_max: bool,
     target_n: int,
     offset: int = 0,
+    pk_max_override: Optional[int] = None,
 ) -> DataFrame:
+    # When pk_max_override is given, append after THIS max instead of the one
+    # observed in source_cached. Used so a --limit'd (sampled) source still gets
+    # PKs above the table's TRUE max, computed from the full Parquet by engorda.
     dt = _get_field_type(source_cached, pk)
 
     if _is_integer_type(dt):
-        start = (_max_pk_value(source_cached, pk) or 0) + 1 if append_after_max else 1
+        observed_max = (
+            pk_max_override if pk_max_override is not None
+            else _max_pk_value(source_cached, pk)
+        )
+        start = (observed_max or 0) + 1 if append_after_max else 1
         highest = start + target_n - 1 + offset
 
         for type_cls, limit in _INT_TYPE_LIMITS:
@@ -787,7 +795,11 @@ def _set_unique_pk_column(
     # original, garantindo que os valores fiquem na faixa de inteiros
     # representáveis de forma exata (2^53 para double, 2^24 para float).
     if _is_float_type(dt):
-        start = (_max_pk_value(source_cached, pk) or 0) + 1 if append_after_max else 1
+        observed_max = (
+            pk_max_override if pk_max_override is not None
+            else _max_pk_value(source_cached, pk)
+        )
+        start = (observed_max or 0) + 1 if append_after_max else 1
         highest = start + target_n - 1 + offset
 
         exact_limit = (
@@ -811,7 +823,11 @@ def _set_unique_pk_column(
 
     # ---- NOVO na v4: PK decimal -------------------------------------------
     if _is_decimal_type(dt):
-        start = (_max_pk_value(source_cached, pk) or 0) + 1 if append_after_max else 1
+        observed_max = (
+            pk_max_override if pk_max_override is not None
+            else _max_pk_value(source_cached, pk)
+        )
+        start = (observed_max or 0) + 1 if append_after_max else 1
         highest = start + target_n - 1 + offset
 
         # Dígitos inteiros disponíveis = precision - scale.
@@ -856,6 +872,7 @@ def _generate_pk_columns(
     *,
     append_after_max: bool,
     target_n: int,
+    pk_max_override: Optional[int] = None,
 ) -> DataFrame:
     if len(spec.pk_cols) == 1:
         return _set_unique_pk_column(
@@ -864,7 +881,7 @@ def _generate_pk_columns(
             spec.pk_cols[0],
             append_after_max=append_after_max,
             target_n=target_n,
-            offset=0,
+            pk_max_override=pk_max_override,
         )
 
     last_pk = spec.pk_cols[-1]
@@ -882,7 +899,7 @@ def _generate_pk_columns(
         last_pk,
         append_after_max=append_after_max,
         target_n=target_n,
-        offset=0,
+        pk_max_override=pk_max_override,
     )
 
 
@@ -1288,6 +1305,7 @@ def synthesize_multitable_spark(
     *,
     seed: int = 42,
     append_after_max_pk: bool = True,
+    pk_max_by_table: Optional[Mapping[str, int]] = None,
     validate_mode: ValidateMode = "full",
     nullable_fk_policy: NullableFkPolicy = "allow_any_null",
     broadcast_fk_counts: bool = False,
@@ -1412,6 +1430,7 @@ def synthesize_multitable_spark(
                     spec,
                     append_after_max=append_after_max_pk,
                     target_n=target_n,
+                    pk_max_override=(pk_max_by_table or {}).get(table_name),
                 )
 
                 for fk_idx, fk in enumerate(spec.foreign_keys):
@@ -1929,6 +1948,7 @@ def run_synthesis_from_tables(
     scale_factor: Optional[float] = None,
     seed: int = 42,
     append_after_max_pk: bool = True,
+    pk_max_by_table: Optional[Mapping[str, int]] = None,
     validate_mode: ValidateMode = "full",
     nullable_fk_policy: NullableFkPolicy = "allow_any_null",
     broadcast_fk_counts: bool = False,
@@ -1997,6 +2017,7 @@ def run_synthesis_from_tables(
         n_rows_by_table=effective_n_rows,
         seed=seed,
         append_after_max_pk=append_after_max_pk,
+        pk_max_by_table=pk_max_by_table,
         validate_mode=validate_mode,
         nullable_fk_policy=nullable_fk_policy,
         broadcast_fk_counts=broadcast_fk_counts,
@@ -2278,6 +2299,12 @@ def parse_arguments() -> argparse.Namespace:
                              "synthesizing (input sampling for fast test runs). Omit for no limit. "
                              "Note: sampling parent and child tables independently can drop some "
                              "FK matches, which the synthesizer warns about and skips.")
+    parser.add_argument("--pk-offset", type=positive_int, default=None,
+                        help="Floor for synthetic PK starts. By default engorda reads each table's "
+                             "TRUE max(pk) from the full Parquet and generates PKs as true_max+1, "
+                             "etc (safe with --limit, collision-free vs the real table). Pass "
+                             "--pk-offset N to start at max(true_max, N) instead, e.g. to reserve "
+                             "a band well above all real PKs. FKs are remapped to match.")
     parser.add_argument("--specs", default=None,
                         help="Override DATAGEN_SPECS_URI (URI of a single specs.json object).")
     return parser.parse_args()
@@ -2286,6 +2313,43 @@ def parse_arguments() -> argparse.Namespace:
 def read_parquet(spark: SparkSession, path: str, limit: int | None = None) -> DataFrame:
     df = spark.read.parquet(path)
     return df.limit(limit) if limit is not None else df
+
+
+def _read_pk_max(spark, path: str, pk_col: str):
+    """max(pk_col) from the full Parquet at `path` (footer-fast with pushdown)."""
+    row = read_parquet(spark, path).agg(F.max(F.col(pk_col))).first()
+    return row[0] if row is not None else None
+
+
+def compute_pk_maxes(spark, config, comp_specs, floor: int = 0) -> dict[str, int]:
+    """True max(pk) per non-static numeric-PK table, read from the FULL Parquet.
+
+    Returns {table: max(floor, true_max)} so synthetic PKs land above the real
+    table's max even under --limit (where the read sample undercounts the max).
+    With spark.sql.parquet.aggregatePushdown=true this is answered from Parquet
+    footer statistics — a metadata read, no data scan.
+
+    Tables that are static, PK-less, or whose max is unreadable/non-numeric are
+    omitted; the synthesizer then falls back to append_after_max on the data.
+    """
+    out: dict[str, int] = {}
+    for table, cfg in comp_specs.items():
+        if cfg.get("static"):
+            continue
+        pk_cols = cfg.get("pk_cols") or []
+        if not pk_cols:
+            continue
+        pk_col = pk_cols[-1]  # the synthesizer generates the last PK column
+        try:
+            raw_max = _read_pk_max(spark, raw_path(config, table), pk_col)
+            true_max = int(raw_max) if raw_max is not None else None
+        except Exception as exc:
+            logger.warning("Could not read max(%s) for %s: %s", pk_col, table, exc)
+            true_max = None
+        if true_max is None:
+            continue
+        out[table] = max(true_max, floor)
+    return out
 
 
 def release(*dataframes) -> None:
@@ -2341,12 +2405,15 @@ def load_specs(spark: SparkSession, specs_uri: str) -> dict:
     return normalize_specs(parsed)
 
 
-def engorda(spark, config, specs, scale_factor, seed, continue_on_error, limit=None) -> None:
+def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
+            limit=None, pk_offset=None) -> None:
     components = connected_components(specs)
     save_base = synthetic_base_path(config)
     total = len(components)
     if limit is not None:
         logger.info("Input limit active: reading at most %d row(s) per raw table", limit)
+    if pk_offset is not None:
+        logger.info("PK offset floor active: synthetic PKs start at >= %d", pk_offset)
     logger.info("Loaded %d table(s) in %d component(s)", len(specs), total)
     run_started = time.perf_counter()
     failures: list[str] = []
@@ -2368,9 +2435,13 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error, limit=N
             # Synthesize only; engorda writes each table itself with a delete
             # scoped to that table's prefix (Spark's overwrite clobbers siblings
             # on the OCI connector by deleting the shared parent prefix).
+            pk_max = compute_pk_maxes(spark, config, comp_specs, floor=(pk_offset or 0))
+            if pk_max:
+                logger.info("[%d/%d] true PK max per table: %s", index, total, pk_max)
             synthetic = run_synthesis_from_tables(
                 comp_tables, comp_specs,
                 n_rows_by_table=n_rows, seed=seed,
+                pk_max_by_table=pk_max,
                 validate_mode="full", verbose=False,
             )
             for name, df in synthetic.items():
@@ -2405,6 +2476,9 @@ def create_spark_session(app_name: str) -> SparkSession:
     for key, value in {
         "spark.sql.parquet.datetimeRebaseModeInWrite": "CORRECTED",
         "spark.sql.parquet.int96RebaseModeInWrite": "CORRECTED",
+        # Answer max(pk) from Parquet footer stats (metadata only, no scan) so
+        # computing each table's true max PK stays fast even under --limit.
+        "spark.sql.parquet.aggregatePushdown": "true",
     }.items():
         builder = builder.config(key, value)
     return builder.getOrCreate()
@@ -2418,7 +2492,7 @@ def main() -> None:
         specs_uri = args.specs or config["DATAGEN_SPECS_URI"]
         specs = load_specs(spark, specs_uri)
         engorda(spark, config, specs, args.scale_factor, args.seed,
-                args.continue_on_error, args.limit)
+                args.continue_on_error, args.limit, args.pk_offset)
     finally:
         spark.stop()
 
