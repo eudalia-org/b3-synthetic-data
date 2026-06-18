@@ -141,23 +141,33 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - [ ] **Step 1: Remove the etl.py usage section and OCI secrets line**
 
 Delete the `## Usage` block that documents `python etl.py --config …` and the
-sentence "The single `etl.py` entrypoint …" (README ~lines 14-17). Delete the
+sentence "The single `etl.py` entrypoint …" (README ~lines 11-17). Delete the
 setup line "Configure OCI Vault secrets (see secrets.py …)" (~line 9).
 
-- [ ] **Step 2: Rewrite remaining command examples to module form**
+- [ ] **Step 2: Remove the entire stale `## OCI Data Flow Deployment` section**
+
+README ~lines 319-end document the discontinued path: `### Build Archive`,
+`### Upload Archive` (`archive.zip`, purged in Task 5), `### Upload ETL Script`
+(`etl.py`, deleted in Task 2), `### Run on Data Flow`. The live deploy is now AWS
+S3 via the GitHub workflow (Task 4), so delete this whole section. If useful, add
+a one-line pointer instead, e.g. *"Deployment: `datagen/` is synced to S3 by
+`.github/workflows/deploy-eudalia-datagen-scripts-to-s3.yml` on push to `main`."*
+
+- [ ] **Step 3: Rewrite remaining command examples to module form**
 
 Replace every `python <module>.py …` for the moved modules with
-`python -m datagen.<module> …`:
-- `python save_tables.py …` → `python -m datagen.save_tables …` (3 spots)
-- `python load_tables.py …` → `python -m datagen.load_tables …` (3 spots)
-- `python validate_tables.py …` → `python -m datagen.validate_tables …` (3 spots)
+`python -m datagen.<module> …` (verified counts: 3 save, 3 load, 3 validate;
+`engorda_tables` has none):
+- lines ~66, 72, 81: `python save_tables.py …` → `python -m datagen.save_tables …`
+- lines ~147-149: `python load_tables.py …` → `python -m datagen.load_tables …`
+- lines ~222-224: `python validate_tables.py …` → `python -m datagen.validate_tables …`
 
-- [ ] **Step 3: Verify no stale references remain in README**
+- [ ] **Step 4: Verify no stale references remain in README**
 
-Run: `grep -nE "etl\.py|secrets\.py|python (save_tables|load_tables|validate_tables)\.py" README.md`
+Run: `grep -nE "etl\.py|secrets\.py|archive\.zip|python (save_tables|load_tables|validate_tables|engorda_tables)\.py" README.md`
 Expected: no output.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add README.md
