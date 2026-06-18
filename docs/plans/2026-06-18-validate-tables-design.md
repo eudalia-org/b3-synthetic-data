@@ -94,7 +94,7 @@ with a caller-supplied SparkSession — no logic locked behind `spark-submit` /
 
 Module boundaries:
 
-- **`build_spark_session()`** — CLI path only; a notebook already has `spark`.
+- **`create_spark_session()`** — CLI path only; a notebook already has `spark`. (Named to match `engorda_tables.py`.)
 - **`load_manifests(specs_uri, schema_uri) -> (specs, schema)`** — read +
   normalize (`OWNER.TABLE` → `TABLE`, reusing engorda's `normalize_specs`).
   Accepts dicts directly too, for notebook use.
@@ -104,7 +104,7 @@ Module boundaries:
 - **`render_summary(report) -> str`** / **`report_to_json(report) -> dict`** —
   formatting, Spark-independent.
 - **`main()`** — CLI / Data Flow wrapper: parse args → read env →
-  `build_spark_session()` → `load_manifests()` → `validate()` → write JSON
+  `create_spark_session()` → `load_manifests()` → `validate()` → write JSON
   report to `--report-uri` + print `render_summary()` →
   `sys.exit(1 if report.has_violations else 0)`.
 
