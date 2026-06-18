@@ -29,31 +29,50 @@ catch.
 Sort the resolved load list parents-before-children, always, silently, for both
 the `--tables` and the all-non-static paths.
 
-Reuse engorda's proven, self-contained `topo_order_tables(specs)` (and its small
-`_fk_list` helper); copy them into `load_tables.py` (each Data Flow app is a
-single uploaded file — no cross-import). `topo_order_tables` orders parents
-before children, ignores self-references, and breaks cycles arbitrarily so every
-table is returned exactly once.
+A single self-contained `topo_sort_for_load(specs, tables)` (plus the tiny
+`_fk_list` helper) in `load_tables.py` (each Data Flow app is a single uploaded
+file — no cross-import). `resolve_load_tables` returns
+`topo_sort_for_load(specs, result)`.
 
-New thin wrapper + one changed call site:
+It is a **stable** topological sort: input order is preserved except where a
+foreign key forces a parent ahead of its child. Algorithm — repeatedly scan the
+remaining list in order and emit the first table whose in-load-set parents are
+already emitted; if none qualifies (a cycle), emit the rest in input order:
 
 ```python
-def topo_sort_for_load(specs: dict, tables: list[str]) -> list[str]:
-    order = topo_order_tables(specs)            # all specs keys, parents first
-    rank = {name: i for i, name in enumerate(order)}
-    # in-specs tables sort by topo rank; tables absent from specs (no FK
-    # metadata) get a max rank -> land at the end, original order preserved.
-    return sorted(tables,
-                  key=lambda t: rank.get(table_path_name(t).upper(), len(order)))
+def topo_sort_for_load(specs, tables):
+    norm = {t: table_path_name(t).upper() for t in tables}
+    present = set(norm.values())
+    parents = {}
+    for t in tables:
+        deps = set()
+        for fk in _fk_list(specs.get(norm[t], {})):
+            parent = (fk.get("parent_table") or "").upper()
+            if parent and parent != norm[t] and parent in present:
+                deps.add(parent)
+        parents[t] = deps
+    result, emitted, remaining = [], set(), list(tables)
+    while remaining:
+        for i, t in enumerate(remaining):
+            if parents[t] <= emitted:
+                result.append(t); emitted.add(norm[t]); remaining.pop(i); break
+        else:
+            result.extend(remaining); break
+    return result
 ```
 
-`resolve_load_tables` returns `topo_sort_for_load(specs, result)`.
-
 Properties:
-- Python's sort is **stable** → siblings keep their requested/specs order; only
-  FK-dependent pairs get reordered.
-- Ranks are global over all specs, so a parent in the load set always precedes
-  its child even when intermediate tables aren't in the load set.
+- **Only FK-dependent pairs get reordered.** Independent tables — including ones
+  absent from `specs` (no FK metadata) — keep their original relative position.
+  This is why the existing `test_requested_drops_static_keeps_order` still holds.
+  (An earlier rank-based draft reused engorda's `topo_order_tables`, but that
+  `sorted(ready)` alphabetizes independent tables — an unwanted silent reshuffle
+  — so it was dropped in favour of this stable sort.)
+- **Only parents that are themselves in the load set** impose a constraint, so an
+  FK to a table that isn't being loaded (e.g. a static/code parent already in the
+  DB) adds no edge.
+- Self-references are ignored; a cycle is broken by emitting the rest in input
+  order, so every input table is returned exactly once.
 - Name-qualifier safe: `CETIP.X` → `X` via `table_path_name(...).upper()`,
   matching how `is_static` / `pk_cols_for` already normalize.
 
@@ -68,7 +87,8 @@ finish, then the child's.)
 
 - parent ordered before child;
 - a child-first `--tables` list is reordered parent-first;
-- a table absent from specs lands last, preserving relative order;
+- schema-qualified names (`CETIP.X`) resolve correctly;
+- an independent / absent-from-specs table keeps its input position;
 - a self-referencing FK does not break ordering;
 - a 2-table cycle returns both tables exactly once.
 

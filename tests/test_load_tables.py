@@ -220,6 +220,66 @@ class TestResolveLoadTables:
             load_tables.resolve_load_tables(SPECS, ["TIPO_DEBITO"])
 
 
+FK_SPECS = {
+    # child whose PK is also its FK to CONDICAO_IF (declared child-first on purpose)
+    "JUROS_FLUTUANTE": {
+        "pk_cols": ["NUM_CONDICAO_IF"],
+        "foreign_keys": [
+            {"columns": ["NUM_CONDICAO_IF"], "parent_table": "CONDICAO_IF",
+             "parent_columns": ["NUM_CONDICAO_IF"]}
+        ],
+    },
+    "CONDICAO_IF": {"pk_cols": ["NUM_CONDICAO_IF"]},
+}
+
+
+class TestTopoSortForLoad:
+    def test_parent_before_child_regardless_of_input_order(self):
+        assert load_tables.topo_sort_for_load(
+            FK_SPECS, ["JUROS_FLUTUANTE", "CONDICAO_IF"]
+        ) == ["CONDICAO_IF", "JUROS_FLUTUANTE"]
+
+    def test_schema_qualified_names_are_resolved(self):
+        assert load_tables.topo_sort_for_load(
+            FK_SPECS, ["CETIP.JUROS_FLUTUANTE", "cetip.condicao_if"]
+        ) == ["cetip.condicao_if", "CETIP.JUROS_FLUTUANTE"]
+
+    def test_independent_and_absent_tables_keep_position(self):
+        # OTHER is absent from specs (no FK metadata) and independent -> it keeps
+        # its input position; only the FK pair is reordered parent-first.
+        assert load_tables.topo_sort_for_load(
+            FK_SPECS, ["OTHER", "JUROS_FLUTUANTE", "CONDICAO_IF"]
+        ) == ["OTHER", "CONDICAO_IF", "JUROS_FLUTUANTE"]
+
+    def test_self_reference_does_not_break(self):
+        specs = {"USUARIO": {"pk_cols": ["NUM_ID_ENTIDADE"], "foreign_keys": [
+            {"columns": ["NUM_ID_SUP"], "parent_table": "USUARIO",
+             "parent_columns": ["NUM_ID_ENTIDADE"]}]}}
+        assert load_tables.topo_sort_for_load(specs, ["USUARIO"]) == ["USUARIO"]
+
+    def test_cycle_returns_each_table_once(self):
+        specs = {
+            "A": {"pk_cols": ["AID"], "foreign_keys": [
+                {"columns": ["BID"], "parent_table": "B", "parent_columns": ["BID"]}]},
+            "B": {"pk_cols": ["BID"], "foreign_keys": [
+                {"columns": ["AID"], "parent_table": "A", "parent_columns": ["AID"]}]},
+        }
+        out = load_tables.topo_sort_for_load(specs, ["A", "B"])
+        assert sorted(out) == ["A", "B"]
+        assert len(out) == 2
+
+
+class TestResolveLoadTablesTopoOrder:
+    def test_requested_child_first_is_reordered_parent_first(self):
+        assert load_tables.resolve_load_tables(
+            FK_SPECS, ["JUROS_FLUTUANTE", "CONDICAO_IF"]
+        ) == ["CONDICAO_IF", "JUROS_FLUTUANTE"]
+
+    def test_all_non_static_path_is_topo_ordered(self):
+        assert load_tables.resolve_load_tables(FK_SPECS, None) == [
+            "CONDICAO_IF", "JUROS_FLUTUANTE"]
+
+
 class TestGuardApplies:
     def test_single_numeric_true(self):
         assert load_tables.guard_applies(["NUM_ID"], True) is True
