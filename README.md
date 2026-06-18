@@ -200,6 +200,66 @@ at-least-once within a single run (a partition that commits then is reported fai
 is retried and re-inserts its rows). Closing that fully would need a server-side
 staging+MERGE (CREATE TABLE on the target), which is out of scope.
 
+## Offline Constraint Validation
+
+`validate_tables.py` checks the synthetic Parquet against the same constraints
+Oracle enforces — **without running a load** — so you catch PK/FK/NOT NULL/
+datatype violations offline instead of one failed Data Flow load at a time. It
+runs as its own Data Flow app (between engorda and load) and is also importable
+from a Data Science notebook.
+
+It validates, per table, against the **raw ∪ synthetic** key universe (the raw
+Parquet stands in for the existing DB state, so collisions with real keys and
+FKs to static/code tables are judged faithfully):
+
+- **NOT NULL** columns, **PK** (not-null + internal uniqueness + no collision
+  with existing/raw keys), **FK** referential integrity, **UNIQUE** keys, and
+  **datatype precision/scale/length** overflow. CHECK constraints are out of
+  scope (Oracle rounds excess NUMBER scale rather than rejecting, so the decimal
+  check only flags integer-part overflow).
+
+```bash
+python validate_tables.py                                  # validate all tables
+python validate_tables.py --tables JUROS_FLUTUANTE         # subset
+python validate_tables.py --report-uri oci://bucket@ns/reports/run1.json
+```
+
+It writes a JSON report (per table, per check: violation count + a sample of
+offending keys/values) to `--report-uri`, prints a human-readable summary to
+stdout (Data Flow logs), and **exits non-zero** if any violations — so it works
+as a hard pre-load gate.
+
+Configuration: `DATAGEN_RAW_BASE_URI`, `DATAGEN_SYNTHETIC_BASE_URI`,
+`DATAGEN_SPECS_URI`, and `DATAGEN_SCHEMA_URI` (the schema manifest; see below).
+
+From a notebook (pass your own SparkSession):
+
+```python
+from validate_tables import validate, load_manifests, render_summary
+specs, schema = load_manifests(spark, specs_uri, schema_uri)
+report = validate(spark, specs, schema, raw_base, synth_base,
+                  tables=["JUROS_FLUTUANTE"])
+print(render_summary(report))
+report.findings  # inspect interactively
+```
+
+### Regenerating `schema.json`
+
+The validator reads column domains + UNIQUE constraints from `schema.json`
+(PK/FK still come from `specs.json`). Build it from two Oracle dumps:
+
+```bash
+# 1. column metadata (all_tab_columns) -> columns.csv
+#    via scripts/extract_schema.sql
+# 2. constraints (P/U/R) -> constraints.csv
+#    via scripts/extract_constraints.sql   (U rows reused for UNIQUE)
+python scripts/build_schema_from_dump.py \
+  --columns columns.csv --constraints constraints.csv --out schema.json
+```
+
+(`specs.json` is regenerated separately from `constraints.csv` via
+`scripts/build_specs_from_constraints.py`.)
+
 ## VDI One-Time ROWID Migration
 
 `scripts/migrate_rowid_to_oci.py` is for the on-prem access pattern where the VDI can reach both
