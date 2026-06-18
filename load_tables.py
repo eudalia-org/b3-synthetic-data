@@ -202,6 +202,56 @@ def is_static(specs: dict, table: str) -> bool:
     return bool(specs.get(table_path_name(table).upper(), {}).get("static"))
 
 
+def _fk_list(cfg: dict) -> list[dict]:
+    """A spec's foreign keys, accepting either the `foreign_keys` or `fks` key."""
+    fks = cfg.get("foreign_keys")
+    if not isinstance(fks, (list, tuple)):
+        fks = cfg.get("fks")
+    return [fk for fk in (fks or []) if isinstance(fk, dict)]
+
+
+def topo_sort_for_load(specs: dict, tables: list[str]) -> list[str]:
+    """Sort a load list so every parent precedes its children — stably.
+
+    Input order is preserved except where a foreign key forces a parent ahead of
+    its child: independent tables (no FK relationship, or absent from specs and
+    thus carrying no FK metadata) keep their original relative order. Only the
+    parents that are themselves in the load set are considered, so an FK to a
+    table that isn't being loaded (e.g. a static/code parent) imposes no
+    constraint. Self-references are ignored; a dependency cycle is broken by
+    emitting the rest in input order, so every input table is returned once.
+
+    Assumes ``tables`` is already de-duplicated (the callers — ``parse_tables``
+    and the unique ``specs`` keys — guarantee this); two strings normalizing to
+    the same table would otherwise both be emitted.
+    """
+    norm = {t: table_path_name(t).upper() for t in tables}
+    present = set(norm.values())
+    parents: dict[str, set[str]] = {}
+    for t in tables:
+        deps: set[str] = set()
+        for fk in _fk_list(specs.get(norm[t], {})):
+            parent = (fk.get("parent_table") or "").upper()
+            if parent and parent != norm[t] and parent in present:
+                deps.add(parent)
+        parents[t] = deps
+
+    result: list[str] = []
+    emitted: set[str] = set()
+    remaining = list(tables)
+    while remaining:
+        for i, t in enumerate(remaining):
+            if parents[t] <= emitted:
+                result.append(t)
+                emitted.add(norm[t])
+                remaining.pop(i)
+                break
+        else:  # only cyclic tables left -> emit them in input order
+            result.extend(remaining)
+            break
+    return result
+
+
 def resolve_load_tables(specs: dict, requested: list[str] | None) -> list[str]:
     if requested:
         result = []
@@ -218,7 +268,9 @@ def resolve_load_tables(specs: dict, requested: list[str] | None) -> list[str]:
     if not result:
         logger.error("No tables to load")
         sys.exit(1)
-    return result
+    # Load parents before children so synthetic FK rows never reference a
+    # synthetic parent that hasn't been appended yet (ORA-02291).
+    return topo_sort_for_load(specs, result)
 
 
 def guard_applies(pk_cols: list[str], pk_is_numeric: bool) -> bool:
