@@ -59,6 +59,20 @@ class TestGetLoadEnv:
         assert config["DATAGEN_JDBC_READ_TIMEOUT_MS"] == "600000"
         assert config["DATAGEN_LOAD_PREFIX"] == ""
         assert config["DATAGEN_TARGET_JDBC_URL"] == "jdbc:oracle:thin:@host"
+        # Schema defaults to the connection user when unset.
+        assert config["DATAGEN_TARGET_SCHEMA"] == "ADMIN"
+
+    def test_schema_defaults_to_db_user_and_overrides(self, monkeypatch):
+        for key in list(os.environ):
+            if key.startswith("DATAGEN_"):
+                monkeypatch.delenv(key, raising=False)
+        for key, value in self.BASE.items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setenv("DATAGEN_TARGET_DB_USER", "ADMIN")
+        monkeypatch.setenv("DATAGEN_TARGET_SCHEMA", "cetip")
+        config = load_tables.get_load_env()
+        assert config["DATAGEN_TARGET_DB_USER"] == "ADMIN"
+        assert config["DATAGEN_TARGET_SCHEMA"] == "cetip"
 
     def test_strips_trailing_slash_and_prefix_slashes(self, monkeypatch):
         for key, value in self.BASE.items():
@@ -259,10 +273,10 @@ class TestManifest:
 
     def test_build_manifest_shape(self):
         entries = [{"table": "LANCAMENTO", "rollbackable": True}]
-        m = load_tables.build_manifest("RID", "2026-06-17T12:00:00Z", "ADMIN", entries)
+        m = load_tables.build_manifest("RID", "2026-06-17T12:00:00Z", "CETIP", entries)
         assert m == {
             "run_id": "RID",
             "created_utc": "2026-06-17T12:00:00Z",
-            "target_user": "ADMIN",
+            "target_schema": "CETIP",
             "tables": entries,
         }

@@ -180,10 +180,20 @@ single-column numeric-PK tables are rolled back; others are logged as needing a 
 restore point.
 
 Configuration: `DATAGEN_TARGET_JDBC_URL`, `DATAGEN_TARGET_DB_PASSWORD`,
-`DATAGEN_TARGET_DB_USER` (default `ADMIN`), `DATAGEN_LOAD_BASE_URI`,
-`DATAGEN_LOAD_PREFIX`, `DATAGEN_JDBC_NUM_PARTITIONS` (default 256),
-`DATAGEN_JDBC_BATCH_SIZE` (default 10000), `DATAGEN_JDBC_READ_TIMEOUT_MS`
-(default 600000). Set `spark.task.maxFailures` high (e.g. 8) in the Data Flow job.
+`DATAGEN_TARGET_DB_USER` (connection user, default `ADMIN`),
+`DATAGEN_TARGET_SCHEMA` (owner of unqualified target tables, default = the
+connection user), `DATAGEN_LOAD_BASE_URI`, `DATAGEN_LOAD_PREFIX`,
+`DATAGEN_JDBC_NUM_PARTITIONS` (default 256), `DATAGEN_JDBC_BATCH_SIZE`
+(default 10000), `DATAGEN_JDBC_READ_TIMEOUT_MS` (default 600000). Set
+`spark.task.maxFailures` high (e.g. 8) in the Data Flow job.
+
+When connecting as a privileged user to write tables owned by another schema —
+e.g. connect as `ADMIN` but the tables are `CETIP.*` — set
+`DATAGEN_TARGET_DB_USER=ADMIN` and `DATAGEN_TARGET_SCHEMA=CETIP`. Then unqualified
+table names (including the omit-`--tables` "all non-static" path) resolve to
+`CETIP.<TABLE>` for the write, the rollback manifest, and `rollback_load.py`
+(which reads the owner from the manifest). Schema-qualified `--tables CETIP.X`
+also works without setting `DATAGEN_TARGET_SCHEMA`.
 
 Note: the guard makes reruns duplicate-free, but parallel JDBC append is
 at-least-once within a single run (a partition that commits then is reported failed

@@ -133,6 +133,12 @@ def get_load_env() -> dict[str, str]:
     config["DATAGEN_TARGET_DB_USER"] = os.environ.get(
         "DATAGEN_TARGET_DB_USER", DEFAULT_TARGET_DB_USER
     )
+    # Owner of unqualified target tables. Defaults to the connection user, but can
+    # differ when connecting as a privileged user (e.g. ADMIN) to write tables
+    # owned by another schema (e.g. CETIP).
+    config["DATAGEN_TARGET_SCHEMA"] = os.environ.get(
+        "DATAGEN_TARGET_SCHEMA", config["DATAGEN_TARGET_DB_USER"]
+    )
     config["DATAGEN_LOAD_PREFIX"] = os.environ.get("DATAGEN_LOAD_PREFIX", "").strip("/")
     config["DATAGEN_JDBC_NUM_PARTITIONS"] = os.environ.get(
         "DATAGEN_JDBC_NUM_PARTITIONS", DEFAULT_NUM_PARTITIONS
@@ -356,16 +362,16 @@ def load_table(
     properties: dict[str, str],
     config: dict[str, str],
     specs: dict,
-    target_user: str,
+    target_schema: str,
     table: str,
     index: int,
     total: int,
     limit: int | None,
 ) -> int:
-    owner, table_name = table_owner_and_name(target_user, table)
+    owner, table_name = table_owner_and_name(target_schema, table)
     validate_identifier(owner)
     validate_identifier(table_name)
-    dbtable = dbtable_name(target_user, table)
+    dbtable = dbtable_name(target_schema, table)
     input_path = build_load_path(config, table_path_name(table))
     num_partitions = resolve_num_partitions(config)
     batch_size = config["DATAGEN_JDBC_BATCH_SIZE"]
@@ -412,7 +418,7 @@ def load_tables(
     continue_on_error: bool,
     limit: int | None,
 ) -> None:
-    target_user = config["DATAGEN_TARGET_DB_USER"]
+    target_schema = config["DATAGEN_TARGET_SCHEMA"]
     properties = build_connection_properties(config)
     failures = []
     appended_total = 0
@@ -434,7 +440,7 @@ def load_tables(
                 properties=properties,
                 config=config,
                 specs=specs,
-                target_user=target_user,
+                target_schema=target_schema,
                 table=table,
                 index=index,
                 total=total,
@@ -472,11 +478,11 @@ def manifest_path(config: dict[str, str], run_id: str) -> str:
     return f"{config['DATAGEN_LOAD_BASE_URI']}/_load_manifests/{run_id}"
 
 
-def build_manifest(run_id: str, created: str, target_user: str, entries: list[dict]) -> dict:
+def build_manifest(run_id: str, created: str, target_schema: str, entries: list[dict]) -> dict:
     return {
         "run_id": run_id,
         "created_utc": created,
-        "target_user": target_user,
+        "target_schema": target_schema,
         "tables": entries,
     }
 
@@ -486,14 +492,14 @@ def capture_manifest_entries(
     properties: dict[str, str],
     config: dict[str, str],
     specs: dict,
-    target_user: str,
+    target_schema: str,
     tables: list[str],
 ) -> list[dict]:
     from pyspark.sql.types import NumericType
 
     entries = []
     for table in tables:
-        owner, table_name = table_owner_and_name(target_user, table)
+        owner, table_name = table_owner_and_name(target_schema, table)
         pk_cols = pk_cols_for(specs, table)
         pk_col, max_before, rollbackable = None, None, False
         if len(pk_cols) == 1:
@@ -545,13 +551,13 @@ def main() -> None:
         tables = resolve_load_tables(specs, requested)
 
         run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        target_user = config["DATAGEN_TARGET_DB_USER"]
+        target_schema = config["DATAGEN_TARGET_SCHEMA"]
         properties = build_connection_properties(config)
         entries = capture_manifest_entries(
-            spark, properties, config, specs, target_user, tables
+            spark, properties, config, specs, target_schema, tables
         )
         manifest = build_manifest(
-            run_id, datetime.now(timezone.utc).isoformat(), target_user, entries
+            run_id, datetime.now(timezone.utc).isoformat(), target_schema, entries
         )
         path = write_manifest(spark, config, run_id, manifest)
         logger.info("Load run_id=%s; manifest written to %s", run_id, path)
