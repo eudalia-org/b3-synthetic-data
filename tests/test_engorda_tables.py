@@ -170,6 +170,24 @@ class TestTopoOrderTables:
         assert sorted(engorda_tables.topo_order_tables(specs)) == ["A", "B"]
 
 
+class TestFkIsWholePk:
+    def test_pk_equals_fk(self):
+        fk = {"columns": ["NUM_CONDICAO_IF"], "parent_table": "CONDICAO_IF"}
+        assert engorda_tables._fk_is_whole_pk(["NUM_CONDICAO_IF"], fk) is True
+
+    def test_composite_pk_equals_fk_any_order(self):
+        fk = {"columns": ["B", "A"]}
+        assert engorda_tables._fk_is_whole_pk(["A", "B"], fk) is True
+
+    def test_fk_is_subset_of_pk_is_false(self):
+        fk = {"columns": ["A"]}
+        assert engorda_tables._fk_is_whole_pk(["A", "B"], fk) is False
+
+    def test_ordinary_fk_is_false(self):
+        fk = {"columns": ["CUSTOMER_ID"]}
+        assert engorda_tables._fk_is_whole_pk(["ORDER_ID"], fk) is False
+
+
 class TestEffectiveNRows:
     SPECS = {
         "CUSTOMERS": {"pk_cols": ["CID"]},  # parent (referenced by ORDERS)
@@ -334,6 +352,8 @@ class TestEngordaLoop:
         monkeypatch.setattr(engorda_tables, "write_synthetic_table",
                             lambda spark, df, out_path: writes.append(out_path))
         monkeypatch.setattr(engorda_tables, "compute_pk_maxes", lambda *a, **k: {})
+        monkeypatch.setattr(engorda_tables, "bind_shared_key_children",
+                            lambda synthetic, comp_specs: synthetic)
         monkeypatch.setattr(engorda_tables, "null_orphan_fks",
                             lambda synthetic, comp_specs: synthetic)
 
@@ -392,6 +412,8 @@ class TestEngordaLoop:
         monkeypatch.setattr(engorda_tables, "release", lambda *dfs: None)
         monkeypatch.setattr(engorda_tables, "write_synthetic_table", lambda s, d, p: None)
         monkeypatch.setattr(engorda_tables, "compute_pk_maxes", lambda *a, **k: {})
+        monkeypatch.setattr(engorda_tables, "bind_shared_key_children",
+                            lambda synthetic, cs: synthetic)
         monkeypatch.setattr(engorda_tables, "null_orphan_fks", lambda synthetic, cs: synthetic)
         monkeypatch.setattr(engorda_tables, "run_synthesis_from_tables",
                             lambda tables, comp_specs, **kwargs: {t: FakeDF() for t in comp_specs})
@@ -411,6 +433,8 @@ class TestEngordaLoop:
         monkeypatch.setattr(engorda_tables, "release", lambda *dfs: None)
         monkeypatch.setattr(engorda_tables, "write_synthetic_table",
                             lambda spark, df, out_path: None)
+        monkeypatch.setattr(engorda_tables, "bind_shared_key_children",
+                            lambda synthetic, cs: synthetic)
         monkeypatch.setattr(engorda_tables, "null_orphan_fks", lambda synthetic, cs: synthetic)
         monkeypatch.setattr(engorda_tables, "compute_pk_maxes",
                             lambda spark, config, comp_specs, floor=0, band=0:

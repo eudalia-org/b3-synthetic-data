@@ -2257,6 +2257,18 @@ def _fk_list(cfg: dict) -> list[dict]:
     return [fk for fk in (fks or []) if isinstance(fk, dict)]
 
 
+def _fk_is_whole_pk(pk_cols: list[str], fk: dict) -> bool:
+    """True when a FK's columns are exactly the child's primary key.
+
+    These are 1:1 "shared-key" extension tables (e.g. JUROS_FLUTUANTE keyed by
+    NUM_CONDICAO_IF, which is also its FK to CONDICAO_IF). The synthesizer's FK
+    remap can leave such a column NULL or non-unique; bind_shared_key_children
+    rebinds it to distinct parent keys instead.
+    """
+    cols = fk.get("columns") or []
+    return bool(pk_cols) and bool(cols) and sorted(cols) == sorted(pk_cols)
+
+
 def topo_order_tables(comp_specs: dict) -> list[str]:
     """Order a component's tables so every parent comes before its children.
 
@@ -2426,18 +2438,58 @@ def referential_sample(spark, config, comp_specs, limit: int) -> dict:
     return sampled
 
 
+def bind_shared_key_children(synthetic: dict, comp_specs: dict) -> dict:
+    """Rebind 1:1 shared-key children (PK == FK) to distinct synthetic parent keys.
+
+    For a table whose primary key IS its FK to a parent (e.g. JUROS_FLUTUANTE /
+    RESGATE keyed by NUM_CONDICAO_IF -> CONDICAO_IF), the synthesizer's FK remap
+    can leave the column NULL or non-unique — fatal because it's a NOT NULL PK.
+    Here we overwrite those columns with a distinct slice of the parent's
+    synthetic keys (numbered join), guaranteeing valid, unique, non-null keys.
+    Child rows beyond the number of parent keys are dropped (1:1 cardinality).
+    """
+    for child, cfg in comp_specs.items():
+        child_df = synthetic.get(child)
+        if child_df is None:
+            continue
+        pk_cols = list(cfg.get("pk_cols") or [])
+        for fk in _fk_list(cfg):
+            cols = list(fk.get("columns") or [])
+            pcols = list(fk.get("parent_columns") or [])
+            parent = fk.get("parent_table")
+            parent_df = synthetic.get(parent)
+            if (parent_df is None or parent == child or len(cols) != len(pcols)
+                    or not _fk_is_whole_pk(pk_cols, fk)):
+                continue
+            keys = (parent_df
+                    .select(*[F.col(pc).alias(f"__np{i}") for i, pc in enumerate(pcols)])
+                    .dropna().distinct()
+                    .withColumn("__rn", F.row_number().over(
+                        Window.orderBy(*[F.col(f"__np{i}") for i in range(len(pcols))]))))
+            numbered = child_df.withColumn("__rn", F.row_number().over(
+                Window.orderBy(F.monotonically_increasing_id())))
+            joined = numbered.join(keys, "__rn", "inner")
+            for i, c in enumerate(cols):
+                joined = joined.withColumn(c, F.col(f"__np{i}"))
+            child_df = joined.drop("__rn", *[f"__np{i}" for i in range(len(pcols))])
+        synthetic[child] = child_df
+    return synthetic
+
+
 def null_orphan_fks(synthetic: dict, comp_specs: dict) -> dict:
     """Set any FK value with no matching parent PK to NULL (nullable columns).
 
     Catches references the synthesizer could not remap — self-references,
     relationships it ignored (source orphans / parent absent), and residual
     sampling orphans — so the load doesn't hit a parent-key-not-found violation.
-    Only safe for nullable FK columns; NOT NULL columns must be handled upstream.
+    PK columns are never nulled (they are NOT NULL; PK==FK tables are handled by
+    bind_shared_key_children). Only safe for nullable FK columns.
     """
     for child, cfg in comp_specs.items():
         child_df = synthetic.get(child)
         if child_df is None:
             continue
+        pk_set = set(cfg.get("pk_cols") or [])
         for fk in _fk_list(cfg):
             parent = fk.get("parent_table")
             parent_df = synthetic.get(parent)
@@ -2445,6 +2497,8 @@ def null_orphan_fks(synthetic: dict, comp_specs: dict) -> dict:
             pcols = list(fk.get("parent_columns") or [])
             if parent_df is None or not cols or len(cols) != len(pcols):
                 continue
+            if set(cols) & pk_set:
+                continue  # never NULL a PK column
             keys = (parent_df
                     .select(*[F.col(pc).alias(f"__pk{i}") for i, pc in enumerate(pcols)])
                     .dropna().distinct()
@@ -2564,6 +2618,7 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
                 pk_max_by_table=pk_max,
                 validate_mode="none", verbose=False,
             )
+            synthetic = bind_shared_key_children(synthetic, comp_specs)
             synthetic = null_orphan_fks(synthetic, comp_specs)
             for name, df in synthetic.items():
                 out_path = f"{save_base}/{name}"
