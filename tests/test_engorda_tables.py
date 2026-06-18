@@ -142,6 +142,34 @@ class TestConnectedComponents:
         assert self._comps(specs) == [["ORDERS"], ["OTHER"]]
 
 
+class TestTopoOrderTables:
+    def _pos(self, order):
+        return {t: i for i, t in enumerate(order)}
+
+    def test_parents_before_children(self):
+        specs = {
+            "ITEMS": {"pk_cols": ["IID"],
+                      "foreign_keys": [{"columns": ["OID"], "parent_table": "ORDERS"}]},
+            "ORDERS": {"pk_cols": ["OID"],
+                       "foreign_keys": [{"columns": ["CID"], "parent_table": "CUSTOMERS"}]},
+            "CUSTOMERS": {"pk_cols": ["CID"]},
+        }
+        pos = self._pos(engorda_tables.topo_order_tables(specs))
+        assert pos["CUSTOMERS"] < pos["ORDERS"] < pos["ITEMS"]
+
+    def test_self_reference_ignored(self):
+        specs = {"USUARIO": {"pk_cols": ["ID"],
+                             "foreign_keys": [{"columns": ["MGR"], "parent_table": "USUARIO"}]}}
+        assert engorda_tables.topo_order_tables(specs) == ["USUARIO"]
+
+    def test_cycle_is_broken_and_covers_all(self):
+        specs = {
+            "A": {"pk_cols": ["ID"], "foreign_keys": [{"columns": ["B"], "parent_table": "B"}]},
+            "B": {"pk_cols": ["ID"], "foreign_keys": [{"columns": ["A"], "parent_table": "A"}]},
+        }
+        assert sorted(engorda_tables.topo_order_tables(specs)) == ["A", "B"]
+
+
 class TestEffectiveNRows:
     SPECS = {
         "CUSTOMERS": {"pk_cols": ["CID"]},  # parent (referenced by ORDERS)
@@ -306,6 +334,8 @@ class TestEngordaLoop:
         monkeypatch.setattr(engorda_tables, "write_synthetic_table",
                             lambda spark, df, out_path: writes.append(out_path))
         monkeypatch.setattr(engorda_tables, "compute_pk_maxes", lambda *a, **k: {})
+        monkeypatch.setattr(engorda_tables, "null_orphan_fks",
+                            lambda synthetic, comp_specs: synthetic)
 
         def fake_run(tables, comp_specs, **kwargs):
             synth_calls.append((set(comp_specs), kwargs["n_rows_by_table"]))
@@ -344,25 +374,31 @@ class TestEngordaLoop:
             engorda_tables.engorda(spark=object(), config=self._config(), specs=specs,
                                    scale_factor=1.0, seed=42, continue_on_error=True)
 
-    def test_passes_limit_to_read_parquet(self, monkeypatch):
+    def test_limit_uses_referential_sample(self, monkeypatch):
         specs = {"A": {"pk_cols": ["ID"]}}
-        seen_limits = []
+        seen = {}
 
         class FakeDF:
             def count(self): return 3
 
-        monkeypatch.setattr(engorda_tables, "read_parquet",
-                            lambda spark, path, limit=None: seen_limits.append(limit) or FakeDF())
+        def _no_read(*a, **k):
+            raise AssertionError("read_parquet used despite --limit")
+
+        # plain read_parquet must NOT be used when --limit is set
+        monkeypatch.setattr(engorda_tables, "read_parquet", _no_read)
+        monkeypatch.setattr(engorda_tables, "referential_sample",
+                            lambda spark, config, comp_specs, limit:
+                                seen.update(limit=limit) or {t: FakeDF() for t in comp_specs})
         monkeypatch.setattr(engorda_tables, "release", lambda *dfs: None)
-        monkeypatch.setattr(engorda_tables, "write_synthetic_table",
-                            lambda spark, df, out_path: None)
+        monkeypatch.setattr(engorda_tables, "write_synthetic_table", lambda s, d, p: None)
         monkeypatch.setattr(engorda_tables, "compute_pk_maxes", lambda *a, **k: {})
+        monkeypatch.setattr(engorda_tables, "null_orphan_fks", lambda synthetic, cs: synthetic)
         monkeypatch.setattr(engorda_tables, "run_synthesis_from_tables",
                             lambda tables, comp_specs, **kwargs: {t: FakeDF() for t in comp_specs})
 
         engorda_tables.engorda(spark=object(), config=self._config(), specs=specs,
                                scale_factor=1.0, seed=42, continue_on_error=False, limit=500)
-        assert seen_limits == [500]
+        assert seen == {"limit": 500}
 
     def _run_capturing(self, monkeypatch, pk_offset, pk_maxes):
         seen = {}
@@ -375,6 +411,7 @@ class TestEngordaLoop:
         monkeypatch.setattr(engorda_tables, "release", lambda *dfs: None)
         monkeypatch.setattr(engorda_tables, "write_synthetic_table",
                             lambda spark, df, out_path: None)
+        monkeypatch.setattr(engorda_tables, "null_orphan_fks", lambda synthetic, cs: synthetic)
         monkeypatch.setattr(engorda_tables, "compute_pk_maxes",
                             lambda spark, config, comp_specs, floor=0, band=0:
                                 floors.append(floor) or pk_maxes)

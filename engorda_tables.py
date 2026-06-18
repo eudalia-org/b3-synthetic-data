@@ -2250,6 +2250,39 @@ def _fk_parent_tables(specs: dict) -> set[str]:
     return parents
 
 
+def _fk_list(cfg: dict) -> list[dict]:
+    fks = cfg.get("foreign_keys")
+    if not isinstance(fks, (list, tuple)):
+        fks = cfg.get("fks")
+    return [fk for fk in (fks or []) if isinstance(fk, dict)]
+
+
+def topo_order_tables(comp_specs: dict) -> list[str]:
+    """Order a component's tables so every parent comes before its children.
+
+    Used by referential sampling (sample parents first, then keep only children
+    whose FK lands in the sampled parents). Self-references are ignored; cycles
+    are broken arbitrarily so the function always returns every table once.
+    """
+    deps: dict[str, set[str]] = {t: set() for t in comp_specs}
+    for table, cfg in comp_specs.items():
+        for fk in _fk_list(cfg):
+            parent = fk.get("parent_table")
+            if parent in comp_specs and parent != table:
+                deps[table].add(parent)
+
+    order: list[str] = []
+    done: set[str] = set()
+    while len(done) < len(comp_specs):
+        ready = [t for t in comp_specs if t not in done and deps[t] <= done]
+        if not ready:  # cycle (e.g. mutual FKs) -> break it
+            ready = [t for t in comp_specs if t not in done]
+        for t in sorted(ready):
+            order.append(t)
+            done.add(t)
+    return order
+
+
 def effective_n_rows(
     specs: dict, source_counts: dict[str, int], scale_factor: float
 ) -> dict[str, int]:
@@ -2295,10 +2328,10 @@ def parse_arguments() -> argparse.Namespace:
                         help="Continue with remaining components after a failure, "
                              "then exit non-zero.")
     parser.add_argument("--limit", type=positive_int, default=None,
-                        help="Read at most this many rows from each raw table before "
-                             "synthesizing (input sampling for fast test runs). Omit for no limit. "
-                             "Note: sampling parent and child tables independently can drop some "
-                             "FK matches, which the synthesizer warns about and skips.")
+                        help="Sample at most this many rows per table for a fast test run. "
+                             "Sampling is referential (parents first, children kept only when "
+                             "their FK lands in a sampled parent), so FKs stay consistent — but "
+                             "child counts come out smaller than the limit. Omit for full data.")
     parser.add_argument("--pk-offset", type=positive_int, default=None,
                         help="Floor for synthetic PK starts. By default engorda reads each table's "
                              "TRUE max(pk) from the full Parquet and generates PKs as true_max+1, "
@@ -2359,6 +2392,75 @@ def compute_pk_maxes(spark, config, comp_specs, floor: int = 0, band: int = 0) -
             continue
         out[table] = max(true_max + band, floor)
     return out
+
+
+def referential_sample(spark, config, comp_specs, limit: int) -> dict:
+    """Parent-first referential sampling so a --limit run stays FK-consistent.
+
+    Walk the component parents-before-children: sample each table to `limit`,
+    but first keep only child rows whose FK lands in an already-sampled parent
+    (or is NULL). Independent per-table sampling would orphan FKs; this keeps
+    every kept child row's parent present, at the cost of smaller child counts.
+    """
+    order = topo_order_tables(comp_specs)
+    sampled: dict = {}
+    for table in order:
+        df = read_parquet(spark, raw_path(config, table))
+        for fk in _fk_list(comp_specs[table]):
+            parent = fk.get("parent_table")
+            cols = list(fk.get("columns") or [])
+            pcols = list(fk.get("parent_columns") or [])
+            if parent == table or parent not in sampled or not cols or len(cols) != len(pcols):
+                continue  # self-ref / out-of-component / malformed -> handled by null pass
+            keys = (sampled[parent]
+                    .select(*[F.col(pc).alias(f"__k{i}") for i, pc in enumerate(pcols)])
+                    .dropna().distinct())
+            cond = reduce(lambda a, b: a & b,
+                          [df[cols[i]] == keys[f"__k{i}"] for i in range(len(cols))])
+            joined = df.join(F.broadcast(keys), cond, "left")
+            all_fk_null = reduce(lambda a, b: a & b, [F.col(c).isNull() for c in cols])
+            df = (joined
+                  .where(F.col("__k0").isNotNull() | all_fk_null)
+                  .drop(*[f"__k{i}" for i in range(len(pcols))]))
+        sampled[table] = df.limit(limit).persist()
+    return sampled
+
+
+def null_orphan_fks(synthetic: dict, comp_specs: dict) -> dict:
+    """Set any FK value with no matching parent PK to NULL (nullable columns).
+
+    Catches references the synthesizer could not remap — self-references,
+    relationships it ignored (source orphans / parent absent), and residual
+    sampling orphans — so the load doesn't hit a parent-key-not-found violation.
+    Only safe for nullable FK columns; NOT NULL columns must be handled upstream.
+    """
+    for child, cfg in comp_specs.items():
+        child_df = synthetic.get(child)
+        if child_df is None:
+            continue
+        for fk in _fk_list(cfg):
+            parent = fk.get("parent_table")
+            parent_df = synthetic.get(parent)
+            cols = list(fk.get("columns") or [])
+            pcols = list(fk.get("parent_columns") or [])
+            if parent_df is None or not cols or len(cols) != len(pcols):
+                continue
+            keys = (parent_df
+                    .select(*[F.col(pc).alias(f"__pk{i}") for i, pc in enumerate(pcols)])
+                    .dropna().distinct()
+                    .withColumn("__match", F.lit(True)))
+            cond = reduce(lambda a, b: a & b,
+                          [child_df[cols[i]] == keys[f"__pk{i}"] for i in range(len(cols))])
+            joined = child_df.join(F.broadcast(keys), cond, "left")
+            any_fk_set = reduce(lambda a, b: a | b, [F.col(c).isNotNull() for c in cols])
+            is_orphan = F.col("__match").isNull() & any_fk_set
+            for c in cols:
+                joined = joined.withColumn(
+                    c, F.when(is_orphan, F.lit(None).cast(child_df.schema[c].dataType))
+                        .otherwise(F.col(c)))
+            child_df = joined.drop("__match", *[f"__pk{i}" for i in range(len(pcols))])
+        synthetic[child] = child_df
+    return synthetic
 
 
 def release(*dataframes) -> None:
@@ -2436,26 +2538,33 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
         synthetic = {}
         try:
             started = time.perf_counter()
-            comp_tables = {t: read_parquet(spark, raw_path(config, t), limit) for t in comp}
+            if limit is not None:
+                # Referential sampling: parent rows first, then keep only children
+                # whose FK lands in a sampled parent -> FK-consistent under --limit.
+                comp_tables = referential_sample(spark, config, comp_specs, limit)
+            else:
+                comp_tables = {t: read_parquet(spark, raw_path(config, t)) for t in comp}
             counts = {t: comp_tables[t].count() for t in comp}
             for t in comp:
                 if comp_specs[t].get("static") and comp_specs[t].get("n_rows") is not None:
                     logger.warning("Table %s is static; ignoring n_rows override", t)
             n_rows = effective_n_rows(comp_specs, counts, scale_factor)
             logger.info("[%d/%d] Component {%s}: n_rows=%s", index, total, label, n_rows)
-            # Synthesize only; engorda writes each table itself with a delete
-            # scoped to that table's prefix (Spark's overwrite clobbers siblings
-            # on the OCI connector by deleting the shared parent prefix).
             pk_max = compute_pk_maxes(spark, config, comp_specs,
                                       floor=(pk_offset or 0), band=(pk_safety_band or 0))
             if pk_max:
                 logger.info("[%d/%d] true PK max per table: %s", index, total, pk_max)
+            # Synthesize (validate_mode="none": we make FKs load-safe ourselves
+            # via null_orphan_fks instead of failing the whole component on an
+            # orphan), then write each table with a scoped delete (Spark's
+            # overwrite clobbers siblings on the OCI connector).
             synthetic = run_synthesis_from_tables(
                 comp_tables, comp_specs,
                 n_rows_by_table=n_rows, seed=seed,
                 pk_max_by_table=pk_max,
-                validate_mode="full", verbose=False,
+                validate_mode="none", verbose=False,
             )
+            synthetic = null_orphan_fks(synthetic, comp_specs)
             for name, df in synthetic.items():
                 out_path = f"{save_base}/{name}"
                 logger.info("[%d/%d] writing %s -> %s", index, total, name, out_path)
