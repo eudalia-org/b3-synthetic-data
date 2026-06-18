@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 
-import load_tables
+from datagen import load_tables
 
 
 class TestValidateIdentifier:

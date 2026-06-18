@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-import engorda_tables
+from datagen import engorda_tables
 
 
 def test_module_imports():
