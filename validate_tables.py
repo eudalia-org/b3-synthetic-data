@@ -101,3 +101,96 @@ def normalize_specs(specs: dict) -> dict:
                 fk["parent_table"] = table_path_name(str(fk["parent_table"]))
         out[table_path_name(str(raw_name))] = new_cfg
     return out
+
+
+def _sample(df, cols, limit=SAMPLE_LIMIT) -> list:
+    rows = df.select(*cols).limit(limit).collect()
+    return [row.asDict() for row in rows]
+
+
+def check_not_null(df, table, not_null_cols) -> list:
+    from pyspark.sql import functions as F
+    findings = []
+    for col in not_null_cols:
+        if col not in df.columns:
+            continue
+        bad = df.filter(F.col(col).isNull())
+        count = bad.count()
+        findings.append(Finding(table, "not_null", col, count,
+                                _sample(bad, [col]) if count else [], count == 0))
+    return findings
+
+
+def check_decimal_domain(df, table, col, precision, scale) -> Finding:
+    from pyspark.sql import functions as F
+    limit = decimal_max_abs(precision, scale)
+    bad = df.filter(F.col(col).isNotNull() & (F.abs(F.col(col)) > F.lit(limit)))
+    count = bad.count()
+    return Finding(table, "decimal_domain", col, count,
+                   _sample(bad, [col]) if count else [], count == 0)
+
+
+def check_varchar_domain(df, table, col, length) -> Finding:
+    from pyspark.sql import functions as F
+    bad = df.filter(F.col(col).isNotNull() & (F.length(F.col(col)) > F.lit(length)))
+    count = bad.count()
+    return Finding(table, "varchar_domain", col, count,
+                   _sample(bad, [col]) if count else [], count == 0)
+
+
+def check_pk(synth_df, raw_df, table, pk_cols) -> list:
+    """PK not-null + internal uniqueness + no collision with existing (raw) keys."""
+    from pyspark.sql import functions as F
+    findings = []
+    # not-null: any pk column null
+    null_cond = None
+    for col in pk_cols:
+        c = F.col(col).isNull()
+        null_cond = c if null_cond is None else (null_cond | c)
+    bad_null = synth_df.filter(null_cond)
+    n_null = bad_null.count()
+    findings.append(Finding(table, "pk_not_null", ",".join(pk_cols), n_null,
+                            _sample(bad_null, pk_cols) if n_null else [], n_null == 0))
+    # internal uniqueness
+    dups = (synth_df.groupBy(*pk_cols).count().filter(F.col("count") > 1))
+    n_dup = dups.count()
+    findings.append(Finding(table, "pk_unique", ",".join(pk_cols), n_dup,
+                            _sample(dups, pk_cols) if n_dup else [], n_dup == 0))
+    # collision with existing real keys (raw)
+    if raw_df is not None:
+        synth_keys = synth_df.select(*pk_cols).distinct()
+        raw_keys = raw_df.select(*pk_cols).distinct()
+        collide = synth_keys.join(raw_keys, on=list(pk_cols), how="inner")
+        n_col = collide.count()
+        findings.append(Finding(table, "pk_collision", ",".join(pk_cols), n_col,
+                                _sample(collide, pk_cols) if n_col else [], n_col == 0))
+    return findings
+
+
+def check_fk(child_df, parent_universe_df, table, child_cols, parent_cols, label) -> Finding:
+    """Non-null child FK tuples must exist in (raw union synthetic) parent keys."""
+    from pyspark.sql import functions as F
+    cond = None
+    for col in child_cols:  # only rows where every FK col is non-null are enforced
+        c = F.col(col).isNotNull()
+        cond = c if cond is None else (cond & c)
+    child = child_df.filter(cond).select(*child_cols).distinct()
+    parent = parent_universe_df.select(
+        *[F.col(p).alias(c) for p, c in zip(parent_cols, child_cols)]).distinct()
+    orphans = child.join(parent, on=list(child_cols), how="left_anti")
+    count = orphans.count()
+    return Finding(table, "fk", label, count,
+                   _sample(orphans, list(child_cols)) if count else [], count == 0)
+
+
+def check_unique(df, table, cols) -> Finding:
+    """Duplicate non-null unique tuples (Oracle ignores rows with any null)."""
+    from pyspark.sql import functions as F
+    cond = None
+    for col in cols:
+        c = F.col(col).isNotNull()
+        cond = c if cond is None else (cond & c)
+    dups = df.filter(cond).groupBy(*cols).count().filter(F.col("count") > 1)
+    count = dups.count()
+    return Finding(table, "unique", ",".join(cols), count,
+                   _sample(dups, list(cols)) if count else [], count == 0)

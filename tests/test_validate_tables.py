@@ -1,8 +1,22 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import validate_tables as vt  # noqa: E402
+
+
+@pytest.mark.skip(reason="requires Spark (JDK 17-21); runs on OCI Data Flow")
+class TestChecksIntegration:
+    def test_checks_against_small_frames(self, spark):
+        # not_null: a null in a NOT NULL column is one violation
+        # decimal_domain: value >= 10**(p-s) is a violation
+        # varchar_domain: len(str) > char_length is a violation
+        # pk_unique: duplicate pk rows are violations; pk_collision: synth pk in raw
+        # fk: child FK not in (raw union synthetic) parent pk is a violation
+        # unique: duplicate non-null unique tuples are violations
+        ...
 
 
 class TestReport:
