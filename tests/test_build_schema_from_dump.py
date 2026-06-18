@@ -27,3 +27,19 @@ class TestParseColumnsCsv:
         # TABLE_NAME; owner-stripping is deferred to build_schema (Task 2).
         assert rows[0]["COLUMN_NAME"] == "NUM_CONDICAO_IF"
         assert rows[0]["NULLABLE"] == "N"
+
+
+class TestBuildSchemaColumns:
+    def test_columns_typed_and_table_stripped(self):
+        col_rows = [
+            {"TABLE_NAME": "CETIP.T", "COLUMN_NAME": "ID", "DATA_TYPE": "NUMBER",
+             "DATA_PRECISION": "38", "DATA_SCALE": "0", "CHAR_LENGTH": "0", "NULLABLE": "N"},
+            {"TABLE_NAME": "CETIP.T", "COLUMN_NAME": "NAME", "DATA_TYPE": "VARCHAR2",
+             "DATA_PRECISION": "", "DATA_SCALE": "", "CHAR_LENGTH": "20", "NULLABLE": "Y"},
+        ]
+        schema = bsd.build_schema(col_rows, constraint_rows=[])
+        assert set(schema.keys()) == {"T"}
+        cols = schema["T"]["columns"]
+        assert cols["ID"] == {"type": "NUMBER", "precision": 38, "scale": 0, "nullable": False}
+        assert cols["NAME"] == {"type": "VARCHAR2", "length": 20, "nullable": True}
+        assert "precision" not in cols["NAME"]  # VARCHAR carries length, not precision
