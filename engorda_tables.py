@@ -2371,7 +2371,29 @@ def _read_pk_max(spark, path: str, pk_col: str):
     return row[0] if row is not None else None
 
 
-def compute_pk_maxes(spark, config, comp_specs, floor: int = 0, band: int = 0) -> dict[str, int]:
+def _pk_capacity(spark, path: str, pk_col: str):
+    """Largest integer the PK column's type can hold (None for string/unknown)."""
+    dt = read_parquet(spark, path).schema[pk_col].dataType
+    if isinstance(dt, T.DecimalType):
+        int_digits = dt.precision - dt.scale
+        return (10 ** int_digits) - 1 if int_digits > 0 else 0
+    if isinstance(dt, T.ByteType):
+        return 127
+    if isinstance(dt, T.ShortType):
+        return 32_767
+    if isinstance(dt, T.IntegerType):
+        return 2**31 - 1
+    if isinstance(dt, T.LongType):
+        return 2**63 - 1
+    if isinstance(dt, T.DoubleType):
+        return 2**53
+    if isinstance(dt, T.FloatType):
+        return 2**24
+    return None
+
+
+def compute_pk_maxes(spark, config, comp_specs, floor: int = 0, band: int = 0,
+                     n_rows: dict | None = None) -> dict[str, int]:
     """Per-table starting max for synthetic PKs, read from the FULL Parquet.
 
     For each non-static numeric-PK table the start is ``max(true_max + band, floor)``:
@@ -2382,10 +2404,15 @@ def compute_pk_maxes(spark, config, comp_specs, floor: int = 0, band: int = 0) -
         table to grow between this read and the load without colliding;
       - ``floor`` = absolute minimum (the --pk-offset reserved band).
 
-    The synthesizer then generates PKs as start + 1, +2, ... for that table.
+    The band/floor are then CLAMPED to the PK column's domain so a tight type
+    (e.g. Decimal(3,0), max 999) can't overflow: start is capped at
+    ``capacity - n_rows`` (and never below true_max). A table whose own growth
+    already exceeds its PK domain is warned about (mark it static / scale down).
+
     Tables that are static, PK-less, or whose max is unreadable/non-numeric are
     omitted; the synthesizer falls back to append_after_max on the data.
     """
+    n_rows = n_rows or {}
     out: dict[str, int] = {}
     for table, cfg in comp_specs.items():
         if cfg.get("static"):
@@ -2397,12 +2424,25 @@ def compute_pk_maxes(spark, config, comp_specs, floor: int = 0, band: int = 0) -
         try:
             raw_max = _read_pk_max(spark, raw_path(config, table), pk_col)
             true_max = int(raw_max) if raw_max is not None else None
+            cap = _pk_capacity(spark, raw_path(config, table), pk_col)
         except Exception as exc:
             logger.warning("Could not read max(%s) for %s: %s", pk_col, table, exc)
-            true_max = None
+            true_max, cap = None, None
         if true_max is None:
             continue
-        out[table] = max(true_max + band, floor)
+        start = max(true_max + band, floor)
+        if cap is not None:
+            headroom = cap - int(n_rows.get(table, 0))  # max start so start + n_rows <= cap
+            if headroom < true_max:
+                logger.warning(
+                    "Table %s: PK domain (max %d) cannot hold %s new row(s) above %d; "
+                    "mark it static or reduce scale.",
+                    table, cap, n_rows.get(table, 0), true_max)
+            elif start > headroom:
+                logger.info("Table %s: clamping synthetic PK start %d -> %d to fit PK domain (%d)",
+                            table, start, headroom, cap)
+            start = max(true_max, min(start, headroom))
+        out[table] = start
     return out
 
 
@@ -2605,7 +2645,8 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
             n_rows = effective_n_rows(comp_specs, counts, scale_factor)
             logger.info("[%d/%d] Component {%s}: n_rows=%s", index, total, label, n_rows)
             pk_max = compute_pk_maxes(spark, config, comp_specs,
-                                      floor=(pk_offset or 0), band=(pk_safety_band or 0))
+                                      floor=(pk_offset or 0), band=(pk_safety_band or 0),
+                                      n_rows=n_rows)
             if pk_max:
                 logger.info("[%d/%d] true PK max per table: %s", index, total, pk_max)
             # Synthesize (validate_mode="none": we make FKs load-safe ourselves

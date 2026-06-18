@@ -437,7 +437,7 @@ class TestEngordaLoop:
                             lambda synthetic, cs: synthetic)
         monkeypatch.setattr(engorda_tables, "null_orphan_fks", lambda synthetic, cs: synthetic)
         monkeypatch.setattr(engorda_tables, "compute_pk_maxes",
-                            lambda spark, config, comp_specs, floor=0, band=0:
+                            lambda spark, config, comp_specs, floor=0, band=0, n_rows=None:
                                 floors.append(floor) or pk_maxes)
 
         def fake_run(tables, comp_specs, **kwargs):
@@ -461,6 +461,21 @@ class TestEngordaLoop:
 
 class TestComputePkMaxes:
     CONFIG = {"DATAGEN_RAW_BASE_URI": "oci://raw@ns", "DATAGEN_RAW_PREFIX": ""}
+
+    @pytest.fixture(autouse=True)
+    def _no_clamp(self, monkeypatch):
+        # default: unlimited PK domain (no clamp). Clamp test overrides this.
+        monkeypatch.setattr(engorda_tables, "_pk_capacity", lambda s, p, c: None)
+
+    def test_clamps_band_to_pk_domain(self, monkeypatch):
+        specs = {"M": {"pk_cols": ["NUM_ID_MODALIDADE_LIQUIDACAO"]}}
+        monkeypatch.setattr(engorda_tables, "_read_pk_max", lambda s, p, c: 26)
+        monkeypatch.setattr(engorda_tables, "_pk_capacity", lambda s, p, c: 999)  # Decimal(3,0)
+        # band would push start to 1_000_026; clamp to capacity - n_rows
+        out = engorda_tables.compute_pk_maxes(object(), self.CONFIG, specs,
+                                              band=1_000_000, n_rows={"M": 10})
+        assert out == {"M": 989}            # 999 - 10, so 989 + 10 <= 999
+        assert out["M"] >= 26               # never below true_max
 
     def test_skips_static_floors_and_uses_last_pk(self, monkeypatch):
         specs = {
