@@ -48,32 +48,16 @@ def parse_columns_csv(path: str) -> list[dict]:
     return rows
 
 
-def _emit(schema: dict) -> dict:
-    out: dict = {}
-    for table in sorted(schema):
-        entry: dict = {"columns": schema[table]["columns"]}
-        if schema[table].get("unique"):
-            entry["unique"] = schema[table]["unique"]
-        out[table] = entry
-    return out
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Generate schema.json from Oracle column + constraint dumps.")
-    parser.add_argument("--columns", required=True, help="CSV from extract_schema.sql")
-    parser.add_argument("--constraints", required=True,
-                        help="CSV from extract_constraints.sql (U rows reused)")
-    parser.add_argument("--out", default="schema.json", help="Output schema.json path")
-    args = parser.parse_args()
-
-    column_rows = parse_columns_csv(args.columns)
-    constraint_rows = parse_constraints_csv(args.constraints)
-    schema = _emit(build_schema(column_rows, constraint_rows))
-    with open(args.out, "w") as handle:
-        json.dump(schema, handle, indent=2, ensure_ascii=False)
-    n_unique = sum(1 for v in schema.values() if v.get("unique"))
-    print(f"Wrote {args.out}: {len(schema)} tables, {n_unique} with UNIQUE keys.")
+def parse_constraints_csv(path: str) -> list[dict]:
+    """Read the constraint dump (reused from extract_constraints.sql)."""
+    rows: list[dict] = []
+    with open(path, newline="") as handle:
+        for raw in csv.DictReader(handle):
+            row = _norm_row(raw)
+            if not row.get("CONSTRAINT_NAME") or not row.get("COLUMN_NAME"):
+                continue
+            rows.append(row)
+    return rows
 
 
 def _table_name(raw: str) -> str:
@@ -134,15 +118,32 @@ def build_schema(column_rows: list[dict], constraint_rows: list[dict]) -> dict:
     return schema
 
 
-def parse_constraints_csv(path: str) -> list[dict]:
-    rows: list[dict] = []
-    with open(path, newline="") as handle:
-        for raw in csv.DictReader(handle):
-            row = _norm_row(raw)
-            if not row.get("CONSTRAINT_NAME") or not row.get("COLUMN_NAME"):
-                continue
-            rows.append(row)
-    return rows
+def _emit(schema: dict) -> dict:
+    out: dict = {}
+    for table in sorted(schema):
+        entry: dict = {"columns": schema[table]["columns"]}
+        if schema[table].get("unique"):
+            entry["unique"] = schema[table]["unique"]
+        out[table] = entry
+    return out
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Generate schema.json from Oracle column + constraint dumps.")
+    parser.add_argument("--columns", required=True, help="CSV from extract_schema.sql")
+    parser.add_argument("--constraints", required=True,
+                        help="CSV from extract_constraints.sql (U rows reused)")
+    parser.add_argument("--out", default="schema.json", help="Output schema.json path")
+    args = parser.parse_args()
+
+    column_rows = parse_columns_csv(args.columns)
+    constraint_rows = parse_constraints_csv(args.constraints)
+    schema = _emit(build_schema(column_rows, constraint_rows))
+    with open(args.out, "w") as handle:
+        json.dump(schema, handle, indent=2, ensure_ascii=False)
+    n_unique = sum(1 for v in schema.values() if v.get("unique"))
+    print(f"Wrote {args.out}: {len(schema)} tables, {n_unique} with UNIQUE keys.")
 
 
 if __name__ == "__main__":
