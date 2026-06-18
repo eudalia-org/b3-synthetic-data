@@ -234,6 +234,30 @@ class TestGuardApplies:
         assert load_tables.guard_applies([], True) is False
 
 
+class TestNormalizePkBound:
+    def test_collapses_integral_decimal(self):
+        # The NUM_ID_LANCAMENTO case: Decimal scale on an integer ID.
+        result = load_tables.normalize_pk_bound(Decimal("8044070030.000000000"))
+        assert result == 8044070030
+        assert isinstance(result, int)
+
+    def test_collapses_integral_float(self):
+        assert load_tables.normalize_pk_bound(8044070030.0) == 8044070030
+        assert isinstance(load_tables.normalize_pk_bound(8044070030.0), int)
+
+    def test_keeps_fractional_values(self):
+        assert load_tables.normalize_pk_bound(Decimal("1.5")) == Decimal("1.5")
+
+    def test_passes_int_through(self):
+        assert load_tables.normalize_pk_bound(42) == 42
+
+    def test_normalized_bound_builds_integer_sql(self):
+        lo = load_tables.normalize_pk_bound(Decimal("8044070030.000000000"))
+        q = load_tables.build_existing_keys_query("ADMIN", "LANCAMENTO", "NUM_ID", lo, lo)
+        assert "BETWEEN 8044070030 AND 8044070030" in q
+        assert ".000000000" not in q
+
+
 class TestBuildExistingKeysQuery:
     def test_builds_bounded_subquery(self):
         q = load_tables.build_existing_keys_query("ADMIN", "LANCAMENTO", "NUM_ID", 10, 99)

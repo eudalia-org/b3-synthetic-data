@@ -225,6 +225,25 @@ def guard_applies(pk_cols: list[str], pk_is_numeric: bool) -> bool:
     return len(pk_cols) == 1 and pk_is_numeric
 
 
+def normalize_pk_bound(value):
+    """Integer-format an integral PK bound.
+
+    Synthetic (and source) ID columns can carry a Decimal scale, e.g.
+    Decimal('8044070030.000000000'). Spark's JDBC numeric partitioning parses
+    lowerBound/upperBound with the column's integral type, so a fractional
+    string like "8044070030.000000000" raises NumberFormatException. IDs are
+    whole numbers, so collapse integral Decimal/float bounds to int; leave
+    genuinely fractional values untouched.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else value
+    return value
+
+
 def build_existing_keys_query(
     owner: str, table_name: str, pk_col: str, lo, hi
 ) -> str:
@@ -335,6 +354,9 @@ def apply_pk_guard(
     lo, hi = bounds[0], bounds[1]
     if lo is None:  # empty DataFrame
         return df, 0
+    # Collapse integral Decimal/float bounds to int so Spark's JDBC partition
+    # bounds don't choke on a fractional string (NumberFormatException).
+    lo, hi = normalize_pk_bound(lo), normalize_pk_bound(hi)
 
     existing = read_existing_keys(
         spark, properties, resolve_num_partitions(config),
