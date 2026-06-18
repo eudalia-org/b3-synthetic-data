@@ -277,7 +277,8 @@
   "MALOTE": {
     "pk_cols": [
       "NUM_ID_MALOTE"
-    ]
+    ],
+    "static": true
   },
   "CONTA_PARTICIPANTE": {
     "pk_cols": [
