@@ -220,6 +220,10 @@ def topo_sort_for_load(specs: dict, tables: list[str]) -> list[str]:
     table that isn't being loaded (e.g. a static/code parent) imposes no
     constraint. Self-references are ignored; a dependency cycle is broken by
     emitting the rest in input order, so every input table is returned once.
+
+    Assumes ``tables`` is already de-duplicated (the callers — ``parse_tables``
+    and the unique ``specs`` keys — guarantee this); two strings normalizing to
+    the same table would otherwise both be emitted.
     """
     norm = {t: table_path_name(t).upper() for t in tables}
     present = set(norm.values())
