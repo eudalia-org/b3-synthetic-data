@@ -194,3 +194,106 @@ def check_unique(df, table, cols) -> Finding:
     count = dups.count()
     return Finding(table, "unique", ",".join(cols), count,
                    _sample(dups, list(cols)) if count else [], count == 0)
+
+
+def plan_checks(specs: dict, schema: dict, tables=None) -> list:
+    """Per-table check plan (pure). FK universe = parent table key columns."""
+    chosen = set(tables) if tables else set(schema)
+    plan = []
+    for table in sorted(t for t in schema if t in chosen):
+        cols = schema[table].get("columns", {})
+        not_null = [c for c, meta in cols.items() if not meta.get("nullable", True)]
+        decimals = [(c, m["precision"], m.get("scale", 0))
+                    for c, m in cols.items() if "precision" in m]
+        varchars = [(c, m["length"]) for c, m in cols.items() if "length" in m]
+        spec = specs.get(table, {})
+        plan.append({
+            "table": table,
+            "pk_cols": spec.get("pk_cols") or [],
+            "not_null": sorted(not_null),
+            "decimals": decimals,
+            "varchars": varchars,
+            "unique": schema[table].get("unique", []),
+            "fks": [fk for fk in (spec.get("foreign_keys") or []) if isinstance(fk, dict)],
+        })
+    return plan
+
+
+def _raw_path(raw_base: str, table: str) -> str:
+    return f"{raw_base}/{table}"
+
+
+def _synth_path(synth_base: str, table: str) -> str:
+    return f"{synth_base}/{table}"
+
+
+def _read_parquet_opt(spark, path):
+    """Read a parquet path; return None if it doesn't exist (e.g. static parent
+    not in synthetic output)."""
+    try:
+        return spark.read.parquet(path)
+    except Exception:  # AnalysisException: path does not exist
+        return None
+
+
+def validate(spark, specs, schema, raw_base, synth_base, tables=None) -> Report:
+    specs = normalize_specs(specs)
+    schema = normalize_schema(schema)
+    plan = plan_checks(specs, schema, tables)
+    findings = []
+    for item in plan:
+        table = item["table"]
+        synth = _read_parquet_opt(spark, _synth_path(synth_base, table))
+        if synth is None:
+            logger.warning("No synthetic parquet for %s; skipping", table)
+            continue
+        raw = _read_parquet_opt(spark, _raw_path(raw_base, table))
+        # column/domain checks
+        present = set(synth.columns)
+        findings += check_not_null(synth, table,
+                                   [c for c in item["not_null"] if c in present])
+        for col, p, s in item["decimals"]:
+            if col in present:
+                findings.append(check_decimal_domain(synth, table, col, p, s))
+        for col, length in item["varchars"]:
+            if col in present:
+                findings.append(check_varchar_domain(synth, table, col, length))
+        # pk
+        if item["pk_cols"] and all(c in present for c in item["pk_cols"]):
+            findings += check_pk(synth, raw, table, item["pk_cols"])
+        # unique
+        for cols in item["unique"]:
+            if all(c in present for c in cols):
+                findings.append(check_unique(synth, table, cols))
+        # fk: universe = raw(parent) union synthetic(parent)
+        for fk in item["fks"]:
+            parent = fk.get("parent_table")
+            child_cols, parent_cols = fk.get("columns"), fk.get("parent_columns")
+            if not (parent and child_cols and parent_cols):
+                continue
+            if not all(c in present for c in child_cols):
+                continue
+            universe = _parent_universe(spark, raw_base, synth_base, parent, parent_cols)
+            if universe is None:
+                logger.warning("No parent data for %s.%s -> %s; skipping FK",
+                               table, child_cols, parent)
+                continue
+            label = f"{','.join(child_cols)}->{parent}"
+            findings.append(check_fk(synth, universe, table,
+                                     child_cols, parent_cols, label))
+    return Report(findings=findings)
+
+
+def _parent_universe(spark, raw_base, synth_base, parent, parent_cols):
+    """Union of parent key columns across raw (existing) and synthetic (incoming)."""
+    frames = []
+    for base in (_raw_path(raw_base, parent), _synth_path(synth_base, parent)):
+        df = _read_parquet_opt(spark, base)
+        if df is not None and all(c in df.columns for c in parent_cols):
+            frames.append(df.select(*parent_cols))
+    if not frames:
+        return None
+    universe = frames[0]
+    for extra in frames[1:]:
+        universe = universe.unionByName(extra)
+    return universe

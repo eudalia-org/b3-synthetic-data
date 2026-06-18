@@ -75,3 +75,35 @@ class TestPureHelpers:
         out = vt.normalize_specs(specs)
         assert "CHILD" in out
         assert out["CHILD"]["foreign_keys"][0]["parent_table"] == "PARENT"
+
+
+class TestPlanChecks:
+    def test_lists_checks_and_fk_parents(self):
+        specs = {
+            "PARENT": {"pk_cols": ["ID"]},
+            "CHILD": {"pk_cols": ["CID"], "foreign_keys": [
+                {"columns": ["PID"], "parent_table": "PARENT", "parent_columns": ["ID"]}]},
+        }
+        schema = {
+            "PARENT": {"columns": {"ID": {"type": "NUMBER", "precision": 5,
+                                          "scale": 0, "nullable": False}}},
+            "CHILD": {"columns": {"CID": {"type": "NUMBER", "precision": 5,
+                                          "scale": 0, "nullable": False},
+                                  "PID": {"type": "NUMBER", "precision": 5,
+                                          "scale": 0, "nullable": True}},
+                      "unique": [["PID"]]},
+        }
+        plan = vt.plan_checks(specs, schema, tables=None)
+        child = next(p for p in plan if p["table"] == "CHILD")
+        assert child["not_null"] == ["CID"]          # PID nullable -> not enforced
+        assert ["PID"] in child["unique"]
+        assert child["fks"][0]["parent_table"] == "PARENT"
+
+    def test_tables_subset_filters(self):
+        specs = {"A": {"pk_cols": ["X"]}, "B": {"pk_cols": ["Y"]}}
+        schema = {"A": {"columns": {"X": {"type": "NUMBER", "precision": 5,
+                                          "scale": 0, "nullable": False}}},
+                  "B": {"columns": {"Y": {"type": "NUMBER", "precision": 5,
+                                          "scale": 0, "nullable": False}}}}
+        plan = vt.plan_checks(specs, schema, tables=["A"])
+        assert {p["table"] for p in plan} == {"A"}
