@@ -40,3 +40,24 @@ class TestReport:
         text = vt.render_summary(report)
         assert text.index("B") < text.index("A")  # violations first
         assert "5" in text
+
+
+class TestPureHelpers:
+    def test_decimal_max_abs(self):
+        assert vt.decimal_max_abs(3, 0) == 999
+        assert vt.decimal_max_abs(5, 2) == 999      # 3 integer digits
+        assert vt.decimal_max_abs(2, 0) == 99
+        assert vt.decimal_max_abs(1, 1) == 0        # no integer digits
+
+    def test_normalize_schema_strips_owner(self):
+        schema = {"CETIP.T": {"columns": {"A": {"type": "NUMBER", "nullable": False}}}}
+        out = vt.normalize_schema(schema)
+        assert "T" in out and "CETIP.T" not in out
+
+    def test_normalize_specs_strips_owner_and_parent(self):
+        specs = {"CETIP.CHILD": {"pk_cols": ["ID"], "foreign_keys": [
+            {"columns": ["PID"], "parent_table": "CETIP.PARENT",
+             "parent_columns": ["ID"]}]}}
+        out = vt.normalize_specs(specs)
+        assert "CHILD" in out
+        assert out["CHILD"]["foreign_keys"][0]["parent_table"] == "PARENT"

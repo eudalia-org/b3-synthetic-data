@@ -10,6 +10,7 @@ Design: docs/plans/2026-06-18-validate-tables-design.md
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import logging
 import os
@@ -75,3 +76,28 @@ def render_summary(report: Report) -> str:
         lines.append(f"  [{mark}] {f.table}.{f.check}({f.target}) "
                      f"-> {f.violation_count} bad")
     return "\n".join(lines)
+
+
+def table_path_name(table: str) -> str:
+    return table.split(".", 1)[1] if "." in table else table
+
+
+def decimal_max_abs(precision: int, scale: int) -> int:
+    """Largest absolute value a Decimal(precision, scale) can hold (int part)."""
+    int_digits = precision - scale
+    return (10 ** int_digits) - 1 if int_digits > 0 else 0
+
+
+def normalize_schema(schema: dict) -> dict:
+    return {table_path_name(str(name)): cfg for name, cfg in schema.items()}
+
+
+def normalize_specs(specs: dict) -> dict:
+    out: dict = {}
+    for raw_name, cfg in specs.items():
+        new_cfg = copy.deepcopy(dict(cfg))
+        for fk in new_cfg.get("foreign_keys") or []:
+            if isinstance(fk, dict) and fk.get("parent_table"):
+                fk["parent_table"] = table_path_name(str(fk["parent_table"]))
+        out[table_path_name(str(raw_name))] = new_cfg
+    return out
