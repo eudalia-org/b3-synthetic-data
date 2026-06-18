@@ -57,11 +57,14 @@ class TestReport:
 
 
 class TestPureHelpers:
-    def test_decimal_max_abs(self):
-        assert vt.decimal_max_abs(3, 0) == 999
-        assert vt.decimal_max_abs(5, 2) == 999      # 3 integer digits
-        assert vt.decimal_max_abs(2, 0) == 99
-        assert vt.decimal_max_abs(1, 1) == 0        # no integer digits
+    def test_decimal_overflow_threshold(self):
+        # A value is invalid iff abs(value) >= 10**(precision - scale).
+        assert vt.decimal_overflow_threshold(3, 0) == 1000   # Decimal(3,0): max 999
+        # Decimal(5,2): max 999.99 -> 999.99 < 1000 must NOT be flagged.
+        assert vt.decimal_overflow_threshold(5, 2) == 1000
+        assert vt.decimal_overflow_threshold(2, 0) == 100
+        # Decimal(2,2): max 0.99 -> any abs >= 1 overflows the integer part.
+        assert vt.decimal_overflow_threshold(2, 2) == 1
 
     def test_normalize_schema_strips_owner(self):
         schema = {"CETIP.T": {"columns": {"A": {"type": "NUMBER", "nullable": False}}}}
@@ -75,6 +78,18 @@ class TestPureHelpers:
         out = vt.normalize_specs(specs)
         assert "CHILD" in out
         assert out["CHILD"]["foreign_keys"][0]["parent_table"] == "PARENT"
+
+    def test_normalize_specs_handles_fks_alias(self):
+        specs = {"CETIP.CHILD": {"pk_cols": ["ID"], "fks": [
+            {"columns": ["PID"], "parent_table": "CETIP.PARENT",
+             "parent_columns": ["ID"]}]}}
+        out = vt.normalize_specs(specs)
+        assert out["CHILD"]["fks"][0]["parent_table"] == "PARENT"
+
+    def test_normalize_specs_raises_on_key_collision(self):
+        specs = {"CETIP.T": {"pk_cols": ["A"]}, "OTHER.T": {"pk_cols": ["B"]}}
+        with pytest.raises(ValueError):
+            vt.normalize_specs(specs)
 
 
 class TestPlanChecks:
@@ -98,6 +113,14 @@ class TestPlanChecks:
         assert child["not_null"] == ["CID"]          # PID nullable -> not enforced
         assert ["PID"] in child["unique"]
         assert child["fks"][0]["parent_table"] == "PARENT"
+
+    def test_reads_fks_alias(self):
+        specs = {"CHILD": {"pk_cols": ["CID"], "fks": [
+            {"columns": ["PID"], "parent_table": "PARENT", "parent_columns": ["ID"]}]}}
+        schema = {"CHILD": {"columns": {"CID": {"type": "NUMBER", "precision": 5,
+                                                "scale": 0, "nullable": False}}}}
+        plan = vt.plan_checks(specs, schema)
+        assert plan[0]["fks"][0]["parent_table"] == "PARENT"
 
     def test_tables_subset_filters(self):
         specs = {"A": {"pk_cols": ["X"]}, "B": {"pk_cols": ["Y"]}}

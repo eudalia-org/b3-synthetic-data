@@ -32,7 +32,8 @@ SAMPLE_LIMIT = 10  # offending rows captured per finding
 @dataclass
 class Finding:
     table: str
-    check: str            # not_null | decimal_domain | varchar_domain | pk_unique | pk_collision | fk | unique
+    check: str            # not_null | decimal_domain | varchar_domain | pk_not_null
+                          # | pk_unique | pk_collision | fk | unique
     target: str           # column or constraint label
     violation_count: int
     sample: list
@@ -82,10 +83,25 @@ def table_path_name(table: str) -> str:
     return table.split(".", 1)[1] if "." in table else table
 
 
-def decimal_max_abs(precision: int, scale: int) -> int:
-    """Largest absolute value a Decimal(precision, scale) can hold (int part)."""
-    int_digits = precision - scale
-    return (10 ** int_digits) - 1 if int_digits > 0 else 0
+def decimal_overflow_threshold(precision: int, scale: int) -> int:
+    """Smallest absolute value that OVERFLOWS Decimal(precision, scale).
+
+    A value is invalid iff ``abs(value) >= 10**(precision - scale)``. This is
+    the design's domain rule and matches Oracle's integer-digit limit: Oracle
+    ROUNDS excess scale rather than rejecting it, so only the integer part can
+    overflow. E.g. Decimal(5,2) holds up to 999.99, so the threshold is 1000
+    and 999.99 is accepted.
+    """
+    int_digits = max(precision - scale, 0)
+    return 10 ** int_digits
+
+
+def _fk_list(cfg: dict) -> list:
+    """A spec's foreign keys, accepting either the `foreign_keys` or `fks` key."""
+    fks = cfg.get("foreign_keys")
+    if not isinstance(fks, (list, tuple)):
+        fks = cfg.get("fks")
+    return [fk for fk in (fks or []) if isinstance(fk, dict)]
 
 
 def normalize_schema(schema: dict) -> dict:
@@ -95,11 +111,21 @@ def normalize_schema(schema: dict) -> dict:
 def normalize_specs(specs: dict) -> dict:
     out: dict = {}
     for raw_name, cfg in specs.items():
+        name = table_path_name(str(raw_name))
+        if name in out:
+            raise ValueError(
+                f"Spec key collision after schema stripping: `{raw_name}` reduces "
+                f"to `{name}`, which is already present."
+            )
         new_cfg = copy.deepcopy(dict(cfg))
-        for fk in new_cfg.get("foreign_keys") or []:
-            if isinstance(fk, dict) and fk.get("parent_table"):
-                fk["parent_table"] = table_path_name(str(fk["parent_table"]))
-        out[table_path_name(str(raw_name))] = new_cfg
+        for fk_key in ("foreign_keys", "fks"):
+            fks = new_cfg.get(fk_key)
+            if not isinstance(fks, (list, tuple)):
+                continue
+            for fk in fks:
+                if isinstance(fk, dict) and fk.get("parent_table"):
+                    fk["parent_table"] = table_path_name(str(fk["parent_table"]))
+        out[name] = new_cfg
     return out
 
 
@@ -123,8 +149,8 @@ def check_not_null(df, table, not_null_cols) -> list:
 
 def check_decimal_domain(df, table, col, precision, scale) -> Finding:
     from pyspark.sql import functions as F
-    limit = decimal_max_abs(precision, scale)
-    bad = df.filter(F.col(col).isNotNull() & (F.abs(F.col(col)) > F.lit(limit)))
+    threshold = decimal_overflow_threshold(precision, scale)
+    bad = df.filter(F.col(col).isNotNull() & (F.abs(F.col(col)) >= F.lit(threshold)))
     count = bad.count()
     return Finding(table, "decimal_domain", col, count,
                    _sample(bad, [col]) if count else [], count == 0)
@@ -214,7 +240,7 @@ def plan_checks(specs: dict, schema: dict, tables=None) -> list:
             "decimals": decimals,
             "varchars": varchars,
             "unique": schema[table].get("unique", []),
-            "fks": [fk for fk in (spec.get("foreign_keys") or []) if isinstance(fk, dict)],
+            "fks": [fk for fk in _fk_list(spec) if isinstance(fk, dict)],
         })
     return plan
 
