@@ -1,0 +1,413 @@
+"""Offline DB-constraint validator for engorda's synthetic Parquet.
+
+Checks the synthetic output against the same constraints Oracle enforces (PK,
+FK, UNIQUE, NOT NULL, datatype precision/scale) WITHOUT running a load. The
+core `validate(spark, ...) -> Report` is importable from a Data Science
+notebook (pass your own SparkSession); `main()` is the Data Flow CLI wrapper.
+
+Design: docs/plans/2026-06-18-validate-tables-design.md
+"""
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import logging
+import os
+import sys
+from dataclasses import dataclass, field
+
+logger = logging.getLogger("validate_tables")
+
+REQUIRED_ENV_VARS = (
+    "DATAGEN_RAW_BASE_URI",
+    "DATAGEN_SYNTHETIC_BASE_URI",
+    "DATAGEN_SPECS_URI",
+    "DATAGEN_SCHEMA_URI",
+)
+
+SAMPLE_LIMIT = 10  # offending rows captured per finding
+
+
+@dataclass
+class Finding:
+    table: str
+    check: str            # not_null | decimal_domain | varchar_domain | pk_not_null
+                          # | pk_unique | pk_collision | fk | unique
+    target: str           # column or constraint label
+    violation_count: int
+    sample: list
+    ok: bool
+
+
+@dataclass
+class Report:
+    findings: list = field(default_factory=list)
+
+    @property
+    def has_violations(self) -> bool:
+        return any(not f.ok for f in self.findings)
+
+    @property
+    def summary_counts(self) -> dict:
+        ok = sum(1 for f in self.findings if f.ok)
+        return {"ok": ok, "violations": len(self.findings) - ok}
+
+
+def report_to_json(report: Report) -> dict:
+    return {
+        "has_violations": report.has_violations,
+        "summary": report.summary_counts,
+        "findings": [
+            {
+                "table": f.table, "check": f.check, "target": f.target,
+                "violation_count": f.violation_count, "sample": f.sample, "ok": f.ok,
+            }
+            for f in report.findings
+        ],
+    }
+
+
+def render_summary(report: Report) -> str:
+    rows = sorted(report.findings, key=lambda f: (f.ok, f.table, f.check))
+    lines = [f"Validation: {report.summary_counts['violations']} violation(s), "
+             f"{report.summary_counts['ok']} ok"]
+    for f in rows:
+        mark = "ok" if f.ok else "!!"
+        lines.append(f"  [{mark}] {f.table}.{f.check}({f.target}) "
+                     f"-> {f.violation_count} bad")
+    return "\n".join(lines)
+
+
+def table_path_name(table: str) -> str:
+    return table.split(".", 1)[1] if "." in table else table
+
+
+def decimal_overflow_threshold(precision: int, scale: int) -> int:
+    """Smallest absolute value that OVERFLOWS Decimal(precision, scale).
+
+    A value is invalid iff ``abs(value) >= 10**(precision - scale)``. This is
+    the design's domain rule and matches Oracle's integer-digit limit: Oracle
+    ROUNDS excess scale rather than rejecting it, so only the integer part can
+    overflow. E.g. Decimal(5,2) holds up to 999.99, so the threshold is 1000
+    and 999.99 is accepted.
+    """
+    int_digits = max(precision - scale, 0)
+    return 10 ** int_digits
+
+
+def _fk_list(cfg: dict) -> list:
+    """A spec's foreign keys, accepting either the `foreign_keys` or `fks` key."""
+    fks = cfg.get("foreign_keys")
+    if not isinstance(fks, (list, tuple)):
+        fks = cfg.get("fks")
+    return [fk for fk in (fks or []) if isinstance(fk, dict)]
+
+
+def normalize_schema(schema: dict) -> dict:
+    return {table_path_name(str(name)): cfg for name, cfg in schema.items()}
+
+
+def normalize_specs(specs: dict) -> dict:
+    out: dict = {}
+    for raw_name, cfg in specs.items():
+        name = table_path_name(str(raw_name))
+        if name in out:
+            raise ValueError(
+                f"Spec key collision after schema stripping: `{raw_name}` reduces "
+                f"to `{name}`, which is already present."
+            )
+        new_cfg = copy.deepcopy(dict(cfg))
+        for fk_key in ("foreign_keys", "fks"):
+            fks = new_cfg.get(fk_key)
+            if not isinstance(fks, (list, tuple)):
+                continue
+            for fk in fks:
+                if isinstance(fk, dict) and fk.get("parent_table"):
+                    fk["parent_table"] = table_path_name(str(fk["parent_table"]))
+        out[name] = new_cfg
+    return out
+
+
+def _sample(df, cols, limit=SAMPLE_LIMIT) -> list:
+    rows = df.select(*cols).limit(limit).collect()
+    return [row.asDict() for row in rows]
+
+
+def check_not_null(df, table, not_null_cols) -> list:
+    from pyspark.sql import functions as F
+    findings = []
+    for col in not_null_cols:
+        if col not in df.columns:
+            continue
+        bad = df.filter(F.col(col).isNull())
+        count = bad.count()
+        findings.append(Finding(table, "not_null", col, count,
+                                _sample(bad, [col]) if count else [], count == 0))
+    return findings
+
+
+def check_decimal_domain(df, table, col, precision, scale) -> Finding:
+    from pyspark.sql import functions as F
+    threshold = decimal_overflow_threshold(precision, scale)
+    bad = df.filter(F.col(col).isNotNull() & (F.abs(F.col(col)) >= F.lit(threshold)))
+    count = bad.count()
+    return Finding(table, "decimal_domain", col, count,
+                   _sample(bad, [col]) if count else [], count == 0)
+
+
+def check_varchar_domain(df, table, col, length) -> Finding:
+    from pyspark.sql import functions as F
+    bad = df.filter(F.col(col).isNotNull() & (F.length(F.col(col)) > F.lit(length)))
+    count = bad.count()
+    return Finding(table, "varchar_domain", col, count,
+                   _sample(bad, [col]) if count else [], count == 0)
+
+
+def check_pk(synth_df, raw_df, table, pk_cols) -> list:
+    """PK not-null + internal uniqueness + no collision with existing (raw) keys."""
+    from pyspark.sql import functions as F
+    findings = []
+    # not-null: any pk column null
+    null_cond = None
+    for col in pk_cols:
+        c = F.col(col).isNull()
+        null_cond = c if null_cond is None else (null_cond | c)
+    bad_null = synth_df.filter(null_cond)
+    n_null = bad_null.count()
+    findings.append(Finding(table, "pk_not_null", ",".join(pk_cols), n_null,
+                            _sample(bad_null, pk_cols) if n_null else [], n_null == 0))
+    # internal uniqueness
+    dups = (synth_df.groupBy(*pk_cols).count().filter(F.col("count") > 1))
+    n_dup = dups.count()
+    findings.append(Finding(table, "pk_unique", ",".join(pk_cols), n_dup,
+                            _sample(dups, pk_cols) if n_dup else [], n_dup == 0))
+    # collision with existing real keys (raw)
+    if raw_df is not None:
+        synth_keys = synth_df.select(*pk_cols).distinct()
+        raw_keys = raw_df.select(*pk_cols).distinct()
+        collide = synth_keys.join(raw_keys, on=list(pk_cols), how="inner")
+        n_col = collide.count()
+        findings.append(Finding(table, "pk_collision", ",".join(pk_cols), n_col,
+                                _sample(collide, pk_cols) if n_col else [], n_col == 0))
+    return findings
+
+
+def check_fk(child_df, parent_universe_df, table, child_cols, parent_cols, label) -> Finding:
+    """Non-null child FK tuples must exist in (raw union synthetic) parent keys."""
+    from pyspark.sql import functions as F
+    cond = None
+    for col in child_cols:  # only rows where every FK col is non-null are enforced
+        c = F.col(col).isNotNull()
+        cond = c if cond is None else (cond & c)
+    child = child_df.filter(cond).select(*child_cols).distinct()
+    parent = parent_universe_df.select(
+        *[F.col(p).alias(c) for p, c in zip(parent_cols, child_cols)]).distinct()
+    orphans = child.join(parent, on=list(child_cols), how="left_anti")
+    count = orphans.count()
+    return Finding(table, "fk", label, count,
+                   _sample(orphans, list(child_cols)) if count else [], count == 0)
+
+
+def check_unique(df, table, cols) -> Finding:
+    """Duplicate non-null unique tuples (Oracle ignores rows with any null)."""
+    from pyspark.sql import functions as F
+    cond = None
+    for col in cols:
+        c = F.col(col).isNotNull()
+        cond = c if cond is None else (cond & c)
+    dups = df.filter(cond).groupBy(*cols).count().filter(F.col("count") > 1)
+    count = dups.count()
+    return Finding(table, "unique", ",".join(cols), count,
+                   _sample(dups, list(cols)) if count else [], count == 0)
+
+
+def plan_checks(specs: dict, schema: dict, tables=None) -> list:
+    """Per-table check plan (pure). FK universe = parent table key columns."""
+    chosen = set(tables) if tables else set(schema)
+    plan = []
+    for table in sorted(t for t in schema if t in chosen):
+        cols = schema[table].get("columns", {})
+        not_null = [c for c, meta in cols.items() if not meta.get("nullable", True)]
+        decimals = [(c, m["precision"], m.get("scale", 0))
+                    for c, m in cols.items() if "precision" in m]
+        varchars = [(c, m["length"]) for c, m in cols.items() if "length" in m]
+        spec = specs.get(table, {})
+        plan.append({
+            "table": table,
+            "pk_cols": spec.get("pk_cols") or [],
+            "not_null": sorted(not_null),
+            "decimals": decimals,
+            "varchars": varchars,
+            "unique": schema[table].get("unique", []),
+            "fks": [fk for fk in _fk_list(spec) if isinstance(fk, dict)],
+        })
+    return plan
+
+
+def _raw_path(raw_base: str, table: str) -> str:
+    return f"{raw_base}/{table}"
+
+
+def _synth_path(synth_base: str, table: str) -> str:
+    return f"{synth_base}/{table}"
+
+
+def _read_parquet_opt(spark, path):
+    """Read a parquet path; return None if it doesn't exist (e.g. static parent
+    not in synthetic output)."""
+    try:
+        return spark.read.parquet(path)
+    except Exception:  # AnalysisException: path does not exist
+        return None
+
+
+def validate(spark, specs, schema, raw_base, synth_base, tables=None) -> Report:
+    specs = normalize_specs(specs)
+    schema = normalize_schema(schema)
+    plan = plan_checks(specs, schema, tables)
+    findings = []
+    for item in plan:
+        table = item["table"]
+        synth = _read_parquet_opt(spark, _synth_path(synth_base, table))
+        if synth is None:
+            logger.warning("No synthetic parquet for %s; skipping", table)
+            continue
+        raw = _read_parquet_opt(spark, _raw_path(raw_base, table))
+        # column/domain checks
+        present = set(synth.columns)
+        findings += check_not_null(synth, table,
+                                   [c for c in item["not_null"] if c in present])
+        for col, p, s in item["decimals"]:
+            if col in present:
+                findings.append(check_decimal_domain(synth, table, col, p, s))
+        for col, length in item["varchars"]:
+            if col in present:
+                findings.append(check_varchar_domain(synth, table, col, length))
+        # pk
+        if item["pk_cols"] and all(c in present for c in item["pk_cols"]):
+            findings += check_pk(synth, raw, table, item["pk_cols"])
+        # unique
+        for cols in item["unique"]:
+            if all(c in present for c in cols):
+                findings.append(check_unique(synth, table, cols))
+        # fk: universe = raw(parent) union synthetic(parent)
+        for fk in item["fks"]:
+            parent = fk.get("parent_table")
+            child_cols, parent_cols = fk.get("columns"), fk.get("parent_columns")
+            if not (parent and child_cols and parent_cols):
+                continue
+            if not all(c in present for c in child_cols):
+                continue
+            universe = _parent_universe(spark, raw_base, synth_base, parent, parent_cols)
+            if universe is None:
+                logger.warning("No parent data for %s.%s -> %s; skipping FK",
+                               table, child_cols, parent)
+                continue
+            label = f"{','.join(child_cols)}->{parent}"
+            findings.append(check_fk(synth, universe, table,
+                                     child_cols, parent_cols, label))
+    return Report(findings=findings)
+
+
+def _parent_universe(spark, raw_base, synth_base, parent, parent_cols):
+    """Union of parent key columns across raw (existing) and synthetic (incoming)."""
+    frames = []
+    for base in (_raw_path(raw_base, parent), _synth_path(synth_base, parent)):
+        df = _read_parquet_opt(spark, base)
+        if df is not None and all(c in df.columns for c in parent_cols):
+            frames.append(df.select(*parent_cols))
+    if not frames:
+        return None
+    universe = frames[0]
+    for extra in frames[1:]:
+        universe = universe.unionByName(extra)
+    return universe
+
+
+def get_validate_env() -> dict:
+    config = {}
+    missing = []
+    for name in REQUIRED_ENV_VARS:
+        value = os.environ.get(name)
+        if not value:
+            missing.append(name)
+        else:
+            config[name] = value.rstrip("/")
+    if missing:
+        logger.error("Missing required env var(s): %s", ", ".join(missing))
+        sys.exit(1)
+    return config
+
+
+def parse_arguments(argv=None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Validate synthetic Parquet vs DB constraints.")
+    parser.add_argument("--specs", default=None, help="Override DATAGEN_SPECS_URI.")
+    parser.add_argument("--schema", default=None, help="Override DATAGEN_SCHEMA_URI.")
+    parser.add_argument("--report-uri", default=None,
+                        help="Where to write the JSON report (object storage).")
+    parser.add_argument("--tables", default=None,
+                        help="Comma-separated subset of tables to validate.")
+    return parser.parse_args(argv)
+
+
+def _read_json_object(spark, uri: str) -> dict:
+    records = spark.sparkContext.wholeTextFiles(uri).collect()
+    if len(records) != 1:
+        raise ValueError(
+            f"Expected exactly one JSON object at `{uri}`, found {len(records)}.")
+    return json.loads(records[0][1])
+
+
+def load_manifests(spark, specs_uri, schema_uri):
+    specs = specs_uri if isinstance(specs_uri, dict) else _read_json_object(spark, specs_uri)
+    schema = schema_uri if isinstance(schema_uri, dict) else _read_json_object(spark, schema_uri)
+    return normalize_specs(specs), normalize_schema(schema)
+
+
+def _write_report(spark, report: Report, uri: str) -> None:
+    blob = json.dumps(report_to_json(report), indent=2, ensure_ascii=False)
+    # one-object write via Hadoop FS (small file)
+    sc = spark.sparkContext
+    conf = sc._jsc.hadoopConfiguration()
+    jpath = sc._jvm.org.apache.hadoop.fs.Path(uri)
+    fs = jpath.getFileSystem(conf)
+    out = fs.create(jpath, True)
+    try:
+        out.write(bytearray(blob, "utf-8"))
+    finally:
+        out.close()
+
+
+def create_spark_session(app_name: str):
+    from pyspark.sql import SparkSession
+    builder = SparkSession.builder.appName(app_name)
+    builder = builder.config("spark.sql.parquet.aggregatePushdown", "true")
+    return builder.getOrCreate()
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO)
+    args = parse_arguments()
+    config = get_validate_env()
+    specs_uri = args.specs or config["DATAGEN_SPECS_URI"]
+    schema_uri = args.schema or config["DATAGEN_SCHEMA_URI"]
+    tables = [t.strip() for t in args.tables.split(",")] if args.tables else None
+
+    spark = create_spark_session("validate_tables")
+    specs, schema = load_manifests(spark, specs_uri, schema_uri)
+    report = validate(spark, specs, schema,
+                      config["DATAGEN_RAW_BASE_URI"],
+                      config["DATAGEN_SYNTHETIC_BASE_URI"], tables=tables)
+    summary = render_summary(report)
+    print(summary)
+    logger.info("%s", summary)
+    if args.report_uri:
+        _write_report(spark, report, args.report_uri)
+        logger.info("Report written to %s", args.report_uri)
+    sys.exit(1 if report.has_violations else 0)
+
+
+if __name__ == "__main__":
+    main()

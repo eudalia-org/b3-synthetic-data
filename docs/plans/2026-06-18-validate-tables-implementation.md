@@ -588,15 +588,15 @@ git commit -m "feat: Report/Finding dataclasses + formatters for validator"
 
 - [ ] **Step 1: Write the failing test**
 
-`decimal_max_abs` mirrors engorda's `_pk_capacity` integer-digit math; `normalize_schema`/`normalize_specs` strip `OWNER.` from table keys (and FK `parent_table`).
+`decimal_overflow_threshold` returns the smallest absolute value that OVERFLOWS `Decimal(p,s)` — i.e. `10**(p−s)` — so the check flags `abs(col) >= threshold` (the design's rule; a fractional value like `999.99` for `Decimal(5,2)` is correctly accepted, since `999.99 < 1000`). `normalize_schema`/`normalize_specs` strip `OWNER.` from table keys (and FK `parent_table`); `normalize_specs` also accepts the `fks` alias and raises on key collision (matching engorda).
 
 ```python
 class TestPureHelpers:
-    def test_decimal_max_abs(self):
-        assert vt.decimal_max_abs(3, 0) == 999
-        assert vt.decimal_max_abs(5, 2) == 999      # 3 integer digits
-        assert vt.decimal_max_abs(2, 0) == 99
-        assert vt.decimal_max_abs(1, 1) == 0        # no integer digits
+    def test_decimal_overflow_threshold(self):
+        assert vt.decimal_overflow_threshold(3, 0) == 1000  # Decimal(3,0): max 999
+        assert vt.decimal_overflow_threshold(5, 2) == 1000  # 999.99 accepted, 1000 overflows
+        assert vt.decimal_overflow_threshold(2, 0) == 100
+        assert vt.decimal_overflow_threshold(2, 2) == 1     # max 0.99; >=1 overflows int part
 
     def test_normalize_schema_strips_owner(self):
         schema = {"CETIP.T": {"columns": {"A": {"type": "NUMBER", "nullable": False}}}}
@@ -627,10 +627,14 @@ def table_path_name(table: str) -> str:
     return table.split(".", 1)[1] if "." in table else table
 
 
-def decimal_max_abs(precision: int, scale: int) -> int:
-    """Largest absolute value a Decimal(precision, scale) can hold (int part)."""
-    int_digits = precision - scale
-    return (10 ** int_digits) - 1 if int_digits > 0 else 0
+def decimal_overflow_threshold(precision: int, scale: int) -> int:
+    """Smallest absolute value that OVERFLOWS Decimal(precision, scale).
+
+    Invalid iff abs(value) >= 10**(precision - scale). Oracle rounds excess
+    scale rather than rejecting, so only the integer part can overflow.
+    """
+    int_digits = max(precision - scale, 0)
+    return 10 ** int_digits
 
 
 def normalize_schema(schema: dict) -> dict:
@@ -713,8 +717,8 @@ def check_not_null(df, table, not_null_cols) -> list:
 
 def check_decimal_domain(df, table, col, precision, scale) -> Finding:
     from pyspark.sql import functions as F
-    limit = decimal_max_abs(precision, scale)
-    bad = df.filter(F.col(col).isNotNull() & (F.abs(F.col(col)) > F.lit(limit)))
+    threshold = decimal_overflow_threshold(precision, scale)
+    bad = df.filter(F.col(col).isNotNull() & (F.abs(F.col(col)) >= F.lit(threshold)))
     count = bad.count()
     return Finding(table, "decimal_domain", col, count,
                    _sample(bad, [col]) if count else [], count == 0)
