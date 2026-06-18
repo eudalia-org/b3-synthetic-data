@@ -79,6 +79,12 @@ Three pieces, mirroring the existing constraint→specs tooling.
 `schema.json` carries column domains + UNIQUE only. PK/FK stay in `specs.json`.
 Each manifest is single-purpose; the validator reads both.
 
+Domains come from `schema.json` — the **real Oracle column** precision/scale —
+*not* the Parquet's stored type. This matters: unconstrained Oracle `NUMBER`
+reads back over JDBC as `Decimal(38,9)`, so the Parquet's own type would
+misreport the true domain. The validator always checks against the Oracle
+metadata.
+
 ### 2. `validate_tables.py` — the app
 
 Self-contained OCI Data Flow app, same skeleton as `engorda_tables.py`. Built
@@ -127,7 +133,7 @@ as a function taking DataFrame(s) and returning `Finding`s.
 | Check | Method |
 |---|---|
 | **NOT NULL** | per non-nullable column: `df.filter(col.isNull()).count()` |
-| **Datatype domain** | Decimal: `abs(col) >= 10**(precision − scale)` overflow + scale-digit check; VARCHAR: `length(col) > char_length`. Reuses engorda `_pk_capacity` math. |
+| **Datatype domain** | Decimal: integer-part overflow only — `abs(col) >= 10**(precision − scale)`. VARCHAR: `length(col) > char_length`. Reuses engorda `_pk_capacity` math. **No scale-digit check** — Oracle *rounds* excess NUMBER scale on insert, it does not reject, so flagging it would be stricter than the DB (false positives). |
 | **PK not-null + unique** | `groupBy(pk_cols).count()` filter `> 1`; **plus** anti-join synthetic PK vs raw PK (collision with existing rows) |
 | **FK referential** | anti-join child's non-null FK columns vs **(raw ∪ synthetic) parent PK columns** |
 | **UNIQUE** | `groupBy(cols).count()` filter `> 1`, ignoring all-null rows (matches Oracle's treatment of nulls in unique keys) |
