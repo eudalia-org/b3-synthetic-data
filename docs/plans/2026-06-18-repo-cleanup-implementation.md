@@ -50,26 +50,32 @@ on the validate import hints at one). If a test prepends the repo root to
 prepends a path so the *bare* module is importable, the `from datagen import …`
 form still works from root; no path edit needed.
 
-- [ ] **Step 4: Declare the package in pyproject.toml**
+- [ ] **Step 4: Make `datagen` importable in tests via pytest pythonpath**
 
-Add an explicit package declaration so `datagen` is recognized as the project
-package (uv uses the hatchling/setuptools backend defined here). Add to
+This repo has no `[build-system]` table — it runs as an application with the repo
+root on `sys.path` (that's why bare `import save_tables` works today, but only
+when pytest happens to run from root). Make that explicit and robust so
+`from datagen import …` resolves regardless of how pytest is invoked. Add to
 `pyproject.toml`:
 
 ```toml
-[tool.setuptools]
-packages = ["datagen"]
+[tool.pytest.ini_options]
+pythonpath = ["."]
 ```
 
-If a `[build-system]` table is absent and `uv sync` complains, this repo is run
-as an application (root on `sys.path`), in which case the package table is
-harmless and tests still pass. Verify with Step 5 regardless.
+Do NOT add a `[tool.setuptools]` package table — there is no setuptools build
+backend here, so it would be inert/misleading. The `__init__.py` + pythonpath is
+all that's needed for both `from datagen import …` and `python -m datagen.<mod>`.
+
+Note: `tests/test_validate_tables.py:6` has its own `sys.path.insert(0, <root>)`.
+Leave it — it remains correct and harmless alongside the pythonpath setting.
 
 - [ ] **Step 5: Run the full test suite — expect all green**
 
 Run: `pytest -q`
-Expected: PASS (same count as before the move). If any test errors on
-`ModuleNotFoundError: datagen`, confirm you are running from the repo root.
+Expected: PASS (same count as before the move). With `pythonpath = ["."]` set,
+this works from any CWD; if you see `ModuleNotFoundError: datagen`, confirm the
+pytest config landed in `pyproject.toml`.
 
 - [ ] **Step 6: Smoke each entrypoint as a module**
 
@@ -80,6 +86,7 @@ Expected: four `… OK` lines (argparse `--help` exits 0).
 
 ```bash
 git add datagen pyproject.toml tests/test_save_tables.py tests/test_engorda_tables.py tests/test_load_tables.py tests/test_validate_tables.py
+git status --short   # confirm the four git mv renames are staged as renames
 git commit -m "refactor: move live pipeline modules into datagen/ package
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
