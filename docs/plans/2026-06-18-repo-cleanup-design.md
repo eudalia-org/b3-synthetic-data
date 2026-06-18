@@ -57,19 +57,28 @@ Use `git mv` to preserve history. Entrypoints are invoked as
 
 Follow-on edits:
 
-- **scripts importers** → change to `from datagen import …`:
-  - `scripts/build_schema_from_dump.py` → `validate_tables`
-  - `scripts/build_specs_from_constraints.py` → `engorda_tables`
-  - `scripts/rollback_load.py` → `load_tables`
-- **tests** → update `import <module>` → `from datagen import <module>` in:
-  `tests/test_save_tables.py`, `tests/test_engorda_tables.py`,
-  `tests/test_load_tables.py`, `tests/test_validate_tables.py`,
-  `tests/test_build_schema_from_dump.py`, `tests/test_build_specs_from_constraints.py`
-  (whichever reference the moved modules).
-- **README** → replace `python save_tables.py …` style usage with
-  `python -m datagen.save_tables …`; remove the `etl.py` usage section and the
-  OCI Vault / `secrets.py` line.
+- **scripts** → **no import changes needed.** Verified: `scripts/*.py` mention
+  `validate_tables`/`load_tables` only in docstrings/comments, not imports.
+- **tests** → only **4 files** import the moved modules; update each:
+  - `tests/test_save_tables.py:3` `import save_tables` → `from datagen import save_tables`
+  - `tests/test_engorda_tables.py:6` `import engorda_tables` → `from datagen import engorda_tables`
+  - `tests/test_load_tables.py:6` `import load_tables` → `from datagen import load_tables`
+  - `tests/test_validate_tables.py:7` `import validate_tables as vt` → `from datagen import validate_tables as vt`
+- **README** → replace all `python <module>.py …` usages (≈9 occurrences for
+  save/load/validate) with `python -m datagen.<module> …`; remove the `etl.py`
+  usage section (lines ~14-17) and the OCI Vault / `secrets.py` line (~line 9).
 - **pyproject.toml** → declare the `datagen` package so it's importable/installable.
+
+### 1a. Repoint the deploy workflow
+
+`.github/workflows/deploy-eudalia-datagen-scripts-to-s3.yml` currently triggers on
+push to `etl.py` and runs `aws s3 cp etl.py s3://…/scripts/etl.py`. Repoint it to
+the new package:
+
+- Trigger `paths:` → `datagen/**` (instead of `etl.py`).
+- Upload step → `aws s3 sync datagen/ s3://${S3_BUCKET}/scripts/datagen/`
+  (replacing the single `etl.py` copy).
+- Update the workflow `name`/echo text away from "ETL Script".
 
 ### 2. Remove the discontinued pipeline
 
@@ -106,6 +115,8 @@ Remove: `v1-initial.png`, `v2-100.png`, `v2-fit.png`, `v2-zoom.png`, `v2.png`,
 - `git grep -n "import etl\|from etl\|oracle_read_smoke\|^import secrets\|transform\."`
   returns nothing in live code.
 - Root no longer lists the removed binaries.
+- The deploy workflow references `datagen/`, not `etl.py`
+  (`grep -n etl .github/workflows/*.yml` is empty).
 
 ## Risks
 
