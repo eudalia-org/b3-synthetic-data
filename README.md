@@ -240,7 +240,7 @@ Configuration: `DATAGEN_RAW_BASE_URI`, `DATAGEN_SYNTHETIC_BASE_URI`,
 From a notebook (pass your own SparkSession):
 
 ```python
-from validate_tables import validate, load_manifests, render_summary
+from datagen.validate_tables import validate, load_manifests, render_summary
 specs, schema = load_manifests(spark, specs_uri, schema_uri)
 report = validate(spark, specs, schema, raw_base, synth_base,
                   tables=["JUROS_FLUTUANTE"])
