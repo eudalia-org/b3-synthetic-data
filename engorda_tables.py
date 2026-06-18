@@ -2305,6 +2305,11 @@ def parse_arguments() -> argparse.Namespace:
                              "etc (safe with --limit, collision-free vs the real table). Pass "
                              "--pk-offset N to start at max(true_max, N) instead, e.g. to reserve "
                              "a band well above all real PKs. FKs are remapped to match.")
+    parser.add_argument("--pk-safety-band", type=positive_int, default=None,
+                        help="Safety gap added above each table's true max(pk): synthetic PKs "
+                             "start at true_max + band + 1. Leaves headroom so the real table can "
+                             "grow between the max read and the load without colliding. Default: "
+                             "no gap (start right after true_max).")
     parser.add_argument("--specs", default=None,
                         help="Override DATAGEN_SPECS_URI (URI of a single specs.json object).")
     return parser.parse_args()
@@ -2321,16 +2326,20 @@ def _read_pk_max(spark, path: str, pk_col: str):
     return row[0] if row is not None else None
 
 
-def compute_pk_maxes(spark, config, comp_specs, floor: int = 0) -> dict[str, int]:
-    """True max(pk) per non-static numeric-PK table, read from the FULL Parquet.
+def compute_pk_maxes(spark, config, comp_specs, floor: int = 0, band: int = 0) -> dict[str, int]:
+    """Per-table starting max for synthetic PKs, read from the FULL Parquet.
 
-    Returns {table: max(floor, true_max)} so synthetic PKs land above the real
-    table's max even under --limit (where the read sample undercounts the max).
-    With spark.sql.parquet.aggregatePushdown=true this is answered from Parquet
-    footer statistics — a metadata read, no data scan.
+    For each non-static numeric-PK table the start is ``max(true_max + band, floor)``:
+      - ``true_max`` = max(pk) from the full Parquet (footer-fast with
+        spark.sql.parquet.aggregatePushdown=true), so synthetic PKs land above
+        the real max even under --limit;
+      - ``band`` = safety gap added above true_max, leaving room for the real
+        table to grow between this read and the load without colliding;
+      - ``floor`` = absolute minimum (the --pk-offset reserved band).
 
+    The synthesizer then generates PKs as start + 1, +2, ... for that table.
     Tables that are static, PK-less, or whose max is unreadable/non-numeric are
-    omitted; the synthesizer then falls back to append_after_max on the data.
+    omitted; the synthesizer falls back to append_after_max on the data.
     """
     out: dict[str, int] = {}
     for table, cfg in comp_specs.items():
@@ -2348,7 +2357,7 @@ def compute_pk_maxes(spark, config, comp_specs, floor: int = 0) -> dict[str, int
             true_max = None
         if true_max is None:
             continue
-        out[table] = max(true_max, floor)
+        out[table] = max(true_max + band, floor)
     return out
 
 
@@ -2406,7 +2415,7 @@ def load_specs(spark: SparkSession, specs_uri: str) -> dict:
 
 
 def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
-            limit=None, pk_offset=None) -> None:
+            limit=None, pk_offset=None, pk_safety_band=None) -> None:
     components = connected_components(specs)
     save_base = synthetic_base_path(config)
     total = len(components)
@@ -2414,6 +2423,8 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
         logger.info("Input limit active: reading at most %d row(s) per raw table", limit)
     if pk_offset is not None:
         logger.info("PK offset floor active: synthetic PKs start at >= %d", pk_offset)
+    if pk_safety_band is not None:
+        logger.info("PK safety band active: synthetic PKs start at true_max + %d", pk_safety_band)
     logger.info("Loaded %d table(s) in %d component(s)", len(specs), total)
     run_started = time.perf_counter()
     failures: list[str] = []
@@ -2435,7 +2446,8 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
             # Synthesize only; engorda writes each table itself with a delete
             # scoped to that table's prefix (Spark's overwrite clobbers siblings
             # on the OCI connector by deleting the shared parent prefix).
-            pk_max = compute_pk_maxes(spark, config, comp_specs, floor=(pk_offset or 0))
+            pk_max = compute_pk_maxes(spark, config, comp_specs,
+                                      floor=(pk_offset or 0), band=(pk_safety_band or 0))
             if pk_max:
                 logger.info("[%d/%d] true PK max per table: %s", index, total, pk_max)
             synthetic = run_synthesis_from_tables(
@@ -2492,7 +2504,7 @@ def main() -> None:
         specs_uri = args.specs or config["DATAGEN_SPECS_URI"]
         specs = load_specs(spark, specs_uri)
         engorda(spark, config, specs, args.scale_factor, args.seed,
-                args.continue_on_error, args.limit, args.pk_offset)
+                args.continue_on_error, args.limit, args.pk_offset, args.pk_safety_band)
     finally:
         spark.stop()
 

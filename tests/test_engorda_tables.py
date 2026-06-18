@@ -188,13 +188,14 @@ class TestParseArguments:
         assert args.specs is None
         assert args.limit is None
         assert args.pk_offset is None
+        assert args.pk_safety_band is None
 
     def test_overrides(self, monkeypatch):
         monkeypatch.setattr(
             sys, "argv",
             ["engorda_tables.py", "--scale-factor", "3", "--seed", "7",
              "--continue-on-error", "--limit", "1000", "--pk-offset", "10000000000000",
-             "--specs", "oci://cfg@ns/s.json"],
+             "--pk-safety-band", "1000000", "--specs", "oci://cfg@ns/s.json"],
         )
         args = engorda_tables.parse_arguments()
         assert args.scale_factor == 3.0
@@ -202,6 +203,7 @@ class TestParseArguments:
         assert args.continue_on_error is True
         assert args.limit == 1000
         assert args.pk_offset == 10_000_000_000_000
+        assert args.pk_safety_band == 1_000_000
         assert args.specs == "oci://cfg@ns/s.json"
 
     def test_rejects_non_positive_limit(self, monkeypatch):
@@ -374,7 +376,7 @@ class TestEngordaLoop:
         monkeypatch.setattr(engorda_tables, "write_synthetic_table",
                             lambda spark, df, out_path: None)
         monkeypatch.setattr(engorda_tables, "compute_pk_maxes",
-                            lambda spark, config, comp_specs, floor=0:
+                            lambda spark, config, comp_specs, floor=0, band=0:
                                 floors.append(floor) or pk_maxes)
 
         def fake_run(tables, comp_specs, **kwargs):
@@ -421,6 +423,19 @@ class TestComputePkMaxes:
         specs = {"A": {"pk_cols": ["ID"]}}
         monkeypatch.setattr(engorda_tables, "_read_pk_max", lambda s, p, c: 8_000_000_000)
         assert engorda_tables.compute_pk_maxes(object(), self.CONFIG, specs) == {"A": 8_000_000_000}
+
+    def test_safety_band_added_above_true_max(self, monkeypatch):
+        specs = {"A": {"pk_cols": ["ID"]}}
+        monkeypatch.setattr(engorda_tables, "_read_pk_max", lambda s, p, c: 8_000_000_000)
+        out = engorda_tables.compute_pk_maxes(object(), self.CONFIG, specs, band=1_000_000)
+        assert out == {"A": 8_001_000_000}  # true_max + band
+
+    def test_floor_wins_over_band_when_higher(self, monkeypatch):
+        specs = {"A": {"pk_cols": ["ID"]}}
+        monkeypatch.setattr(engorda_tables, "_read_pk_max", lambda s, p, c: 100)
+        out = engorda_tables.compute_pk_maxes(object(), self.CONFIG, specs,
+                                              floor=10**13, band=1_000_000)
+        assert out == {"A": 10**13}  # max(true_max + band, floor)
 
     def test_omits_unreadable_max(self, monkeypatch):
         specs = {"A": {"pk_cols": ["ID"]}}
