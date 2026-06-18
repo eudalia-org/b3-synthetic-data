@@ -43,3 +43,30 @@ class TestBuildSchemaColumns:
         assert cols["ID"] == {"type": "NUMBER", "precision": 38, "scale": 0, "nullable": False}
         assert cols["NAME"] == {"type": "VARCHAR2", "length": 20, "nullable": True}
         assert "precision" not in cols["NAME"]  # VARCHAR carries length, not precision
+
+
+class TestBuildSchemaUnique:
+    def test_composite_unique_paired_by_position(self):
+        col_rows = [
+            {"TABLE_NAME": "T", "COLUMN_NAME": "A", "DATA_TYPE": "NUMBER",
+             "DATA_PRECISION": "5", "DATA_SCALE": "0", "CHAR_LENGTH": "0", "NULLABLE": "N"},
+            {"TABLE_NAME": "T", "COLUMN_NAME": "B", "DATA_TYPE": "NUMBER",
+             "DATA_PRECISION": "5", "DATA_SCALE": "0", "CHAR_LENGTH": "0", "NULLABLE": "N"},
+        ]
+        constraint_rows = [
+            {"CONSTRAINT_TYPE": "U", "CONSTRAINT_NAME": "T_UK", "TABLE_NAME": "T",
+             "COLUMN_NAME": "B", "COL_POSITION": "2"},
+            {"CONSTRAINT_TYPE": "U", "CONSTRAINT_NAME": "T_UK", "TABLE_NAME": "T",
+             "COLUMN_NAME": "A", "COL_POSITION": "1"},
+            {"CONSTRAINT_TYPE": "P", "CONSTRAINT_NAME": "T_PK", "TABLE_NAME": "T",
+             "COLUMN_NAME": "A", "COL_POSITION": "1"},  # ignored
+        ]
+        schema = bsd.build_schema(col_rows, constraint_rows)
+        assert schema["T"]["unique"] == [["A", "B"]]  # ordered by position
+
+    def test_no_unique_key_omits_field(self):
+        col_rows = [{"TABLE_NAME": "T", "COLUMN_NAME": "A", "DATA_TYPE": "NUMBER",
+                     "DATA_PRECISION": "5", "DATA_SCALE": "0", "CHAR_LENGTH": "0",
+                     "NULLABLE": "N"}]
+        schema = bsd.build_schema(col_rows, constraint_rows=[])
+        assert "unique" not in schema["T"]
