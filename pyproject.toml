@@ -8,7 +8,6 @@ dependencies = [
     "eudalia",
     "langchain>=1.2.1",
     "langchain-openai>=1.1.6",
-    "oci>=2.164.2",
 ]
 
 [tool.uv.sources]
@@ -19,6 +18,9 @@ dev = [
     "pytest>=8.0.0",
     "ruff>=0.3.0",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100

@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import validate_tables as vt  # noqa: E402
+from datagen import validate_tables as vt  # noqa: E402
 
 
 @pytest.mark.skip(reason="requires Spark (JDK 17-21); runs on OCI Data Flow")

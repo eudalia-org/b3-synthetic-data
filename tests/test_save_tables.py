@@ -1,6 +1,6 @@
 import pytest
 
-import save_tables
+from datagen import save_tables
 
 # Realistic 18-character Oracle ROWIDs (base64 alphabet).
 ROWID_A = "AAAS5MAAEAAAACXAAA"
