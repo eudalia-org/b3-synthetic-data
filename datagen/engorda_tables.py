@@ -36,6 +36,24 @@ REQUIRED_ENV_VARS = (
 DEFAULT_SCALE_FACTOR = 1.0
 DEFAULT_SEED = 42
 
+# ---------------------------------------------------------------------------
+# Filtro de domínio: CDB simplificado.
+#
+# Toda tabela de origem que possuir a coluna NUM_TIPO_IF é filtrada para
+# NUM_TIPO_IF == 46 ANTES da síntese, garantindo que o modelo seja gerado
+# usando apenas o CDB simplificado. Tabelas que NÃO possuem a coluna passam
+# intactas. O filtro é aplicado por `_aplica_filtro_tipo_if` (logo após
+# `read_parquet`) nos dois pontos de leitura da fonte de síntese:
+#   1. referential_sample  (caminho --limit);
+#   2. engorda             (caminho sem --limit).
+#
+# IMPORTANTE: a leitura de max(pk) em compute_pk_maxes NÃO usa este filtro
+# de propósito — ela precisa do max real da tabela inteira para que as PKs
+# sintéticas não colidam com linhas de produção de OUTROS NUM_TIPO_IF.
+# ---------------------------------------------------------------------------
+FILTRO_TIPO_IF_COLUMN = "NUM_TIPO_IF"
+FILTRO_TIPO_IF_VALUE = 49 #filtro cdb simplificado
+
 NullableFkPolicy = Literal["allow_any_null", "allow_all_null", "invalid_null"]
 
 
@@ -2365,6 +2383,23 @@ def read_parquet(spark: SparkSession, path: str, limit: int | None = None) -> Da
     return df.limit(limit) if limit is not None else df
 
 
+def _aplica_filtro_tipo_if(df: DataFrame) -> DataFrame:
+    """Filtra a fonte de síntese para o CDB simplificado (NUM_TIPO_IF == 46).
+
+    Aplica o filtro APENAS quando a coluna NUM_TIPO_IF existe no DataFrame;
+    tabelas sem a coluna passam intactas. Linhas com NUM_TIPO_IF NULL são
+    descartadas (não casam com == 46), o que é o comportamento desejado.
+
+    Usado somente na leitura da FONTE de síntese (referential_sample e o
+    caminho sem --limit de engorda). A leitura de max(pk) em compute_pk_maxes
+    é intencionalmente NÃO filtrada: ela precisa do max real da tabela inteira
+    para evitar colisão das PKs sintéticas com linhas de outros NUM_TIPO_IF.
+    """
+    if FILTRO_TIPO_IF_COLUMN in df.columns:
+        return df.where(F.col(FILTRO_TIPO_IF_COLUMN) == F.lit(FILTRO_TIPO_IF_VALUE))
+    return df
+
+
 def _read_pk_max(spark, path: str, pk_col: str):
     """max(pk_col) from the full Parquet at `path` (footer-fast with pushdown)."""
     row = read_parquet(spark, path).agg(F.max(F.col(pk_col))).first()
@@ -2422,6 +2457,11 @@ def compute_pk_maxes(spark, config, comp_specs, floor: int = 0, band: int = 0,
             continue
         pk_col = pk_cols[-1]  # the synthesizer generates the last PK column
         try:
+            # NB: max(pk) é lido da tabela INTEIRA, sem o filtro NUM_TIPO_IF==46,
+            # de propósito. As PKs sintéticas precisam ficar acima do max real de
+            # TODOS os NUM_TIPO_IF para não colidirem com linhas de produção de
+            # outros tipos de IF (ver validate_collision_producao). Filtrar aqui
+            # reduziria o max e poderia gerar PKs que colidem com dados reais.
             raw_max = _read_pk_max(spark, raw_path(config, table), pk_col)
             true_max = int(raw_max) if raw_max is not None else None
             cap = _pk_capacity(spark, raw_path(config, table), pk_col)
@@ -2457,7 +2497,10 @@ def referential_sample(spark, config, comp_specs, limit: int) -> dict:
     order = topo_order_tables(comp_specs)
     sampled: dict = {}
     for table in order:
-        df = read_parquet(spark, raw_path(config, table))
+        # Filtra para o CDB simplificado (NUM_TIPO_IF == 46) ANTES da amostragem
+        # referencial, para que a consistência de FK seja calculada sobre o
+        # subconjunto 46. Tabelas sem a coluna passam intactas.
+        df = _aplica_filtro_tipo_if(read_parquet(spark, raw_path(config, table)))
         for fk in _fk_list(comp_specs[table]):
             parent = fk.get("parent_table")
             cols = list(fk.get("columns") or [])
@@ -2637,7 +2680,12 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
                 # whose FK lands in a sampled parent -> FK-consistent under --limit.
                 comp_tables = referential_sample(spark, config, comp_specs, limit)
             else:
-                comp_tables = {t: read_parquet(spark, raw_path(config, t)) for t in comp}
+                # Filtra cada tabela para o CDB simplificado (NUM_TIPO_IF == 46);
+                # tabelas sem a coluna passam intactas.
+                comp_tables = {
+                    t: _aplica_filtro_tipo_if(read_parquet(spark, raw_path(config, t)))
+                    for t in comp
+                }
             counts = {t: comp_tables[t].count() for t in comp}
             for t in comp:
                 if comp_specs[t].get("static") and comp_specs[t].get("n_rows") is not None:
