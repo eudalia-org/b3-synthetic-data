@@ -1,375 +1,1212 @@
 {
-  "ENTIDADE": {
-    "pk_cols": [
-      "NUM_ID_ENTIDADE"
-    ]
-  },
-  "TIPO_DEBITO": {
-    "pk_cols": [
-      "COD_TIPO_DEBITO"
-    ],
-    "static": true
-  },
-  "JUROS_FLUTUANTE": {
-    "pk_cols": [
-      "NUM_CONDICAO_IF"
-    ]
-  },
-  "OPCAO_RECOMPRA": {
-    "pk_cols": [
-      "NUM_ID_OPCAO_RECOMPRA"
-    ],
-    "static": true
-  },
-  "CERTIFICACAO_CETIP": {
-    "pk_cols": [
-      "NUM_ID_CERTIFICACAO_CETIP"
-    ],
-    "static": true
-  },
-  "USUARIO": {
-    "pk_cols": [
-      "NUM_ID_ENTIDADE"
-    ]
-  },
-  "ESPECIFICACAO_COMITENTE": {
-    "pk_cols": [
-      "NUM_ID_ESPECIFICACAO_COMITENTE"
-    ],
-    "foreign_keys": [
-      {
-        "columns": [
-          "COD_TIPO_POSICAO_CARTEIRA"
+    "BLOQUEIO_OPERACAO_IF": {
+        "pk_cols": [
+            "NUM_ID_BLOQUEIO_OPERACAO_IF"
         ],
-        "parent_table": "TIPO_POSICAO_CARTEIRA",
-        "parent_columns": [
-          "COD_TIPO_POSICAO_CARTEIRA"
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_ID_TIPO_OPER_OBJETO_SERV"
+                ],
+                "parent_table": "TIPO_OPER_OBJETO_SERV",
+                "parent_columns": [
+                    "NUM_ID_TIPO_OPER_OBJETO_SERV"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_IF"
+                ],
+                "parent_table": "INSTRUMENTO_FINANCEIRO",
+                "parent_columns": [
+                    "NUM_IF"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_ATUALIZ"
+                ],
+                "parent_table": "USUARIO",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_DESBLOQ"
+                ],
+                "parent_table": "USUARIO",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            }
         ]
-      }
-    ]
-  },
-  "NATUREZA_ECONOMICA": {
-    "pk_cols": [
-      "NUM_ID_NATUREZA_ECONOMICA"
-    ],
-    "static": true
-  },
-  "INSTRUMENTO_FINANCEIRO": {
-    "pk_cols": [
-      "NUM_IF"
-    ],
-    "foreign_keys": [
-      {
-        "columns": [
-          "NUM_ID_MOTIVO_SITUACAO_IF"
+    },
+    "CARTEIRA_COMITENTE": {
+        "pk_cols": [
+            "NUM_CARTEIRA_COMITENTE"
         ],
-        "parent_table": "MOTIVO_SITUACAO_IF",
-        "parent_columns": [
-          "NUM_ID_MOTIVO_SITUACAO_IF"
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_IF"
+                ],
+                "parent_table": "INSTRUMENTO_FINANCEIRO",
+                "parent_columns": [
+                    "NUM_IF"
+                ]
+            },
+            {
+                "columns": [
+                    "COD_TIPO_POSICAO_CARTEIRA"
+                ],
+                "parent_table": "TIPO_POSICAO_CARTEIRA",
+                "parent_columns": [
+                    "COD_TIPO_POSICAO_CARTEIRA"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ],
+                "parent_table": "CONTA_PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ]
+            }
         ]
-      }
-    ]
-  },
-  "TITULO": {
-    "pk_cols": [
-      "NUM_IF"
-    ]
-  },
-  "OBJETO_SERVICO": {
-    "pk_cols": [
-      "NUM_ID_OBJETO_SERVICO"
-    ],
-    "static": true
-  },
-  "TIPO_OPER_PTA_CARTEIRA": {
-    "pk_cols": [
-      "NUM_ID_TIPO_OPER_PTA_CARTEIRA"
-    ],
-    "foreign_keys": [
-      {
-        "columns": [
-          "COD_TIPO_DEBITO"
+    },
+    "CARTEIRA_PARTICIPANTE": {
+        "pk_cols": [
+            "NUM_CARTEIRA_PARTICIPANTE"
         ],
-        "parent_table": "TIPO_DEBITO",
-        "parent_columns": [
-          "COD_TIPO_DEBITO"
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_IF"
+                ],
+                "parent_table": "INSTRUMENTO_FINANCEIRO",
+                "parent_columns": [
+                    "NUM_IF"
+                ]
+            },
+            {
+                "columns": [
+                    "COD_TIPO_POSICAO_CARTEIRA"
+                ],
+                "parent_table": "TIPO_POSICAO_CARTEIRA",
+                "parent_columns": [
+                    "COD_TIPO_POSICAO_CARTEIRA"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ],
+                "parent_table": "CONTA_PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ]
+            }
         ]
-      },
-      {
-        "columns": [
-          "COD_TIPO_POSICAO_CARTEIRA"
+    },
+    "CERTIFICACAO_CETIP": {
+        "pk_cols": [
+            "NUM_ID_CERTIFICACAO_CETIP"
         ],
-        "parent_table": "TIPO_POSICAO_CARTEIRA",
-        "parent_columns": [
-          "COD_TIPO_POSICAO_CARTEIRA"
-        ]
-      }
-    ],
-    "static": true
-  },
-  "NAT_ECON_TP_OPER_PONTA": {
-    "pk_cols": [
-      "NUM_ID_NAT_ECON_TP_OPER_PONTA"
-    ],
-    "static": true
-  },
-  "PARAMETRIZACAO_TIPO_REGIME": {
-    "pk_cols": [
-      "NUM_ID_PARAM_TIPO_REGIME"
-    ],
-    "static": true
-  },
-  "CARTEIRA_COMITENTE": {
-    "pk_cols": [
-      "NUM_CARTEIRA_COMITENTE"
-    ],
-    "foreign_keys": [
-      {
-        "columns": [
-          "COD_TIPO_POSICAO_CARTEIRA"
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ],
+                "parent_table": "CONTA_PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_TIPO_IF"
+                ],
+                "parent_table": "TIPO_IF",
+                "parent_columns": [
+                    "NUM_TIPO_IF"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_INCLUSAO"
+                ],
+                "parent_table": "USUARIO",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_ALTERACAO"
+                ],
+                "parent_table": "USUARIO",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            }
         ],
-        "parent_table": "TIPO_POSICAO_CARTEIRA",
-        "parent_columns": [
-          "COD_TIPO_POSICAO_CARTEIRA"
+        "static": true
+    },
+    "COMITENTE_FATCA": {
+        "pk_cols": [
+            "NUM_ID_ENTIDADE"
         ]
-      }
-    ]
-  },
-  "CONDICAO_IF": {
-    "pk_cols": [
-      "NUM_CONDICAO_IF"
-    ]
-  },
-  "FORMA_PAGAMENTO": {
-    "pk_cols": [
-      "NUM_ID_FORMA_PAGAMENTO"
-    ],
-    "static": true
-  },
-  "NAT_ECO_TIPO_IF": {
-    "pk_cols": [
-      "NUM_ID_NAT_ECO_TIPO_IF"
-    ],
-    "static": true
-  },
-  "TCTPCONTROLE_IF_DEPR": {
-    "pk_cols": [
-      "NUM_CONTROLE_IF_DEPOSITARIA"
-    ]
-  },
-  "RELACAO": {
-    "pk_cols": [
-      "NUM_ID_RELACAO"
-    ]
-  },
-  "PARAMETRO_CONFIG": {
-    "pk_cols": [
-      "NUM_ID_PARAMETRO_CONFIG"
-    ],
-    "static": true
-  },
-  "BLOQUEIO_OPERACAO_IF": {
-    "pk_cols": [
-      "NUM_ID_BLOQUEIO_OPERACAO_IF"
-    ]
-  },
-  "CREDITO": {
-    "pk_cols": [
-      "NUM_IF"
-    ]
-  },
-  "PAPEL_PARTICIPANTE": {
-    "pk_cols": [
-      "COD_PAPEL_PARTICIPANTE"
-    ],
-    "static": true
-  },
-  "DEPOSITO_AUTOMATICO_IF": {
-    "pk_cols": [
-      "NUM_IF"
-    ]
-  },
-  "OPERACAO": {
-    "pk_cols": [
-      "NUM_ID_OPERACAO"
-    ],
-    "foreign_keys": [
-      {
-        "columns": [
-          "COD_TIPO_DEBITO_P1"
+    },
+    "COMITENTE_INR": {
+        "pk_cols": [
+            "NUM_ID_ENTIDADE"
+        ]
+    },
+    "CONDICAO_IF": {
+        "pk_cols": [
+            "NUM_CONDICAO_IF"
         ],
-        "parent_table": "TIPO_DEBITO",
-        "parent_columns": [
-          "COD_TIPO_DEBITO"
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_IF"
+                ],
+                "parent_table": "INSTRUMENTO_FINANCEIRO",
+                "parent_columns": [
+                    "NUM_IF"
+                ]
+            }
         ]
-      },
-      {
-        "columns": [
-          "COD_TIPO_DEBITO_P2"
+    },
+    "CONTA_PARTICIPANTE": {
+        "pk_cols": [
+            "NUM_CONTA_PARTICIPANTE"
         ],
-        "parent_table": "TIPO_DEBITO",
-        "parent_columns": [
-          "COD_TIPO_DEBITO"
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE"
+                ],
+                "parent_table": "PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_SITUACAO_CONTA"
+                ],
+                "parent_table": "SITUACAO_CONTA",
+                "parent_columns": [
+                    "NUM_ID_SITUACAO_CONTA"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_MALOTE"
+                ],
+                "parent_table": "MALOTE",
+                "parent_columns": [
+                    "NUM_ID_MALOTE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_ATUALIZ"
+                ],
+                "parent_table": "USUARIO",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_CONTA_PARTICIPANTE_CETIP"
+                ],
+                "parent_table": "CONTA_PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_CONTA_COBRANCA"
+                ],
+                "parent_table": "CONTA_PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ]
+            }
         ]
-      },
-      {
-        "columns": [
-          "NUM_ID_MODALIDADE_LIQUIDACAO"
+    },
+    "CREDITO": {
+        "pk_cols": [
+            "NUM_IF"
         ],
-        "parent_table": "MODALIDADE_LIQUIDACAO",
-        "parent_columns": [
-          "NUM_ID_MODALIDADE_LIQUIDACAO"
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_IF"
+                ],
+                "parent_table": "INSTRUMENTO_FINANCEIRO",
+                "parent_columns": [
+                    "NUM_IF"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ],
+                "parent_table": "CONTA_PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_CONTA_PARTICIPANTE_CREDOR"
+                ],
+                "parent_table": "CONTA_PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ]
+            }
         ]
-      }
-    ]
-  },
-  "SITUACAO_CONTA": {
-    "pk_cols": [
-      "NUM_ID_SITUACAO_CONTA"
-    ],
-    "static": true
-  },
-  "TCTPHABILITA_OPERACAO_SERVICO": {
-    "pk_cols": [
-      "NUM_HABILITA_OPERACAO_SERVICO"
-    ],
-    "static": true
-  },
-  "TIPO_OPER_OBJETO_SERV": {
-    "pk_cols": [
-      "NUM_ID_TIPO_OPER_OBJETO_SERV"
-    ],
-    "static": true
-  },
-  "LANCAMENTO": {
-    "pk_cols": [
-      "NUM_ID_LANCAMENTO"
-    ]
-  },
-  "TIPO_POSICAO_CARTEIRA": {
-    "pk_cols": [
-      "COD_TIPO_POSICAO_CARTEIRA"
-    ],
-    "static": true
-  },
-  "MODALIDADE_LIQUIDACAO": {
-    "pk_cols": [
-      "NUM_ID_MODALIDADE_LIQUIDACAO"
-    ],
-    "static": true
-  },
-  "ESPECIFICACAO": {
-    "pk_cols": [
-      "NUM_ID_ESPECIFICACAO"
-    ],
-    "foreign_keys": [
-      {
-        "columns": [
-          "COD_PAPEL_PARTICIPANTE"
+    },
+    "DADO_OPERACAO": {
+        "pk_cols": [
+            "NUM_ID_DADO_OPERACAO"
         ],
-        "parent_table": "PAPEL_PARTICIPANTE",
-        "parent_columns": [
-          "COD_PAPEL_PARTICIPANTE"
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_ID_OPERACAO"
+                ],
+                "parent_table": "OPERACAO",
+                "parent_columns": [
+                    "NUM_ID_OPERACAO"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_TIPO_DADO_OPERACAO"
+                ],
+                "parent_table": "TIPO_DADO_OPERACAO",
+                "parent_columns": [
+                    "NUM_ID_TIPO_DADO_OPERACAO"
+                ]
+            }
         ]
-      }
-    ]
-  },
-  "MALOTE": {
-    "pk_cols": [
-      "NUM_ID_MALOTE"
-    ],
-    "static": true
-  },
-  "CONTA_PARTICIPANTE": {
-    "pk_cols": [
-      "NUM_CONTA_PARTICIPANTE"
-    ],
-    "foreign_keys": [
-      {
-        "columns": [
-          "NUM_ID_SITUACAO_CONTA"
+    },
+    "DEPOSITO_AUTOMATICO_IF": {
+        "pk_cols": [
+            "NUM_IF"
         ],
-        "parent_table": "SITUACAO_CONTA",
-        "parent_columns": [
-          "NUM_ID_SITUACAO_CONTA"
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_IF"
+                ],
+                "parent_table": "INSTRUMENTO_FINANCEIRO",
+                "parent_columns": [
+                    "NUM_IF"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ],
+                "parent_table": "CONTA_PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ]
+            }
         ]
-      }
-    ]
-  },
-  "EVENTO": {
-    "pk_cols": [
-      "NUM_EVENTO"
-    ]
-  },
-  "DADO_OPERACAO": {
-    "pk_cols": [
-      "NUM_ID_DADO_OPERACAO"
-    ]
-  },
-  "TIPO_IF": {
-    "pk_cols": [
-      "NUM_TIPO_IF"
-    ],
-    "static": true
-  },
-  "COMITENTE_FATCA": {
-    "pk_cols": [
-      "NUM_ID_ENTIDADE"
-    ]
-  },
-  "CARTEIRA_PARTICIPANTE": {
-    "pk_cols": [
-      "NUM_CARTEIRA_PARTICIPANTE"
-    ],
-    "foreign_keys": [
-      {
-        "columns": [
-          "COD_TIPO_POSICAO_CARTEIRA"
+    },
+    "ENTIDADE": {
+        "pk_cols": [
+            "NUM_ID_ENTIDADE"
         ],
-        "parent_table": "TIPO_POSICAO_CARTEIRA",
-        "parent_columns": [
-          "COD_TIPO_POSICAO_CARTEIRA"
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_ATUALIZ"
+                ],
+                "parent_table": "USUARIO",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            }
         ]
-      }
-    ]
-  },
-  "PARTICIPANTE": {
-    "pk_cols": [
-      "NUM_ID_ENTIDADE"
-    ]
-  },
-  "PARAMETRIZACAO_REGIME_MERCADO": {
-    "pk_cols": [
-      "NUM_ID_PARAM_REGIME_MERCADO"
-    ],
-    "static": true
-  },
-  "TIPO_DADO_OPERACAO": {
-    "pk_cols": [
-      "NUM_ID_TIPO_DADO_OPERACAO"
-    ],
-    "static": true
-  },
-  "TCTPFEATURE_TOGGLE": {
-    "pk_cols": [
-      "NUM_IDT_FTRE_TOG"
-    ],
-    "static": true
-  },
-  "COMITENTE_INR": {
-    "pk_cols": [
-      "NUM_ID_ENTIDADE"
-    ]
-  },
-  "MOTIVO_SITUACAO_IF": {
-    "pk_cols": [
-      "NUM_ID_MOTIVO_SITUACAO_IF"
-    ],
-    "static": true
-  },
-  "RESGATE": {
-    "pk_cols": [
-      "NUM_CONDICAO_IF"
-    ]
-  }
+    },
+    "ESPECIFICACAO": {
+        "pk_cols": [
+            "NUM_ID_ESPECIFICACAO"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_ID_OPERACAO"
+                ],
+                "parent_table": "OPERACAO",
+                "parent_columns": [
+                    "NUM_ID_OPERACAO"
+                ]
+            },
+            {
+                "columns": [
+                    "COD_PAPEL_PARTICIPANTE"
+                ],
+                "parent_table": "PAPEL_PARTICIPANTE",
+                "parent_columns": [
+                    "COD_PAPEL_PARTICIPANTE"
+                ]
+            }
+        ]
+    },
+    "ESPECIFICACAO_COMITENTE": {
+        "pk_cols": [
+            "NUM_ID_ESPECIFICACAO_COMITENTE"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "COD_TIPO_POSICAO_CARTEIRA"
+                ],
+                "parent_table": "TIPO_POSICAO_CARTEIRA",
+                "parent_columns": [
+                    "COD_TIPO_POSICAO_CARTEIRA"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_ESPECIFICACAO"
+                ],
+                "parent_table": "ESPECIFICACAO",
+                "parent_columns": [
+                    "NUM_ID_ESPECIFICACAO"
+                ]
+            }
+        ]
+    },
+    "EVENTO": {
+        "pk_cols": [
+            "NUM_EVENTO"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_CONDICAO_IF"
+                ],
+                "parent_table": "CONDICAO_IF",
+                "parent_columns": [
+                    "NUM_CONDICAO_IF"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_IF"
+                ],
+                "parent_table": "INSTRUMENTO_FINANCEIRO",
+                "parent_columns": [
+                    "NUM_IF"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_ATUALIZ"
+                ],
+                "parent_table": "USUARIO",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            }
+        ]
+    },
+    "FORMA_PAGAMENTO": {
+        "pk_cols": [
+            "NUM_ID_FORMA_PAGAMENTO"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_TIPO_IF"
+                ],
+                "parent_table": "TIPO_IF",
+                "parent_columns": [
+                    "NUM_TIPO_IF"
+                ]
+            }
+        ],
+        "static": true
+    },
+    "INSTRUMENTO_FINANCEIRO": {
+        "pk_cols": [
+            "NUM_IF"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_TIPO_IF"
+                ],
+                "parent_table": "TIPO_IF",
+                "parent_columns": [
+                    "NUM_TIPO_IF"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_IF_ORIGEM"
+                ],
+                "parent_table": "INSTRUMENTO_FINANCEIRO",
+                "parent_columns": [
+                    "NUM_IF"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ],
+                "parent_table": "CONTA_PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_CONTA_PARTICIPANTE_MANDAT"
+                ],
+                "parent_table": "CONTA_PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_IF_PERTENCE"
+                ],
+                "parent_table": "INSTRUMENTO_FINANCEIRO",
+                "parent_columns": [
+                    "NUM_IF"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_MOTIVO_SITUACAO_IF"
+                ],
+                "parent_table": "MOTIVO_SITUACAO_IF",
+                "parent_columns": [
+                    "NUM_ID_MOTIVO_SITUACAO_IF"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_FORMA_PAGAMENTO"
+                ],
+                "parent_table": "FORMA_PAGAMENTO",
+                "parent_columns": [
+                    "NUM_ID_FORMA_PAGAMENTO"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_CONTA_ESCRITURADOR"
+                ],
+                "parent_table": "CONTA_PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_CONTA_AGENTE_FIDUCIARIO"
+                ],
+                "parent_table": "CONTA_PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ]
+            }
+        ]
+    },
+    "JUROS_FLUTUANTE": {
+        "pk_cols": [
+            "NUM_CONDICAO_IF"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_CONDICAO_IF"
+                ],
+                "parent_table": "CONDICAO_IF",
+                "parent_columns": [
+                    "NUM_CONDICAO_IF"
+                ]
+            }
+        ]
+    },
+    "LANCAMENTO": {
+        "pk_cols": [
+            "NUM_ID_LANCAMENTO"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "COD_PAPEL_PARTICIPANTE"
+                ],
+                "parent_table": "PAPEL_PARTICIPANTE",
+                "parent_columns": [
+                    "COD_PAPEL_PARTICIPANTE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE"
+                ],
+                "parent_table": "USUARIO",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_OPERACAO"
+                ],
+                "parent_table": "OPERACAO",
+                "parent_columns": [
+                    "NUM_ID_OPERACAO"
+                ]
+            }
+        ]
+    },
+    "MALOTE": {
+        "pk_cols": [
+            "NUM_ID_MALOTE"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ],
+                "parent_table": "CONTA_PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_ATUALIZ"
+                ],
+                "parent_table": "USUARIO",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            }
+        ],
+        "static": true
+    },
+    "MODALIDADE_LIQUIDACAO": {
+        "pk_cols": [
+            "NUM_ID_MODALIDADE_LIQUIDACAO"
+        ],
+        "strict": true,
+        "static": true
+    },
+    "MOTIVO_SITUACAO_IF": {
+        "pk_cols": [
+            "NUM_ID_MOTIVO_SITUACAO_IF"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_TIPO_IF"
+                ],
+                "parent_table": "TIPO_IF",
+                "parent_columns": [
+                    "NUM_TIPO_IF"
+                ]
+            }
+        ],
+        "static": true
+    },
+    "NAT_ECON_TP_OPER_PONTA": {
+        "pk_cols": [
+            "NUM_ID_NAT_ECON_TP_OPER_PONTA"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_ID_NATUREZA_ECONOMICA"
+                ],
+                "parent_table": "NATUREZA_ECONOMICA",
+                "parent_columns": [
+                    "NUM_ID_NATUREZA_ECONOMICA"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_ATUALIZ"
+                ],
+                "parent_table": "USUARIO",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            }
+        ],
+        "static": true
+    },
+    "NAT_ECO_TIPO_IF": {
+        "pk_cols": [
+            "NUM_ID_NAT_ECO_TIPO_IF"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_TIPO_IF"
+                ],
+                "parent_table": "TIPO_IF",
+                "parent_columns": [
+                    "NUM_TIPO_IF"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_NATUREZA_ECONOMICA"
+                ],
+                "parent_table": "NATUREZA_ECONOMICA",
+                "parent_columns": [
+                    "NUM_ID_NATUREZA_ECONOMICA"
+                ]
+            }
+        ],
+        "static": true
+    },
+    "NATUREZA_ECONOMICA": {
+        "pk_cols": [
+            "NUM_ID_NATUREZA_ECONOMICA"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_ATUALIZ"
+                ],
+                "parent_table": "USUARIO",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            }
+        ],
+        "static": true
+    },
+    "OBJETO_SERVICO": {
+        "pk_cols": [
+            "NUM_ID_OBJETO_SERVICO"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_ATUALIZ"
+                ],
+                "parent_table": "USUARIO",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            }
+        ],
+        "static": true
+    },
+    "OPCAO_RECOMPRA": {
+        "pk_cols": [
+            "NUM_ID_OPCAO_RECOMPRA"
+        ],
+        "static": true
+    },
+    "OPERACAO": {
+        "pk_cols": [
+            "NUM_ID_OPERACAO"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_EVENTO"
+                ],
+                "parent_table": "EVENTO",
+                "parent_columns": [
+                    "NUM_EVENTO"
+                ]
+            },
+            {
+                "columns": [
+                    "COD_TIPO_DEBITO_P1"
+                ],
+                "parent_table": "TIPO_DEBITO",
+                "parent_columns": [
+                    "COD_TIPO_DEBITO"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_CONTA_PARTICIPANTE_P2"
+                ],
+                "parent_table": "CONTA_PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_CONTA_PARTICIPANTE_P1"
+                ],
+                "parent_table": "CONTA_PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_TIPO_OPER_OBJETO_SERV"
+                ],
+                "parent_table": "TIPO_OPER_OBJETO_SERV",
+                "parent_columns": [
+                    "NUM_ID_TIPO_OPER_OBJETO_SERV"
+                ]
+            },
+            {
+                "columns": [
+                    "COD_TIPO_DEBITO_P2"
+                ],
+                "parent_table": "TIPO_DEBITO",
+                "parent_columns": [
+                    "COD_TIPO_DEBITO"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_MODALIDADE_LIQUIDACAO"
+                ],
+                "parent_table": "MODALIDADE_LIQUIDACAO",
+                "parent_columns": [
+                    "NUM_ID_MODALIDADE_LIQUIDACAO"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_IF"
+                ],
+                "parent_table": "INSTRUMENTO_FINANCEIRO",
+                "parent_columns": [
+                    "NUM_IF"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_IF_PERTENCE"
+                ],
+                "parent_table": "INSTRUMENTO_FINANCEIRO",
+                "parent_columns": [
+                    "NUM_IF"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_MCC_P1"
+                ],
+                "parent_table": "PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_MCC_P2"
+                ],
+                "parent_table": "PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_CONTA_ESCRITURADOR"
+                ],
+                "parent_table": "CONTA_PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_CONTA_CUSTODIANTE"
+                ],
+                "parent_table": "CONTA_PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ]
+            }
+        ]
+    },
+    "PAPEL_PARTICIPANTE": {
+        "pk_cols": [
+            "COD_PAPEL_PARTICIPANTE"
+        ],
+        "static": true
+    },
+    "PARAMETRIZACAO_REGIME_MERCADO": {
+        "pk_cols": [
+            "NUM_ID_PARAM_REGIME_MERCADO"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_ID_TIPO_OPER_OBJETO_SERV"
+                ],
+                "parent_table": "TIPO_OPER_OBJETO_SERV",
+                "parent_columns": [
+                    "NUM_ID_TIPO_OPER_OBJETO_SERV"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_ATUALIZACAO"
+                ],
+                "parent_table": "ENTIDADE",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            }
+        ],
+        "static": true
+    },
+    "PARAMETRIZACAO_TIPO_REGIME": {
+        "pk_cols": [
+            "NUM_ID_PARAM_TIPO_REGIME"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_TIPO_IF"
+                ],
+                "parent_table": "TIPO_IF",
+                "parent_columns": [
+                    "NUM_TIPO_IF"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_ATUALIZACAO"
+                ],
+                "parent_table": "ENTIDADE",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            }
+        ],
+        "static": true
+    },
+    "PARAMETRO_CONFIG": {
+        "pk_cols": [
+            "NUM_ID_PARAMETRO_CONFIG"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_ID_OBJETO_SERVICO"
+                ],
+                "parent_table": "OBJETO_SERVICO",
+                "parent_columns": [
+                    "NUM_ID_OBJETO_SERVICO"
+                ]
+            }
+        ],
+        "static": true
+    },
+    "PARTICIPANTE": {
+        "pk_cols": [
+            "NUM_ID_ENTIDADE"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ],
+                "parent_table": "CONTA_PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_ATUALIZ"
+                ],
+                "parent_table": "USUARIO",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            }
+        ]
+    },
+    "RELACAO": {
+        "pk_cols": [
+            "NUM_ID_RELACAO"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE"
+                ],
+                "parent_table": "ENTIDADE",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_PARA"
+                ],
+                "parent_table": "ENTIDADE",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_ATUALIZ"
+                ],
+                "parent_table": "USUARIO",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            }
+        ]
+    },
+    "RESGATE": {
+        "pk_cols": [
+            "NUM_CONDICAO_IF"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_CONDICAO_IF"
+                ],
+                "parent_table": "CONDICAO_IF",
+                "parent_columns": [
+                    "NUM_CONDICAO_IF"
+                ]
+            }
+        ]
+    },
+    "SITUACAO_CONTA": {
+        "pk_cols": [
+            "NUM_ID_SITUACAO_CONTA"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_ATUALIZ"
+                ],
+                "parent_table": "USUARIO",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            }
+        ],
+        "static": true
+    },
+    "TCTPCONTROLE_IF_DEPR": {
+        "pk_cols": [
+            "NUM_CONTROLE_IF_DEPOSITARIA"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_IF"
+                ],
+                "parent_table": "INSTRUMENTO_FINANCEIRO",
+                "parent_columns": [
+                    "NUM_IF"
+                ]
+            }
+        ]
+    },
+    "TCTPFEATURE_TOGGLE": {
+        "pk_cols": [
+            "NUM_IDT_FTRE_TOG"
+        ],
+        "static": true
+    },
+    "TCTPHABILITA_OPERACAO_SERVICO": {
+        "pk_cols": [
+            "NUM_HABILITA_OPERACAO_SERVICO"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_ID_PARAMETRO_CONFIGURACAO"
+                ],
+                "parent_table": "PARAMETRO_CONFIG",
+                "parent_columns": [
+                    "NUM_ID_PARAMETRO_CONFIG"
+                ]
+            }
+        ],
+        "static": true
+    },
+    "TIPO_DADO_OPERACAO": {
+        "pk_cols": [
+            "NUM_ID_TIPO_DADO_OPERACAO"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_ID_TIPO_OPER_OBJETO_SERV"
+                ],
+                "parent_table": "TIPO_OPER_OBJETO_SERV",
+                "parent_columns": [
+                    "NUM_ID_TIPO_OPER_OBJETO_SERV"
+                ]
+            }
+        ],
+        "static": true
+    },
+    "TIPO_DEBITO": {
+        "pk_cols": [
+            "COD_TIPO_DEBITO"
+        ],
+        "static": true
+    },
+    "TIPO_IF": {
+        "pk_cols": [
+            "NUM_TIPO_IF"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_ID_OBJETO_SERVICO"
+                ],
+                "parent_table": "OBJETO_SERVICO",
+                "parent_columns": [
+                    "NUM_ID_OBJETO_SERVICO"
+                ]
+            }
+        ],
+        "static": true
+    },
+    "TIPO_OPER_OBJETO_SERV": {
+        "pk_cols": [
+            "NUM_ID_TIPO_OPER_OBJETO_SERV"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_ID_OBJETO_SERVICO"
+                ],
+                "parent_table": "OBJETO_SERVICO",
+                "parent_columns": [
+                    "NUM_ID_OBJETO_SERVICO"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_ATUALIZ"
+                ],
+                "parent_table": "USUARIO",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            }
+        ],
+        "static": true
+    },
+    "TIPO_OPER_PTA_CARTEIRA": {
+        "pk_cols": [
+            "NUM_ID_TIPO_OPER_PTA_CARTEIRA"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "COD_TIPO_DEBITO"
+                ],
+                "parent_table": "TIPO_DEBITO",
+                "parent_columns": [
+                    "COD_TIPO_DEBITO"
+                ]
+            },
+            {
+                "columns": [
+                    "COD_TIPO_POSICAO_CARTEIRA"
+                ],
+                "parent_table": "TIPO_POSICAO_CARTEIRA",
+                "parent_columns": [
+                    "COD_TIPO_POSICAO_CARTEIRA"
+                ]
+            }
+        ],
+        "static": true
+    },
+    "TIPO_POSICAO_CARTEIRA": {
+        "pk_cols": [
+            "COD_TIPO_POSICAO_CARTEIRA"
+        ],
+        "static": true
+    },
+    "TITULO": {
+        "pk_cols": [
+            "NUM_IF"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_IF"
+                ],
+                "parent_table": "INSTRUMENTO_FINANCEIRO",
+                "parent_columns": [
+                    "NUM_IF"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ],
+                "parent_table": "CONTA_PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_CONTA_AGENTE_PAGAMENTO"
+                ],
+                "parent_table": "CONTA_PARTICIPANTE",
+                "parent_columns": [
+                    "NUM_CONTA_PARTICIPANTE"
+                ]
+            }
+        ]
+    },
+    "USUARIO": {
+        "pk_cols": [
+            "NUM_ID_ENTIDADE"
+        ],
+        "foreign_keys": [
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE"
+                ],
+                "parent_table": "ENTIDADE",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            },
+            {
+                "columns": [
+                    "NUM_ID_ENTIDADE_ATUALIZ"
+                ],
+                "parent_table": "USUARIO",
+                "parent_columns": [
+                    "NUM_ID_ENTIDADE"
+                ]
+            }
+        ]
+    }
 }
