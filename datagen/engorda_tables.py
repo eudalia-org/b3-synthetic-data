@@ -525,31 +525,64 @@ def _validate_specs(
                     )
 
 
-def _topological_order(specs: Mapping[str, TableSpec]) -> List[str]:
-    remaining = set(specs.keys())
+def _toposort_break_cycles(
+    deps: Mapping[str, set],
+    *,
+    on_cycle: Optional[Callable[[set, Mapping[str, set], set], None]] = None,
+) -> List[str]:
+    """Order nodes so every node follows all of its `deps`, returning each node
+    exactly once.
+
+    Cycles are not fatal: when no node is ready, the cycle is broken by forcing
+    the node with the fewest still-unresolved deps (ties broken by name) so the
+    result is deterministic. `on_cycle(remaining, deps, done)` is invoked the
+    first time a break is forced, for callers that want to warn.
+    """
+    remaining = set(deps)
     done: set = set()
     order: List[str] = []
+    cycle_reported = False
 
     while remaining:
-        ready = [
-            n
-            for n in remaining
-            if {fk.parent_table for fk in specs[n].foreign_keys}.issubset(done)
-        ]
+        ready = sorted(n for n in remaining if deps[n] <= done)
 
         if not ready:
-            unresolved = {
-                t: [fk.parent_table for fk in specs[t].foreign_keys]
-                for t in remaining
-            }
-            raise ValueError(f"Ciclo/self-ref/pai ausente. Pendências: {unresolved}")
+            if on_cycle is not None and not cycle_reported:
+                on_cycle(remaining, deps, done)
+                cycle_reported = True
+            ready = [min(remaining, key=lambda n: (len(deps[n] - done), n))]
 
-        for name in sorted(ready):
+        for name in ready:
             order.append(name)
             done.add(name)
-            remaining.remove(name)
+            remaining.discard(name)
 
     return order
+
+
+def _topological_order(specs: Mapping[str, TableSpec]) -> List[str]:
+    """Parents before children. Shares topo_order_tables' cycle policy: cycles
+    are broken (with a warning) rather than raised, since sanitize/validate have
+    already removed self-refs and missing parents by the time this runs."""
+    deps: Dict[str, set] = {
+        name: {
+            fk.parent_table
+            for fk in spec.foreign_keys
+            if fk.parent_table != name and fk.parent_table in specs
+        }
+        for name, spec in specs.items()
+    }
+
+    def _warn(remaining: set, deps: Mapping[str, set], done: set) -> None:
+        unresolved = {t: sorted(deps[t] - done) for t in sorted(remaining) if deps[t] - done}
+        warnings.warn(
+            "Ciclo de FK detectado; quebrando arbitrariamente para ordenar. "
+            f"Pendências: {unresolved}",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    return _toposort_break_cycles(deps, on_cycle=_warn)
 
 
 def _referenced_parent_columns(specs: Mapping[str, TableSpec]) -> Dict[str, set]:
@@ -2301,16 +2334,7 @@ def topo_order_tables(comp_specs: dict) -> list[str]:
             if parent in comp_specs and parent != table:
                 deps[table].add(parent)
 
-    order: list[str] = []
-    done: set[str] = set()
-    while len(done) < len(comp_specs):
-        ready = [t for t in comp_specs if t not in done and deps[t] <= done]
-        if not ready:  # cycle (e.g. mutual FKs) -> break it
-            ready = [t for t in comp_specs if t not in done]
-        for t in sorted(ready):
-            order.append(t)
-            done.add(t)
-    return order
+    return _toposort_break_cycles(deps)
 
 
 def effective_n_rows(

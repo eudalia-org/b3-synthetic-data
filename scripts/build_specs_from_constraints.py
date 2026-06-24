@@ -40,6 +40,58 @@ STATIC_TABLES = {
     "TCTPFEATURE_TOGGLE", "TCTPHABILITA_OPERACAO_SERVICO", "MALOTE",
 }
 
+# Audit "last updated by" columns (NUM_ID_ENTIDADE_ATUALIZ -> USUARIO/ENTIDADE).
+# These are metadata pointers, not structural parent-child relationships, and
+# they form FK cycles (e.g. ENTIDADE <-> USUARIO). We exclude them from the FK
+# graph; the synthesizer leaves the column's raw values in place.
+AUDIT_FK_COL_SUFFIX = "_ATUALIZ"
+
+# Structural back-reference FKs that close a genuine cycle. Each entry is the
+# NON-owning side of a mutual reference; we keep the ownership edge and drop
+# this one so the graph is a DAG. Keyed by (child_table, (columns...)).
+#   - account belongs to participant -> keep CONTA_PARTICIPANTE.NUM_ID_ENTIDADE
+#     -> PARTICIPANTE; drop the participant's pointer back to its account.
+#   - malote belongs to account -> keep MALOTE.NUM_CONTA_PARTICIPANTE ->
+#     CONTA_PARTICIPANTE; drop the account's pointer back to its malote.
+BACK_REFERENCE_FKS = {
+    ("PARTICIPANTE", ("NUM_CONTA_PARTICIPANTE",)),
+    ("CONTA_PARTICIPANTE", ("NUM_ID_MALOTE",)),
+}
+
+
+def _is_audit_fk(fk: dict) -> bool:
+    cols = fk.get("columns") or []
+    return bool(cols) and all(c.endswith(AUDIT_FK_COL_SUFFIX) for c in cols)
+
+
+def prune_cycle_fks(specs: dict) -> tuple[list[str], list[str]]:
+    """Drop audit (*_ATUALIZ) and structural back-reference FKs in place.
+
+    Both classes of FK would otherwise create cycles that the engorda
+    topological order cannot satisfy. Returns (audit_dropped, cycle_dropped)
+    as human-readable descriptions for reporting.
+    """
+    audit_dropped: list[str] = []
+    cycle_dropped: list[str] = []
+    for table, entry in specs.items():
+        fks = entry.get("foreign_keys")
+        if not fks:
+            continue
+        kept: list[dict] = []
+        for fk in fks:
+            label = f"{table}.{fk.get('columns')} -> {fk.get('parent_table')}"
+            if _is_audit_fk(fk):
+                audit_dropped.append(label)
+            elif (table, tuple(fk.get("columns") or [])) in BACK_REFERENCE_FKS:
+                cycle_dropped.append(label)
+            else:
+                kept.append(fk)
+        if kept:
+            entry["foreign_keys"] = kept
+        else:
+            entry.pop("foreign_keys", None)
+    return audit_dropped, cycle_dropped
+
 
 def parse_constraints_csv(path: str) -> list[dict]:
     """Read the constraint dump, normalizing header case and whitespace."""
@@ -127,6 +179,9 @@ def build_specs(
         # deterministic order
         specs[table]["foreign_keys"] = sorted(fks, key=lambda fk: fk["columns"])
 
+    # Drop audit + structural back-reference FKs that would create cycles.
+    audit_fks, cycle_breaks = prune_cycle_fks(specs)
+
     # static / n_rows: prefer overrides from an existing specs, else the set.
     for table in specs:
         ov = overrides.get(table, {})
@@ -152,6 +207,8 @@ def build_specs(
         "fks": sum(len(v.get("foreign_keys", [])) for v in out.values()),
         "static": sum(1 for v in out.values() if v.get("static")),
         "self_refs": self_refs,
+        "audit_fks": audit_fks,
+        "cycle_breaks": cycle_breaks,
         "skipped": skipped,
     }
     return out
@@ -182,6 +239,14 @@ def main() -> None:
     if report["self_refs"]:
         print("Self-referencing FKs (engorda nulls orphans on load):")
         for item in report["self_refs"]:
+            print(f"  - {item}")
+    if report["audit_fks"]:
+        print("Audit FKs excluded (*_ATUALIZ; metadata, not structural):")
+        for item in report["audit_fks"]:
+            print(f"  - {item}")
+    if report["cycle_breaks"]:
+        print("Structural back-reference FKs dropped to break cycles:")
+        for item in report["cycle_breaks"]:
             print(f"  - {item}")
     if report["skipped"]:
         print("Skipped constraints:")

@@ -24,15 +24,6 @@
             },
             {
                 "columns": [
-                    "NUM_ID_ENTIDADE_ATUALIZ"
-                ],
-                "parent_table": "USUARIO",
-                "parent_columns": [
-                    "NUM_ID_ENTIDADE"
-                ]
-            },
-            {
-                "columns": [
                     "NUM_ID_ENTIDADE_DESBLOQ"
                 ],
                 "parent_table": "USUARIO",
@@ -205,24 +196,6 @@
             },
             {
                 "columns": [
-                    "NUM_ID_MALOTE"
-                ],
-                "parent_table": "MALOTE",
-                "parent_columns": [
-                    "NUM_ID_MALOTE"
-                ]
-            },
-            {
-                "columns": [
-                    "NUM_ID_ENTIDADE_ATUALIZ"
-                ],
-                "parent_table": "USUARIO",
-                "parent_columns": [
-                    "NUM_ID_ENTIDADE"
-                ]
-            },
-            {
-                "columns": [
                     "NUM_CONTA_PARTICIPANTE_CETIP"
                 ],
                 "parent_table": "CONTA_PARTICIPANTE",
@@ -328,17 +301,6 @@
     "ENTIDADE": {
         "pk_cols": [
             "NUM_ID_ENTIDADE"
-        ],
-        "foreign_keys": [
-            {
-                "columns": [
-                    "NUM_ID_ENTIDADE_ATUALIZ"
-                ],
-                "parent_table": "USUARIO",
-                "parent_columns": [
-                    "NUM_ID_ENTIDADE"
-                ]
-            }
         ]
     },
     "ESPECIFICACAO": {
@@ -412,15 +374,6 @@
                 "parent_table": "INSTRUMENTO_FINANCEIRO",
                 "parent_columns": [
                     "NUM_IF"
-                ]
-            },
-            {
-                "columns": [
-                    "NUM_ID_ENTIDADE_ATUALIZ"
-                ],
-                "parent_table": "USUARIO",
-                "parent_columns": [
-                    "NUM_ID_ENTIDADE"
                 ]
             }
         ]
@@ -593,15 +546,6 @@
                 "parent_columns": [
                     "NUM_CONTA_PARTICIPANTE"
                 ]
-            },
-            {
-                "columns": [
-                    "NUM_ID_ENTIDADE_ATUALIZ"
-                ],
-                "parent_table": "USUARIO",
-                "parent_columns": [
-                    "NUM_ID_ENTIDADE"
-                ]
             }
         ],
         "static": true
@@ -610,7 +554,6 @@
         "pk_cols": [
             "NUM_ID_MODALIDADE_LIQUIDACAO"
         ],
-        "strict": true,
         "static": true
     },
     "MOTIVO_SITUACAO_IF": {
@@ -630,6 +573,12 @@
         ],
         "static": true
     },
+    "NATUREZA_ECONOMICA": {
+        "pk_cols": [
+            "NUM_ID_NATUREZA_ECONOMICA"
+        ],
+        "static": true
+    },
     "NAT_ECON_TP_OPER_PONTA": {
         "pk_cols": [
             "NUM_ID_NAT_ECON_TP_OPER_PONTA"
@@ -642,15 +591,6 @@
                 "parent_table": "NATUREZA_ECONOMICA",
                 "parent_columns": [
                     "NUM_ID_NATUREZA_ECONOMICA"
-                ]
-            },
-            {
-                "columns": [
-                    "NUM_ID_ENTIDADE_ATUALIZ"
-                ],
-                "parent_table": "USUARIO",
-                "parent_columns": [
-                    "NUM_ID_ENTIDADE"
                 ]
             }
         ],
@@ -682,37 +622,9 @@
         ],
         "static": true
     },
-    "NATUREZA_ECONOMICA": {
-        "pk_cols": [
-            "NUM_ID_NATUREZA_ECONOMICA"
-        ],
-        "foreign_keys": [
-            {
-                "columns": [
-                    "NUM_ID_ENTIDADE_ATUALIZ"
-                ],
-                "parent_table": "USUARIO",
-                "parent_columns": [
-                    "NUM_ID_ENTIDADE"
-                ]
-            }
-        ],
-        "static": true
-    },
     "OBJETO_SERVICO": {
         "pk_cols": [
             "NUM_ID_OBJETO_SERVICO"
-        ],
-        "foreign_keys": [
-            {
-                "columns": [
-                    "NUM_ID_ENTIDADE_ATUALIZ"
-                ],
-                "parent_table": "USUARIO",
-                "parent_columns": [
-                    "NUM_ID_ENTIDADE"
-                ]
-            }
         ],
         "static": true
     },
@@ -924,26 +836,6 @@
     "PARTICIPANTE": {
         "pk_cols": [
             "NUM_ID_ENTIDADE"
-        ],
-        "foreign_keys": [
-            {
-                "columns": [
-                    "NUM_CONTA_PARTICIPANTE"
-                ],
-                "parent_table": "CONTA_PARTICIPANTE",
-                "parent_columns": [
-                    "NUM_CONTA_PARTICIPANTE"
-                ]
-            },
-            {
-                "columns": [
-                    "NUM_ID_ENTIDADE_ATUALIZ"
-                ],
-                "parent_table": "USUARIO",
-                "parent_columns": [
-                    "NUM_ID_ENTIDADE"
-                ]
-            }
         ]
     },
     "RELACAO": {
@@ -965,15 +857,6 @@
                     "NUM_ID_ENTIDADE_PARA"
                 ],
                 "parent_table": "ENTIDADE",
-                "parent_columns": [
-                    "NUM_ID_ENTIDADE"
-                ]
-            },
-            {
-                "columns": [
-                    "NUM_ID_ENTIDADE_ATUALIZ"
-                ],
-                "parent_table": "USUARIO",
                 "parent_columns": [
                     "NUM_ID_ENTIDADE"
                 ]
@@ -999,17 +882,6 @@
     "SITUACAO_CONTA": {
         "pk_cols": [
             "NUM_ID_SITUACAO_CONTA"
-        ],
-        "foreign_keys": [
-            {
-                "columns": [
-                    "NUM_ID_ENTIDADE_ATUALIZ"
-                ],
-                "parent_table": "USUARIO",
-                "parent_columns": [
-                    "NUM_ID_ENTIDADE"
-                ]
-            }
         ],
         "static": true
     },
@@ -1105,15 +977,6 @@
                 "parent_columns": [
                     "NUM_ID_OBJETO_SERVICO"
                 ]
-            },
-            {
-                "columns": [
-                    "NUM_ID_ENTIDADE_ATUALIZ"
-                ],
-                "parent_table": "USUARIO",
-                "parent_columns": [
-                    "NUM_ID_ENTIDADE"
-                ]
             }
         ],
         "static": true
@@ -1194,15 +1057,6 @@
                     "NUM_ID_ENTIDADE"
                 ],
                 "parent_table": "ENTIDADE",
-                "parent_columns": [
-                    "NUM_ID_ENTIDADE"
-                ]
-            },
-            {
-                "columns": [
-                    "NUM_ID_ENTIDADE_ATUALIZ"
-                ],
-                "parent_table": "USUARIO",
                 "parent_columns": [
                     "NUM_ID_ENTIDADE"
                 ]

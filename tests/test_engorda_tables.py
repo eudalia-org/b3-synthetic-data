@@ -170,6 +170,46 @@ class TestTopoOrderTables:
         assert sorted(engorda_tables.topo_order_tables(specs)) == ["A", "B"]
 
 
+class TestTopologicalOrder:
+    """_topological_order shares topo_order_tables' cycle policy: it breaks
+    cycles instead of raising (cycles are sanitized/expected, not fatal)."""
+
+    def _spec(self, name, parents=()):
+        fks = tuple(
+            engorda_tables.ForeignKeySpec(columns=(f"FK_{p}",), parent_table=p,
+                                          parent_columns=("ID",))
+            for p in parents
+        )
+        return engorda_tables.TableSpec(name=name, pk_cols=("ID",), foreign_keys=fks)
+
+    def test_parents_before_children(self):
+        specs = {
+            "ITEMS": self._spec("ITEMS", ["ORDERS"]),
+            "ORDERS": self._spec("ORDERS", ["CUSTOMERS"]),
+            "CUSTOMERS": self._spec("CUSTOMERS"),
+        }
+        order = engorda_tables._topological_order(specs)
+        pos = {t: i for i, t in enumerate(order)}
+        assert pos["CUSTOMERS"] < pos["ORDERS"] < pos["ITEMS"]
+
+    def test_cycle_is_broken_and_warns(self):
+        specs = {
+            "A": self._spec("A", ["B"]),
+            "B": self._spec("B", ["A"]),
+        }
+        with pytest.warns(UserWarning, match="[Cc]iclo"):
+            order = engorda_tables._topological_order(specs)
+        assert sorted(order) == ["A", "B"]
+
+    def test_acyclic_does_not_warn(self):
+        import warnings as _w
+
+        specs = {"P": self._spec("P"), "C": self._spec("C", ["P"])}
+        with _w.catch_warnings():
+            _w.simplefilter("error")
+            assert engorda_tables._topological_order(specs) == ["P", "C"]
+
+
 class TestFkIsWholePk:
     def test_pk_equals_fk(self):
         fk = {"columns": ["NUM_CONDICAO_IF"], "parent_table": "CONDICAO_IF"}
