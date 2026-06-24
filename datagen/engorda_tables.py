@@ -33,7 +33,7 @@ REQUIRED_ENV_VARS = (
     "DATAGEN_SYNTHETIC_BASE_URI",
     "DATAGEN_SPECS_URI",
 )
-DEFAULT_SCALE_FACTOR = 1.0
+DEFAULT_SCALE_FACTOR = 2.0
 DEFAULT_SEED = 42
 
 # ---------------------------------------------------------------------------
@@ -52,7 +52,7 @@ DEFAULT_SEED = 42
 # sintéticas não colidam com linhas de produção de OUTROS NUM_TIPO_IF.
 # ---------------------------------------------------------------------------
 FILTRO_TIPO_IF_COLUMN = "NUM_TIPO_IF"
-FILTRO_TIPO_IF_VALUE = 49 #filtro cdb simplificado
+FILTRO_TIPO_IF_VALUE = 46 #filtro cdb simplificado
 
 NullableFkPolicy = Literal["allow_any_null", "allow_all_null", "invalid_null"]
 
