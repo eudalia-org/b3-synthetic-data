@@ -2793,11 +2793,14 @@ _RUNTIME_SPARK_CONF = {
     "spark.sql.adaptive.coalescePartitions.enabled": "true",
     "spark.sql.adaptive.skewJoin.enabled": "true",
     # AQE coalesces post-shuffle partitions toward this target size, so the
-    # high partition count below never lands as giant 20GB+ reducer tasks.
+    # high partition count below never lands as giant reducer tasks.
     "spark.sql.adaptive.advisoryPartitionSizeInBytes": "128m",
-    # Start high; AQE coalesces down. Replaces the 200 default, which at multi-TB
-    # scale makes each shuffle partition tens of GB -> spill/OOM/skew.
-    "spark.sql.shuffle.partitions": "2000",
+    # Initial/max partition count. AQE only MERGES small partitions, never SPLITS
+    # large ones (outside skewed joins), so this must be high enough that no
+    # starting partition is oversized: ~largest_shuffle / 256m (multi-TB tables
+    # at scale_factor=2 -> ~24k). AQE coalesces small components back down via
+    # the advisory size above, so over-provisioning is cheap; under-sizing isn't.
+    "spark.sql.shuffle.partitions": "24000",
 }
 
 
