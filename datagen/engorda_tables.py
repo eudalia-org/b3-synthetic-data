@@ -612,9 +612,11 @@ def _with_contiguous_row_id(df: DataFrame, id_col: str) -> DataFrame:
         4. sizes = groupBy(part).agg(count(*)) — uma linha por partição.
            O map-side combine reduz N linhas a ~num_partições linhas antes
            do shuffle, então a etapa é barota mas leve.
-        5. offset = soma cumulativa de sizes ordenada por part — única etapa
-           "global", sobre O(num_partições) linhas (trivial).
-        6. id_col = offset + part_row - 1.
+        5. offset = soma cumulativa de sizes, calculada no DRIVER. `sizes` tem
+           uma linha por partição e já é pequeno; coletá-lo e fazer o prefix-sum
+           em Python evita um Window sem partitionBy, que o Spark executa como
+           Exchange SinglePartition (serial, trava em tabelas grandes).
+        6. id_col = offset + part_row - 1, com offset trazido por broadcast.
 
     Equivalência com a versão anterior:
         monotonically_increasing_id() ordena por (partition_id, counter).
@@ -663,25 +665,35 @@ def _with_contiguous_row_id(df: DataFrame, id_col: str) -> DataFrame:
         .agg(F.count(F.lit(1)).cast("long").alias(part_size_col))
     )
 
-    w_offset = Window.orderBy(F.col(part_col)).rowsBetween(
-        Window.unboundedPreceding, -1
+    # Prefix-sum no driver: uma linha por partição. Coletar é o mesmo custo do
+    # broadcast a seguir e evita o Window sem partitionBy (SinglePartition).
+    spark = df.sparkSession
+    ordered_sizes = sorted(
+        ((row[part_col], row[part_size_col]) for row in sizes.collect()),
+        key=lambda pair: pair[0],
     )
-    sizes = sizes.withColumn(
-        offset_col,
-        F.coalesce(
-            F.sum(F.col(part_size_col)).over(w_offset),
-            F.lit(0).cast("long"),
-        ).cast("long"),
-    )
+    running = 0
+    offset_rows: List[Tuple[int, int]] = []
+    for part_value, size in ordered_sizes:
+        offset_rows.append((part_value, running))
+        running += size
 
-    df = df.join(F.broadcast(sizes), on=part_col, how="left")
+    offset_schema = T.StructType(
+        [
+            T.StructField(part_col, T.IntegerType(), False),
+            T.StructField(offset_col, T.LongType(), False),
+        ]
+    )
+    offsets = spark.createDataFrame(offset_rows, schema=offset_schema)
+
+    df = df.join(F.broadcast(offsets), on=part_col, how="left")
 
     df = df.withColumn(
         id_col,
         (F.col(offset_col) + F.col(part_row_col) - F.lit(1)).cast("long"),
     )
 
-    return df.drop(mid_col, part_col, part_row_col, part_size_col, offset_col)
+    return df.drop(mid_col, part_col, part_row_col, offset_col)
 
 
 def _bootstrap_rows_exact(
@@ -2758,19 +2770,49 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
         sys.exit(1)
 
 
+# Workload-level Spark settings, independent of cluster shape. Driver/executor
+# OCPU, memory and count are tuned via the OCI Data Flow UI, not here.
+_STATIC_SPARK_CONF = {
+    "spark.sql.parquet.datetimeRebaseModeInWrite": "CORRECTED",
+    "spark.sql.parquet.int96RebaseModeInWrite": "CORRECTED",
+    # Answer max(pk) from Parquet footer stats (metadata only, no scan) so
+    # computing each table's true max PK stays fast even under --limit.
+    "spark.sql.parquet.aggregatePushdown": "true",
+    "spark.serializer": "org.apache.spark.serializer.KryoSerializer",
+    # Tolerate long GC pauses on large (fat) executors instead of declaring them
+    # lost — losing 1 of few executors triggers expensive recompute cascades.
+    "spark.network.timeout": "600s",
+    "spark.executor.heartbeatInterval": "30s",
+}
+
+# Adaptive Query Execution + shuffle sizing. These are runtime SQL confs, so we
+# also re-apply them to an already-active session: on Data Flow the context may
+# be created by the platform before this runs, which would ignore builder confs.
+_RUNTIME_SPARK_CONF = {
+    "spark.sql.adaptive.enabled": "true",
+    "spark.sql.adaptive.coalescePartitions.enabled": "true",
+    "spark.sql.adaptive.skewJoin.enabled": "true",
+    # AQE coalesces post-shuffle partitions toward this target size, so the
+    # high partition count below never lands as giant 20GB+ reducer tasks.
+    "spark.sql.adaptive.advisoryPartitionSizeInBytes": "128m",
+    # Start high; AQE coalesces down. Replaces the 200 default, which at multi-TB
+    # scale makes each shuffle partition tens of GB -> spill/OOM/skew.
+    "spark.sql.shuffle.partitions": "2000",
+}
+
+
 def create_spark_session(app_name: str) -> SparkSession:
     from pyspark.sql import SparkSession
 
     builder = SparkSession.builder.appName(app_name)
-    for key, value in {
-        "spark.sql.parquet.datetimeRebaseModeInWrite": "CORRECTED",
-        "spark.sql.parquet.int96RebaseModeInWrite": "CORRECTED",
-        # Answer max(pk) from Parquet footer stats (metadata only, no scan) so
-        # computing each table's true max PK stays fast even under --limit.
-        "spark.sql.parquet.aggregatePushdown": "true",
-    }.items():
+    for key, value in {**_STATIC_SPARK_CONF, **_RUNTIME_SPARK_CONF}.items():
         builder = builder.config(key, value)
-    return builder.getOrCreate()
+    spark = builder.getOrCreate()
+
+    # Guarantee the AQE/shuffle confs apply even if the session pre-existed.
+    for key, value in _RUNTIME_SPARK_CONF.items():
+        spark.conf.set(key, value)
+    return spark
 
 
 def main() -> None:
