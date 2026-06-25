@@ -2783,6 +2783,12 @@ _STATIC_SPARK_CONF = {
     # lost — losing 1 of few executors triggers expensive recompute cascades.
     "spark.network.timeout": "600s",
     "spark.executor.heartbeatInterval": "30s",
+    # Overhead as a fraction of executor memory (Spark 3.3+), so it auto-scales
+    # with whatever shape is picked in the Data Flow UI. 0.2 (~20%) suits PySpark
+    # + shuffle-heavy work; the 0.1 default gets containers RM-killed at scale.
+    # NOTE: do NOT also set the absolute spark.executor.memoryOverhead in the UI
+    # — the absolute wins over the factor and would pin overhead to one shape.
+    "spark.executor.memoryOverheadFactor": "0.2",
 }
 
 # Adaptive Query Execution + shuffle sizing. These are runtime SQL confs, so we
