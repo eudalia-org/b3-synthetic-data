@@ -30,6 +30,11 @@ from collections import defaultdict
 # Reference / code / domain tables that must NOT be fattened (constrained PK
 # domains, copied 1:1). Edit this set if the schema changes. Used when no
 # --current specs.json is given to carry static flags over.
+# Only the 15 "ESCRITA" (write/transaction) tables are fattened; everything
+# else is copied 1:1 (static). Fattened: CARTEIRA_COMITENTE, CARTEIRA_PARTICIPANTE,
+# ESPECIFICACAO, ESPECIFICACAO_COMITENTE, INSTRUMENTO_FINANCEIRO, LANCAMENTO,
+# OPERACAO, TITULO, EVENTO, CONDICAO_IF, CREDITO, DADO_OPERACAO,
+# DEPOSITO_AUTOMATICO_IF, JUROS_FLUTUANTE, RESGATE.
 STATIC_TABLES = {
     "TIPO_DEBITO", "TIPO_POSICAO_CARTEIRA", "TIPO_IF", "TIPO_OPER_OBJETO_SERV",
     "TIPO_OPER_PTA_CARTEIRA", "TIPO_DADO_OPERACAO", "NAT_ECO_TIPO_IF",
@@ -38,6 +43,9 @@ STATIC_TABLES = {
     "OBJETO_SERVICO", "OPCAO_RECOMPRA", "CERTIFICACAO_CETIP",
     "PARAMETRIZACAO_REGIME_MERCADO", "PARAMETRIZACAO_TIPO_REGIME", "PARAMETRO_CONFIG",
     "TCTPFEATURE_TOGGLE", "TCTPHABILITA_OPERACAO_SERVICO", "MALOTE",
+    # Structural / entity / reference tables — copied 1:1, not transactions.
+    "BLOQUEIO_OPERACAO_IF", "COMITENTE_FATCA", "COMITENTE_INR", "CONTA_PARTICIPANTE",
+    "ENTIDADE", "PARTICIPANTE", "RELACAO", "TCTPCONTROLE_IF_DEPR", "USUARIO",
 }
 
 # Audit "last updated by" columns (NUM_ID_ENTIDADE_ATUALIZ -> USUARIO/ENTIDADE).

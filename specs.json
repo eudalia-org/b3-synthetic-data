@@ -31,7 +31,8 @@
                     "NUM_ID_ENTIDADE"
                 ]
             }
-        ]
+        ],
+        "static": true
     },
     "CARTEIRA_COMITENTE": {
         "pk_cols": [
@@ -148,12 +149,14 @@
     "COMITENTE_FATCA": {
         "pk_cols": [
             "NUM_ID_ENTIDADE"
-        ]
+        ],
+        "static": true
     },
     "COMITENTE_INR": {
         "pk_cols": [
             "NUM_ID_ENTIDADE"
-        ]
+        ],
+        "static": true
     },
     "CONDICAO_IF": {
         "pk_cols": [
@@ -212,7 +215,8 @@
                     "NUM_CONTA_PARTICIPANTE"
                 ]
             }
-        ]
+        ],
+        "static": true
     },
     "CREDITO": {
         "pk_cols": [
@@ -301,7 +305,8 @@
     "ENTIDADE": {
         "pk_cols": [
             "NUM_ID_ENTIDADE"
-        ]
+        ],
+        "static": true
     },
     "ESPECIFICACAO": {
         "pk_cols": [
@@ -836,7 +841,8 @@
     "PARTICIPANTE": {
         "pk_cols": [
             "NUM_ID_ENTIDADE"
-        ]
+        ],
+        "static": true
     },
     "RELACAO": {
         "pk_cols": [
@@ -861,7 +867,8 @@
                     "NUM_ID_ENTIDADE"
                 ]
             }
-        ]
+        ],
+        "static": true
     },
     "RESGATE": {
         "pk_cols": [
@@ -899,7 +906,8 @@
                     "NUM_IF"
                 ]
             }
-        ]
+        ],
+        "static": true
     },
     "TCTPFEATURE_TOGGLE": {
         "pk_cols": [
@@ -1061,6 +1069,7 @@
                     "NUM_ID_ENTIDADE"
                 ]
             }
-        ]
+        ],
+        "static": true
     }
 }
