@@ -2783,6 +2783,11 @@ _STATIC_SPARK_CONF = {
     # lost — losing 1 of few executors triggers expensive recompute cascades.
     "spark.network.timeout": "600s",
     "spark.executor.heartbeatInterval": "30s",
+    # Survive transient shuffle-block unavailability (a GC pause makes an executor
+    # briefly unreachable) instead of failing the fetch -> with few executors a
+    # FetchFailed forces a full map-stage recompute, and 4 of them abort the job.
+    "spark.shuffle.io.maxRetries": "10",
+    "spark.shuffle.io.retryWait": "15s",
     # Overhead as a fraction of executor memory (Spark 3.3+), so it auto-scales
     # with whatever shape is picked in the Data Flow UI. 0.2 (~20%) suits PySpark
     # + shuffle-heavy work; the 0.1 default gets containers RM-killed at scale.
@@ -2800,13 +2805,17 @@ _RUNTIME_SPARK_CONF = {
     "spark.sql.adaptive.skewJoin.enabled": "true",
     # AQE coalesces post-shuffle partitions toward this target size, so the
     # high partition count below never lands as giant reducer tasks.
-    "spark.sql.adaptive.advisoryPartitionSizeInBytes": "128m",
-    # Initial/max partition count. AQE only MERGES small partitions, never SPLITS
-    # large ones (outside skewed joins), so this must be high enough that no
-    # starting partition is oversized: ~largest_shuffle / 256m (multi-TB tables
-    # at scale_factor=2 -> ~24k). AQE coalesces small components back down via
-    # the advisory size above, so over-provisioning is cheap; under-sizing isn't.
-    "spark.sql.shuffle.partitions": "24000",
+    "spark.sql.adaptive.advisoryPartitionSizeInBytes": "256m",
+    # Fewer, larger MAP tasks (default is 128m) -> fewer map outputs. Total
+    # shuffle blocks = map_tasks x shuffle.partitions, and a huge block count is
+    # what causes FetchFailedException at scale. 512m cuts map tasks ~4x.
+    "spark.sql.files.maxPartitionBytes": "512m",
+    # Initial/max REDUCE partition count. Balances two forces: large enough that
+    # no partition is oversized (AQE only MERGES, never SPLITS outside skewed
+    # joins), but not so large that map_tasks x this explodes the block count and
+    # triggers FetchFailed. ~0.5-1GB partitions on 128GB executors; AQE coalesces
+    # small components back down via the advisory size above.
+    "spark.sql.shuffle.partitions": "8000",
 }
 
 
