@@ -1412,6 +1412,22 @@ def synthesize_multitable_spark(
     mappings: Dict[Tuple[str, Tuple[str, ...]], DataFrame] = {}
     intermediates: List[DataFrame] = []
 
+    # How many child tables still need each parent mapping. Once a parent's last
+    # consumer is synthesized, its mapping is unpersisted instead of being held
+    # for the whole component — large components otherwise keep every table's
+    # bootstrapped frames + mappings cached at once, which is the memory wall.
+    mapping_consumers: Dict[Tuple[str, Tuple[str, ...]], int] = {}
+    for child_name in order:
+        for fk in active_specs[child_name].foreign_keys:
+            key = (fk.parent_table, tuple(fk.parent_columns))
+            mapping_consumers[key] = mapping_consumers.get(key, 0) + 1
+
+    def _release_mapping_consumer(key: Tuple[str, Tuple[str, ...]]) -> None:
+        remaining = mapping_consumers.get(key, 0) - 1
+        mapping_consumers[key] = remaining
+        if remaining <= 0:
+            _safe_unpersist(mappings.pop(key, None))
+
     if verbose:
         print("Specs ativas após saneamento de relacionamentos:")
         for table_name, spec in active_specs.items():
@@ -1434,6 +1450,8 @@ def synthesize_multitable_spark(
                 set(c for cols in ref_col_sets for c in cols)
                 | set(spec.pk_cols)
             )
+
+            src_indexed: Optional[DataFrame] = None
 
             if spec.static:
                 src_count = source.count()
@@ -1506,6 +1524,7 @@ def synthesize_multitable_spark(
                             "A FK será mantida sem remapeamento nesta tabela.",
                             policy=relationship_policy,
                         )
+                        _release_mapping_consumer(key)
                         continue
 
                     work = _apply_fk_mapping(
@@ -1522,6 +1541,7 @@ def synthesize_multitable_spark(
                         broadcast_fk_counts=broadcast_fk_counts,
                         fk_index=fk_idx,
                     )
+                    _release_mapping_consumer(key)
 
                 if spec.postprocess is not None:
                     work = spec.postprocess(work, result)
@@ -1545,6 +1565,12 @@ def synthesize_multitable_spark(
             synth = _persist(synth, storage_level)
             synth.count()
             result[table_name] = synth
+
+            # synth and any parent mapping are now materialized with their own
+            # cached blocks, so the bulky bootstrapped frames for this table are
+            # no longer needed — free them now instead of at end-of-component.
+            _safe_unpersist(work)
+            _safe_unpersist(src_indexed)
 
         if validate_mode == "full":
             if verbose:

@@ -677,3 +677,49 @@ class TestEngordaIntegration:
         # FK integrity: every synthetic ORDERS.CUSTOMER_ID exists in synthetic CUSTOMERS.
         orphans = out_orders.join(out_customers, "CUSTOMER_ID", "left_anti").count()
         assert orphans == 0
+
+    def test_multilevel_fk_integrity_with_eager_mapping_release(self, spark, tmp_path):
+        # Guards the eager mapping-release: A's mapping is consumed by both B and
+        # C and must survive until C (its last consumer); B's mapping must survive
+        # until C. A premature free would corrupt the grandchild's remapped FKs.
+        raw = tmp_path / "raw"
+        syn = tmp_path / "syn"
+
+        a = spark.createDataFrame([(i,) for i in range(1, 6)], ["A_ID"])
+        b = spark.createDataFrame(
+            [(i, (i % 5) + 1) for i in range(1, 21)], ["B_ID", "A_ID"]
+        )
+        c = spark.createDataFrame(
+            [(i, (i % 20) + 1, (i % 5) + 1) for i in range(1, 41)],
+            ["C_ID", "B_ID", "A_ID"],
+        )
+        a.write.parquet(str(raw / "A"))
+        b.write.parquet(str(raw / "B"))
+        c.write.parquet(str(raw / "C"))
+
+        config = {
+            "DATAGEN_RAW_BASE_URI": str(raw), "DATAGEN_RAW_PREFIX": "",
+            "DATAGEN_SYNTHETIC_BASE_URI": str(syn), "DATAGEN_SYNTHETIC_PREFIX": "",
+        }
+        specs = {
+            "A": {"pk_cols": ["A_ID"]},
+            "B": {"pk_cols": ["B_ID"],
+                  "foreign_keys": [{"columns": ["A_ID"], "parent_table": "A"}]},
+            "C": {"pk_cols": ["C_ID"],
+                  "foreign_keys": [{"columns": ["B_ID"], "parent_table": "B"},
+                                   {"columns": ["A_ID"], "parent_table": "A"}]},
+        }
+
+        engorda_tables.engorda(spark, config, specs, scale_factor=2.0, seed=7,
+                               continue_on_error=False)
+
+        out_a = spark.read.parquet(str(syn / "A"))
+        out_b = spark.read.parquet(str(syn / "B"))
+        out_c = spark.read.parquet(str(syn / "C"))
+
+        # Every remapped FK lands on an existing parent key, at both levels.
+        assert out_b.join(out_a, "A_ID", "left_anti").count() == 0
+        assert out_c.join(out_a, "A_ID", "left_anti").count() == 0
+        assert out_c.join(out_b, "B_ID", "left_anti").count() == 0
+        # PK uniqueness preserved.
+        assert out_c.select("C_ID").distinct().count() == out_c.count()
