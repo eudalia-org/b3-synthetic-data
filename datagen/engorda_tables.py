@@ -3251,6 +3251,14 @@ def main() -> None:
     config = get_engorda_env()
     spark = create_spark_session("DataGenEngordaTables")
     try:
+        # The baked shuffle.partitions (8000) is sized for multi-TB full runs.
+        # Under --limit the data is tiny, and 8000-wide shuffles across every
+        # table flood the driver with scheduling/bookkeeping for a small job.
+        # Drop back to the Spark default so small/test runs stay light.
+        if args.limit is not None:
+            spark.conf.set("spark.sql.shuffle.partitions", "200")
+            logger.info("Input limit active: shuffle.partitions set to 200")
+
         specs_uri = args.specs or config["DATAGEN_SPECS_URI"]
         specs = load_specs(spark, specs_uri)
         engorda(spark, config, specs, args.scale_factor, args.seed,
