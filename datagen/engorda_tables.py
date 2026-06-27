@@ -2955,8 +2955,8 @@ def bind_shared_key_children(synthetic: dict, comp_specs: dict) -> dict:
     RESGATE keyed by NUM_CONDICAO_IF -> CONDICAO_IF), the synthesizer's FK remap
     can leave the column NULL or non-unique — fatal because it's a NOT NULL PK.
     Here we overwrite those columns with a distinct slice of the parent's
-    synthetic keys (numbered join), guaranteeing valid, unique, non-null keys.
-    Child rows beyond the number of parent keys are dropped (1:1 cardinality).
+    synthetic keys, guaranteeing valid, unique, non-null keys. Child rows beyond
+    the number of parent keys are dropped (1:1 cardinality).
     """
     for child, cfg in comp_specs.items():
         child_df = synthetic.get(child)
@@ -2971,17 +2971,27 @@ def bind_shared_key_children(synthetic: dict, comp_specs: dict) -> dict:
             if (parent_df is None or parent == child or len(cols) != len(pcols)
                     or not _fk_is_whole_pk(pk_cols, fk)):
                 continue
+
+            # Numbering em PARALELO via _with_contiguous_row_id em vez de
+            # row_number() sobre Window sem partitionBy. O padrão antigo virava
+            # Exchange SinglePartition (sort serial numa única task) e estourava
+            # num pai grande tipo CONDICAO_IF; o lado do filho, com
+            # orderBy(monotonically_increasing_id()), ainda era NÃO-determinístico
+            # (mid é reavaliado por estágio), variando o pareamento entre runs.
+            # _with_contiguous_row_id dá id contíguo 0..N-1 bijetivo dos dois
+            # lados; o inner join pareia 1:1 e descarta filhos acima do nº de
+            # chaves do pai (mesma cardinalidade documentada), sem sort global.
             keys = (parent_df
                     .select(*[F.col(pc).alias(f"__np{i}") for i, pc in enumerate(pcols)])
-                    .dropna().distinct()
-                    .withColumn("__rn", F.row_number().over(
-                        Window.orderBy(*[F.col(f"__np{i}") for i in range(len(pcols))]))))
-            numbered = child_df.withColumn("__rn", F.row_number().over(
-                Window.orderBy(F.monotonically_increasing_id())))
-            joined = numbered.join(keys, "__rn", "inner")
+                    .dropna().distinct())
+            keys = _with_contiguous_row_id(keys, "__bind_rn")
+
+            numbered = _with_contiguous_row_id(child_df, "__bind_rn")
+
+            joined = numbered.join(keys, "__bind_rn", "inner")
             for i, c in enumerate(cols):
                 joined = joined.withColumn(c, F.col(f"__np{i}"))
-            child_df = joined.drop("__rn", *[f"__np{i}" for i in range(len(pcols))])
+            child_df = joined.drop("__bind_rn", *[f"__np{i}" for i in range(len(pcols))])
         synthetic[child] = child_df
     return synthetic
 
@@ -2992,8 +3002,13 @@ def null_orphan_fks(synthetic: dict, comp_specs: dict) -> dict:
     Catches references the synthesizer could not remap — self-references,
     relationships it ignored (source orphans / parent absent), and residual
     sampling orphans — so the load doesn't hit a parent-key-not-found violation.
-    PK columns are never nulled (they are NOT NULL; PK==FK tables are handled by
-    bind_shared_key_children). Only safe for nullable FK columns.
+
+    Whole-PK FKs (every FK col is also a PK col) are handled by
+    bind_shared_key_children. For a PARTIAL overlap (some FK cols are PK, some
+    aren't) we still neutralize the orphan by nulling only the NON-PK columns:
+    under Oracle MATCH SIMPLE a single NULL column disables the composite-FK
+    check, and the PK columns stay intact (NOT NULL). Only safe for nullable
+    FK columns, which the non-PK ones are.
     """
     for child, cfg in comp_specs.items():
         child_df = synthetic.get(child)
@@ -3007,18 +3022,30 @@ def null_orphan_fks(synthetic: dict, comp_specs: dict) -> dict:
             pcols = list(fk.get("parent_columns") or [])
             if parent_df is None or not cols or len(cols) != len(pcols):
                 continue
-            if set(cols) & pk_set:
-                continue  # never NULL a PK column
+
+            # Colunas da FK que NÃO são PK. Se TODAS forem PK -> território do
+            # bind_shared_key_children, pula. Antes, qualquer interseção
+            # (set(cols) & pk_set) pulava a FK inteira e deixava órfãos de uma
+            # sobreposição PARCIAL passarem direto pro load (ORA-02291). Agora
+            # anulamos só as não-PK, o que basta para desligar a checagem.
+            nullable_cols = [c for c in cols if c not in pk_set]
+            if not nullable_cols:
+                continue
+
             keys = (parent_df
                     .select(*[F.col(pc).alias(f"__pk{i}") for i, pc in enumerate(pcols)])
                     .dropna().distinct()
                     .withColumn("__match", F.lit(True)))
             cond = reduce(lambda a, b: a & b,
                           [child_df[cols[i]] == keys[f"__pk{i}"] for i in range(len(cols))])
-            joined = child_df.join(F.broadcast(keys), cond, "left")
+            # Sem F.broadcast: as chaves distintas de um pai sintético grande
+            # estouram o threshold de broadcast (OOM no driver / fallback
+            # silencioso). O AQE ainda faz broadcast automático quando o build
+            # side é de fato pequeno.
+            joined = child_df.join(keys, cond, "left")
             any_fk_set = reduce(lambda a, b: a | b, [F.col(c).isNotNull() for c in cols])
             is_orphan = F.col("__match").isNull() & any_fk_set
-            for c in cols:
+            for c in nullable_cols:
                 joined = joined.withColumn(
                     c, F.when(is_orphan, F.lit(None).cast(child_df.schema[c].dataType))
                         .otherwise(F.col(c)))
@@ -3251,14 +3278,6 @@ def main() -> None:
     config = get_engorda_env()
     spark = create_spark_session("DataGenEngordaTables")
     try:
-        # The baked shuffle.partitions (8000) is sized for multi-TB full runs.
-        # Under --limit the data is tiny, and 8000-wide shuffles across every
-        # table flood the driver with scheduling/bookkeeping for a small job.
-        # Drop back to the Spark default so small/test runs stay light.
-        if args.limit is not None:
-            spark.conf.set("spark.sql.shuffle.partitions", "200")
-            logger.info("Input limit active: shuffle.partitions set to 200")
-
         specs_uri = args.specs or config["DATAGEN_SPECS_URI"]
         specs = load_specs(spark, specs_uri)
         engorda(spark, config, specs, args.scale_factor, args.seed,
