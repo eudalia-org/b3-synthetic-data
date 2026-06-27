@@ -65,9 +65,13 @@ FILTRO_TIPO_IF_VALUE = 46 #filtro cdb simplificado
 # Regras aplicadas quando a coluna existir na tabela:
 #   DAT_INCLUSAO              -> data/hora da engorda (timestamp)
 #   DAT_ALTERACAO             -> mesma data/hora de DAT_INCLUSAO (timestamp)
-#   NUM_ID_CERTIFICACAO_CETIP -> incremental acima do último ID do banco
 #   DT_EMISSAO                -> data da engorda, sem timestamp
 #   DT_VENCIMENTO             -> data da engorda + prazo, sem timestamp
+#
+# NUM_ID_CERTIFICACAO_CETIP NÃO entra aqui: ela é PK e a geração de PK
+# (compute_pk_maxes + _set_unique_pk_column) já a faz incremental acima do max
+# real da tabela inteira, com a folga do --pk-safety-band. Tratá-la de novo
+# desfazia a folga e relia o max sem necessidade.
 #
 # Para DT_VENCIMENTO, se não for informado um prazo fixo por tabela, o código
 # preserva o prazo original da linha bootstrapada: DT_VENCIMENTO - DT_EMISSAO.
@@ -75,7 +79,6 @@ FILTRO_TIPO_IF_VALUE = 46 #filtro cdb simplificado
 # ---------------------------------------------------------------------------
 ENGORDA_COL_DAT_INCLUSAO = "DAT_INCLUSAO"
 ENGORDA_COL_DAT_ALTERACAO = "DAT_ALTERACAO"
-ENGORDA_COL_NUM_ID_CERTIFICACAO_CETIP = "NUM_ID_CERTIFICACAO_CETIP"
 ENGORDA_COL_DT_VENCIMENTO = "DT_VENCIMENTO"
 ENGORDA_COL_DT_EMISSAO = "DT_EMISSAO"
 DEFAULT_DT_VENCIMENTO_PRAZO_DIAS = 365
@@ -195,129 +198,32 @@ def _date_expression_for_type(expr, dt: T.DataType):
     return expr.cast(dt)
 
 
-def _max_incremental_column_value(df: DataFrame, col_name: str) -> Optional[int]:
-    """
-    Lê max(col_name) como número inteiro para coluna incremental.
-
-    Usa cast para double para funcionar com inteiros, decimais e strings numéricas.
-    Valores não numéricos/NULL são ignorados pelo max. Retorna None se não há
-    valor aproveitável.
-    """
-    if col_name not in df.columns:
-        return None
-
-    row = df.agg(F.max(F.col(col_name).cast("double")).alias("max_value")).first()
-    if row is None:
-        return None
-
-    value = row["max_value"]
-    if value is None:
-        return None
-
-    value_f = float(value)
-    if math.isnan(value_f):
-        return None
-
-    return int(math.floor(value_f))
-
-
-def _set_incremental_engorda_column(
-    work: DataFrame,
-    source_for_max: DataFrame,
-    col_name: str,
-    *,
-    target_n: int,
-    max_override: Optional[int] = None,
-) -> DataFrame:
-    """Define coluna incremental como último ID conhecido + posição sintética."""
-    if col_name not in work.columns:
-        return work
-
-    if "__synthetic_pos" not in work.columns:
-        raise ValueError(
-            f"Não foi possível gerar `{col_name}` incremental: coluna interna "
-            "`__synthetic_pos` ausente."
-        )
-
-    dt = _get_field_type(work, col_name)
-    observed_max = (
-        int(max_override)
-        if max_override is not None
-        else _max_incremental_column_value(source_for_max, col_name)
-    )
-    start = (observed_max or 0) + 1
-    highest = start + max(int(target_n), 0) - 1
-
-    for type_cls, limit in _INT_TYPE_LIMITS:
-        if isinstance(dt, type_cls) and highest > limit:
-            raise OverflowError(
-                f"Coluna incremental `{col_name}` {type_cls.__name__} estoura "
-                f"limite {limit:,} (max {highest:,})."
-            )
-
-    if isinstance(dt, T.LongType) and highest > 2**63 - 1:
-        raise OverflowError(
-            f"Coluna incremental `{col_name}` LongType estoura limite de 64 bits."
-        )
-
-    if _is_float_type(dt):
-        exact_limit = (
-            _DOUBLE_EXACT_INT_LIMIT
-            if isinstance(dt, T.DoubleType)
-            else _FLOAT_EXACT_INT_LIMIT
-        )
-        if highest > exact_limit:
-            raise OverflowError(
-                f"Coluna incremental `{col_name}` ({type(dt).__name__}) atingiria "
-                f"{highest:,}, acima do limite de inteiro exato {exact_limit:,}."
-            )
-
-    if _is_decimal_type(dt):
-        int_digits = dt.precision - dt.scale
-        decimal_limit = (10 ** int_digits) - 1 if int_digits > 0 else 0
-        if highest > decimal_limit:
-            raise OverflowError(
-                f"Coluna incremental `{col_name}` Decimal({dt.precision},{dt.scale}) "
-                f"estoura o limite de {decimal_limit:,} (max {highest:,})."
-            )
-
-    value_expr = F.col("__synthetic_pos") + F.lit(start)
-
-    if _is_string_type(dt):
-        return work.withColumn(col_name, value_expr.cast("long").cast("string").cast(dt))
-
-    return work.withColumn(col_name, value_expr.cast(dt))
-
-
 def _apply_engorda_business_rules(
     work: DataFrame,
-    source_for_max: DataFrame,
     *,
-    table_name: str,
-    target_n: int,
     engorda_ts: datetime,
-    certificacao_cetip_max_override: Optional[int] = None,
     dt_vencimento_prazo_dias: Optional[int] = None,
     default_dt_vencimento_prazo_dias: int = DEFAULT_DT_VENCIMENTO_PRAZO_DIAS,
 ) -> DataFrame:
     """
-    Aplica as regras da planilha/imagem às colunas existentes na tabela.
+    Aplica as regras de DATA do engorda às colunas existentes na tabela.
+
+    Regras (aplicadas só quando a coluna existir; tipo físico preservado):
+      DAT_INCLUSAO  -> timestamp da engorda
+      DAT_ALTERACAO -> mesmo timestamp de DAT_INCLUSAO
+      DT_EMISSAO    -> data da engorda, sem hora
+      DT_VENCIMENTO -> data da engorda + prazo, sem hora
+
+    NUM_ID_CERTIFICACAO_CETIP NÃO é tratada aqui: é PK, e a geração de PK
+    (compute_pk_maxes + _set_unique_pk_column) já a faz incremental acima do max
+    real da tabela inteira, com a folga do --pk-safety-band. Reescrevê-la aqui
+    desfazia a folga e relia o max desnecessariamente.
 
     A função é tolerante: se uma coluna não existir, não altera a tabela.
     """
     engorda_dt = _engorda_date(engorda_ts)
 
-    # 1) Incremental sempre acima do último ID do banco.
-    if ENGORDA_COL_NUM_ID_CERTIFICACAO_CETIP in work.columns:
-        work = _set_incremental_engorda_column(
-            work,
-            source_for_max,
-            ENGORDA_COL_NUM_ID_CERTIFICACAO_CETIP,
-            target_n=target_n,
-            max_override=certificacao_cetip_max_override,
-        )
-
-    # 2) Calcula prazo de vencimento ANTES de sobrescrever DT_EMISSAO.
+    # 1) Calcula prazo de vencimento ANTES de sobrescrever DT_EMISSAO.
     tmp_prazo_col = "__engorda_prazo_dias"
     while tmp_prazo_col in work.columns:
         tmp_prazo_col = f"_{tmp_prazo_col}"
@@ -347,7 +253,7 @@ def _apply_engorda_business_rules(
 
         work = work.withColumn(tmp_prazo_col, prazo_expr)
 
-    # 3) DAT_INCLUSAO e DAT_ALTERACAO usam exatamente o mesmo timestamp.
+    # 2) DAT_INCLUSAO e DAT_ALTERACAO usam exatamente o mesmo timestamp.
     for col_name in (ENGORDA_COL_DAT_INCLUSAO, ENGORDA_COL_DAT_ALTERACAO):
         if col_name in work.columns:
             work = work.withColumn(
@@ -358,7 +264,7 @@ def _apply_engorda_business_rules(
                 ),
             )
 
-    # 4) DT_EMISSAO = data da engorda sem timestamp.
+    # 3) DT_EMISSAO = data da engorda sem timestamp.
     if has_emissao:
         work = work.withColumn(
             ENGORDA_COL_DT_EMISSAO,
@@ -368,7 +274,7 @@ def _apply_engorda_business_rules(
             ),
         )
 
-    # 5) DT_VENCIMENTO = data da engorda + prazo, sem timestamp.
+    # 4) DT_VENCIMENTO = data da engorda + prazo, sem timestamp.
     if has_vencimento:
         venc_expr = F.expr(
             f"date_add(DATE '{engorda_dt.isoformat()}', CAST({tmp_prazo_col} AS INT))"
@@ -1631,7 +1537,6 @@ def synthesize_multitable_spark(
     seed: int = 42,
     append_after_max_pk: bool = True,
     pk_max_by_table: Optional[Mapping[str, int]] = None,
-    certificacao_cetip_max_by_table: Optional[Mapping[str, int]] = None,
     engorda_ts: Optional[datetime] = None,
     dt_vencimento_prazo_dias_by_table: Optional[Mapping[str, int]] = None,
     default_dt_vencimento_prazo_dias: int = DEFAULT_DT_VENCIMENTO_PRAZO_DIAS,
@@ -1660,7 +1565,6 @@ def synthesize_multitable_spark(
         raise ValueError("relationship_policy deve ser 'warn_and_skip' ou 'raise'.")
 
     engorda_ts = _normalize_engorda_ts(engorda_ts)
-    certificacao_cetip_max_by_table = dict(certificacao_cetip_max_by_table or {})
     dt_vencimento_prazo_dias_by_table = dict(dt_vencimento_prazo_dias_by_table or {})
 
     # Saneia specs antes da validação/topologia/mapping.
@@ -1749,11 +1653,7 @@ def synthesize_multitable_spark(
 
                 work = _apply_engorda_business_rules(
                     work,
-                    source,
-                    table_name=table_name,
-                    target_n=src_count,
                     engorda_ts=engorda_ts,
-                    certificacao_cetip_max_override=certificacao_cetip_max_by_table.get(table_name),
                     dt_vencimento_prazo_dias=dt_vencimento_prazo_dias_by_table.get(table_name),
                     default_dt_vencimento_prazo_dias=default_dt_vencimento_prazo_dias,
                 )
@@ -1832,11 +1732,7 @@ def synthesize_multitable_spark(
 
                 work = _apply_engorda_business_rules(
                     work,
-                    source,
-                    table_name=table_name,
-                    target_n=target_n,
                     engorda_ts=engorda_ts,
-                    certificacao_cetip_max_override=certificacao_cetip_max_by_table.get(table_name),
                     dt_vencimento_prazo_dias=dt_vencimento_prazo_dias_by_table.get(table_name),
                     default_dt_vencimento_prazo_dias=default_dt_vencimento_prazo_dias,
                 )
@@ -2333,7 +2229,6 @@ def run_synthesis_from_tables(
     seed: int = 42,
     append_after_max_pk: bool = True,
     pk_max_by_table: Optional[Mapping[str, int]] = None,
-    certificacao_cetip_max_by_table: Optional[Mapping[str, int]] = None,
     engorda_ts: Optional[datetime] = None,
     dt_vencimento_prazo_dias_by_table: Optional[Mapping[str, int]] = None,
     default_dt_vencimento_prazo_dias: int = DEFAULT_DT_VENCIMENTO_PRAZO_DIAS,
@@ -2406,7 +2301,6 @@ def run_synthesis_from_tables(
         seed=seed,
         append_after_max_pk=append_after_max_pk,
         pk_max_by_table=pk_max_by_table,
-        certificacao_cetip_max_by_table=certificacao_cetip_max_by_table,
         engorda_ts=engorda_ts,
         dt_vencimento_prazo_dias_by_table=dt_vencimento_prazo_dias_by_table,
         default_dt_vencimento_prazo_dias=default_dt_vencimento_prazo_dias,
@@ -2855,64 +2749,6 @@ def compute_pk_maxes(spark, config, comp_specs, floor: int = 0, band: int = 0,
     return out
 
 
-def _read_incremental_column_max(spark, path: str, col_name: str) -> Optional[int]:
-    """max(col_name) numérico da tabela Parquet inteira; retorna None se coluna não existir."""
-    df = read_parquet(spark, path)
-    if col_name not in df.columns:
-        return None
-
-    row = df.agg(F.max(F.col(col_name).cast("double")).alias("max_value")).first()
-    if row is None or row["max_value"] is None:
-        return None
-
-    value_f = float(row["max_value"])
-    if math.isnan(value_f):
-        return None
-
-    return int(math.floor(value_f))
-
-
-def compute_certificacao_cetip_maxes(
-    spark,
-    config,
-    comp_specs,
-    *,
-    floor: int = 0,
-    band: int = 0,
-) -> dict[str, int]:
-    """
-    Lê o último NUM_ID_CERTIFICACAO_CETIP do banco/tabela inteira.
-
-    Importante: não aplica filtro NUM_TIPO_IF aqui, pelo mesmo motivo das PKs:
-    o ID sintético deve ficar acima do maior ID real da tabela inteira, evitando
-    colisão com outros subconjuntos de produção.
-    """
-    out: dict[str, int] = {}
-
-    for table in comp_specs:
-        try:
-            true_max = _read_incremental_column_max(
-                spark,
-                raw_path(config, table),
-                ENGORDA_COL_NUM_ID_CERTIFICACAO_CETIP,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Could not read max(%s) for %s: %s",
-                ENGORDA_COL_NUM_ID_CERTIFICACAO_CETIP,
-                table,
-                exc,
-            )
-            true_max = None
-
-        if true_max is None:
-            continue
-
-        out[table] = max(int(true_max) + int(band), int(floor))
-
-    return out
-
-
 def referential_sample(spark, config, comp_specs, limit: int) -> dict:
     """Parent-first referential sampling so a --limit run stays FK-consistent.
 
@@ -3154,15 +2990,6 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
                                       n_rows=n_rows)
             if pk_max:
                 logger.info("[%d/%d] true PK max per table: %s", index, total, pk_max)
-            cetip_max = compute_certificacao_cetip_maxes(spark, config, comp_specs)
-            if cetip_max:
-                logger.info(
-                    "[%d/%d] true %s max per table: %s",
-                    index,
-                    total,
-                    ENGORDA_COL_NUM_ID_CERTIFICACAO_CETIP,
-                    cetip_max,
-                )
             prazo_vencimento_por_tabela: dict[str, int] = {}
             for t, cfg in comp_specs.items():
                 cfg_prazo = cfg.get("dt_vencimento_prazo_dias")
@@ -3178,7 +3005,6 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
                 comp_tables, comp_specs,
                 n_rows_by_table=n_rows, seed=seed,
                 pk_max_by_table=pk_max,
-                certificacao_cetip_max_by_table=cetip_max,
                 engorda_ts=engorda_ts,
                 dt_vencimento_prazo_dias_by_table=prazo_vencimento_por_tabela,
                 validate_mode="none", verbose=False,
