@@ -723,3 +723,39 @@ class TestEngordaIntegration:
         assert out_c.join(out_b, "B_ID", "left_anti").count() == 0
         # PK uniqueness preserved.
         assert out_c.select("C_ID").distinct().count() == out_c.count()
+
+    def test_limit_path_referential_sample_fk_integrity(self, spark, tmp_path):
+        # Exercises the --limit path (referential_sample + truncate_lineage).
+        # The multi-level FK chain previously built lineage deep enough to OOM
+        # the driver; this guards that the path runs and stays FK-consistent.
+        raw, syn = tmp_path / "raw", tmp_path / "syn"
+        spark.createDataFrame([(i,) for i in range(1, 9)], ["A_ID"]).write.parquet(str(raw / "A"))
+        spark.createDataFrame(
+            [(i, (i % 8) + 1) for i in range(1, 41)], ["B_ID", "A_ID"]
+        ).write.parquet(str(raw / "B"))
+        spark.createDataFrame(
+            [(i, (i % 40) + 1) for i in range(1, 121)], ["C_ID", "B_ID"]
+        ).write.parquet(str(raw / "C"))
+
+        config = {
+            "DATAGEN_RAW_BASE_URI": str(raw), "DATAGEN_RAW_PREFIX": "",
+            "DATAGEN_SYNTHETIC_BASE_URI": str(syn), "DATAGEN_SYNTHETIC_PREFIX": "",
+        }
+        specs = {
+            "A": {"pk_cols": ["A_ID"]},
+            "B": {"pk_cols": ["B_ID"],
+                  "foreign_keys": [{"columns": ["A_ID"], "parent_table": "A"}]},
+            "C": {"pk_cols": ["C_ID"],
+                  "foreign_keys": [{"columns": ["B_ID"], "parent_table": "B"}]},
+        }
+
+        engorda_tables.engorda(spark, config, specs, scale_factor=1.0, seed=3,
+                               continue_on_error=False, limit=50)
+
+        out_a = spark.read.parquet(str(syn / "A"))
+        out_b = spark.read.parquet(str(syn / "B"))
+        out_c = spark.read.parquet(str(syn / "C"))
+        # FK-consistent after referential sampling + synthesis.
+        assert out_b.join(out_a, "A_ID", "left_anti").count() == 0
+        assert out_c.join(out_b, "B_ID", "left_anti").count() == 0
+        assert out_c.count() > 0  # sampling kept rows

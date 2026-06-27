@@ -294,6 +294,23 @@ def _persist(df: DataFrame, storage_level: StorageLevel) -> DataFrame:
     return df.persist(storage_level)
 
 
+def _materialize(
+    df: DataFrame, storage_level: StorageLevel, truncate_lineage: bool
+) -> DataFrame:
+    """Materialize a stage. When truncate_lineage is set, use an eager
+    localCheckpoint so the LOGICAL plan is replaced by a shallow RDD leaf —
+    a persist keeps the cached plan tree, which the analyzer still traverses on
+    every dependent query, so deep FK-mapping chains compound until the driver
+    OOMs analyzing them. Used for --limit, where the referential-sample chain
+    makes the plans deep; the full run keeps persist (recomputable on
+    executor loss, which localCheckpoint is not)."""
+    if truncate_lineage:
+        return df.localCheckpoint(eager=True)
+    out = _persist(df, storage_level)
+    out.count()
+    return out
+
+
 def _safe_unpersist(df: Optional[DataFrame]) -> None:
     if df is None:
         return
@@ -1547,6 +1564,7 @@ def synthesize_multitable_spark(
     verbose: bool = False,
     relationship_policy: RelationshipPolicy = "warn_and_skip",
     check_relationship_values: bool = True,
+    truncate_lineage: bool = False,
 ) -> Dict[str, DataFrame]:
     """
     Gera dados sintéticos multi-tabela.
@@ -1658,8 +1676,7 @@ def synthesize_multitable_spark(
                     default_dt_vencimento_prazo_dias=default_dt_vencimento_prazo_dias,
                 )
 
-                work = _persist(work, storage_level)
-                work.count()
+                work = _materialize(work, storage_level, truncate_lineage)
                 intermediates.append(work)
 
             else:
@@ -1737,8 +1754,7 @@ def synthesize_multitable_spark(
                     default_dt_vencimento_prazo_dias=default_dt_vencimento_prazo_dias,
                 )
 
-                work = _persist(work, storage_level)
-                work.count()
+                work = _materialize(work, storage_level, truncate_lineage)
                 intermediates.append(work)
 
             if table_name in parent_refs:
@@ -2246,6 +2262,7 @@ def run_synthesis_from_tables(
     verbose: bool = True,
     relationship_policy: RelationshipPolicy = "warn_and_skip",
     check_relationship_values: bool = True,
+    truncate_lineage: bool = False,
 ) -> Dict[str, DataFrame]:
     """
     Runner para quando os DataFrames já estão carregados.
@@ -2311,6 +2328,7 @@ def run_synthesis_from_tables(
         verbose=verbose,
         relationship_policy=relationship_policy,
         check_relationship_values=False,
+        truncate_lineage=truncate_lineage,
     )
 
     if save_path:
@@ -2780,7 +2798,14 @@ def referential_sample(spark, config, comp_specs, limit: int) -> dict:
             df = (joined
                   .where(F.col("__k0").isNotNull() | all_fk_null)
                   .drop(*[f"__k{i}" for i in range(len(pcols))]))
-        sampled[table] = df.limit(limit).persist()
+        # localCheckpoint (eager) instead of a lazy persist: each child below
+        # references sampled[parent], so without truncating the logical plan the
+        # join chain compounds across the whole topological order and every
+        # downstream consumer (FK validation, synthesis) re-analyzes a plan deep
+        # enough to OOM the driver -> "SparkContext shutdown". persist() does not
+        # help — the analyzer still traverses the cached plan tree for cache
+        # matching; localCheckpoint replaces it with a shallow RDD leaf.
+        sampled[table] = df.limit(limit).localCheckpoint(eager=True)
     return sampled
 
 
@@ -3008,6 +3033,10 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
                 engorda_ts=engorda_ts,
                 dt_vencimento_prazo_dias_by_table=prazo_vencimento_por_tabela,
                 validate_mode="none", verbose=False,
+                # Under --limit the referential-sample chain makes synthesis plans
+                # deep enough to OOM the driver; truncate work lineage via eager
+                # localCheckpoint. The full run keeps persist (recomputable).
+                truncate_lineage=(limit is not None),
             )
             synthetic = bind_shared_key_children(synthetic, comp_specs)
             synthetic = null_orphan_fks(synthetic, comp_specs)
