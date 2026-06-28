@@ -90,8 +90,10 @@ mis-shifting).
 ## Architecture
 
 A standalone script `datagen/shift_keys.py` (mirroring `engorda_tables.py`,
-`load_tables.py`, etc.) that **imports existing helpers** rather than
-reimplementing them:
+`load_tables.py`, etc.). **OCI Data Flow apps deploy as a single self-contained
+file, so it cannot import from `datagen.*`** — the helpers below are **vendored**
+(copied verbatim, behaviourally identical) into `shift_keys.py`, the same way
+`engorda_tables.py` vendored its synthesizer:
 
 - `write_synthetic_table` — scoped Hadoop-FS delete of just the table's prefix +
   `mode("append")`. Required: plain `mode("overwrite")` on the OCI HDFS connector

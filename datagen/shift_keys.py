@@ -6,6 +6,8 @@ integrity. See docs/plans/2026-06-28-shift-synthetic-keys-design.md.
 from __future__ import annotations
 
 import argparse
+import copy
+import json
 import logging
 import os
 import sys
@@ -13,21 +15,165 @@ from typing import Dict, List, Tuple
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-
-from datagen.engorda_tables import (
-    _pk_capacity,
-    create_spark_session,
-    load_specs,
-    read_parquet,
-    synthetic_base_path,
-    table_path_name,
-    write_synthetic_table,
-)
-from datagen.save_tables import build_connection_properties, read_rows, read_single_value
+from pyspark.sql import types as T
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Vendored helpers. OCI Data Flow apps deploy as a single self-contained file,
+# so this module cannot import from datagen.engorda_tables / datagen.save_tables;
+# the helpers it needs are copied here verbatim (kept behaviourally identical).
+# ---------------------------------------------------------------------------
+
+# Workload Spark conf (no shuffle in this job -> AQE/shuffle.partitions omitted).
+_SPARK_CONF = {
+    "spark.sql.parquet.datetimeRebaseModeInWrite": "CORRECTED",
+    "spark.sql.parquet.int96RebaseModeInWrite": "CORRECTED",
+    # max(col)/min(col) answered from Parquet footer stats (metadata-only read).
+    "spark.sql.parquet.aggregatePushdown": "true",
+    "spark.serializer": "org.apache.spark.serializer.KryoSerializer",
+    "spark.network.timeout": "600s",
+    "spark.executor.heartbeatInterval": "30s",
+    "spark.executor.memoryOverheadFactor": "0.2",
+}
+
+
+def create_spark_session(app_name: str) -> SparkSession:
+    builder = SparkSession.builder.appName(app_name)
+    for key, value in _SPARK_CONF.items():
+        builder = builder.config(key, value)
+    return builder.getOrCreate()
+
+
+def table_path_name(table: str) -> str:
+    return table.split(".", 1)[1] if "." in table else table
+
+
+def synthetic_base_path(config: dict) -> str:
+    base = config["DATAGEN_SYNTHETIC_BASE_URI"]
+    prefix = config.get("DATAGEN_SYNTHETIC_PREFIX")
+    return f"{base}/{prefix}" if prefix else base
+
+
+def read_parquet(spark: SparkSession, path: str, limit: int | None = None) -> DataFrame:
+    df = spark.read.parquet(path)
+    return df.limit(limit) if limit is not None else df
+
+
+def normalize_specs(specs: dict) -> dict:
+    out: dict = {}
+    for raw_name, cfg in specs.items():
+        name = table_path_name(str(raw_name))
+        if name in out:
+            raise ValueError(
+                f"Spec key collision after schema stripping: `{raw_name}` -> `{name}`."
+            )
+        new_cfg = copy.deepcopy(dict(cfg))
+        for fk_key in ("foreign_keys", "fks"):
+            fks = new_cfg.get(fk_key)
+            if not isinstance(fks, (list, tuple)):
+                continue
+            for fk in fks:
+                if isinstance(fk, dict) and fk.get("parent_table"):
+                    fk["parent_table"] = table_path_name(str(fk["parent_table"]))
+        out[name] = new_cfg
+    return out
+
+
+def load_specs(spark: SparkSession, specs_uri: str) -> dict:
+    records = spark.sparkContext.wholeTextFiles(specs_uri).collect()
+    if len(records) != 1:
+        raise ValueError(
+            f"Expected exactly one specs object at `{specs_uri}`, found {len(records)}. "
+            "DATAGEN_SPECS_URI must point at a single specs.json file, not a prefix."
+        )
+    try:
+        parsed = json.loads(records[0][1])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"specs.json at `{specs_uri}` is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict) or not parsed:
+        raise ValueError(f"specs.json at `{specs_uri}` must be a non-empty object.")
+    return normalize_specs(parsed)
+
+
+def _pk_capacity(spark, path: str, pk_col: str):
+    """Largest integer the column's type can hold (None for string/unknown)."""
+    dt = read_parquet(spark, path).schema[pk_col].dataType
+    if isinstance(dt, T.DecimalType):
+        int_digits = dt.precision - dt.scale
+        return (10 ** int_digits) - 1 if int_digits > 0 else 0
+    if isinstance(dt, T.ByteType):
+        return 127
+    if isinstance(dt, T.ShortType):
+        return 32_767
+    if isinstance(dt, T.IntegerType):
+        return 2**31 - 1
+    if isinstance(dt, T.LongType):
+        return 2**63 - 1
+    if isinstance(dt, T.DoubleType):
+        return 2**53
+    if isinstance(dt, T.FloatType):
+        return 2**24
+    return None
+
+
+def _delete_path(spark: SparkSession, path: str) -> None:
+    """Recursively delete exactly `path` via the Hadoop FileSystem API — scoped to
+    one table prefix. Spark's mode("overwrite") deletes the shared parent prefix
+    on the OCI HDFS connector and clobbers sibling tables, so we delete ourselves."""
+    jvm = spark._jvm
+    hadoop_conf = spark._jsc.hadoopConfiguration()
+    jpath = jvm.org.apache.hadoop.fs.Path(path)
+    fs = jpath.getFileSystem(hadoop_conf)
+    if fs.exists(jpath):
+        fs.delete(jpath, True)
+
+
+def write_synthetic_table(spark: SparkSession, df: DataFrame, out_path: str) -> None:
+    """Write one table to its own prefix without touching siblings: scoped-delete
+    the prefix, then append. (No column-name sanitisation needed here — the
+    synthetic Parquet we read back already has Parquet-valid column names.)"""
+    _delete_path(spark, out_path)
+    df.write.mode("append").parquet(out_path)
+
+
+def build_connection_properties(config: dict) -> dict:
+    return {
+        "url": config["DATAGEN_SOURCE_JDBC_URL"],
+        "user": config["DATAGEN_SOURCE_DB_USER"],
+        "password": config["DATAGEN_SOURCE_DB_PASSWORD"],
+        "driver": "oracle.jdbc.OracleDriver",
+        "oracle.jdbc.useFetchSizeWithLongColumn": "true",
+        "defaultRowPrefetch": config["DATAGEN_JDBC_FETCH_SIZE"],
+        "oracle.jdbc.ReadTimeout": config["DATAGEN_JDBC_READ_TIMEOUT_MS"],
+        "oracle.jdbc.defaultLobPrefetchSize": config["DATAGEN_JDBC_LOB_PREFETCH"],
+    }
+
+
+def read_rows(spark: SparkSession, properties: dict, query: str) -> list:
+    return (
+        spark.read.format("jdbc")
+        .options(**properties)
+        .option("dbtable", f"({query}) DATAGEN_Q")
+        .load()
+        .collect()
+    )
+
+
+def read_single_value(spark: SparkSession, properties: dict, query: str):
+    rows = (
+        spark.read.format("jdbc")
+        .options(**properties)
+        .option("dbtable", f"({query}) DATAGEN_Q")
+        .load()
+        .take(1)
+    )
+    return rows[0] if rows else None
+
+# --- end vendored helpers ---
 
 
 def compute_shift_columns(specs: dict) -> Dict[str, List[str]]:
