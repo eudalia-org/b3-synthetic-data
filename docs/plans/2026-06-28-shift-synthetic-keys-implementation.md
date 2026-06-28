@@ -24,8 +24,13 @@
   - `check_overflow(spark, base, shift, offset, capacity_override=None) -> list[tuple]` — read-only; `capacity_override` (from Oracle) wins over `_pk_capacity`.
   - `apply_shift(spark, base, shift, offset, continue_on_error, reliable_checkpoint) -> list[str]` — Phase 2.
   - `get_shift_env() -> dict` — env validation (SYNTHETIC + SPECS required; CHECKPOINT + Oracle JDBC + owner optional).
+  - `oracle_props_or_none(config) -> dict | None` — JDBC props iff the full Oracle env set is present.
   - `print_deployment_summary(config)` — env vars + Data Flow config block.
   - `parse_arguments()`, `main()`.
+
+  **Assumption:** `specs.json` table keys equal the bare, uppercase Oracle
+  `ALL_TAB_COLUMNS.TABLE_NAME` (true for this schema; revisit if specs ever
+  become owner-qualified).
 - **Create:** `tests/test_shift_keys.py` — unit (`compute_shift_columns`) + integration (transform, overflow, end-to-end).
 
 ## Test command
@@ -382,7 +387,7 @@ def check_overflow(
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `… -m pytest tests/test_shift_keys.py::TestCheckOverflow -v`
-Expected: PASS (2 tests).
+Expected: PASS (3 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -867,7 +872,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `… -m pytest tests/test_shift_keys.py::TestEnvAndCli -v`
-Expected: PASS (5 tests).
+Expected: PASS (6 tests).
 
 - [ ] **Step 5: Commit**
 
