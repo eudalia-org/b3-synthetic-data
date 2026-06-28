@@ -102,7 +102,10 @@ report. Checks do not stop at the first failure.
    insert error (Oracle rounds), so only magnitude is checked.
 3. **String length → `ORA-12899`.** For each string column mapped to
    `VARCHAR2`/`CHAR`: violation if `max(octet_length(col)) > DATA_LENGTH` (byte
-   semantics — conservative/correct bound).
+   semantics — conservative/correct bound). The metadata query also pulls
+   `CHAR_LENGTH`, so if `octet_length` proves over-strict for CHAR-semantics
+   (multibyte) columns, the check can fall back to `length(col) > CHAR_LENGTH`
+   for those — but byte-length is the safe default.
 4. **NOT NULL → `ORA-01400`.** For each target `NULLABLE='N'` column present in the
    synthetic: violation if its synthetic null-count > 0.
 5. **Uniqueness → `ORA-00001`.** For each PK (incl. composite) and `UNIQUE`
