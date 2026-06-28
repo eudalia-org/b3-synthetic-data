@@ -513,9 +513,13 @@ def read_target_columns(spark, properties, owner, tables):
     nullable(bool), has_default(bool), is_numeric, is_string}}} from ALL_TAB_COLUMNS."""
     owner = validate_identifier(owner)
     names = ",".join(f"'{validate_identifier(table_path_name(t))}'" for t in tables)
+    # NVL2(DATA_DEFAULT,...) instead of selecting DATA_DEFAULT itself: DATA_DEFAULT
+    # is an Oracle LONG column, and reading LONG via Spark JDBC alongside other
+    # columns is flaky (stream-already-closed). We only need the boolean.
     rows = read_rows(spark, properties,
                      "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, DATA_PRECISION, "
-                     "DATA_SCALE, DATA_LENGTH, CHAR_LENGTH, NULLABLE, DATA_DEFAULT "
+                     "DATA_SCALE, DATA_LENGTH, CHAR_LENGTH, NULLABLE, "
+                     "NVL2(DATA_DEFAULT, 'Y', 'N') AS HAS_DEFAULT "
                      f"FROM ALL_TAB_COLUMNS WHERE OWNER='{owner}' "
                      f"AND TABLE_NAME IN ({names})")
     out = {}
@@ -530,7 +534,7 @@ def read_target_columns(spark, properties, owner, tables):
             "data_length": r["DATA_LENGTH"],
             "char_length": r["CHAR_LENGTH"],
             "nullable": r["NULLABLE"] == "Y",
-            "has_default": r["DATA_DEFAULT"] is not None,
+            "has_default": r["HAS_DEFAULT"] == "Y",
             "is_numeric": dt in numeric,
             "is_string": dt in string,
         }
@@ -630,6 +634,11 @@ def count_fk_static_orphans(spark, properties, config, specs, df, table, owner_f
 def validate_load(spark, properties, config, specs, target_schema, tables, limit):
     """Read-only pre-flight. Returns a flat list of Violations across all tables."""
     owner_for = lambda t: table_owner_and_name(target_schema, t)  # noqa: E731
+    if limit is not None:
+        logger.warning(
+            "Validation under --limit profiles df.limit(%d), which Spark samples "
+            "nondeterministically; the inserted sample may differ. Use a full run "
+            "(no --limit) for an authoritative pre-flight.", limit)
     target_columns = read_target_columns(spark, properties, target_schema, tables)
     target_constraints = read_target_constraints(spark, properties, target_schema, tables)
     violations = []
