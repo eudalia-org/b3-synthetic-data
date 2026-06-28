@@ -217,6 +217,170 @@ def profile_synthetic_table(df, target_cols, constraints):
             "distinct_counts": distinct_counts}
 
 
+def read_target_columns(spark, properties, owner, tables):
+    """{TABLE: {COL: {data_type, precision, scale, data_length, char_length,
+    nullable(bool), has_default(bool), is_numeric, is_string}}} from ALL_TAB_COLUMNS."""
+    owner = validate_identifier(owner)
+    names = ",".join(f"'{validate_identifier(table_path_name(t))}'" for t in tables)
+    # NVL2(DATA_DEFAULT,...) instead of selecting DATA_DEFAULT itself: DATA_DEFAULT
+    # is an Oracle LONG column, and reading LONG via Spark JDBC alongside other
+    # columns is flaky (stream-already-closed). We only need the boolean.
+    rows = read_rows(spark, properties,
+                     "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, DATA_PRECISION, "
+                     "DATA_SCALE, DATA_LENGTH, CHAR_LENGTH, NULLABLE, "
+                     "NVL2(DATA_DEFAULT, 'Y', 'N') AS HAS_DEFAULT "
+                     f"FROM ALL_TAB_COLUMNS WHERE OWNER='{owner}' "
+                     f"AND TABLE_NAME IN ({names})")
+    out = {}
+    numeric = {"NUMBER", "FLOAT", "BINARY_FLOAT", "BINARY_DOUBLE", "INTEGER"}
+    string = {"VARCHAR2", "CHAR", "NVARCHAR2", "NCHAR"}
+    for r in rows:
+        dt = r["DATA_TYPE"]
+        out.setdefault(r["TABLE_NAME"], {})[r["COLUMN_NAME"]] = {
+            "data_type": dt,
+            "precision": r["DATA_PRECISION"],
+            "scale": r["DATA_SCALE"],
+            "data_length": r["DATA_LENGTH"],
+            "char_length": r["CHAR_LENGTH"],
+            "nullable": r["NULLABLE"] == "Y",
+            "has_default": r["HAS_DEFAULT"] == "Y",
+            "is_numeric": dt in numeric,
+            "is_string": dt in string,
+        }
+    return out
+
+
+def read_target_constraints(spark, properties, owner, tables):
+    """{TABLE: [(constraint_name, (COL,...)), ...]} for P and U constraints,
+    columns ordered by POSITION."""
+    owner = validate_identifier(owner)
+    names = ",".join(f"'{validate_identifier(table_path_name(t))}'" for t in tables)
+    rows = read_rows(spark, properties,
+                     "SELECT c.TABLE_NAME, c.CONSTRAINT_NAME, acc.COLUMN_NAME, acc.POSITION "
+                     "FROM ALL_CONSTRAINTS c JOIN ALL_CONS_COLUMNS acc "
+                     "ON c.OWNER=acc.OWNER AND c.CONSTRAINT_NAME=acc.CONSTRAINT_NAME "
+                     f"WHERE c.OWNER='{owner}' AND c.CONSTRAINT_TYPE IN ('P','U') "
+                     f"AND c.TABLE_NAME IN ({names})")
+    grouped = {}
+    for r in rows:
+        grouped.setdefault((r["TABLE_NAME"], r["CONSTRAINT_NAME"]), []).append(
+            (int(r["POSITION"]), r["COLUMN_NAME"]))
+    out = {}
+    for (table, name), cols in grouped.items():
+        ordered = tuple(c for _pos, c in sorted(cols))
+        out.setdefault(table, []).append((name, ordered))
+    return out
+
+
+def count_prod_collisions(spark, properties, config, owner, table_name, df, constraints):
+    """{tuple(cols): count of synthetic keys already in production}. Range-bounds
+    the production read on a single numeric key (reusing read_existing_keys);
+    composite/non-numeric keys read distinct production columns directly."""
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import NumericType
+
+    col_map = {c.upper(): c for c in df.columns}
+    out = {}
+    for _name, cols in constraints:
+        actuals = [col_map.get(c.upper()) for c in cols]
+        if any(a is None for a in actuals):
+            continue
+        syn_keys = df.select(*actuals).dropna().dropDuplicates()
+        if len(cols) == 1 and isinstance(df.schema[actuals[0]].dataType, NumericType):
+            bounds = df.agg(F.min(actuals[0]), F.max(actuals[0])).first()
+            lo, hi = bounds[0], bounds[1]
+            if lo is None:
+                out[tuple(c.upper() for c in cols)] = 0
+                continue
+            lo, hi = normalize_pk_bound(lo), normalize_pk_bound(hi)
+            existing = read_existing_keys(
+                spark, properties, resolve_num_partitions(config),
+                owner, table_name, actuals[0], lo, hi)
+            existing = existing.withColumnRenamed(existing.columns[0], actuals[0])
+        else:
+            col_list = ",".join(validate_identifier(c) for c in cols)
+            q = (f"(SELECT {col_list} FROM {validate_identifier(owner)}."
+                 f"{validate_identifier(table_name)}) DATAGEN_UK")
+            existing = (spark.read.format("jdbc").options(**properties)
+                        .option("dbtable", q).load())
+            for syn_col, prod_col in zip(actuals, existing.columns):
+                existing = existing.withColumnRenamed(prod_col, syn_col)
+        out[tuple(c.upper() for c in cols)] = syn_keys.join(
+            existing, on=actuals, how="inner").count()
+    return out
+
+
+def count_fk_static_orphans(spark, properties, config, specs, df, table, owner_for):
+    """{(tuple(cols), parent): count of synthetic FK values absent from the static
+    parent's key}. Only FKs whose parent is static (is_static) are checked."""
+    norm = table_path_name(table).upper()
+    entry = specs.get(norm, {})
+    col_map = {c.upper(): c for c in df.columns}
+    out = {}
+    for fk in _fk_list(entry):
+        parent = (fk.get("parent_table") or "").upper()
+        if not parent or not is_static(specs, parent):
+            continue
+        cols = [c.upper() for c in fk.get("columns", [])]
+        pcols = [c.upper() for c in (fk.get("parent_columns") or [])]
+        actuals = [col_map.get(c) for c in cols]
+        if not cols or len(cols) != len(pcols) or any(a is None for a in actuals):
+            continue
+        p_owner, p_name = owner_for(parent)
+        col_list = ",".join(validate_identifier(c) for c in pcols)
+        q = (f"(SELECT {col_list} FROM {validate_identifier(p_owner)}."
+             f"{validate_identifier(p_name)}) DATAGEN_FK")
+        parent_keys = spark.read.format("jdbc").options(**properties).option(
+            "dbtable", q).load()
+        for a, pc in zip(actuals, parent_keys.columns):
+            parent_keys = parent_keys.withColumnRenamed(pc, a)
+        syn = df.select(*actuals).dropna()
+        orphans = syn.join(parent_keys, on=actuals, how="left_anti").count()
+        out[(tuple(cols), parent)] = orphans
+    return out
+
+
+def validate_load(spark, properties, config, specs, target_schema, tables, limit):
+    """Read-only pre-flight. Returns a flat list of Violations across all tables."""
+    owner_for = lambda t: table_owner_and_name(target_schema, t)  # noqa: E731
+    if limit is not None:
+        logger.warning(
+            "Validation under --limit profiles df.limit(%d), which Spark samples "
+            "nondeterministically; the inserted sample may differ. Use a full run "
+            "(no --limit) for an authoritative pre-flight.", limit)
+    target_columns = read_target_columns(spark, properties, target_schema, tables)
+    target_constraints = read_target_constraints(spark, properties, target_schema, tables)
+    violations = []
+    for table in tables:
+        owner, table_name = owner_for(table)
+        tcols = target_columns.get(table_name)
+        if tcols is None:
+            violations.append(Violation(table, "column_alignment", "*",
+                                        f"target table {owner}.{table_name} not found"))
+            continue
+        df = spark.read.parquet(build_load_path(config, table_path_name(table)))
+        if limit is not None:
+            df = df.limit(limit)
+        constraints = target_constraints.get(table_name, [])
+        prof = profile_synthetic_table(df, tcols, constraints)
+        prod_collisions = count_prod_collisions(
+            spark, properties, config, owner, table_name, df, constraints)
+        fk_orphans = count_fk_static_orphans(
+            spark, properties, config, specs, df, table, owner_for)
+        violations += validate_table(
+            table=table,
+            synthetic_cols={c.upper() for c in df.columns},
+            profile=prof["columns"],
+            target_cols=tcols,
+            constraints=constraints,
+            total_count=prof["total_count"],
+            distinct_counts=prof["distinct_counts"],
+            prod_collision_counts=prod_collisions,
+            fk_orphan_counts=fk_orphans,
+        )
+    return violations
+
+
 def validate_identifier(name: str) -> str:
     upper = name.upper()
     if not IDENTIFIER_PATTERN.match(upper):
