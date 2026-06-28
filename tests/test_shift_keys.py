@@ -176,3 +176,102 @@ class TestOraclePreflight:
 
     def test_find_collisions_none_when_offset_clears(self):
         assert shift_keys.find_collisions({"T": 100}, {"T": 1}, 1000) == []
+
+
+class TestApplyShift:
+    def test_in_place_shift_preserves_fk_integrity(self, spark, tmp_path):
+        from pyspark.sql import types as T
+        base = str(tmp_path / "syn")
+        # CONDICAO_IF (non-static parent), RESGATE (shared-key child),
+        # OPERACAO (child with FK to CONDICAO_IF), TIPO_IF (static)
+        spark.createDataFrame([(1,), (2,), (3,)],
+            T.StructType([T.StructField("NUM_CONDICAO_IF", T.LongType())])
+        ).write.parquet(f"{base}/CONDICAO_IF")
+        spark.createDataFrame([(1,), (2,)],
+            T.StructType([T.StructField("NUM_CONDICAO_IF", T.LongType())])
+        ).write.parquet(f"{base}/RESGATE")
+        spark.createDataFrame([(10, 1), (11, 2)],
+            T.StructType([T.StructField("NUM_OPER", T.LongType()),
+                          T.StructField("NUM_CONDICAO_IF", T.LongType())])
+        ).write.parquet(f"{base}/OPERACAO")
+        spark.createDataFrame([(46,)],
+            T.StructType([T.StructField("NUM_TIPO_IF", T.LongType())])
+        ).write.parquet(f"{base}/TIPO_IF")
+
+        specs = {
+            "TIPO_IF": {"pk_cols": ["NUM_TIPO_IF"], "static": True},
+            "CONDICAO_IF": {"pk_cols": ["NUM_CONDICAO_IF"]},
+            "RESGATE": {"pk_cols": ["NUM_CONDICAO_IF"],
+                        "foreign_keys": [{"columns": ["NUM_CONDICAO_IF"],
+                                          "parent_table": "CONDICAO_IF"}]},
+            "OPERACAO": {"pk_cols": ["NUM_OPER"],
+                         "foreign_keys": [{"columns": ["NUM_CONDICAO_IF"],
+                                           "parent_table": "CONDICAO_IF"}]},
+        }
+        shift = shift_keys.compute_shift_columns(specs)
+        failures = shift_keys.apply_shift(spark, base, shift, 1000,
+                                          continue_on_error=False,
+                                          reliable_checkpoint=False)
+        assert failures == []
+
+        cond = spark.read.parquet(f"{base}/CONDICAO_IF")
+        oper = spark.read.parquet(f"{base}/OPERACAO")
+        resg = spark.read.parquet(f"{base}/RESGATE")
+        tipo = spark.read.parquet(f"{base}/TIPO_IF")
+
+        # parent PK shifted
+        assert sorted(r["NUM_CONDICAO_IF"] for r in cond.collect()) == [1001, 1002, 1003]
+        # child FK shifted by same N -> still joins parent
+        assert oper.join(cond, "NUM_CONDICAO_IF", "left_anti").count() == 0
+        assert sorted(r["NUM_OPER"] for r in oper.collect()) == [1010, 1011]
+        # shared-key child shifted, still matches parent
+        assert resg.join(cond, "NUM_CONDICAO_IF", "left_anti").count() == 0
+        # static table untouched
+        assert [r["NUM_TIPO_IF"] for r in tipo.collect()] == [46]
+
+
+class TestEnvAndCli:
+    def test_get_shift_env_requires_synthetic_and_specs(self, monkeypatch):
+        monkeypatch.delenv("DATAGEN_SYNTHETIC_BASE_URI", raising=False)
+        monkeypatch.setenv("DATAGEN_SPECS_URI", "oci://b@n/specs.json")
+        with pytest.raises(SystemExit):
+            shift_keys.get_shift_env()
+
+    def test_get_shift_env_ok(self, monkeypatch):
+        monkeypatch.setenv("DATAGEN_SYNTHETIC_BASE_URI", "oci://b@n/syn/")
+        monkeypatch.setenv("DATAGEN_SPECS_URI", "oci://b@n/specs.json")
+        monkeypatch.delenv("DATAGEN_CHECKPOINT_URI", raising=False)
+        cfg = shift_keys.get_shift_env()
+        assert cfg["DATAGEN_SYNTHETIC_BASE_URI"] == "oci://b@n/syn"  # trailing / stripped
+        assert cfg["DATAGEN_SPECS_URI"] == "oci://b@n/specs.json"
+        assert cfg.get("DATAGEN_CHECKPOINT_URI") in (None, "")
+
+    def test_parse_arguments_offset_required(self):
+        with pytest.raises(SystemExit):
+            shift_keys.parse_arguments([])
+
+    def test_parse_arguments_values(self):
+        args = shift_keys.parse_arguments(["--offset", "1000000", "--dry-run"])
+        assert args.offset == 1000000 and args.dry_run is True
+        assert args.continue_on_error is False
+
+    def test_oracle_props_none_without_env(self, monkeypatch):
+        for k in ("DATAGEN_SOURCE_JDBC_URL", "DATAGEN_SOURCE_DB_USER",
+                  "DATAGEN_SOURCE_DB_PASSWORD"):
+            monkeypatch.delenv(k, raising=False)
+        monkeypatch.setenv("DATAGEN_SYNTHETIC_BASE_URI", "oci://b@n/syn/")
+        monkeypatch.setenv("DATAGEN_SPECS_URI", "oci://b@n/specs.json")
+        cfg = shift_keys.get_shift_env()
+        assert cfg["DATAGEN_ORACLE_OWNER"] == "CETIP"
+        assert shift_keys.oracle_props_or_none(cfg) is None
+
+    def test_deployment_summary_lists_env_and_config(self, capsys):
+        shift_keys.print_deployment_summary({"DATAGEN_SYNTHETIC_BASE_URI": "oci://b@n/syn"})
+        out = capsys.readouterr().out
+        assert "DATAGEN_SYNTHETIC_BASE_URI" in out
+        assert "DATAGEN_SPECS_URI" in out
+        assert "DATAGEN_CHECKPOINT_URI" in out
+        assert "DATAGEN_SOURCE_JDBC_URL" in out
+        assert "DATAGEN_ORACLE_OWNER" in out
+        assert "datagen/shift_keys.py" in out
+        assert "--offset" in out
