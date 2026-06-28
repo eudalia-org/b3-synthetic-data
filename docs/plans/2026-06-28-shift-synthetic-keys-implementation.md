@@ -17,9 +17,13 @@
 - **Create:** `datagen/shift_keys.py` — the app. Responsibilities, top to bottom:
   - `compute_shift_columns(specs) -> dict[str, list[str]]` — pure: which columns shift, per table.
   - `shift_table(df, cols, offset) -> DataFrame` — pure transform: `(col+N).cast(dtype)`.
-  - `check_overflow(spark, base, shift, offset) -> list[tuple]` — read-only pre-flight.
+  - `capacity_from_precision_scale(precision, scale) -> int | None` — pure: `NUMBER(p,s) -> 10^(p-s)-1`.
+  - `oracle_column_capacities(rows, shift) -> dict[(table,col), int]` — pure: from `ALL_TAB_COLUMNS` rows.
+  - `find_collisions(prod_max, synth_min, offset) -> list[tuple]` — pure: `synth_min+N <= prod_max` flagged.
+  - `read_oracle_capacities(spark, props, owner) -> rows` / `read_oracle_max(spark, props, owner, table, col)` — thin JDBC wrappers reusing `save_tables` helpers.
+  - `check_overflow(spark, base, shift, offset, capacity_override=None) -> list[tuple]` — read-only; `capacity_override` (from Oracle) wins over `_pk_capacity`.
   - `apply_shift(spark, base, shift, offset, continue_on_error, reliable_checkpoint) -> list[str]` — Phase 2.
-  - `get_shift_env() -> dict` — env validation (SYNTHETIC + SPECS required, CHECKPOINT optional).
+  - `get_shift_env() -> dict` — env validation (SYNTHETIC + SPECS required; CHECKPOINT + Oracle JDBC + owner optional).
   - `print_deployment_summary(config)` — env vars + Data Flow config block.
   - `parse_arguments()`, `main()`.
 - **Create:** `tests/test_shift_keys.py` — unit (`compute_shift_columns`) + integration (transform, overflow, end-to-end).
@@ -322,6 +326,16 @@ class TestCheckOverflow:
         assert len(out) == 1
         table, col, mx, shifted, cap = out[0]
         assert (table, col, mx, shifted, cap) == ("T", "K", 90, 110, 99)
+
+    def test_capacity_override_wins_over_parquet(self, spark, tmp_path):
+        from pyspark.sql import types as T
+        # Parquet dtype Decimal(38,0) is huge, but the live Oracle capacity is 200;
+        # max 150 + 100 = 250 > 200 -> overflow detected only via the override.
+        schema = T.StructType([T.StructField("K", T.DecimalType(38, 0))])
+        self._write(spark, tmp_path, "T", schema, [(150,)])
+        out = shift_keys.check_overflow(spark, str(tmp_path), {"T": ["K"]}, 100,
+                                        capacity_override={("T", "K"): 200})
+        assert out == [("T", "K", 150, 250, 200)]
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -334,18 +348,26 @@ Expected: FAIL — no `check_overflow`.
 ```python
 # datagen/shift_keys.py
 def check_overflow(
-    spark: SparkSession, base: str, shift: Dict[str, List[str]], offset: int
+    spark: SparkSession,
+    base: str,
+    shift: Dict[str, List[str]],
+    offset: int,
+    capacity_override: Dict[Tuple[str, str], int] | None = None,
 ) -> List[Tuple[str, str, int, int, int]]:
     """Read-only. For each shiftable column, read max(col) (footer-fast via
     aggregatePushdown) and flag (table, col, max, max+offset, capacity) when
-    max+offset exceeds the column's numeric domain. Non-numeric / empty columns
-    are skipped."""
+    max+offset exceeds the column's numeric domain. `capacity_override` (the
+    authoritative live Oracle capacity) wins over the Parquet-schema
+    `_pk_capacity`. Non-numeric / empty columns are skipped."""
+    capacity_override = capacity_override or {}
     overflows: List[Tuple[str, str, int, int, int]] = []
     for table, cols in shift.items():
         path = f"{base}/{table_path_name(table)}"
         df = read_parquet(spark, path)
         for c in cols:
-            cap = _pk_capacity(spark, path, c)
+            cap = capacity_override.get((table, c))
+            if cap is None:
+                cap = _pk_capacity(spark, path, c)
             if cap is None:
                 continue
             row = df.agg(F.max(F.col(c)).alias("m")).first()
@@ -371,7 +393,132 @@ git commit -m "feat(shift_keys): add read-only overflow pre-flight"
 
 ---
 
-### Task 4: `apply_shift` — Phase 2 in-place mutate (end-to-end)
+### Task 4: Oracle live pre-flight — authoritative capacity + collision (pure logic)
+
+**Files:**
+- Modify: `datagen/shift_keys.py`
+- Test: `tests/test_shift_keys.py`
+
+The pure functions are fully unit-tested; the two thin JDBC wrappers
+(`read_oracle_capacities`, `read_oracle_max`) just run a query via the proven
+`save_tables.read_rows`/`read_single_value` and are not exercised locally (no
+Oracle in the test env).
+
+- [ ] **Step 1: Write failing unit tests for the pure functions**
+
+```python
+class TestOraclePreflight:
+    def test_capacity_from_precision_scale(self):
+        assert shift_keys.capacity_from_precision_scale(2, 0) == 99
+        assert shift_keys.capacity_from_precision_scale(5, 0) == 99999
+        assert shift_keys.capacity_from_precision_scale(10, 2) == 10**8 - 1
+        # NULL precision (unconstrained NUMBER) -> no limit
+        assert shift_keys.capacity_from_precision_scale(None, None) is None
+
+    def test_oracle_column_capacities_filters_to_shift_set(self):
+        # rows mimic ALL_TAB_COLUMNS: (TABLE_NAME, COLUMN_NAME, DATA_PRECISION, DATA_SCALE)
+        rows = [
+            ("OPERACAO", "NUM_OPER", 12, 0),
+            ("OPERACAO", "IGNORED", 5, 0),      # not in shift set -> dropped
+            ("INSTRUMENTO_FINANCEIRO", "NUM_IF", None, None),  # unconstrained -> skipped
+        ]
+        shift = {"OPERACAO": ["NUM_OPER"], "INSTRUMENTO_FINANCEIRO": ["NUM_IF"]}
+        out = shift_keys.oracle_column_capacities(rows, shift)
+        assert out == {("OPERACAO", "NUM_OPER"): 10**12 - 1}
+
+    def test_find_collisions(self):
+        prod_max = {"OPERACAO": 5000, "CONDICAO_IF": 100}
+        synth_min = {"OPERACAO": 1, "CONDICAO_IF": 1}
+        # offset 4000: OPERACAO 1+4000=4001 <= 5000 -> collision; CONDICAO_IF 4001 > 100 -> ok
+        out = shift_keys.find_collisions(prod_max, synth_min, 4000)
+        assert out == [("OPERACAO", 5000, 4001)]
+
+    def test_find_collisions_none_when_offset_clears(self):
+        assert shift_keys.find_collisions({"T": 100}, {"T": 1}, 1000) == []
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `… -m pytest tests/test_shift_keys.py::TestOraclePreflight -v`
+Expected: FAIL — functions not defined.
+
+- [ ] **Step 3: Implement the pure functions + thin JDBC wrappers**
+
+```python
+# datagen/shift_keys.py  (add this import near the top)
+from datagen.save_tables import build_connection_properties, read_rows, read_single_value
+
+
+def capacity_from_precision_scale(precision, scale):
+    """Largest integer value for an Oracle NUMBER(precision, scale).
+    NULL precision (unconstrained NUMBER) -> None (no limit)."""
+    if precision is None:
+        return None
+    int_digits = int(precision) - int(scale or 0)
+    return (10 ** int_digits) - 1 if int_digits > 0 else 0
+
+
+def oracle_column_capacities(rows, shift: Dict[str, List[str]]) -> Dict[Tuple[str, str], int]:
+    """Map (table, col) -> capacity from ALL_TAB_COLUMNS rows
+    (TABLE_NAME, COLUMN_NAME, DATA_PRECISION, DATA_SCALE), restricted to the
+    shift set; columns with no precision (unconstrained) are omitted."""
+    wanted = {(t, c) for t, cols in shift.items() for c in cols}
+    out: Dict[Tuple[str, str], int] = {}
+    for table, col, precision, scale in rows:
+        if (table, col) not in wanted:
+            continue
+        cap = capacity_from_precision_scale(precision, scale)
+        if cap is not None:
+            out[(table, col)] = cap
+    return out
+
+
+def find_collisions(prod_max: Dict[str, int], synth_min: Dict[str, int],
+                    offset: int) -> List[Tuple[str, int, int]]:
+    """Flag (table, prod_max, synth_min+offset) where the shifted synthetic key
+    range does NOT clear current production (synth_min + offset <= prod_max)."""
+    flagged: List[Tuple[str, int, int]] = []
+    for table, pmax in prod_max.items():
+        smin = synth_min.get(table)
+        if smin is None or pmax is None:
+            continue
+        if smin + offset <= pmax:
+            flagged.append((table, int(pmax), int(smin) + offset))
+    return flagged
+
+
+def read_oracle_capacities(spark, props: dict, owner: str):
+    """Thin: ALL_TAB_COLUMNS rows for `owner`. Returns list of
+    (TABLE_NAME, COLUMN_NAME, DATA_PRECISION, DATA_SCALE)."""
+    query = (
+        "SELECT TABLE_NAME, COLUMN_NAME, DATA_PRECISION, DATA_SCALE "
+        f"FROM ALL_TAB_COLUMNS WHERE OWNER = '{owner}'"
+    )
+    return [(r["TABLE_NAME"], r["COLUMN_NAME"], r["DATA_PRECISION"], r["DATA_SCALE"])
+            for r in read_rows(spark, props, query)]
+
+
+def read_oracle_max(spark, props: dict, owner: str, table: str, col: str):
+    """Thin: live MAX(col) from owner.table (index-fast). None if empty."""
+    row = read_single_value(spark, props, f"SELECT MAX({col}) AS M FROM {owner}.{table}")
+    return None if row is None or row["M"] is None else int(row["M"])
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `… -m pytest tests/test_shift_keys.py::TestOraclePreflight -v`
+Expected: PASS (4 tests).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add datagen/shift_keys.py tests/test_shift_keys.py
+git commit -m "feat(shift_keys): Oracle capacity + collision pre-flight logic"
+```
+
+---
+
+### Task 5: `apply_shift` — Phase 2 in-place mutate (end-to-end)
 
 **Files:**
 - Modify: `datagen/shift_keys.py`
@@ -488,7 +635,7 @@ git commit -m "feat(shift_keys): add in-place per-table apply_shift"
 
 ---
 
-### Task 5: Env loading, CLI, deployment summary, `main`
+### Task 6: Env loading, CLI, deployment summary, `main` (with Oracle wiring)
 
 **Files:**
 - Modify: `datagen/shift_keys.py`
@@ -522,12 +669,24 @@ class TestEnvAndCli:
         assert args.offset == 1000000 and args.dry_run is True
         assert args.continue_on_error is False
 
+    def test_oracle_props_none_without_env(self, monkeypatch):
+        for k in ("DATAGEN_SOURCE_JDBC_URL", "DATAGEN_SOURCE_DB_USER",
+                  "DATAGEN_SOURCE_DB_PASSWORD"):
+            monkeypatch.delenv(k, raising=False)
+        monkeypatch.setenv("DATAGEN_SYNTHETIC_BASE_URI", "oci://b@n/syn/")
+        monkeypatch.setenv("DATAGEN_SPECS_URI", "oci://b@n/specs.json")
+        cfg = shift_keys.get_shift_env()
+        assert cfg["DATAGEN_ORACLE_OWNER"] == "CETIP"
+        assert shift_keys.oracle_props_or_none(cfg) is None
+
     def test_deployment_summary_lists_env_and_config(self, capsys):
         shift_keys.print_deployment_summary({"DATAGEN_SYNTHETIC_BASE_URI": "oci://b@n/syn"})
         out = capsys.readouterr().out
         assert "DATAGEN_SYNTHETIC_BASE_URI" in out
         assert "DATAGEN_SPECS_URI" in out
         assert "DATAGEN_CHECKPOINT_URI" in out
+        assert "DATAGEN_SOURCE_JDBC_URL" in out
+        assert "DATAGEN_ORACLE_OWNER" in out
         assert "datagen/shift_keys.py" in out
         assert "--offset" in out
 ```
@@ -564,7 +723,29 @@ def get_shift_env() -> dict:
     chk = os.environ.get(CHECKPOINT_ENV)
     if chk:
         config[CHECKPOINT_ENV] = chk.rstrip("/")
+    # Optional Oracle pre-flight: URL + user + password travel as a set.
+    for name in ("DATAGEN_SOURCE_JDBC_URL", "DATAGEN_SOURCE_DB_USER",
+                 "DATAGEN_SOURCE_DB_PASSWORD"):
+        val = os.environ.get(name)
+        if val:
+            config[name] = val
+    config["DATAGEN_ORACLE_OWNER"] = os.environ.get("DATAGEN_ORACLE_OWNER", "CETIP")
+    # JDBC tuning defaults required by build_connection_properties.
+    config.setdefault("DATAGEN_JDBC_FETCH_SIZE", os.environ.get("DATAGEN_JDBC_FETCH_SIZE", "1000"))
+    config.setdefault("DATAGEN_JDBC_READ_TIMEOUT_MS",
+                      os.environ.get("DATAGEN_JDBC_READ_TIMEOUT_MS", "60000"))
+    config.setdefault("DATAGEN_JDBC_LOB_PREFETCH",
+                      os.environ.get("DATAGEN_JDBC_LOB_PREFETCH", "262144"))
     return config
+
+
+def oracle_props_or_none(config: dict):
+    """Build JDBC connection properties iff the full Oracle env set is present."""
+    if all(config.get(k) for k in
+           ("DATAGEN_SOURCE_JDBC_URL", "DATAGEN_SOURCE_DB_USER",
+            "DATAGEN_SOURCE_DB_PASSWORD")):
+        return build_connection_properties(config)
+    return None
 
 
 def parse_arguments(argv=None) -> argparse.Namespace:
@@ -587,6 +768,11 @@ def print_deployment_summary(config: dict) -> None:
         f"  {SYNTHETIC_ENV}   {base}\n"
         f"  {SPECS_ENV}            oci://<bucket>@<namespace>/specs.json\n"
         f"  {CHECKPOINT_ENV}       (optional) oci://<bucket>@<namespace>/_chk\n"
+        "Optional (enables live Oracle datatype + collision pre-flight):\n"
+        "  DATAGEN_SOURCE_JDBC_URL      jdbc:oracle:thin:@//host:port/service\n"
+        "  DATAGEN_SOURCE_DB_USER       <user>\n"
+        "  DATAGEN_SOURCE_DB_PASSWORD   <password>\n"
+        "  DATAGEN_ORACLE_OWNER         CETIP   (default)\n"
         "\nData Flow application:\n"
         "  Main:       datagen/shift_keys.py\n"
         "  Arguments:  --offset <N> [--dry-run] [--continue-on-error]\n"
@@ -594,6 +780,7 @@ def print_deployment_summary(config: dict) -> None:
         "              memoryOverheadFactor=0.2). No shuffle -> shuffle.partitions irrelevant.\n"
         "  Shape:      Driver    8 OCPU / 64 GB\n"
         "              Executors 4 x (16-32 OCPU / 128 GB)   # I/O-bound; scale OCPU\n"
+        "  Network:    Oracle checks need Data Flow -> Oracle connectivity (ADB networking)\n"
     )
 
 
@@ -609,21 +796,53 @@ def main() -> None:
         specs = load_specs(spark, config[SPECS_ENV])
         shift = compute_shift_columns(specs)
         base = synthetic_base_path(config)  # base URI + optional prefix
+        owner = config["DATAGEN_ORACLE_OWNER"]
         total_cols = sum(len(v) for v in shift.values())
         logger.info("Shifting %d column(s) across %d table(s) by +%d",
                     total_cols, len(shift), args.offset)
 
-        overflows = check_overflow(spark, base, shift, args.offset)
-        if overflows:
-            logger.error("Overflow — aborting, nothing written:")
+        # Live Oracle pre-flight when DB env is configured; else Parquet fallback.
+        props = oracle_props_or_none(config)
+        capacity_override: Dict[Tuple[str, str], int] = {}
+        collisions: List[Tuple[str, int, int]] = []
+        if props is not None:
+            logger.info("Oracle pre-flight against OWNER=%s", owner)
+            capacity_override = oracle_column_capacities(
+                read_oracle_capacities(spark, props, owner), shift)
+            prod_max: Dict[str, int] = {}
+            synth_min: Dict[str, int] = {}
+            for table in shift:
+                pk_cols = specs[table].get("pk_cols", [])
+                if specs[table].get("static") or not pk_cols:
+                    continue
+                pk = pk_cols[-1]
+                if pk not in shift[table]:
+                    continue  # PK kept fixed (FK-to-static) — no collision risk
+                pmax = read_oracle_max(spark, props, owner, table, pk)
+                if pmax is not None:
+                    prod_max[table] = pmax
+                path = f"{base}/{table_path_name(table)}"
+                row = read_parquet(spark, path).agg(F.min(F.col(pk)).alias("m")).first()
+                synth_min[table] = None if row is None or row["m"] is None else int(row["m"])
+            collisions = find_collisions(prod_max, synth_min, args.offset)
+        else:
+            logger.warning("No Oracle env -> Parquet-schema capacity; production "
+                           "COLLISION was NOT verified for offset %d.", args.offset)
+
+        overflows = check_overflow(spark, base, shift, args.offset, capacity_override)
+        if overflows or collisions:
+            logger.error("Pre-flight FAILED — aborting, nothing written.")
             for table, col, mx, shifted, cap in overflows:
-                logger.error("  %s.%s: max=%d +%d=%d > capacity %d",
+                logger.error("  overflow %s.%s: max=%d +%d=%d > capacity %d",
                              table, col, mx, args.offset, shifted, cap)
+            for table, pmax, shifted_min in collisions:
+                logger.error("  collision %s: synthetic min+%d=%d <= production max %d",
+                             table, args.offset, shifted_min, pmax)
             print_deployment_summary(config)
             sys.exit(1)
 
         if args.dry_run:
-            logger.info("Dry run: pre-flight OK, no overflow. Writing nothing.")
+            logger.info("Dry run: pre-flight OK. Writing nothing.")
             print_deployment_summary(config)
             return
 
@@ -659,7 +878,7 @@ git commit -m "feat(shift_keys): env, CLI, deployment summary, main"
 
 ---
 
-### Task 6: Full-suite check + lint
+### Task 7: Full-suite check + lint
 
 **Files:** none (verification only)
 
@@ -695,3 +914,6 @@ git commit -m "chore(shift_keys): lint"
 - The checkpoint in `apply_shift` is **mandatory**, not an optimization: `write_synthetic_table` deletes the table's prefix before appending, so a lazily-read `df` still pointing at those files would be corrupted. `localCheckpoint`/`checkpoint` replace the plan with a materialized leaf.
 - `_pk_capacity` returns `None` for non-numeric/unknown dtypes — `check_overflow` skips those (they shouldn't appear among key columns, but the guard is cheap).
 - Keep the output schema identical via `cast(dtype)` — the downstream JDBC load depends on it.
+- The Oracle pre-flight is **optional**: with the full `DATAGEN_SOURCE_JDBC_URL`/`_DB_USER`/`_DB_PASSWORD` set it uses live `ALL_TAB_COLUMNS` capacity + `MAX(pk)` collision; without it, it falls back to Parquet-schema capacity and **loudly warns** that collision wasn't verified. Enabling it needs Data Flow → Oracle networking.
+- Put the `from datagen.save_tables import build_connection_properties, read_rows, read_single_value` line in the **top** import block (with the engorda import) so `ruff` doesn't flag a non-top-level import.
+- Oracle pure functions (`capacity_from_precision_scale`, `oracle_column_capacities`, `find_collisions`) are unit-tested; the thin JDBC wrappers aren't run locally (no Oracle) — keep them thin so there's nothing to test beyond the query string.

@@ -47,6 +47,12 @@ joins and no shuffle, so it is embarrassingly parallel and I/O-bound.
 5. **In-place mechanism: checkpoint-swap, per table** (Approach 1) — read →
    shift → sever lineage via checkpoint → scoped-delete the table's own prefix →
    append to the same path.
+6. **Live Oracle pre-flight** (optional, gated on Oracle JDBC env). All tables
+   live in the single `CETIP` schema (configurable, default owner `CETIP`).
+   When DB access is configured, the pre-flight uses the *live* Oracle column
+   definitions and production maxima as the authoritative source instead of the
+   Parquet schema; when it isn't, it falls back to the Parquet-schema overflow
+   check and loudly warns that collision was not verified.
 
 ## Which columns get shifted
 
@@ -91,8 +97,11 @@ reimplementing them:
   `mode("append")`. Required: plain `mode("overwrite")` on the OCI HDFS connector
   deletes the *shared parent prefix* and would clobber sibling tables.
 - `_pk_capacity(spark, path, col)` — largest integer for the column's dtype
-  (works for any column, not just PKs; for the overflow check).
+  (works for any column, not just PKs; the Parquet-schema overflow fallback).
 - `read_parquet`, `synthetic_base_path`, `table_path_name`, `create_spark_session`.
+- From `save_tables.py` (for the optional Oracle pre-flight):
+  `build_connection_properties(config)`, `read_rows(spark, props, query)`,
+  `read_single_value(spark, props, query)`.
 
 The per-table synthetic path is built inline as
 `f"{synthetic_base_path(config)}/{table_path_name(table)}"` (the same expression
@@ -104,7 +113,9 @@ references to `synthetic_path(table)` below are shorthand for that expression.
 ```
 load specs (DATAGEN_SPECS_URI) -> compute shift-column-set per table
                                 |
-        Phase 1: PRE-FLIGHT (read-only) -- abort on overflow, write nothing
+        (optional) read live Oracle column types + production maxima (OWNER=CETIP)
+                                |
+        Phase 1: PRE-FLIGHT (read-only) -- abort on overflow OR collision
                                 |
         Phase 2: MUTATE (per table, in place)
                                 |
@@ -113,16 +124,35 @@ load specs (DATAGEN_SPECS_URI) -> compute shift-column-set per table
 
 ### Phase 1 — Pre-flight (read-only)
 
-For each shiftable column `(table, col)`:
+The pre-flight aborts before any write if **either** an overflow **or** a
+production collision is found, and reports all offenders.
 
-- Read `max(col)` from the **full** synthetic Parquet using
-  `spark.sql.parquet.aggregatePushdown=true` (footer-only metadata read, fast
-  even on the 665M-row tables).
-- Compute the column's capacity via `_pk_capacity` for its dtype.
+**Overflow** — for each shiftable column `(table, col)`:
+
+- Read `max(col)` from the **full** synthetic Parquet via
+  `aggregatePushdown` (footer-only, fast even on 665M-row tables).
+- Determine the column's capacity:
+  - **Authoritative (Oracle env set):** from the live `ALL_TAB_COLUMNS`
+    `DATA_PRECISION`/`DATA_SCALE` for `(OWNER, table, col)` →
+    `capacity = 10^(precision - scale) - 1`. A NULL precision (unconstrained
+    `NUMBER`) means no limit → skipped.
+  - **Fallback (no Oracle env):** `_pk_capacity` from the Parquet dtype.
 - If `max + N > capacity`, record an overflow.
 
-If any column overflows, **abort with a report** listing each offending
-`(table, col, dtype, max, max+N, capacity)`. Nothing is written.
+**Collision** (Oracle env only) — for each non-static table's shifted PK
+`(table, pk)`:
+
+- `prod_max` = live `SELECT MAX(pk) FROM CETIP.<table>` (index-fast).
+- `synth_min` = `min(pk)` from the synthetic Parquet (footer-fast).
+- If `synth_min + N <= prod_max`, record a collision (the offset does **not**
+  lift the synthetic key range clear of current production → would hit
+  `ORA-00001` unique-violation on load). FK columns inherit their parent's
+  shifted values, so checking each generated PK is sufficient.
+
+If any overflow or collision is found, **abort with a report** and write nothing.
+When no Oracle env is configured, the collision check is **skipped with a loud
+warning** that the offset's clearance over production was not verified, and the
+overflow check uses the Parquet-schema fallback.
 
 ### Phase 2 — Mutate (per table)
 
@@ -168,8 +198,19 @@ Environment variables:
 | `DATAGEN_SYNTHETIC_BASE_URI` | yes | synthetic tables read + mutated in place |
 | `DATAGEN_SPECS_URI` | yes | `specs.json` — which keys to shift |
 | `DATAGEN_CHECKPOINT_URI` | no | if set, reliable checkpoint instead of `localCheckpoint` |
+| `DATAGEN_SOURCE_JDBC_URL` | no | Oracle JDBC URL — enables the live datatype + collision pre-flight |
+| `DATAGEN_SOURCE_DB_USER` | no | Oracle user (with `…JDBC_URL`) |
+| `DATAGEN_SOURCE_DB_PASSWORD` | no | Oracle password (with `…JDBC_URL`) |
+| `DATAGEN_ORACLE_OWNER` | no | schema owner for the live checks (default `CETIP`) |
 
-It does **not** read raw source data (`DATAGEN_RAW_BASE_URI` is not needed).
+It does **not** read raw source data (`DATAGEN_RAW_BASE_URI` is not needed). The
+Oracle vars are optional and travel as a set: providing the JDBC URL + user +
+password switches on the authoritative live pre-flight; omitting them falls back
+to the Parquet-schema overflow check (collision unverified). Reuses
+`build_connection_properties` / `read_rows` / `read_single_value` from
+`save_tables.py`. Note: enabling the Oracle checks requires Data Flow → Oracle
+network access (the `dataflow-adb-networking` setup), which the object-store-only
+mode does not.
 
 ## Deployment summary output
 
@@ -180,19 +221,26 @@ Required env vars:
   DATAGEN_SYNTHETIC_BASE_URI   oci://<bucket>@<namespace>/<prefix>
   DATAGEN_SPECS_URI            oci://<bucket>@<namespace>/specs.json
   DATAGEN_CHECKPOINT_URI       (optional) oci://<bucket>@<namespace>/_chk
+Optional (enables live Oracle datatype + collision pre-flight):
+  DATAGEN_SOURCE_JDBC_URL      jdbc:oracle:thin:@//host:port/service
+  DATAGEN_SOURCE_DB_USER       <user>
+  DATAGEN_SOURCE_DB_PASSWORD   <password>
+  DATAGEN_ORACLE_OWNER         CETIP   (default)
 
 Data Flow application:
   Main:       datagen/shift_keys.py
-  Arguments:  --offset <N> [--dry-run]
+  Arguments:  --offset <N> [--dry-run] [--continue-on-error]
   Spark:      create_spark_session workload conf (aggregatePushdown, Kryo,
-              memoryOverheadFactor=0.3). No shuffle -> shuffle.partitions irrelevant.
+              memoryOverheadFactor=0.2). No shuffle -> shuffle.partitions irrelevant.
   Shape:      Driver    8 OCPU / 64 GB
               Executors 4 x (16-32 OCPU / 128 GB)   # I/O-bound; scale OCPU for throughput
+  Network:    Oracle checks require Data Flow -> Oracle connectivity (ADB networking)
 ```
 
 ## Error handling
 
-- **Overflow:** Phase 1 aborts before any write, with a per-column report.
+- **Overflow / collision:** Phase 1 aborts before any write, with a per-column
+  report; collision is only checked when Oracle env is configured.
 - **Per-table failure in Phase 2:** logged with the table name; the run stops by
   default, or continues to remaining tables under `--continue-on-error`. A failed
   table can be regenerated by re-running engorda for it. The log makes clear which
@@ -225,6 +273,12 @@ Local Spark via the JDK-17 path (PySpark 4.1 needs Java 17–21).
   - `NULL` FK values preserved; dtypes preserved.
 - **Overflow** — a tight-domain column where `max + N` exceeds capacity: Phase 1
   aborts with a report and **nothing is written**.
+- **Oracle pre-flight (pure logic, no live DB):** the capacity-from-precision/scale
+  function (`NUMBER(p,s) -> 10^(p-s)-1`, NULL precision -> no limit) and the
+  collision function (`synth_min + N <= prod_max -> flagged`) are pure and unit
+  tested with injected rows/values. The thin JDBC wrappers (reusing
+  `read_rows`/`read_single_value`) are not exercised locally — no Oracle in the
+  test env — and rely on the proven `save_tables.py` helpers.
 
 ## Out of scope / follow-ups
 
