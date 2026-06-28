@@ -90,9 +90,10 @@ class TestShiftTable:
         assert rows == {"a": (1001, 1010), "b": (1002, 1020)}
 
     def test_preserves_dtype(self, spark):
+        from decimal import Decimal
         from pyspark.sql import types as T
         schema = T.StructType([T.StructField("K", T.DecimalType(38, 9))])
-        df = spark.createDataFrame([(1,)], schema)
+        df = spark.createDataFrame([(Decimal("1"),)], schema)
         out = shift_keys.shift_table(df, ["K"], 5)
         assert out.schema["K"].dataType == T.DecimalType(38, 9)
         assert int(out.collect()[0]["K"]) == 6
