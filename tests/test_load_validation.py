@@ -97,3 +97,37 @@ class TestFkToStatic:
         out = L.fk_to_static_violations(
             "T", {(("NUM_TIPO_IF",), "TIPO_IF"): 7, (("X",), "Y"): 0})
         assert [(v.columns, v.detail.startswith("7")) for v in out] == [("NUM_TIPO_IF", True)]
+
+
+class TestValidateTable:
+    def test_runs_all_checks_and_concatenates(self):
+        # one violation from numeric domain + one from not-null
+        out = L.validate_table(
+            table="T",
+            synthetic_cols={"K", "S"},
+            profile={"K": {"max": 150, "min": 0, "null_count": 0},
+                     "S": {"null_count": 2, "max_octet": 5}},
+            target_cols={
+                "K": {"precision": 2, "scale": 0, "nullable": True, "has_default": False},
+                "S": {"data_length": 10, "nullable": False, "has_default": False},
+            },
+            constraints=[],
+            total_count=10,
+            distinct_counts={},
+            prod_collision_counts={},
+            fk_orphan_counts={},
+        )
+        checks = sorted(v.check for v in out)
+        assert checks == ["not_null", "numeric_domain"]
+
+
+class TestReport:
+    def test_groups_by_table(self):
+        vs = [L.Violation("A", "not_null", "X", "1 NULL"),
+              L.Violation("A", "numeric_domain", "Y", "max>cap"),
+              L.Violation("B", "fk_to_static", "Z", "orphans")]
+        report = L.format_violation_report(vs)
+        assert "A" in report and "B" in report and "not_null" in report and "Z" in report
+
+    def test_empty_report(self):
+        assert L.format_violation_report([]) == "No violations."

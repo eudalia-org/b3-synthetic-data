@@ -140,6 +140,37 @@ def fk_to_static_violations(table, orphan_counts):
     return out
 
 
+def validate_table(table, synthetic_cols, profile, target_cols, constraints,
+                   total_count, distinct_counts, prod_collision_counts, fk_orphan_counts):
+    """Run all six checks for one table; return the concatenated violations.
+    `profile` is the per-column dict (max/min/max_octet/null_count); the numeric
+    and string checks read the columns relevant to them."""
+    violations = []
+    violations += column_alignment_violations(table, synthetic_cols, target_cols)
+    violations += numeric_domain_violations(table, profile, target_cols)
+    violations += string_length_violations(table, profile, target_cols)
+    violations += not_null_violations(table, profile, target_cols)
+    violations += uniqueness_violations(
+        table, constraints, total_count, distinct_counts, prod_collision_counts)
+    violations += fk_to_static_violations(table, fk_orphan_counts)
+    return violations
+
+
+def format_violation_report(violations):
+    """Group violations by table into a human-readable multi-line report."""
+    if not violations:
+        return "No violations."
+    by_table = {}
+    for v in violations:
+        by_table.setdefault(v.table, []).append(v)
+    lines = []
+    for table in sorted(by_table):
+        lines.append(f"{table}:")
+        for v in by_table[table]:
+            lines.append(f"  [{v.check}] {v.columns} — {v.detail}")
+    return "\n".join(lines)
+
+
 def validate_identifier(name: str) -> str:
     upper = name.upper()
     if not IDENTIFIER_PATTERN.match(upper):
