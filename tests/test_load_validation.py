@@ -1,8 +1,19 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from datagen import load_tables as L  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def spark():
+    from pyspark.sql import SparkSession
+    s = (SparkSession.builder.appName("load-val-test").master("local[2]")
+         .config("spark.sql.shuffle.partitions", "2").getOrCreate())
+    yield s
+    s.stop()
 
 
 class TestCapacity:
@@ -131,3 +142,25 @@ class TestReport:
 
     def test_empty_report(self):
         assert L.format_violation_report([]) == "No violations."
+
+
+class TestProfile:
+    def test_profile_numeric_string_null_distinct(self, spark):
+        from pyspark.sql import types as T
+        schema = T.StructType([
+            T.StructField("K", T.LongType()),
+            T.StructField("S", T.StringType()),
+        ])
+        df = spark.createDataFrame([(1, "ab"), (2, "abcd"), (2, None)], schema)
+        # target_cols marks K numeric, S string; constraint PK(K)
+        target_cols = {
+            "K": {"is_numeric": True, "is_string": False, "nullable": False},
+            "S": {"is_numeric": False, "is_string": True, "nullable": False},
+        }
+        prof = L.profile_synthetic_table(df, target_cols, [("PK", ("K",))])
+        assert prof["total_count"] == 3
+        assert prof["columns"]["K"]["max"] == 2 and prof["columns"]["K"]["min"] == 1
+        assert prof["columns"]["K"]["null_count"] == 0
+        assert prof["columns"]["S"]["max_octet"] == 4
+        assert prof["columns"]["S"]["null_count"] == 1
+        assert prof["distinct_counts"][("K",)] == 2  # values 1,2 (dup 2)

@@ -171,6 +171,52 @@ def format_violation_report(violations):
     return "\n".join(lines)
 
 
+def profile_synthetic_table(df, target_cols, constraints):
+    """One-pass profile of a synthetic table for the checks.
+    target_cols: {COL: {is_numeric, is_string, nullable, ...}} (UPPER keys).
+    Returns {total_count, columns: {COL: {max, min, max_octet, null_count}},
+    distinct_counts: {tuple(cols): n}}."""
+    from pyspark.sql import functions as F
+
+    col_map = {c.upper(): c for c in df.columns}
+    aggs = [F.count(F.lit(1)).alias("__total")]
+    present = {}  # upper -> actual
+    for up, actual in col_map.items():
+        meta = target_cols.get(up)
+        if meta is None:
+            continue
+        present[up] = actual
+        if meta.get("is_numeric"):
+            aggs.append(F.max(actual).alias(f"__max__{up}"))
+            aggs.append(F.min(actual).alias(f"__min__{up}"))
+        if meta.get("is_string"):
+            aggs.append(F.max(F.octet_length(F.col(actual))).alias(f"__oct__{up}"))
+        aggs.append(
+            F.count(F.when(F.col(actual).isNull(), F.lit(1))).alias(f"__null__{up}"))
+    # distinct per constraint whose columns are all present
+    constraint_keys = []
+    for _name, cols in constraints:
+        if all(c.upper() in present for c in cols):
+            actuals = [present[c.upper()] for c in cols]
+            alias = "__dist__" + "_".join(c.upper() for c in cols)
+            aggs.append(F.countDistinct(*[F.col(a) for a in actuals]).alias(alias))
+            constraint_keys.append((tuple(c.upper() for c in cols), alias))
+
+    row = df.agg(*aggs).first()
+    columns = {}
+    for up in present:
+        meta = target_cols[up]
+        columns[up] = {
+            "max": row[f"__max__{up}"] if meta.get("is_numeric") else None,
+            "min": row[f"__min__{up}"] if meta.get("is_numeric") else None,
+            "max_octet": row[f"__oct__{up}"] if meta.get("is_string") else None,
+            "null_count": row[f"__null__{up}"],
+        }
+    distinct_counts = {cols: row[alias] for cols, alias in constraint_keys}
+    return {"total_count": row["__total"], "columns": columns,
+            "distinct_counts": distinct_counts}
+
+
 def validate_identifier(name: str) -> str:
     upper = name.upper()
     if not IDENTIFIER_PATTERN.match(upper):
