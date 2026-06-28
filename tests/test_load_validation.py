@@ -144,6 +144,18 @@ class TestReport:
         assert L.format_violation_report([]) == "No violations."
 
 
+class TestDryRunArg:
+    def test_dry_run_flag_parses(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["load_tables", "--dry-run"])
+        args = L.parse_arguments()
+        assert args.dry_run is True
+
+    def test_dry_run_defaults_false(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["load_tables"])
+        args = L.parse_arguments()
+        assert args.dry_run is False
+
+
 class TestProfile:
     def test_profile_numeric_string_null_distinct(self, spark):
         from pyspark.sql import types as T

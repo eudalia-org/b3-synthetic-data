@@ -420,6 +420,11 @@ def parse_arguments() -> argparse.Namespace:
         "--run-id",
         help="Run id for the rollback manifest. Defaults to a UTC timestamp.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate the synthetic data against the target schema and exit; insert nothing.",
+    )
     return parser.parse_args()
 
 
@@ -964,27 +969,31 @@ def main() -> None:
             else None
         )
         tables = resolve_load_tables(specs, requested)
-
-        run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         target_schema = config["DATAGEN_TARGET_SCHEMA"]
         properties = build_connection_properties(config)
+
+        logger.info("Pre-flight validation against %s ...", target_schema)
+        violations = validate_load(
+            spark, properties, config, specs, target_schema, tables, args.limit)
+        if violations:
+            logger.error("Pre-flight FAILED (%d violation(s)) — nothing inserted:\n%s",
+                         len(violations), format_violation_report(violations))
+            sys.exit(1)
+        logger.info("Pre-flight validation passed.")
+        if args.dry_run:
+            logger.info("Dry run: validation only, nothing loaded.")
+            return
+
+        run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         entries = capture_manifest_entries(
-            spark, properties, config, specs, target_schema, tables
-        )
+            spark, properties, config, specs, target_schema, tables)
         manifest = build_manifest(
-            run_id, datetime.now(timezone.utc).isoformat(), target_schema, entries
-        )
+            run_id, datetime.now(timezone.utc).isoformat(), target_schema, entries)
         path = write_manifest(spark, config, run_id, manifest)
         logger.info("Load run_id=%s; manifest written to %s", run_id, path)
 
-        load_tables(
-            spark,
-            config,
-            specs,
-            tables,
-            continue_on_error=args.continue_on_error,
-            limit=args.limit,
-        )
+        load_tables(spark, config, specs, tables,
+                    continue_on_error=args.continue_on_error, limit=args.limit)
     finally:
         spark.stop()
 
