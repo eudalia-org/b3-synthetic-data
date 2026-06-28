@@ -3,9 +3,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from datagen import shift_keys  # noqa: E402
-
 import pytest  # noqa: E402
+
+from datagen import shift_keys  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -91,6 +91,7 @@ class TestShiftTable:
 
     def test_preserves_dtype(self, spark):
         from decimal import Decimal
+
         from pyspark.sql import types as T
         schema = T.StructType([T.StructField("K", T.DecimalType(38, 9))])
         df = spark.createDataFrame([(Decimal("1"),)], schema)
@@ -114,6 +115,7 @@ class TestCheckOverflow:
 
     def test_no_overflow_returns_empty(self, spark, tmp_path):
         from decimal import Decimal
+
         from pyspark.sql import types as T
         schema = T.StructType([T.StructField("K", T.DecimalType(38, 0))])
         self._write(spark, tmp_path, "T", schema, [(Decimal("10"),), (Decimal("20"),)])
@@ -122,6 +124,7 @@ class TestCheckOverflow:
 
     def test_overflow_detected_for_tight_domain(self, spark, tmp_path):
         from decimal import Decimal
+
         from pyspark.sql import types as T
         # Decimal(2,0) capacity = 99; max is 90, +20 = 110 > 99 -> overflow
         schema = T.StructType([T.StructField("K", T.DecimalType(2, 0))])
@@ -134,6 +137,7 @@ class TestCheckOverflow:
 
     def test_capacity_override_wins_over_parquet(self, spark, tmp_path):
         from decimal import Decimal
+
         from pyspark.sql import types as T
         # Parquet dtype Decimal(38,0) is huge, but the live Oracle capacity is 200;
         # max 150 + 100 = 250 > 200 -> overflow detected only via the override.

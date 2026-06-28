@@ -272,7 +272,8 @@ def apply_shift(
             # Sever lineage: the next step deletes `path`, so a lazy read of the
             # source files would corrupt the output. Checkpoint replaces the plan
             # with a materialized RDD leaf.
-            df = df.checkpoint(eager=True) if reliable_checkpoint else df.localCheckpoint(eager=True)
+            df = (df.checkpoint(eager=True) if reliable_checkpoint
+                  else df.localCheckpoint(eager=True))
             write_synthetic_table(spark, df, path)
             logger.info("[%d/%d] shifted %s (%s)", i, total, table, ",".join(shift[table]))
         except Exception as exc:  # noqa: BLE001
