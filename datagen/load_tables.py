@@ -111,6 +111,35 @@ def not_null_violations(table, profile, target_cols):
     return out
 
 
+def uniqueness_violations(table, constraints, total_count, distinct_counts,
+                          prod_collision_counts):
+    """constraints: list of (name, tuple(cols)). distinct_counts/prod_collision_counts
+    keyed by tuple(cols). Flags internal dups (distinct < total) and production
+    collisions (>0 synthetic keys already in production)."""
+    out = []
+    for _name, cols in constraints:
+        label = ",".join(cols)
+        distinct = distinct_counts.get(cols)
+        if distinct is not None and distinct < total_count:
+            out.append(Violation(table, "uniqueness_internal", label,
+                                 f"{total_count - distinct} duplicate key(s) within synthetic"))
+        collisions = prod_collision_counts.get(cols, 0)
+        if collisions > 0:
+            out.append(Violation(table, "uniqueness_vs_production", label,
+                                 f"{collisions} synthetic key(s) already in production"))
+    return out
+
+
+def fk_to_static_violations(table, orphan_counts):
+    """orphan_counts: {(tuple(cols), parent_table): count}."""
+    out = []
+    for (cols, parent), count in orphan_counts.items():
+        if count > 0:
+            out.append(Violation(table, "fk_to_static", ",".join(cols),
+                                 f"{count} value(s) not present in static parent {parent}"))
+    return out
+
+
 def validate_identifier(name: str) -> str:
     upper = name.upper()
     if not IDENTIFIER_PATTERN.match(upper):

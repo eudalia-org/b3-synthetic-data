@@ -67,3 +67,33 @@ class TestNotNull:
         target = {"A": {"nullable": False}, "B": {"nullable": False}}
         out = L.not_null_violations("T", profile, target)
         assert [v.columns for v in out] == ["A"]
+
+
+class TestUniqueness:
+    def test_internal_dup_flagged(self):
+        constraints = [("PK_T", ("A",)), ("UK_T", ("B", "C"))]
+        out = L.uniqueness_violations(
+            "T", constraints, total_count=100,
+            distinct_counts={("A",): 100, ("B", "C"): 90},  # UK has dups
+            prod_collision_counts={})
+        assert [(v.check, v.columns) for v in out] == [("uniqueness_internal", "B,C")]
+
+    def test_production_collision_flagged(self):
+        out = L.uniqueness_violations(
+            "T", [("PK_T", ("A",))], total_count=100,
+            distinct_counts={("A",): 100},
+            prod_collision_counts={("A",): 5})
+        assert [(v.check, v.columns) for v in out] == [("uniqueness_vs_production", "A")]
+
+    def test_clean_no_violations(self):
+        out = L.uniqueness_violations(
+            "T", [("PK_T", ("A",))], total_count=100,
+            distinct_counts={("A",): 100}, prod_collision_counts={("A",): 0})
+        assert out == []
+
+
+class TestFkToStatic:
+    def test_orphans_flagged(self):
+        out = L.fk_to_static_violations(
+            "T", {(("NUM_TIPO_IF",), "TIPO_IF"): 7, (("X",), "Y"): 0})
+        assert [(v.columns, v.detail.startswith("7")) for v in out] == [("NUM_TIPO_IF", True)]
