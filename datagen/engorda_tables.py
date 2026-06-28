@@ -41,7 +41,7 @@ DEFAULT_SEED = 42
 # Filtro de domínio: CDB simplificado.
 #
 # Toda tabela de origem que possuir a coluna NUM_TIPO_IF é filtrada para
-# NUM_TIPO_IF == 46 ANTES da síntese, garantindo que o modelo seja gerado
+# NUM_TIPO_IF == 49 ANTES da síntese, garantindo que o modelo seja gerado
 # usando apenas o CDB simplificado. Tabelas que NÃO possuem a coluna passam
 # intactas. O filtro é aplicado por `_aplica_filtro_tipo_if` (logo após
 # `read_parquet`) nos dois pontos de leitura da fonte de síntese:
@@ -53,7 +53,7 @@ DEFAULT_SEED = 42
 # sintéticas não colidam com linhas de produção de OUTROS NUM_TIPO_IF.
 # ---------------------------------------------------------------------------
 FILTRO_TIPO_IF_COLUMN = "NUM_TIPO_IF"
-FILTRO_TIPO_IF_VALUE = 46 #filtro cdb simplificado
+FILTRO_TIPO_IF_VALUE = 49 #filtro cdb simplificado
 
 # ---------------------------------------------------------------------------
 # Regras de engorda por coluna.
@@ -2665,11 +2665,11 @@ def read_parquet(spark: SparkSession, path: str, limit: int | None = None) -> Da
 
 
 def _aplica_filtro_tipo_if(df: DataFrame) -> DataFrame:
-    """Filtra a fonte de síntese para o CDB simplificado (NUM_TIPO_IF == 46).
+    """Filtra a fonte de síntese para o CDB simplificado (NUM_TIPO_IF == 49).
 
     Aplica o filtro APENAS quando a coluna NUM_TIPO_IF existe no DataFrame;
     tabelas sem a coluna passam intactas. Linhas com NUM_TIPO_IF NULL são
-    descartadas (não casam com == 46), o que é o comportamento desejado.
+    descartadas (não casam com == 49), o que é o comportamento desejado.
 
     Usado somente na leitura da FONTE de síntese (referential_sample e o
     caminho sem --limit de engorda). A leitura de max(pk) em compute_pk_maxes
@@ -2767,20 +2767,35 @@ def compute_pk_maxes(spark, config, comp_specs, floor: int = 0, band: int = 0,
     return out
 
 
-def referential_sample(spark, config, comp_specs, limit: int) -> dict:
-    """Parent-first referential sampling so a --limit run stays FK-consistent.
+def referential_sample(spark, config, comp_specs, limit: int | None) -> dict:
+    """Subset referencial pais-antes-de-filhos, mantendo a FK consistente.
 
-    Walk the component parents-before-children: sample each table to `limit`,
-    but first keep only child rows whose FK lands in an already-sampled parent
-    (or is NULL). Independent per-table sampling would orphan FKs; this keeps
-    every kept child row's parent present, at the cost of smaller child counts.
+    Percorre o componente pais-antes-de-filhos: lê cada tabela, aplica o filtro
+    de domínio CDB simplificado (NUM_TIPO_IF == 49) onde a coluna existe, e
+    mantém só as linhas-filhas cuja FK cai num pai já subsetado (ou é NULL).
+
+    Isto PROPAGA o filtro de domínio PARA BAIXO na árvore de FK, PELA CHAVE:
+    uma filha SEM a coluna NUM_TIPO_IF (ex.: CARTEIRA_COMITENTE) fica restrita
+    ao universo CDB porque seu NUM_IF precisa casar com uma linha de
+    INSTRUMENTO_FINANCEIRO que sobreviveu ao filtro de tipo no pai. Sem essa
+    propagação, o pai encolhe para o tipo 49, a filha mantém TODAS as linhas,
+    toda chave-filha vira órfã e null_orphan_fks zera a FK inteira — o sintoma
+    "CARTEIRA_COMITENTE.NUM_IF 100% nulo" observado no caminho full antigo.
+
+    limit:
+        int  -> também limita cada tabela a `limit` linhas (teste rápido). Os
+                conjuntos de chave do pai são pequenos -> broadcast é seguro.
+        None -> run COMPLETO: sem cap de linhas. Os conjuntos de chave do pai
+                podem ser grandes -> o join de chave NÃO usa F.broadcast (deixa
+                o AQE decidir) para evitar OOM no driver.
     """
     order = topo_order_tables(comp_specs)
     sampled: dict = {}
+    broadcast_keys = limit is not None
     for table in order:
-        # Filtra para o CDB simplificado (NUM_TIPO_IF == 46) ANTES da amostragem
+        # Filtra para o CDB simplificado (NUM_TIPO_IF == 49) ANTES da propagação
         # referencial, para que a consistência de FK seja calculada sobre o
-        # subconjunto 46. Tabelas sem a coluna passam intactas.
+        # subconjunto 49. Tabelas sem a coluna passam intactas.
         df = _aplica_filtro_tipo_if(read_parquet(spark, raw_path(config, table)))
         for fk in _fk_list(comp_specs[table]):
             parent = fk.get("parent_table")
@@ -2793,19 +2808,25 @@ def referential_sample(spark, config, comp_specs, limit: int) -> dict:
                     .dropna().distinct())
             cond = reduce(lambda a, b: a & b,
                           [df[cols[i]] == keys[f"__k{i}"] for i in range(len(cols))])
-            joined = df.join(F.broadcast(keys), cond, "left")
+            # Broadcast só no caminho --limit (chaves pequenas). No full, as
+            # chaves distintas de um pai grande estouram o broadcast -> deixa o
+            # AQE escolher a estratégia de join.
+            keys_side = F.broadcast(keys) if broadcast_keys else keys
+            joined = df.join(keys_side, cond, "left")
             all_fk_null = reduce(lambda a, b: a & b, [F.col(c).isNull() for c in cols])
             df = (joined
                   .where(F.col("__k0").isNotNull() | all_fk_null)
                   .drop(*[f"__k{i}" for i in range(len(pcols))]))
-        # localCheckpoint (eager) instead of a lazy persist: each child below
-        # references sampled[parent], so without truncating the logical plan the
-        # join chain compounds across the whole topological order and every
-        # downstream consumer (FK validation, synthesis) re-analyzes a plan deep
-        # enough to OOM the driver -> "SparkContext shutdown". persist() does not
-        # help — the analyzer still traverses the cached plan tree for cache
-        # matching; localCheckpoint replaces it with a shallow RDD leaf.
-        sampled[table] = df.limit(limit).localCheckpoint(eager=True)
+        if limit is not None:
+            df = df.limit(limit)
+        # localCheckpoint (eager) nos dois caminhos: cada filho abaixo referencia
+        # sampled[parent], então sem truncar o plano lógico a cadeia de joins se
+        # acumula por toda a ordem topológica e todo consumidor downstream
+        # (validação de FK, síntese) reanalisa um plano fundo o bastante para
+        # OOMar o driver -> "SparkContext shutdown". persist() não ajuda — o
+        # analyzer ainda percorre a árvore de plano cacheada; localCheckpoint a
+        # substitui por uma folha RDD rasa.
+        sampled[table] = df.localCheckpoint(eager=True)
     return sampled
 
 
@@ -2998,12 +3019,15 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
                 # whose FK lands in a sampled parent -> FK-consistent under --limit.
                 comp_tables = referential_sample(spark, config, comp_specs, limit)
             else:
-                # Filtra cada tabela para o CDB simplificado (NUM_TIPO_IF == 46);
-                # tabelas sem a coluna passam intactas.
-                comp_tables = {
-                    t: _aplica_filtro_tipo_if(read_parquet(spark, raw_path(config, t)))
-                    for t in comp
-                }
+                # Run COMPLETO: MESMA propagação referencial do filtro de domínio,
+                # agora sem cap de linhas. Filtra INSTRUMENTO_FINANCEIRO por
+                # NUM_TIPO_IF==46 e propaga o universo CDB pela árvore de FK, de
+                # modo que filhas SEM a coluna (CARTEIRA_COMITENTE, CARTEIRA_
+                # PARTICIPANTE, CREDITO, OPERACAO, ...) fiquem restritas ao tipo
+                # 46 via NUM_IF. Antes o filtro era por tabela isolada: o pai
+                # encolhia, as filhas passavam inteiras e viravam órfãs ->
+                # null_orphan_fks zerava a FK (NUM_IF 100% nulo).
+                comp_tables = referential_sample(spark, config, comp_specs, None)
             counts = {t: comp_tables[t].count() for t in comp}
             for t in comp:
                 if comp_specs[t].get("static") and comp_specs[t].get("n_rows") is not None:
