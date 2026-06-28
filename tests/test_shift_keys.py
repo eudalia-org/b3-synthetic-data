@@ -113,17 +113,19 @@ class TestCheckOverflow:
         df.write.parquet(str(tmp_path / name))
 
     def test_no_overflow_returns_empty(self, spark, tmp_path):
+        from decimal import Decimal
         from pyspark.sql import types as T
         schema = T.StructType([T.StructField("K", T.DecimalType(38, 0))])
-        self._write(spark, tmp_path, "T", schema, [(10,), (20,)])
+        self._write(spark, tmp_path, "T", schema, [(Decimal("10"),), (Decimal("20"),)])
         shift = {"T": ["K"]}
         assert shift_keys.check_overflow(spark, str(tmp_path), shift, 1000) == []
 
     def test_overflow_detected_for_tight_domain(self, spark, tmp_path):
+        from decimal import Decimal
         from pyspark.sql import types as T
         # Decimal(2,0) capacity = 99; max is 90, +20 = 110 > 99 -> overflow
         schema = T.StructType([T.StructField("K", T.DecimalType(2, 0))])
-        self._write(spark, tmp_path, "T", schema, [(90,)])
+        self._write(spark, tmp_path, "T", schema, [(Decimal("90"),)])
         shift = {"T": ["K"]}
         out = shift_keys.check_overflow(spark, str(tmp_path), shift, 20)
         assert len(out) == 1
@@ -131,11 +133,12 @@ class TestCheckOverflow:
         assert (table, col, mx, shifted, cap) == ("T", "K", 90, 110, 99)
 
     def test_capacity_override_wins_over_parquet(self, spark, tmp_path):
+        from decimal import Decimal
         from pyspark.sql import types as T
         # Parquet dtype Decimal(38,0) is huge, but the live Oracle capacity is 200;
         # max 150 + 100 = 250 > 200 -> overflow detected only via the override.
         schema = T.StructType([T.StructField("K", T.DecimalType(38, 0))])
-        self._write(spark, tmp_path, "T", schema, [(150,)])
+        self._write(spark, tmp_path, "T", schema, [(Decimal("150"),)])
         out = shift_keys.check_overflow(spark, str(tmp_path), {"T": ["K"]}, 100,
                                         capacity_override={("T", "K"): 200})
         assert out == [("T", "K", 150, 250, 200)]
