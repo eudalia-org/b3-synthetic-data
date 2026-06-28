@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+from collections import namedtuple
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -38,6 +39,76 @@ REQUIRED_ENV_VARS = (
     "DATAGEN_LOAD_BASE_URI",
 )
 IDENTIFIER_PATTERN = re.compile(r"^[A-Z][A-Z0-9_$#]*$")
+
+Violation = namedtuple("Violation", ["table", "check", "columns", "detail"])
+
+
+def capacity_from_precision_scale(precision, scale):
+    """Largest integer an Oracle NUMBER(precision, scale) holds.
+    NULL precision (unconstrained NUMBER) -> None (no limit)."""
+    if precision is None:
+        return None
+    int_digits = int(precision) - int(scale or 0)
+    return (10 ** int_digits) - 1 if int_digits > 0 else 0
+
+
+def column_alignment_violations(table, synthetic_cols, target_cols):
+    """synthetic_cols: set of UPPER names. target_cols: {COL: {nullable, has_default}}."""
+    out = []
+    for col in sorted(synthetic_cols - set(target_cols)):
+        out.append(Violation(table, "column_alignment", col, "column not in target table"))
+    required = {
+        c for c, m in target_cols.items() if not m["nullable"] and not m["has_default"]
+    }
+    for col in sorted(required - synthetic_cols):
+        out.append(Violation(
+            table, "column_alignment", col, "required NOT NULL column missing from synthetic"))
+    return out
+
+
+def numeric_domain_violations(table, profile, target_cols):
+    """profile: {COL: {max, min}} (numeric cols). target_cols: {COL: {precision, scale}}."""
+    out = []
+    for col, prof in profile.items():
+        meta = target_cols.get(col)
+        if meta is None:
+            continue
+        cap = capacity_from_precision_scale(meta.get("precision"), meta.get("scale"))
+        if cap is None:
+            continue
+        if prof["max"] is not None and prof["max"] > cap:
+            out.append(Violation(table, "numeric_domain", col,
+                                 f"max {prof['max']} > capacity {cap}"))
+        if prof["min"] is not None and prof["min"] < -cap:
+            out.append(Violation(table, "numeric_domain", col,
+                                 f"min {prof['min']} < -capacity {-cap}"))
+    return out
+
+
+def string_length_violations(table, profile, target_cols):
+    """profile: {COL: {max_octet}}. target_cols: {COL: {data_length}}."""
+    out = []
+    for col, prof in profile.items():
+        meta = target_cols.get(col)
+        if meta is None or meta.get("data_length") is None:
+            continue
+        if prof.get("max_octet") is not None and prof["max_octet"] > meta["data_length"]:
+            out.append(Violation(table, "string_length", col,
+                                 f"max byte length {prof['max_octet']} > {meta['data_length']}"))
+    return out
+
+
+def not_null_violations(table, profile, target_cols):
+    """profile: {COL: {null_count}}. target_cols: {COL: {nullable}}."""
+    out = []
+    for col, prof in profile.items():
+        meta = target_cols.get(col)
+        if meta is None or meta.get("nullable", True):
+            continue
+        if prof.get("null_count", 0) > 0:
+            out.append(Violation(table, "not_null", col,
+                                 f"{prof['null_count']} NULL(s) in NOT NULL column"))
+    return out
 
 
 def validate_identifier(name: str) -> str:
