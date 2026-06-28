@@ -591,7 +591,7 @@ def print_deployment_summary(config: dict) -> None:
         "  Main:       datagen/shift_keys.py\n"
         "  Arguments:  --offset <N> [--dry-run] [--continue-on-error]\n"
         "  Spark:      create_spark_session workload conf (aggregatePushdown, Kryo,\n"
-        "              memoryOverheadFactor=0.3). No shuffle -> shuffle.partitions irrelevant.\n"
+        "              memoryOverheadFactor=0.2). No shuffle -> shuffle.partitions irrelevant.\n"
         "  Shape:      Driver    8 OCPU / 64 GB\n"
         "              Executors 4 x (16-32 OCPU / 128 GB)   # I/O-bound; scale OCPU\n"
     )
@@ -671,7 +671,9 @@ Expected: PASS (all tasks' tests).
 - [ ] **Step 2: Run the full project suite to confirm no regressions**
 
 Run: `… -m pytest tests/ -q`
-Expected: the pre-existing 4 `FakeDF`/arg-default failures only; everything else passes.
+Expected: **no new failures** vs the baseline — only the pre-existing `FakeDF`-mock /
+arg-default failures in `test_engorda_tables.py` remain (their exact count is
+environment/time-specific; confirm none are newly introduced by shift_keys).
 
 - [ ] **Step 3: Lint**
 
