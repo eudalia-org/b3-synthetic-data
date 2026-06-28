@@ -9,7 +9,6 @@ import argparse
 import logging
 import os
 import sys
-import warnings
 from typing import Dict, List, Tuple
 
 from pyspark.sql import DataFrame, SparkSession
@@ -58,10 +57,10 @@ def compute_shift_columns(specs: dict) -> Dict[str, List[str]]:
         if t not in static:
             for pk in e.get("pk_cols", []) or []:
                 if (t, pk) in fk_to_static:
-                    warnings.warn(
-                        f"{t}.{pk}: non-static PK that is also an FK to a static "
+                    logger.warning(
+                        "%s.%s: non-static PK that is also an FK to a static "
                         "parent; NOT shifting (kept matched to reference data).",
-                        UserWarning, stacklevel=2,
+                        t, pk,
                     )
                 else:
                     cols.add(pk)
@@ -197,11 +196,9 @@ def get_shift_env() -> dict:
             config[name] = val
     config["DATAGEN_ORACLE_OWNER"] = os.environ.get("DATAGEN_ORACLE_OWNER", "CETIP")
     # JDBC tuning defaults required by build_connection_properties.
-    config.setdefault("DATAGEN_JDBC_FETCH_SIZE", os.environ.get("DATAGEN_JDBC_FETCH_SIZE", "1000"))
-    config.setdefault("DATAGEN_JDBC_READ_TIMEOUT_MS",
-                      os.environ.get("DATAGEN_JDBC_READ_TIMEOUT_MS", "60000"))
-    config.setdefault("DATAGEN_JDBC_LOB_PREFETCH",
-                      os.environ.get("DATAGEN_JDBC_LOB_PREFETCH", "262144"))
+    config["DATAGEN_JDBC_FETCH_SIZE"] = os.environ.get("DATAGEN_JDBC_FETCH_SIZE", "1000")
+    config["DATAGEN_JDBC_READ_TIMEOUT_MS"] = os.environ.get("DATAGEN_JDBC_READ_TIMEOUT_MS", "60000")
+    config["DATAGEN_JDBC_LOB_PREFETCH"] = os.environ.get("DATAGEN_JDBC_LOB_PREFETCH", "262144")
     return config
 
 
@@ -214,11 +211,19 @@ def oracle_props_or_none(config: dict):
     return None
 
 
+def _positive_offset(value: str) -> int:
+    """argparse type: the shift must strictly increase keys, so offset > 0."""
+    ivalue = int(value)
+    if ivalue <= 0:
+        raise argparse.ArgumentTypeError(f"--offset must be > 0 (got {ivalue})")
+    return ivalue
+
+
 def parse_arguments(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Add a uniform +N to generated PK/FK values in the synthetic output.")
-    parser.add_argument("--offset", type=int, required=True,
-                        help="Uniform amount added to every shifted key.")
+    parser.add_argument("--offset", type=_positive_offset, required=True,
+                        help="Uniform amount (> 0) added to every shifted key.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Pre-flight only: report shift columns + overflow, write nothing.")
     parser.add_argument("--continue-on-error", action="store_true",
@@ -233,7 +238,8 @@ def print_deployment_summary(config: dict) -> None:
         "Required env vars:\n"
         f"  {SYNTHETIC_ENV}   {base}\n"
         f"  {SPECS_ENV}            oci://<bucket>@<namespace>/specs.json\n"
-        f"  {CHECKPOINT_ENV}       (optional) oci://<bucket>@<namespace>/_chk\n"
+        f"  {CHECKPOINT_ENV}       (recommended for in-place safety) "
+        "oci://<bucket>@<namespace>/_chk\n"
         "Optional (enables live Oracle datatype + collision pre-flight):\n"
         "  DATAGEN_SOURCE_JDBC_URL      jdbc:oracle:thin:@//host:port/service\n"
         "  DATAGEN_SOURCE_DB_USER       <user>\n"
@@ -315,6 +321,8 @@ def main() -> None:
                 pk_cols = specs[table].get("pk_cols", [])
                 if specs[table].get("static") or not pk_cols:
                     continue
+                # Surrogate PK is the last column (engorda's compute_pk_maxes
+                # convention); single-column PKs in this schema.
                 pk = pk_cols[-1]
                 if pk not in shift[table]:
                     continue  # PK kept fixed (FK-to-static) — no collision risk
@@ -347,6 +355,13 @@ def main() -> None:
             return
 
         logger.warning("In-place, non-idempotent mutation — re-running double-shifts.")
+        if not reliable:
+            logger.warning(
+                "No %s set: using localCheckpoint (NON-reliable). In-place writes are "
+                "IRRECOVERABLE if an executor is lost mid-table — the source files are "
+                "deleted before append. Set %s to a durable path for production safety.",
+                CHECKPOINT_ENV, CHECKPOINT_ENV,
+            )
         failures = apply_shift(spark, base, shift, args.offset,
                                continue_on_error=args.continue_on_error,
                                reliable_checkpoint=reliable)

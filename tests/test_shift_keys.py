@@ -1,4 +1,5 @@
 # tests/test_shift_keys.py
+import logging
 import sys
 from pathlib import Path
 
@@ -67,6 +68,18 @@ class TestComputeShiftColumns:
         }
         out = shift_keys.compute_shift_columns(specs)
         assert out["RESGATE"] == ["NUM_CONDICAO_IF"]
+
+    def test_fk_to_static_pk_logs_warning_and_excludes(self, caplog):
+        specs = {
+            "CODE": {"pk_cols": ["COD"], "static": True},
+            "EXT": {"pk_cols": ["COD"],
+                    "foreign_keys": [{"columns": ["COD"], "parent_table": "CODE"}]},
+        }
+        with caplog.at_level(logging.WARNING, logger="datagen.shift_keys"):
+            out = shift_keys.compute_shift_columns(specs)
+        assert out == {}  # column excluded from the shift set
+        assert any("EXT.COD" in r.getMessage() and "NOT shifting" in r.getMessage()
+                   for r in caplog.records)
 
     def test_real_specs_yields_31_columns(self):
         import json
@@ -153,6 +166,9 @@ class TestOraclePreflight:
         assert shift_keys.capacity_from_precision_scale(2, 0) == 99
         assert shift_keys.capacity_from_precision_scale(5, 0) == 99999
         assert shift_keys.capacity_from_precision_scale(10, 2) == 10**8 - 1
+        # scale >= precision leaves no integer digits -> capacity 0
+        assert shift_keys.capacity_from_precision_scale(2, 2) == 0
+        assert shift_keys.capacity_from_precision_scale(3, 5) == 0
         # NULL precision (unconstrained NUMBER) -> no limit
         assert shift_keys.capacity_from_precision_scale(None, None) is None
 
@@ -229,6 +245,36 @@ class TestApplyShift:
         # static table untouched
         assert [r["NUM_TIPO_IF"] for r in tipo.collect()] == [46]
 
+    def _setup_good_and_bad(self, spark, tmp_path):
+        from pyspark.sql import types as T
+        base = str(tmp_path / "syn")
+        spark.createDataFrame([(1,), (2,)],
+            T.StructType([T.StructField("K", T.LongType())])
+        ).write.parquet(f"{base}/T_GOOD")
+        spark.createDataFrame([(7,)],
+            T.StructType([T.StructField("K", T.LongType())])
+        ).write.parquet(f"{base}/T_BAD")
+        # T_BAD's shift targets a column that does not exist -> shift_table raises.
+        shift = {"T_GOOD": ["K"], "T_BAD": ["NOPE"]}
+        return base, shift
+
+    def test_continue_on_error_isolates_failure(self, spark, tmp_path):
+        base, shift = self._setup_good_and_bad(spark, tmp_path)
+        failures = shift_keys.apply_shift(spark, base, shift, 100,
+                                          continue_on_error=True,
+                                          reliable_checkpoint=False)
+        assert failures == ["T_BAD"]
+        # The good table was still shifted in place.
+        good = spark.read.parquet(f"{base}/T_GOOD")
+        assert sorted(r["K"] for r in good.collect()) == [101, 102]
+
+    def test_stop_on_error_reraises(self, spark, tmp_path):
+        base, shift = self._setup_good_and_bad(spark, tmp_path)
+        with pytest.raises(Exception):
+            shift_keys.apply_shift(spark, base, shift, 100,
+                                   continue_on_error=False,
+                                   reliable_checkpoint=False)
+
 
 class TestEnvAndCli:
     def test_get_shift_env_requires_synthetic_and_specs(self, monkeypatch):
@@ -254,6 +300,14 @@ class TestEnvAndCli:
         args = shift_keys.parse_arguments(["--offset", "1000000", "--dry-run"])
         assert args.offset == 1000000 and args.dry_run is True
         assert args.continue_on_error is False
+
+    def test_parse_arguments_rejects_zero_offset(self):
+        with pytest.raises(SystemExit):
+            shift_keys.parse_arguments(["--offset", "0"])
+
+    def test_parse_arguments_rejects_negative_offset(self):
+        with pytest.raises(SystemExit):
+            shift_keys.parse_arguments(["--offset", "-5"])
 
     def test_oracle_props_none_without_env(self, monkeypatch):
         for k in ("DATAGEN_SOURCE_JDBC_URL", "DATAGEN_SOURCE_DB_USER",
