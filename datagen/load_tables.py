@@ -890,6 +890,8 @@ def load_table(
         spark, properties, config, df, specs, owner, table_name, table, index, total
     )
 
+    df = null_self_ref_columns(df, table, NULL_ON_INSERT)
+
     appended = df.count()
     limit_note = f" (limit {limit})" if limit is not None else ""
     logger.info(
