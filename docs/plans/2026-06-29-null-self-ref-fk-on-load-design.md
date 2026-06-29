@@ -55,6 +55,8 @@ A helper nulls the listed columns present in the DataFrame, preserving dtype:
 
 ```python
 def null_self_ref_columns(df, table, null_map):
+    from pyspark.sql import functions as F  # local import — matches this file's pattern
+
     cols = null_map.get(table_path_name(table).upper(), [])
     actual = {c.upper(): c for c in df.columns}
     for c in cols:
@@ -64,17 +66,22 @@ def null_self_ref_columns(df, table, null_map):
     return df
 ```
 
-Applied in `load_table` **after** `apply_pk_guard` and **before** `df.write`. It is
-a no-op for the other 14 tables and for any listed column not present in `df`. The
-`cast(dtype)` keeps the insert schema byte-identical.
+Note: this file has **no module-level `F` import** — every function imports
+`functions as F` locally (see `apply_pk_guard`, `profile_synthetic_table`), so the
+helper does the same. Applied in `load_table` **after** `apply_pk_guard` and
+**before** `df.count()`/`df.write` (nulling is row-count-neutral, so the exact spot
+in that window is immaterial). It is a no-op for the other 14 tables and for any
+listed column not present in `df`. The `cast(dtype)` keeps the insert schema
+byte-identical.
 
 ## Error handling / interactions
 
 - **Validation pre-flight:** unaffected. Nulling only relaxes constraints (the
   columns are nullable), so the pre-flight — which profiles the original values —
   remains a safe superset check. No coupling needed.
-- **Logging:** when columns are nulled for a table, log which ones, so the run
-  record shows the self-ref linkage was dropped.
+- **Logging:** when columns are nulled for a table, log which ones at `INFO`
+  level (matching `load_table`'s other progress logs), so the run record shows the
+  self-ref linkage was dropped.
 
 ## Testing
 
