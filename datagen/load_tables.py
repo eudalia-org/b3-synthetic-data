@@ -44,12 +44,16 @@ Violation = namedtuple("Violation", ["table", "check", "columns", "detail"])
 
 
 def capacity_from_precision_scale(precision, scale):
-    """Largest integer an Oracle NUMBER(precision, scale) holds.
-    NULL precision (unconstrained NUMBER) -> None (no limit)."""
+    """Largest magnitude an Oracle NUMBER(precision, scale) holds, as an exact
+    Decimal. The bound is the true max magnitude (10^precision - 1) / 10^scale,
+    NOT just the integer part: NUMBER(2,0) -> Decimal('99');
+    NUMBER(4,2) -> Decimal('99.99'); NUMBER(2,2) -> Decimal('0.99'). NULL
+    precision (unconstrained NUMBER) -> None (no limit)."""
     if precision is None:
         return None
-    int_digits = int(precision) - int(scale or 0)
-    return (10 ** int_digits) - 1 if int_digits > 0 else 0
+    p = int(precision)
+    s = int(scale or 0)
+    return Decimal(10 ** p - 1) / (Decimal(10) ** s)
 
 
 def column_alignment_violations(table, synthetic_cols, target_cols):
@@ -112,17 +116,25 @@ def not_null_violations(table, profile, target_cols):
 
 
 def uniqueness_violations(table, constraints, total_count, distinct_counts,
-                          prod_collision_counts):
-    """constraints: list of (name, tuple(cols)). distinct_counts/prod_collision_counts
-    keyed by tuple(cols). Flags internal dups (distinct < total) and production
-    collisions (>0 synthetic keys already in production)."""
+                          prod_collision_counts, nonnull_counts=None):
+    """constraints: list of (name, tuple(cols)). distinct_counts/prod_collision_counts/
+    nonnull_counts keyed by tuple(cols). Flags internal dups and production
+    collisions (>0 synthetic keys already in production).
+
+    Internal dups compare distinct against the count of rows whose key is fully
+    non-null (nonnull_counts), NOT total_count: Oracle UNIQUE permits unlimited
+    NULL-bearing rows, so countDistinct (which drops NULL-key rows) must be
+    measured against the same non-null population. Falls back to total_count when
+    a non-null count isn't supplied (e.g. NOT NULL PKs, where they're equal)."""
+    nonnull_counts = nonnull_counts or {}
     out = []
     for _name, cols in constraints:
         label = ",".join(cols)
         distinct = distinct_counts.get(cols)
-        if distinct is not None and distinct < total_count:
+        comparand = nonnull_counts.get(cols, total_count)
+        if distinct is not None and distinct < comparand:
             out.append(Violation(table, "uniqueness_internal", label,
-                                 f"{total_count - distinct} duplicate key(s) within synthetic"))
+                                 f"{comparand - distinct} duplicate key(s) within synthetic"))
         collisions = prod_collision_counts.get(cols, 0)
         if collisions > 0:
             out.append(Violation(table, "uniqueness_vs_production", label,
@@ -141,7 +153,8 @@ def fk_to_static_violations(table, orphan_counts):
 
 
 def validate_table(table, synthetic_cols, profile, target_cols, constraints,
-                   total_count, distinct_counts, prod_collision_counts, fk_orphan_counts):
+                   total_count, distinct_counts, prod_collision_counts, fk_orphan_counts,
+                   nonnull_counts=None):
     """Run all six checks for one table; return the concatenated violations.
     `profile` is the per-column dict (max/min/max_octet/null_count); the numeric
     and string checks read the columns relevant to them."""
@@ -151,7 +164,8 @@ def validate_table(table, synthetic_cols, profile, target_cols, constraints,
     violations += string_length_violations(table, profile, target_cols)
     violations += not_null_violations(table, profile, target_cols)
     violations += uniqueness_violations(
-        table, constraints, total_count, distinct_counts, prod_collision_counts)
+        table, constraints, total_count, distinct_counts, prod_collision_counts,
+        nonnull_counts)
     violations += fk_to_static_violations(table, fk_orphan_counts)
     return violations
 
@@ -175,7 +189,10 @@ def profile_synthetic_table(df, target_cols, constraints):
     """One-pass profile of a synthetic table for the checks.
     target_cols: {COL: {is_numeric, is_string, nullable, ...}} (UPPER keys).
     Returns {total_count, columns: {COL: {max, min, max_octet, null_count}},
-    distinct_counts: {tuple(cols): n}}."""
+    distinct_counts: {tuple(cols): n}, nonnull_counts: {tuple(cols): n}}.
+    nonnull_counts is the number of rows where ALL of a constraint's columns are
+    non-null; the uniqueness check compares distinct against this (not total)
+    because Oracle UNIQUE permits unlimited fully/partially-NULL rows."""
     from pyspark.sql import functions as F
 
     col_map = {c.upper(): c for c in df.columns}
@@ -193,14 +210,20 @@ def profile_synthetic_table(df, target_cols, constraints):
             aggs.append(F.max(F.octet_length(F.col(actual))).alias(f"__oct__{up}"))
         aggs.append(
             F.count(F.when(F.col(actual).isNull(), F.lit(1))).alias(f"__null__{up}"))
-    # distinct per constraint whose columns are all present
+    # distinct + non-null-row count per constraint whose columns are all present
     constraint_keys = []
     for _name, cols in constraints:
         if all(c.upper() in present for c in cols):
             actuals = [present[c.upper()] for c in cols]
-            alias = "__dist__" + "_".join(c.upper() for c in cols)
-            aggs.append(F.countDistinct(*[F.col(a) for a in actuals]).alias(alias))
-            constraint_keys.append((tuple(c.upper() for c in cols), alias))
+            key = "_".join(c.upper() for c in cols)
+            dist_alias = "__dist__" + key
+            nn_alias = "__nn__" + key
+            aggs.append(F.countDistinct(*[F.col(a) for a in actuals]).alias(dist_alias))
+            all_present = F.lit(True)
+            for a in actuals:
+                all_present = all_present & F.col(a).isNotNull()
+            aggs.append(F.count(F.when(all_present, F.lit(1))).alias(nn_alias))
+            constraint_keys.append((tuple(c.upper() for c in cols), dist_alias, nn_alias))
 
     row = df.agg(*aggs).first()
     columns = {}
@@ -212,13 +235,14 @@ def profile_synthetic_table(df, target_cols, constraints):
             "max_octet": row[f"__oct__{up}"] if meta.get("is_string") else None,
             "null_count": row[f"__null__{up}"],
         }
-    distinct_counts = {cols: row[alias] for cols, alias in constraint_keys}
+    distinct_counts = {cols: row[dist_alias] for cols, dist_alias, _nn in constraint_keys}
+    nonnull_counts = {cols: row[nn_alias] for cols, _dist, nn_alias in constraint_keys}
     return {"total_count": row["__total"], "columns": columns,
-            "distinct_counts": distinct_counts}
+            "distinct_counts": distinct_counts, "nonnull_counts": nonnull_counts}
 
 
 def read_target_columns(spark, properties, owner, tables):
-    """{TABLE: {COL: {data_type, precision, scale, data_length, char_length,
+    """{TABLE: {COL: {data_type, precision, scale, data_length,
     nullable(bool), has_default(bool), is_numeric, is_string}}} from ALL_TAB_COLUMNS."""
     owner = validate_identifier(owner)
     names = ",".join(f"'{validate_identifier(table_path_name(t))}'" for t in tables)
@@ -227,13 +251,17 @@ def read_target_columns(spark, properties, owner, tables):
     # columns is flaky (stream-already-closed). We only need the boolean.
     rows = read_rows(spark, properties,
                      "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, DATA_PRECISION, "
-                     "DATA_SCALE, DATA_LENGTH, CHAR_LENGTH, NULLABLE, "
+                     "DATA_SCALE, DATA_LENGTH, NULLABLE, "
                      "NVL2(DATA_DEFAULT, 'Y', 'N') AS HAS_DEFAULT "
                      f"FROM ALL_TAB_COLUMNS WHERE OWNER='{owner}' "
                      f"AND TABLE_NAME IN ({names})")
     out = {}
     numeric = {"NUMBER", "FLOAT", "BINARY_FLOAT", "BINARY_DOUBLE", "INTEGER"}
-    string = {"VARCHAR2", "CHAR", "NVARCHAR2", "NCHAR"}
+    # Only single-byte-charset types are length-checked: the string-length check
+    # compares octet_length against DATA_LENGTH (bytes). NVARCHAR2/NCHAR store in
+    # the national charset (often 2 bytes/char), so a byte-vs-DATA_LENGTH compare
+    # would be apples-to-oranges; they're intentionally excluded (not length-checked).
+    string = {"VARCHAR2", "CHAR"}
     for r in rows:
         dt = r["DATA_TYPE"]
         out.setdefault(r["TABLE_NAME"], {})[r["COLUMN_NAME"]] = {
@@ -241,7 +269,6 @@ def read_target_columns(spark, properties, owner, tables):
             "precision": r["DATA_PRECISION"],
             "scale": r["DATA_SCALE"],
             "data_length": r["DATA_LENGTH"],
-            "char_length": r["CHAR_LENGTH"],
             "nullable": r["NULLABLE"] == "Y",
             "has_default": r["HAS_DEFAULT"] == "Y",
             "is_numeric": dt in numeric,
@@ -272,10 +299,27 @@ def read_target_constraints(spark, properties, owner, tables):
     return out
 
 
+def _count_key_collisions(syn_keys_df, existing_keys_df, cols):
+    """Count synthetic keys (already deduped + non-null) that exist in production.
+    Both DataFrames must share the synthetic column names in `cols`. Pure
+    DataFrame-level join core — no I/O, so it's unit-testable with local frames."""
+    return syn_keys_df.join(existing_keys_df, on=list(cols), how="inner").count()
+
+
+def _count_orphans(syn_df, parent_keys_df, cols):
+    """Count synthetic FK rows whose (non-null) key is absent from the parent.
+    Rows with any NULL key column are excluded (an unenforced FK). Both
+    DataFrames must share the synthetic column names in `cols`. Pure
+    DataFrame-level join core — no I/O, so it's unit-testable with local frames."""
+    syn = syn_df.select(*cols).dropna()
+    return syn.join(parent_keys_df, on=list(cols), how="left_anti").count()
+
+
 def count_prod_collisions(spark, properties, config, owner, table_name, df, constraints):
     """{tuple(cols): count of synthetic keys already in production}. Range-bounds
     the production read on a single numeric key (reusing read_existing_keys);
-    composite/non-numeric keys read distinct production columns directly."""
+    composite/non-numeric keys read distinct production columns directly. The
+    join itself is delegated to _count_key_collisions (unit-tested)."""
     from pyspark.sql import functions as F
     from pyspark.sql.types import NumericType
 
@@ -305,14 +349,18 @@ def count_prod_collisions(spark, properties, config, owner, table_name, df, cons
                         .option("dbtable", q).load())
             for syn_col, prod_col in zip(actuals, existing.columns):
                 existing = existing.withColumnRenamed(prod_col, syn_col)
-        out[tuple(c.upper() for c in cols)] = syn_keys.join(
-            existing, on=actuals, how="inner").count()
+            # A duplicated production tuple would otherwise inflate the inner-join
+            # count past the number of colliding synthetic keys.
+            existing = existing.dropDuplicates()
+        out[tuple(c.upper() for c in cols)] = _count_key_collisions(
+            syn_keys, existing, actuals)
     return out
 
 
 def count_fk_static_orphans(spark, properties, config, specs, df, table, owner_for):
     """{(tuple(cols), parent): count of synthetic FK values absent from the static
-    parent's key}. Only FKs whose parent is static (is_static) are checked."""
+    parent's key}. Only FKs whose parent is static (is_static) are checked. The
+    join itself is delegated to _count_orphans (unit-tested)."""
     norm = table_path_name(table).upper()
     entry = specs.get(norm, {})
     col_map = {c.upper(): c for c in df.columns}
@@ -334,9 +382,7 @@ def count_fk_static_orphans(spark, properties, config, specs, df, table, owner_f
             "dbtable", q).load()
         for a, pc in zip(actuals, parent_keys.columns):
             parent_keys = parent_keys.withColumnRenamed(pc, a)
-        syn = df.select(*actuals).dropna()
-        orphans = syn.join(parent_keys, on=actuals, how="left_anti").count()
-        out[(tuple(cols), parent)] = orphans
+        out[(tuple(cols), parent)] = _count_orphans(df, parent_keys, actuals)
     return out
 
 
@@ -361,23 +407,30 @@ def validate_load(spark, properties, config, specs, target_schema, tables, limit
         df = spark.read.parquet(build_load_path(config, table_path_name(table)))
         if limit is not None:
             df = df.limit(limit)
-        constraints = target_constraints.get(table_name, [])
-        prof = profile_synthetic_table(df, tcols, constraints)
-        prod_collisions = count_prod_collisions(
-            spark, properties, config, owner, table_name, df, constraints)
-        fk_orphans = count_fk_static_orphans(
-            spark, properties, config, specs, df, table, owner_for)
-        violations += validate_table(
-            table=table,
-            synthetic_cols={c.upper() for c in df.columns},
-            profile=prof["columns"],
-            target_cols=tcols,
-            constraints=constraints,
-            total_count=prof["total_count"],
-            distinct_counts=prof["distinct_counts"],
-            prod_collision_counts=prod_collisions,
-            fk_orphan_counts=fk_orphans,
-        )
+        # Cached: scanned three times below (profile + collisions + fk-orphans).
+        # Multi-TB context — avoid repeated full Parquet scans.
+        df = df.cache()
+        try:
+            constraints = target_constraints.get(table_name, [])
+            prof = profile_synthetic_table(df, tcols, constraints)
+            prod_collisions = count_prod_collisions(
+                spark, properties, config, owner, table_name, df, constraints)
+            fk_orphans = count_fk_static_orphans(
+                spark, properties, config, specs, df, table, owner_for)
+            violations += validate_table(
+                table=table,
+                synthetic_cols={c.upper() for c in df.columns},
+                profile=prof["columns"],
+                target_cols=tcols,
+                constraints=constraints,
+                total_count=prof["total_count"],
+                distinct_counts=prof["distinct_counts"],
+                prod_collision_counts=prod_collisions,
+                fk_orphan_counts=fk_orphans,
+                nonnull_counts=prof["nonnull_counts"],
+            )
+        finally:
+            df.unpersist()
     return violations
 
 
