@@ -40,6 +40,13 @@ REQUIRED_ENV_VARS = (
 )
 IDENTIFIER_PATTERN = re.compile(r"^[A-Z][A-Z0-9_$#]*$")
 
+# Self-referential FK columns set to NULL on insert: a synthetic row can point at
+# another not-yet-inserted row in the same table (ORA-02291), and the values are
+# stale post-PK-shift anyway. The columns are nullable; left NULL, not back-filled.
+NULL_ON_INSERT = {
+    "INSTRUMENTO_FINANCEIRO": ["NUM_IF_ORIGEM", "NUM_IF_PERTENCE"],
+}
+
 Violation = namedtuple("Violation", ["table", "check", "columns", "detail"])
 
 
@@ -828,6 +835,30 @@ def apply_pk_guard(
         index, total, table, f"{existing_count:,}", lo, hi,
     )
     return to_append, existing_count
+
+
+def null_self_ref_columns(df, table, null_map):
+    """Set a table's self-referential FK columns to NULL before insert.
+
+    They are nullable and left NULL (not back-filled). A synthetic row may
+    reference another not-yet-inserted row in the same table (ORA-02291). dtype is
+    preserved so the insert schema is unchanged. No-op for tables/columns absent
+    from `null_map` or from `df`. Case-insensitive column match.
+    """
+    from pyspark.sql import functions as F
+
+    cols = null_map.get(table_path_name(table).upper(), [])
+    actual = {c.upper(): c for c in df.columns}
+    nulled = []
+    for c in cols:
+        real = actual.get(c.upper())
+        if real is not None:
+            df = df.withColumn(real, F.lit(None).cast(df.schema[real].dataType))
+            nulled.append(real)
+    if nulled:
+        logger.info("%s: nulled self-ref FK column(s) on insert: %s",
+                    table_path_name(table).upper(), ", ".join(nulled))
+    return df
 
 
 def load_table(
