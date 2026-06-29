@@ -83,24 +83,38 @@ def fks_do_specs(specs: dict) -> Set[FkKey]:
 
 
 def fks_do_banco(caminho_csv: str) -> Set[FkKey]:
-    # agrupa por (child, parent) + nome implícito via posição; como o CSV não
-    # traz o constraint_name, reconstruímos a FK juntando linhas da mesma
-    # (child, parent) ordenadas por posição. Isso funciona quando há UMA FK por
-    # par (child, parent); se houver múltiplas FKs distintas entre o mesmo par,
-    # veja a nota no final do arquivo.
-    acc: Dict[Tuple[str, str], List[Tuple[int, str, str]]] = defaultdict(list)
+    """
+    Lê fk_real.csv agrupando por CONSTRAINT_NAME — cada constraint vira UMA FK.
+
+    Requer o CSV revisado com a coluna CONSTRAINT_NAME. Isso trata
+    corretamente FKs múltiplas para o mesmo pai (ex.: OPERACAO tem NUM_IF e
+    NUM_IF_PERTENCE -> INSTRUMENTO_FINANCEIRO) e FKs compostas (ex.:
+    OPER_CTX_MSG_FK com P1,P2 -> CONTEXTO_MENSAGEM), que o agrupamento antigo
+    por (child, parent) embaralhava, gerando falso-positivos "SÓ NO SPECS".
+    """
+    por_constraint: Dict[str, Tuple[str, str]] = {}     # cname -> (child, parent)
+    colunas: Dict[str, List[Tuple[int, str, str]]] = defaultdict(list)
+
     with open(caminho_csv, newline="", encoding="utf-8-sig") as f:
-        for row in csv.DictReader(f):
+        reader = csv.DictReader(f)
+        if "CONSTRAINT_NAME" not in (reader.fieldnames or []):
+            raise ValueError(
+                "fk_real.csv não tem a coluna CONSTRAINT_NAME. Re-extraia com o "
+                "SQL revisado (o que inclui ac.constraint_name)."
+            )
+        for row in reader:
+            cname = _norm(row["CONSTRAINT_NAME"])
             child = _norm(row["CHILD_TABLE"])
             parent = _norm(row["PARENT_TABLE"])
             pos = int(row["COL_POSITION"])
             ccol = _norm(row["CHILD_COLUMN"])
             pcol = _norm(row["PARENT_COLUMN"])
-            acc[(child, parent)].append((pos, ccol, pcol))
+            por_constraint[cname] = (child, parent)
+            colunas[cname].append((pos, ccol, pcol))
 
     out: Set[FkKey] = set()
-    for (child, parent), trips in acc.items():
-        trips.sort()
+    for cname, (child, parent) in por_constraint.items():
+        trips = sorted(colunas[cname])
         ccols = tuple(c for _, c, _ in trips)
         pcols = tuple(p for _, _, p in trips)
         out.add((child, ccols, parent, pcols))
@@ -182,22 +196,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-# ---------------------------------------------------------------------------
-# NOTA sobre múltiplas FKs entre o mesmo par (child, parent):
-#
-# OPERACAO, por exemplo, tem DUAS FKs para CONTA_PARTICIPANTE (P1 e P2) e duas
-# para INSTRUMENTO_FINANCEIRO (NUM_IF e NUM_IF_PERTENCE). O CSV agrupado por
-# (child, parent) junta essas colunas e pode comparar errado. Se o relatório
-# acusar divergência nessas tabelas, troque o SQL de FK para incluir
-# `ac.constraint_name` e agrupe por constraint_name em vez de (child, parent)
-# — aí cada FK física vira uma chave separada. Para a maioria das 47 (uma FK
-# por par) o agrupamento atual já está correto.
-# ---------------------------------------------------------------------------
-
-
-
-
+    
 -- ===== PKs reais (uma linha por coluna de PK, com posição) =====
 SELECT
     ac.table_name,
