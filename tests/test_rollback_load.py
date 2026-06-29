@@ -39,3 +39,26 @@ class TestDeleteAboveSql:
     def test_rejects_bad_identifier(self):
         with pytest.raises(ValueError):
             rollback_load.delete_above_sql("ADMIN", "T; DROP", "PK", 1, 2)
+
+
+class TestRollbackOrder:
+    def test_reverses_to_children_first(self):
+        # manifest lists tables parent-first (load order); rollback deletes children first
+        entries = [{"table": "PARENT"}, {"table": "MID"}, {"table": "CHILD"}]
+        assert [e["table"] for e in rollback_load.rollback_order(entries)] == [
+            "CHILD", "MID", "PARENT"]
+
+    def test_empty(self):
+        assert rollback_load.rollback_order([]) == []
+
+
+class TestDryRunArg:
+    def test_dry_run_parses(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["rollback_load", "--run-id", "R1", "--dry-run"])
+        args = rollback_load.parse_arguments()
+        assert args.dry_run is True and args.run_id == "R1"
+
+    def test_dry_run_default_false(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["rollback_load", "--run-id", "R1"])
+        args = rollback_load.parse_arguments()
+        assert args.dry_run is False

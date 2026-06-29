@@ -66,7 +66,23 @@ def parse_arguments() -> argparse.Namespace:
         action="store_true",
         help="Try remaining tables after a failure, then exit non-zero if any failed.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report the rows that would be deleted per table without deleting anything.",
+    )
     return parser.parse_args()
+
+
+def rollback_order(entries: list) -> list:
+    """Children-before-parents delete order.
+
+    The manifest lists tables in load (parent-first) order. Deleting a parent
+    while a child still references it raises ORA-02292, so reverse the manifest
+    order — the reverse of a valid parent-first topo order is a valid
+    children-first order.
+    """
+    return list(reversed(entries))
 
 
 def get_env() -> dict[str, str]:
@@ -165,7 +181,7 @@ def scalar(spark, properties, query):
     return rows[0][0] if rows and rows[0][0] is not None else None
 
 
-def rollback_table(spark, properties, entry, chunk_size, index, total) -> int:
+def rollback_table(spark, properties, entry, chunk_size, index, total, dry_run=False) -> int:
     owner, name, pk_col = entry["owner"], entry["name"], entry["pk_col"]
     max_before = entry["max_pk_before"]
     o, t, p = validate_identifier(owner), validate_identifier(name), validate_identifier(pk_col)
@@ -184,9 +200,13 @@ def rollback_table(spark, properties, entry, chunk_size, index, total) -> int:
         logger.info("[%d/%d] %s: nothing above max_pk_before", index, total, entry["table"])
         return 0
     logger.info(
-        "[%d/%d] %s: deleting PK (%s, %s] in %d chunk(s)",
-        index, total, entry["table"], lower_exclusive, current_max, len(ranges),
+        "[%d/%d] %s: %s PK (%s, %s] in %d chunk(s)",
+        index, total, entry["table"],
+        "DRY RUN — would delete" if dry_run else "deleting",
+        lower_exclusive, current_max, len(ranges),
     )
+    if dry_run:
+        return len(ranges)
     for lo, hi in ranges:
         execute_statement(spark, properties, delete_above_sql(owner, name, pk_col, lo, hi))
     return len(ranges)
@@ -201,7 +221,9 @@ def main() -> None:
     try:
         manifest = read_manifest(spark, config, args.run_id)
         entries = [e for e in manifest.get("tables", [])]
-        rollbackable = [e for e in entries if e.get("rollbackable")]
+        # Delete children before parents (reverse of the parent-first load order)
+        # so a parent delete never hits ORA-02292 from a still-present child.
+        rollbackable = rollback_order([e for e in entries if e.get("rollbackable")])
         skipped = [e for e in entries if not e.get("rollbackable")]
         for e in skipped:
             logger.warning(
@@ -209,11 +231,15 @@ def main() -> None:
                 e["table"],
             )
         total = len(rollbackable)
+        if args.dry_run:
+            logger.info("DRY RUN: no rows will be deleted.")
         logger.info("Rolling back run_id=%s: %d rollbackable table(s)", args.run_id, total)
         for index, entry in enumerate(rollbackable, start=1):
             try:
-                rollback_table(spark, properties, entry, args.chunk_size, index, total)
-                logger.info("[%d/%d] %s: rolled back", index, total, entry["table"])
+                rollback_table(spark, properties, entry, args.chunk_size, index, total,
+                               dry_run=args.dry_run)
+                logger.info("[%d/%d] %s: %s", index, total, entry["table"],
+                            "would be rolled back" if args.dry_run else "rolled back")
             except Exception as exc:
                 logger.exception("[%d/%d] %s: FAILED: %s", index, total, entry["table"], exc)
                 failures.append(entry["table"])
