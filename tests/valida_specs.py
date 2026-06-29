@@ -234,3 +234,29 @@ WHERE  ac.constraint_type = 'R'
 AND    ac.owner = :OWNER
 AND    ac.table_name IN ( /* suas 47 */ )
 ORDER BY ac.table_name, ac.constraint_name, acc.position;
+
+
+
+
+
+
+
+SELECT
+    ac.constraint_name         AS constraint_name,
+    ac.table_name              AS child_table,
+    acc.column_name            AS child_column,
+    acc.position               AS col_position,
+    r.table_name               AS parent_table,
+    rcc.column_name            AS parent_column
+FROM   all_constraints ac
+JOIN   all_cons_columns acc
+       ON  ac.owner = acc.owner AND ac.constraint_name = acc.constraint_name
+JOIN   all_constraints r
+       ON  ac.r_owner = r.owner AND ac.r_constraint_name = r.constraint_name
+JOIN   all_cons_columns rcc
+       ON  r.owner = rcc.owner
+       AND r.constraint_name = rcc.constraint_name
+       AND acc.position = rcc.position
+WHERE  ac.constraint_type = 'R'
+AND    ac.owner = :OWNER
+ORDER BY ac.table_name, ac.constraint_name, acc.position;
