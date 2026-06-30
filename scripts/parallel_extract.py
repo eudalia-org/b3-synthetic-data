@@ -79,6 +79,70 @@ def jdbc_url_to_dsn(jdbc_url: str) -> str:
     return f"{host}:{port}/{sid}"
 
 
+_PENDING = {"ACCEPTED", "IN_PROGRESS", "CANCELING", "STOPPING"}
+_SUCCESS = {"SUCCEEDED"}
+_FAILURE = {"FAILED", "CANCELED", "STOPPED"}
+
+
+def classify_state(state: str) -> str:
+    if state in _SUCCESS:
+        return "success"
+    if state in _FAILURE:
+        return "failure"
+    return "pending"        # unknown states keep polling (logged by caller)
+
+
+def _oci_json(cmd: list) -> dict:
+    out = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return json.loads(out.stdout) if out.stdout.strip() else {}
+
+
+def submit_run(bucket, index, opts) -> str:
+    cmd = build_run_create_command(bucket, index, opts)
+    data = _oci_json(cmd)
+    return data["data"]["id"]
+
+
+def poll_run(run_id: str) -> str:
+    data = _oci_json(["oci", "data-flow", "run", "get", "--run-id", run_id])
+    return data["data"]["lifecycle-state"]
+
+
+def run_buckets(buckets, opts, submit=submit_run, poll=poll_run, _after_terminal=None) -> list:
+    """Submit buckets (<= max_concurrent_runs in flight), poll to terminal, retry failures.
+
+    Returns a list aligned to buckets: {tables, run_id, state, retries, attempts}.
+    submit/poll are injectable for tests. With poll_seconds==0 no sleeping occurs.
+    """
+    results = [dict(tables=b, run_id=None, state=None, retries=0) for b in buckets]
+    pending = [i for i, b in enumerate(buckets) if b]    # skip empty buckets
+    in_flight: dict = {}                                 # index -> run_id
+    cap, max_retries, wait = (opts["max_concurrent_runs"], opts["max_retries"],
+                              opts["poll_seconds"])
+    while pending or in_flight:
+        while pending and len(in_flight) < cap:
+            i = pending.pop(0)
+            in_flight[i] = submit(buckets[i], i, opts)
+            results[i]["run_id"] = in_flight[i]
+        for i, run_id in list(in_flight.items()):
+            kind = classify_state(poll(run_id))
+            if kind == "pending":
+                continue
+            del in_flight[i]
+            if _after_terminal:
+                _after_terminal(i)
+            if kind == "success":
+                results[i]["state"] = "SUCCEEDED"
+            elif results[i]["retries"] < max_retries:
+                results[i]["retries"] += 1
+                pending.append(i)                        # retry
+            else:
+                results[i]["state"] = "FAILED"
+        if wait and in_flight:
+            time.sleep(wait)
+    return results
+
+
 NOMINAL_AVG_ROW_LEN = 100   # bytes/row; tier-1 only needs relative ordering (soft constant)
 
 

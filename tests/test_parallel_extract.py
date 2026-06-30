@@ -77,6 +77,48 @@ class TestMergeSizeTiers:
         assert out[("CETIP", "A")] == 40.0          # median of the single resolved value
 
 
+class TestLifecycleClassify:
+    @pytest.mark.parametrize("state,kind", [
+        ("SUCCEEDED", "success"), ("FAILED", "failure"), ("CANCELED", "failure"),
+        ("STOPPED", "failure"), ("ACCEPTED", "pending"), ("IN_PROGRESS", "pending"),
+        ("CANCELING", "pending"), ("STOPPING", "pending"), ("WAT", "pending")])
+    def test_classify(self, state, kind):
+        assert P.classify_state(state) == kind
+
+
+class TestRunBuckets:
+    def test_retries_failed_then_succeeds(self):
+        # bucket 0 fails once then succeeds; bucket 1 succeeds first try
+        calls = {"submit": 0}
+        seq = {0: ["FAILED", "SUCCEEDED"], 1: ["SUCCEEDED"]}
+        attempt = {0: 0, 1: 0}
+
+        def fake_submit(bucket, index, opts):
+            calls["submit"] += 1
+            return f"run-{index}-{attempt[index]}"
+
+        def fake_poll(run_id):
+            index = int(run_id.split("-")[1])
+            state = seq[index][attempt[index]]
+            return state
+
+        def on_terminal(index):
+            attempt[index] += 1
+
+        results = P.run_buckets(
+            [[("S", "A")], [("S", "B")]], opts=dict(max_concurrent_runs=2, max_retries=2,
+            poll_seconds=0), submit=fake_submit, poll=fake_poll, _after_terminal=on_terminal)
+        assert results[0]["state"] == "SUCCEEDED" and results[0]["retries"] == 1
+        assert results[1]["state"] == "SUCCEEDED" and results[1]["retries"] == 0
+        assert calls["submit"] == 3                          # 2 + 1 retry
+
+    def test_gives_up_after_max_retries(self):
+        results = P.run_buckets(
+            [[("S", "A")]], opts=dict(max_concurrent_runs=1, max_retries=1, poll_seconds=0),
+            submit=lambda b, i, o: "r", poll=lambda r: "FAILED")
+        assert results[0]["state"] == "FAILED" and results[0]["retries"] == 1
+
+
 class TestTier4Sql:
     def test_interpolates_validated_identifiers(self):
         sql = P.tier4_count_sql("CETIP", "OPERACAO")
