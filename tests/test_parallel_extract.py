@@ -137,7 +137,7 @@ class TestRunBuckets:
             calls["submit"] += 1
             return f"run-{index}-{attempt[index]}"
 
-        def fake_poll(run_id):
+        def fake_poll(run_id, opts=None):
             index = int(run_id.split("-")[1])
             state = seq[index][attempt[index]]
             return state
@@ -155,7 +155,7 @@ class TestRunBuckets:
     def test_gives_up_after_max_retries(self):
         results = P.run_buckets(
             [[("S", "A")]], opts=dict(max_concurrent_runs=1, max_retries=1, poll_seconds=0),
-            submit=lambda b, i, o: "r", poll=lambda r: "FAILED")
+            submit=lambda b, i, o: "r", poll=lambda r, o=None: "FAILED")
         assert results[0]["state"] == "FAILED" and results[0]["retries"] == 1
 
 
@@ -295,3 +295,39 @@ class TestSpecsSource:
                             ["parallel_extract", "--specs", "s.json", "--tables", "A"])
         with pytest.raises(SystemExit):
             P.parse_arguments()
+
+
+class TestOciAuthFlags:
+    def test_emits_only_set_flags(self):
+        opts = dict(profile="DEV", config_file=None, auth="security_token", cert_bundle=None)
+        assert P.oci_auth_flags(opts) == ["--profile", "DEV", "--auth", "security_token"]
+
+    def test_empty_when_none_set(self):
+        assert P.oci_auth_flags(dict()) == []
+
+    def test_all_four(self):
+        opts = dict(profile="P", config_file="/c", auth="api_key", cert_bundle="/b")
+        assert P.oci_auth_flags(opts) == [
+            "--profile", "P", "--config-file", "/c", "--auth", "api_key", "--cert-bundle", "/b"]
+
+
+class TestAuthFlagsInCommands:
+    def test_run_create_includes_auth_flags(self):
+        opts = dict(application_id="app", compartment_id="cmp", num_executors=2,
+                    driver_shape="d", executor_shape="e", driver_shape_config=None,
+                    executor_shape_config=None, passthrough=[],
+                    profile="DEV", config_file=None, auth="security_token", cert_bundle=None)
+        cmd = P.build_run_create_command([("S", "A")], 0, opts)
+        assert cmd[-4:] == ["--profile", "DEV", "--auth", "security_token"]
+
+    def test_poll_run_includes_auth_flags(self, monkeypatch):
+        captured = {}
+
+        def fake_oci_json(cmd):
+            captured["cmd"] = cmd
+            return {"data": {"lifecycle-state": "SUCCEEDED"}}
+
+        monkeypatch.setattr(P, "_oci_json", fake_oci_json)
+        P.poll_run("run-x", dict(profile="DEV"))
+        assert captured["cmd"][:5] == ["oci", "data-flow", "run", "get", "--run-id"]
+        assert captured["cmd"][-2:] == ["--profile", "DEV"]

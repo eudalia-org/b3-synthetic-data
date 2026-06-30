@@ -111,6 +111,12 @@ def parse_arguments():
     p.add_argument("--executor-shape", default="VM.Standard.E4.Flex")
     p.add_argument("--driver-shape-config", default=None)
     p.add_argument("--executor-shape-config", default=None)
+    p.add_argument("--profile", default=None, help="OCI CLI profile name.")
+    p.add_argument("--config-file", default=None, help="OCI CLI config file path.")
+    p.add_argument("--auth", default=None,
+                   help="OCI CLI auth mode (e.g. security_token, api_key, instance_principal).")
+    p.add_argument("--cert-bundle", default=None,
+                   help="CA bundle path passed to OCI CLI (corporate/VDI SSL inspection).")
     p.add_argument("--passthrough", default="",
                    help="Extra save_tables flags appended to run arguments, e.g. "
                         "'--continue-on-error'.")
@@ -137,7 +143,18 @@ def _opts_from_args(a) -> dict:
                 executor_shape_config=a.executor_shape_config,
                 passthrough=a.passthrough.split() if a.passthrough else [],
                 max_concurrent_runs=a.max_concurrent_runs, max_retries=a.max_retries,
-                poll_seconds=a.poll_seconds)
+                poll_seconds=a.poll_seconds, profile=a.profile, config_file=a.config_file,
+                auth=a.auth, cert_bundle=a.cert_bundle)
+
+
+def oci_auth_flags(opts) -> list:
+    """Global OCI CLI auth flags to append to every `oci` invocation (only those set)."""
+    flags = []
+    for key, flag in (("profile", "--profile"), ("config_file", "--config-file"),
+                      ("auth", "--auth"), ("cert_bundle", "--cert-bundle")):
+        if opts.get(key):
+            flags += [flag, opts[key]]
+    return flags
 
 
 def build_plan(weights: dict, num_buckets: int, opts: dict, provenance: dict) -> dict:
@@ -215,8 +232,9 @@ def submit_run(bucket, index, opts) -> str:
     return data["data"]["id"]
 
 
-def poll_run(run_id: str) -> str:
-    data = _oci_json(["oci", "data-flow", "run", "get", "--run-id", run_id])
+def poll_run(run_id: str, opts=None) -> str:
+    cmd = ["oci", "data-flow", "run", "get", "--run-id", run_id] + oci_auth_flags(opts or {})
+    data = _oci_json(cmd)
     return data["data"]["lifecycle-state"]
 
 
@@ -237,7 +255,7 @@ def run_buckets(buckets, opts, submit=submit_run, poll=poll_run, _after_terminal
             in_flight[i] = submit(buckets[i], i, opts)
             results[i]["run_id"] = in_flight[i]
         for i, run_id in list(in_flight.items()):
-            kind = classify_state(poll(run_id))
+            kind = classify_state(poll(run_id, opts))
             if kind == "pending":
                 continue
             del in_flight[i]
@@ -386,7 +404,7 @@ def build_run_create_command(bucket: list, index: int, opts: dict) -> list:
         cmd += ["--driver-shape-config", opts["driver_shape_config"]]
     if opts.get("executor_shape_config"):
         cmd += ["--executor-shape-config", opts["executor_shape_config"]]
-    return cmd
+    return cmd + oci_auth_flags(opts)
 
 
 def bin_pack(weights: dict, num_buckets: int) -> list:
