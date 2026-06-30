@@ -51,3 +51,35 @@ class TestParseTables:
         f = tmp_path / "t.txt"
         f.write_text("A\n# comment\n\nB\n")
         assert P.parse_tables(None, str(f)) == ["A", "B"]
+
+
+class TestMergeSizeTiers:
+    def test_earlier_tier_wins(self):
+        keys = [("CETIP", "A"), ("CETIP", "B")]
+        tiers = [{("CETIP", "A"): 100.0}, {("CETIP", "A"): 999.0, ("CETIP", "B"): 50.0}]
+        assert P.merge_size_tiers(keys, tiers) == {("CETIP", "A"): 100.0, ("CETIP", "B"): 50.0}
+
+    def test_missing_key_gets_median(self):
+        keys = [("CETIP", "A"), ("CETIP", "B"), ("CETIP", "C")]
+        tiers = [{("CETIP", "A"): 10.0, ("CETIP", "B"): 30.0}]   # C unresolved
+        out = P.merge_size_tiers(keys, tiers)
+        assert out[("CETIP", "C")] == 20.0          # median(10, 30)
+
+    def test_all_unresolved_default_one(self):
+        keys = [("CETIP", "A")]
+        assert P.merge_size_tiers(keys, []) == {("CETIP", "A"): 1.0}
+
+    def test_ignores_non_positive(self):
+        keys = [("CETIP", "A"), ("CETIP", "B")]
+        tiers = [{("CETIP", "A"): 0.0, ("CETIP", "B"): 40.0}]    # 0 -> treat as unresolved
+        out = P.merge_size_tiers(keys, tiers)
+        assert out[("CETIP", "A")] == 40.0          # median of the single resolved value
+
+
+class TestSizeProvenance:
+    def test_reports_resolving_tier_index_else_median(self):
+        keys = [("S", "A"), ("S", "B"), ("S", "C")]
+        tiers = [{("S", "A"): 10.0}, {("S", "B"): 20.0}]        # C unresolved
+        prov = P.size_provenance(keys, tiers, tier_labels=["dba_segments", "all_tables"])
+        assert prov == {("S", "A"): "dba_segments", ("S", "B"): "all_tables",
+                        ("S", "C"): "median"}

@@ -77,3 +77,43 @@ def jdbc_url_to_dsn(jdbc_url: str) -> str:
     else:
         raise ValueError(f"Cannot parse JDBC URL: {jdbc_url!r}")
     return f"{host}:{port}/{sid}"
+
+
+def merge_size_tiers(keys, tier_dicts) -> dict:
+    """Resolve {(owner,table): rows} by tier precedence, median-backfilling the rest.
+
+    keys: full list of (owner, table) tuples to resolve.
+    tier_dicts: ordered list of {(owner,table): weight}; earliest wins. Non-positive
+    weights are treated as unresolved. Keys still missing get the median of resolved
+    weights (1.0 if none resolved).
+    """
+    resolved: dict = {}
+    for tier in tier_dicts:
+        for key, weight in tier.items():
+            if key in keys and key not in resolved and weight and weight > 0:
+                resolved[key] = float(weight)
+    if resolved:
+        ordered = sorted(resolved.values())
+        mid = len(ordered) // 2
+        median = (ordered[mid] if len(ordered) % 2
+                  else (ordered[mid - 1] + ordered[mid]) / 2)
+    else:
+        median = 1.0
+    return {key: resolved.get(key, median) for key in keys}
+
+
+def size_provenance(keys, tier_dicts, tier_labels) -> dict:
+    """Which tier resolved each key (else 'median'). For the --sizes-report. Pure.
+
+    Same precedence as merge_size_tiers (earliest positive wins). tier_labels names
+    tiers positionally; len(tier_labels) == len(tier_dicts).
+    """
+    out = {}
+    for key in keys:
+        out[key] = "median"
+        for label, tier in zip(tier_labels, tier_dicts):
+            w = tier.get(key)
+            if w and w > 0:
+                out[key] = label
+                break
+    return out
