@@ -132,6 +132,10 @@ def parse_arguments():
     p.add_argument("--allow-equal-weight-fallback", action="store_true",
                    help="If the source is unreachable, bucket on equal weights instead of "
                         "failing.")
+    p.add_argument("--include-fk-closure", action="store_true",
+                   help="Expand the table set to the full transitive FK closure (every "
+                        "parent table) via the live source ALL_CONSTRAINTS graph. Requires a "
+                        "reachable source; not bypassable by --allow-equal-weight-fallback.")
     p.add_argument("--sizes-report", default=None,
                    help="Write the per-table resolved-tier + weight report to this JSON path.")
     p.add_argument("--dry-run", action="store_true",
@@ -189,6 +193,11 @@ def main():
     raw_tables = (tables_from_specs(args.specs) if args.specs
                   else parse_tables(args.tables, args.tables_file))
     keys = [split_owner_table(t, args.owner) for t in raw_tables]
+    if args.include_fk_closure:
+        before = len(keys)
+        keys = expand_fk_closure(keys)
+        logger.info("FK closure: %d seed table(s) -> %d total (+%d parents)",
+                    before, len(keys), len(keys) - before)
     opts = _opts_from_args(args)
     weights, provenance = resolve_sizes(
         keys, connect=connect_source, allow_fallback=args.allow_equal_weight_fallback)
@@ -362,6 +371,64 @@ def fetch_size_tiers(conn, keys) -> list:
             logger.warning("size tier sample(%s.%s) failed: %s", owner, table, exc)
     tiers.append(tier4)
     return tiers
+
+
+def fk_closure(seed, edges) -> set:
+    """Transitive FK closure: BFS the child->parent graph from seed.
+
+    seed: iterable of (owner, table). edges: iterable of (child_key, parent_key).
+    Returns the closure set including the seed. Cycles and self-refs are safe.
+    """
+    from collections import deque
+    adj: dict = {}
+    for child, parent in edges:
+        adj.setdefault(child, []).append(parent)
+    seen = set(seed)
+    queue = deque(seen)
+    while queue:
+        node = queue.popleft()
+        for parent in adj.get(node, ()):
+            if parent not in seen:
+                seen.add(parent)
+                queue.append(parent)
+    return seen
+
+
+def fetch_fk_edges(conn, owners) -> list:
+    """[(child_key, parent_key)] FK edges among `owners`, from ALL_CONSTRAINTS.
+
+    Self-joins ALL_CONSTRAINTS on R_OWNER/R_CONSTRAINT_NAME to resolve each FK's
+    parent table. Owners are bound as values.
+    """
+    placeholders, binds = _owners_in_clause(owners)
+    sql = (f"SELECT c.OWNER, c.TABLE_NAME, r.OWNER, r.TABLE_NAME "
+           f"FROM ALL_CONSTRAINTS c "
+           f"JOIN ALL_CONSTRAINTS r ON c.R_OWNER = r.OWNER "
+           f"AND c.R_CONSTRAINT_NAME = r.CONSTRAINT_NAME "
+           f"WHERE c.CONSTRAINT_TYPE = 'R' AND c.OWNER IN ({placeholders})")
+    cur = conn.cursor()
+    cur.execute(sql, binds)
+    return [((row[0], row[1]), (row[2], row[3])) for row in cur]
+
+
+def expand_fk_closure(keys, connect=connect_source) -> list:
+    """Expand `keys` to the full transitive FK closure via the live source.
+
+    Requires a reachable source (the closure has no offline form) — exits loudly
+    if the connection fails. Returns the sorted closure key list.
+    """
+    owners = {o for o, _ in keys}
+    try:
+        conn = connect()
+    except Exception as exc:                                  # noqa: BLE001
+        logger.error("--include-fk-closure needs a reachable source to read the FK "
+                     "graph (%s).", exc)
+        sys.exit(2)
+    try:
+        edges = fetch_fk_edges(conn, owners)
+    finally:
+        conn.close()
+    return sorted(fk_closure(keys, edges))
 
 
 TIER_LABELS = ["dba_segments", "all_tables", "all_tab_statistics", "sample_count"]

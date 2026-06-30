@@ -382,3 +382,61 @@ class TestShapeOmitInherits:
         assert a.num_executors is None
         assert a.driver_shape is None
         assert a.executor_shape is None
+
+
+class TestFkClosure:
+    def test_walks_parents_transitively(self):
+        seed = [("C", "OPERACAO")]
+        edges = [(("C", "OPERACAO"), ("C", "EVENTO")),
+                 (("C", "EVENTO"), ("C", "CONDICAO_IF")),
+                 (("C", "UNRELATED"), ("C", "XYZ"))]
+        assert P.fk_closure(seed, edges) == {
+            ("C", "OPERACAO"), ("C", "EVENTO"), ("C", "CONDICAO_IF")}
+
+    def test_handles_cycles(self):
+        edges = [(("C", "A"), ("C", "B")), (("C", "B"), ("C", "A"))]
+        assert P.fk_closure([("C", "A")], edges) == {("C", "A"), ("C", "B")}
+
+    def test_self_reference(self):
+        assert P.fk_closure([("C", "IF")], [(("C", "IF"), ("C", "IF"))]) == {("C", "IF")}
+
+    def test_no_edges_returns_seed(self):
+        assert P.fk_closure([("C", "A"), ("C", "B")], []) == {("C", "A"), ("C", "B")}
+
+
+class TestExpandFkClosure:
+    def test_expands_using_edges_from_conn(self):
+        class FakeCur:
+            def execute(self, sql, binds):
+                self.sql = sql
+            def __iter__(self):
+                return iter([("C", "OPERACAO", "C", "EVENTO")])
+
+        class FakeConn:
+            def cursor(self):
+                return FakeCur()
+            def close(self):
+                pass
+
+        out = P.expand_fk_closure([("C", "OPERACAO")], connect=lambda: FakeConn())
+        assert ("C", "EVENTO") in out and ("C", "OPERACAO") in out
+
+    def test_exits_when_source_unreachable(self):
+        def boom():
+            raise RuntimeError("down")
+        with pytest.raises(SystemExit):
+            P.expand_fk_closure([("C", "A")], connect=boom)
+
+
+class TestFkClosureArg:
+    def _argv(self, *extra):
+        return ["parallel_extract", "--application-id", "a", "--compartment-id", "c",
+                "--specs", "specs.json", *extra]
+
+    def test_flag_default_false(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", self._argv())
+        assert P.parse_arguments().include_fk_closure is False
+
+    def test_flag_true(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", self._argv("--include-fk-closure"))
+        assert P.parse_arguments().include_fk_closure is True
