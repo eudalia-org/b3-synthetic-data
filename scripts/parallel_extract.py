@@ -79,6 +79,115 @@ def jdbc_url_to_dsn(jdbc_url: str) -> str:
     return f"{host}:{port}/{sid}"
 
 
+NOMINAL_AVG_ROW_LEN = 100   # bytes/row; tier-1 only needs relative ordering (soft constant)
+
+
+def tier4_count_sql(owner: str, table: str) -> str:
+    return f"SELECT COUNT(*) FROM {valid_identifier(owner)}.{valid_identifier(table)} SAMPLE (0.1)"
+
+
+def bytes_to_rows(total_bytes: float) -> float:
+    return float(total_bytes) / NOMINAL_AVG_ROW_LEN
+
+
+def _owners_in_clause(owners):
+    # returns (sql_fragment, bind_dict) binding owners as VALUES (never identifiers)
+    binds = {f"o{i}": o for i, o in enumerate(sorted(owners))}
+    placeholders = ", ".join(f":{k}" for k in binds)
+    return placeholders, binds
+
+
+def connect_source():
+    """Lazy-import oracledb; connect to the on-prem source. Raises on failure."""
+    import oracledb  # lazy: not needed for unit tests
+    dsn = jdbc_url_to_dsn(os.environ["DATAGEN_SOURCE_JDBC_URL"])
+    user = os.environ.get("DATAGEN_SOURCE_DB_USER", "")
+    password = os.environ["DATAGEN_SOURCE_DB_PASSWORD"]
+    conn = oracledb.connect(user=user, password=password, dsn=dsn)
+    conn.cursor().execute("SELECT 1 FROM dual").fetchone()   # tier-0 probe
+    return conn
+
+
+def fetch_size_tiers(conn, keys) -> list:
+    """Run tiers 1-4 against `conn`; return an ordered list of {(owner,table): rows}.
+
+    Each tier is wrapped: ORA-00942 / NULL / errors are logged and skipped (the tier
+    contributes whatever it resolved, or {}). keys is the full (owner,table) list.
+    """
+    owners = {o for o, _ in keys}
+    wanted = set(keys)
+    placeholders, binds = _owners_in_clause(owners)
+    tiers = []
+
+    def run(label, sql, row_to_kv, extra_binds=None):
+        out = {}
+        try:
+            cur = conn.cursor()
+            cur.execute(sql, {**binds, **(extra_binds or {})})
+            for row in cur:
+                key, val = row_to_kv(row)
+                if key in wanted and val is not None:
+                    out[key] = float(val)
+        except Exception as exc:                              # noqa: BLE001 - tier fallthrough
+            logger.warning("size tier %s failed (fallthrough): %s", label, exc)
+        return out
+
+    tiers.append(run("dba_segments",
+        f"SELECT OWNER, SEGMENT_NAME, SUM(BYTES) FROM DBA_SEGMENTS "
+        f"WHERE OWNER IN ({placeholders}) AND SEGMENT_TYPE LIKE 'TABLE%' "
+        f"GROUP BY OWNER, SEGMENT_NAME",
+        lambda r: ((r[0], r[1]), bytes_to_rows(r[2]) if r[2] else None)))
+    tiers.append(run("all_tables",
+        f"SELECT OWNER, TABLE_NAME, NUM_ROWS FROM ALL_TABLES WHERE OWNER IN ({placeholders})",
+        lambda r: ((r[0], r[1]), r[2])))
+    tiers.append(run("all_tab_statistics",
+        f"SELECT OWNER, TABLE_NAME, NUM_ROWS FROM ALL_TAB_STATISTICS "
+        f"WHERE OWNER IN ({placeholders}) AND PARTITION_NAME IS NULL",
+        lambda r: ((r[0], r[1]), r[2])))
+
+    # tier 4: per still-missing key (after merging 1-3), sampled count
+    resolved = set()
+    for t in tiers:
+        resolved |= set(t)
+    tier4 = {}
+    for owner, table in sorted(wanted - resolved):
+        try:
+            cur = conn.cursor()
+            n = cur.execute(tier4_count_sql(owner, table)).fetchone()[0]
+            if n:
+                tier4[(owner, table)] = float(n) * 1000.0     # 0.1% sample -> scale up
+        except Exception as exc:                              # noqa: BLE001
+            logger.warning("size tier sample(%s.%s) failed: %s", owner, table, exc)
+    tiers.append(tier4)
+    return tiers
+
+
+TIER_LABELS = ["dba_segments", "all_tables", "all_tab_statistics", "sample_count"]
+
+
+def resolve_sizes(keys, connect=connect_source, allow_fallback=False):
+    """Resolve {(owner,table): rows} + provenance, with the loud-fail/fallback gate.
+
+    Tries `connect()` (which runs the tier-0 probe). On failure: if allow_fallback,
+    return equal weights (1.0) with 'equal-weight-fallback' provenance + a warning;
+    otherwise log and `sys.exit(2)`. Injectable `connect` for tests.
+    """
+    try:
+        conn = connect()
+    except Exception as exc:                                  # noqa: BLE001
+        if not allow_fallback:
+            logger.error("Source unreachable (%s). Pass --allow-equal-weight-fallback to "
+                         "bucket on equal weights instead.", exc)
+            sys.exit(2)
+        logger.warning("Source unreachable (%s); falling back to equal weights.", exc)
+        return ({k: 1.0 for k in keys}, {k: "equal-weight-fallback" for k in keys})
+    try:
+        tiers = fetch_size_tiers(conn, keys)
+    finally:
+        conn.close()
+    return merge_size_tiers(keys, tiers), size_provenance(keys, tiers, TIER_LABELS)
+
+
 # Confirmed against `oci data-flow run create --help` (Task 8, Step 1).
 RUN_ARGS_FLAG = "--arguments"        # JSON array of application arguments
 

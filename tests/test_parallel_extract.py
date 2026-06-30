@@ -77,6 +77,41 @@ class TestMergeSizeTiers:
         assert out[("CETIP", "A")] == 40.0          # median of the single resolved value
 
 
+class TestTier4Sql:
+    def test_interpolates_validated_identifiers(self):
+        sql = P.tier4_count_sql("CETIP", "OPERACAO")
+        assert sql == "SELECT COUNT(*) FROM CETIP.OPERACAO SAMPLE (0.1)"
+
+    def test_rejects_bad_identifier(self):
+        with pytest.raises(ValueError):
+            P.tier4_count_sql("CETIP", "OPER; DROP")
+
+
+class TestBytesToRows:
+    def test_divides_by_nominal_row_len(self):
+        # NOMINAL_AVG_ROW_LEN bytes/row; only relative ordering matters
+        assert P.bytes_to_rows(P.NOMINAL_AVG_ROW_LEN * 5) == 5.0
+
+    def test_zero_bytes(self):
+        assert P.bytes_to_rows(0) == 0.0
+
+
+class TestResolveSizes:
+    def test_unreachable_without_flag_exits(self):
+        def boom():
+            raise RuntimeError("no route to host")
+        with pytest.raises(SystemExit):
+            P.resolve_sizes([("S", "A")], connect=boom, allow_fallback=False)
+
+    def test_unreachable_with_flag_equal_weight(self):
+        def boom():
+            raise RuntimeError("no route to host")
+        weights, prov = P.resolve_sizes([("S", "A"), ("S", "B")], connect=boom,
+                                        allow_fallback=True)
+        assert weights == {("S", "A"): 1.0, ("S", "B"): 1.0}
+        assert set(prov.values()) == {"equal-weight-fallback"}
+
+
 class TestBuildRunCreateCommand:
     def _opts(self, **kw):
         base = dict(application_id="ocid1.dataflowapplication.x",
