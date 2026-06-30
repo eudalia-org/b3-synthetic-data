@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -133,6 +134,7 @@ def build_plan(weights: dict, num_buckets: int, opts: dict, provenance: dict) ->
     for i, bucket in enumerate(buckets):
         plan_buckets.append({
             "index": i,
+            "keys": bucket,                          # raw (owner, table) tuples
             "tables": [f"{o}.{t}" for o, t in bucket],
             "weight": sum(weights[k] for k in bucket),
             "command": build_run_create_command(bucket, i, opts) if bucket else None,
@@ -162,12 +164,11 @@ def main():
     if args.dry_run:
         logger.info("DRY RUN — balance_skew=%.2f", plan["balance_skew"])
         for b in plan["buckets"]:
-            logger.info("bucket %d  tables=%s  weight=%.0f  cmd=%s",
-                        b["index"], b["tables"], b["weight"], b["command"])
+            cmd = shlex.join(b["command"]) if b["command"] else "(empty bucket)"
+            logger.info("bucket %d  tables=%s  weight=%.0f\n  %s",
+                        b["index"], b["tables"], b["weight"], cmd)
         sys.exit(0)
-    buckets = [b["tables_keys"] if "tables_keys" in b else
-               [tuple(t.split(".", 1)) for t in b["tables"]]
-               for b in plan["buckets"]]
+    buckets = [b["keys"] for b in plan["buckets"]]
     results = run_buckets(buckets, opts)
     manifest = {"results": [
         {**r, "tables": [f"{o}.{t}" for o, t in (r["tables"] or [])]}
@@ -209,7 +210,7 @@ def poll_run(run_id: str) -> str:
 def run_buckets(buckets, opts, submit=submit_run, poll=poll_run, _after_terminal=None) -> list:
     """Submit buckets (<= max_concurrent_runs in flight), poll to terminal, retry failures.
 
-    Returns a list aligned to buckets: {tables, run_id, state, retries, attempts}.
+    Returns a list aligned to buckets: {tables, run_id, state, retries}.
     submit/poll are injectable for tests. With poll_seconds==0 no sleeping occurs.
     """
     results = [dict(tables=b, run_id=None, state=None, retries=0) for b in buckets]
