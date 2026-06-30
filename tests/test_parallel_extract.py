@@ -331,3 +331,23 @@ class TestAuthFlagsInCommands:
         P.poll_run("run-x", dict(profile="DEV"))
         assert captured["cmd"][:5] == ["oci", "data-flow", "run", "get", "--run-id"]
         assert captured["cmd"][-2:] == ["--profile", "DEV"]
+
+
+class TestDefaultOwner:
+    def _argv(self, *extra):
+        return ["parallel_extract", "--application-id", "a", "--compartment-id", "c",
+                "--tables", "OPERACAO", *extra]
+
+    def test_owner_defaults_to_cetip(self, monkeypatch):
+        monkeypatch.delenv("DATAGEN_SOURCE_SCHEMA", raising=False)
+        monkeypatch.setattr(sys, "argv", self._argv())
+        assert P.parse_arguments().owner == "CETIP"
+
+    def test_owner_flag_overrides(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", self._argv("--owner", "OTHER"))
+        assert P.parse_arguments().owner == "OTHER"
+
+    def test_owner_from_env(self, monkeypatch):
+        monkeypatch.setenv("DATAGEN_SOURCE_SCHEMA", "FROMENV")
+        monkeypatch.setattr(sys, "argv", self._argv())
+        assert P.parse_arguments().owner == "FROMENV"

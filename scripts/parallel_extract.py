@@ -21,6 +21,7 @@ logger = logging.getLogger("parallel_extract")
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Z][A-Z0-9_$#]*$")
 DEFAULT_ORACLE_PORT = "1521"
+DEFAULT_SOURCE_SCHEMA = "CETIP"   # source tables live in CETIP; the login user may differ
 
 
 def valid_identifier(name: str) -> str:
@@ -101,6 +102,10 @@ def parse_arguments():
     # env-or-flag: default from env, validated after parse (required=True would ignore the env)
     p.add_argument("--application-id", default=os.environ.get("DATAGEN_DATAFLOW_APP_ID"))
     p.add_argument("--compartment-id", default=os.environ.get("DATAGEN_OCI_COMPARTMENT_ID"))
+    p.add_argument("--owner", default=os.environ.get("DATAGEN_SOURCE_SCHEMA",
+                                                      DEFAULT_SOURCE_SCHEMA),
+                   help="Default schema/owner for unqualified table names (default CETIP; "
+                        "env DATAGEN_SOURCE_SCHEMA). The connecting user may differ.")
     p.add_argument("--max-concurrent-runs", type=int, default=4)
     p.add_argument("--num-buckets", type=int, default=None,
                    help="Default = --max-concurrent-runs.")
@@ -179,8 +184,7 @@ def main():
     args = parse_arguments()
     raw_tables = (tables_from_specs(args.specs) if args.specs
                   else parse_tables(args.tables, args.tables_file))
-    default_owner = os.environ.get("DATAGEN_SOURCE_DB_USER", "")
-    keys = [split_owner_table(t, default_owner) for t in raw_tables]
+    keys = [split_owner_table(t, args.owner) for t in raw_tables]
     opts = _opts_from_args(args)
     weights, provenance = resolve_sizes(
         keys, connect=connect_source, allow_fallback=args.allow_equal_weight_fallback)
