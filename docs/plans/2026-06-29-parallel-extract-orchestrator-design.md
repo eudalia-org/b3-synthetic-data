@@ -94,16 +94,17 @@ parse args / env
 
 ### 1. Live size fetch — fallback chain
 
-**Connection (a first-class decision, not an implementation detail).** The extract reaches
-Oracle via the **JDBC** driver using `DATAGEN_SOURCE_JDBC_URL` (an Oracle thin/TNS URL, an
-mTLS-wallet alias for an Autonomous DB). `python-oracledb` **thin** mode cannot consume a
-JDBC URL or a `cwallet.sso` directly — it needs a parsed DSN (host/port/service or a TLS
-descriptor) plus credentials. So the orchestrator must:
-1. **Derive an oracledb DSN** from `DATAGEN_SOURCE_JDBC_URL` (strip the `jdbc:oracle:thin:@`
-   prefix; pass the resulting EZConnect/TNS descriptor to `oracledb.connect`). For a
-   wallet/mTLS ADB, point oracledb at the wallet via `config_dir`/`wallet_location`
-   (`TNS_ADMIN`) and `wallet_password`; the plan must name the exact env that supplies the
-   wallet path. Credentials come from `DATAGEN_SOURCE_DB_USER` + `DATAGEN_SOURCE_DB_PASSWORD`.
+**Connection (a first-class decision, not an implementation detail).** The source is an
+**on-prem Oracle** (not a wallet/mTLS Autonomous DB), so no wallet or TLS material is
+involved — a plain host/port/service DSN suffices. The extract reaches Oracle via the
+**JDBC** driver using `DATAGEN_SOURCE_JDBC_URL` (`jdbc:oracle:thin:@<host>:<port>:<sid>` or
+`…@//<host>:<port>/<service>`). `python-oracledb` **thin** mode cannot consume a JDBC URL
+directly — it needs a parsed DSN — so the orchestrator must:
+1. **Derive an oracledb DSN** from `DATAGEN_SOURCE_JDBC_URL`: strip the `jdbc:oracle:thin:@`
+   prefix and pass the resulting host/port/service (EZConnect) descriptor to
+   `oracledb.connect`. Handle both the SID colon form and the `//host:port/service` form.
+   Credentials come from `DATAGEN_SOURCE_DB_USER` + `DATAGEN_SOURCE_DB_PASSWORD`. No
+   `config_dir`/`wallet_location`/`wallet_password` needed.
 2. **Run a tier-0 connectivity probe** (`SELECT 1 FROM dual`) that **fails loudly** (clear
    error, non-zero exit unless `--allow-equal-weight-fallback`) rather than letting a broken
    connection silently cascade all tables to tier 5 — otherwise the whole size mechanism is
@@ -249,8 +250,8 @@ Pure functions, unit-tested with **no cloud/DB**:
   input tables.
 - **`build_run_create_command`** — correct arguments JSON, display name, shape flags,
   `--compartment-id`, escaping.
-- **JDBC-URL → oracledb DSN** derivation — parses `DATAGEN_SOURCE_JDBC_URL` into a usable
-  DSN (the wallet/TLS path is exercised manually).
+- **JDBC-URL → oracledb DSN** derivation — parses both `DATAGEN_SOURCE_JDBC_URL` forms
+  (`@host:port:sid` and `@//host:port/service`) into a usable host/port/service DSN.
 
 Manual / live verification (in the plan, not automated):
 - **`oci data-flow run create --help`** check to confirm exact flag spellings before wiring.
