@@ -79,6 +79,104 @@ def jdbc_url_to_dsn(jdbc_url: str) -> str:
     return f"{host}:{port}/{sid}"
 
 
+def parse_arguments():
+    p = argparse.ArgumentParser(description="Fan save_tables.py out across concurrent "
+                                            "OCI Data Flow runs, size-balanced.")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--tables", help="Comma-separated source table list (OWNER.TABLE or TABLE).")
+    src.add_argument("--tables-file", help="Local file, one table per line (# comments ok).")
+    # env-or-flag: default from env, validated after parse (required=True would ignore the env)
+    p.add_argument("--application-id", default=os.environ.get("DATAGEN_DATAFLOW_APP_ID"))
+    p.add_argument("--compartment-id", default=os.environ.get("DATAGEN_OCI_COMPARTMENT_ID"))
+    p.add_argument("--max-concurrent-runs", type=int, default=4)
+    p.add_argument("--num-buckets", type=int, default=None,
+                   help="Default = --max-concurrent-runs.")
+    p.add_argument("--max-retries", type=int, default=1)
+    p.add_argument("--poll-seconds", type=int, default=30)
+    p.add_argument("--num-executors", type=int, default=2)
+    p.add_argument("--driver-shape", default="VM.Standard.E4.Flex")
+    p.add_argument("--executor-shape", default="VM.Standard.E4.Flex")
+    p.add_argument("--driver-shape-config", default=None)
+    p.add_argument("--executor-shape-config", default=None)
+    p.add_argument("--passthrough", default="",
+                   help="Extra save_tables flags appended to run arguments, e.g. "
+                        "'--continue-on-error'.")
+    p.add_argument("--allow-equal-weight-fallback", action="store_true",
+                   help="If the source is unreachable, bucket on equal weights instead of "
+                        "failing.")
+    p.add_argument("--sizes-report", default=None,
+                   help="Write the per-table resolved-tier + weight report to this JSON path.")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Plan (sizes + buckets + commands) and exit without submitting.")
+    args = p.parse_args()
+    env_for = {"application_id": "DATAGEN_DATAFLOW_APP_ID",
+               "compartment_id": "DATAGEN_OCI_COMPARTMENT_ID"}
+    for name, env in env_for.items():
+        if not getattr(args, name):
+            p.error(f"--{name.replace('_', '-')} is required (flag or env {env}).")
+    return args
+
+
+def _opts_from_args(a) -> dict:
+    return dict(application_id=a.application_id, compartment_id=a.compartment_id,
+                num_executors=a.num_executors, driver_shape=a.driver_shape,
+                executor_shape=a.executor_shape, driver_shape_config=a.driver_shape_config,
+                executor_shape_config=a.executor_shape_config,
+                passthrough=a.passthrough.split() if a.passthrough else [],
+                max_concurrent_runs=a.max_concurrent_runs, max_retries=a.max_retries,
+                poll_seconds=a.poll_seconds)
+
+
+def build_plan(weights: dict, num_buckets: int, opts: dict, provenance: dict) -> dict:
+    buckets = bin_pack(weights, num_buckets)
+    plan_buckets = []
+    for i, bucket in enumerate(buckets):
+        plan_buckets.append({
+            "index": i,
+            "tables": [f"{o}.{t}" for o, t in bucket],
+            "weight": sum(weights[k] for k in bucket),
+            "command": build_run_create_command(bucket, i, opts) if bucket else None,
+        })
+    nonempty = [b["weight"] for b in plan_buckets if b["weight"] > 0]
+    skew = (max(nonempty) / min(nonempty)) if nonempty else 1.0
+    sizes_report = {k: {"weight": weights[k], "tier": provenance.get(k, "median")}
+                    for k in weights}
+    return {"buckets": plan_buckets, "balance_skew": skew, "sizes_report": sizes_report}
+
+
+def main():
+    args = parse_arguments()
+    raw_tables = parse_tables(args.tables, args.tables_file)
+    default_owner = os.environ.get("DATAGEN_SOURCE_DB_USER", "")
+    keys = [split_owner_table(t, default_owner) for t in raw_tables]
+    opts = _opts_from_args(args)
+    weights, provenance = resolve_sizes(
+        keys, connect=connect_source, allow_fallback=args.allow_equal_weight_fallback)
+    num_buckets = args.num_buckets or args.max_concurrent_runs
+    plan = build_plan(weights, num_buckets, opts, provenance)
+    if args.sizes_report:
+        from pathlib import Path
+        str_report = {f"{o}.{t}": v for (o, t), v in plan["sizes_report"].items()}
+        Path(args.sizes_report).write_text(json.dumps(str_report, indent=2))
+        logger.info("Sizes report written to %s", args.sizes_report)
+    if args.dry_run:
+        logger.info("DRY RUN — balance_skew=%.2f", plan["balance_skew"])
+        for b in plan["buckets"]:
+            logger.info("bucket %d  tables=%s  weight=%.0f  cmd=%s",
+                        b["index"], b["tables"], b["weight"], b["command"])
+        sys.exit(0)
+    buckets = [b["tables_keys"] if "tables_keys" in b else
+               [tuple(t.split(".", 1)) for t in b["tables"]]
+               for b in plan["buckets"]]
+    results = run_buckets(buckets, opts)
+    manifest = {"results": [
+        {**r, "tables": [f"{o}.{t}" for o, t in (r["tables"] or [])]}
+        for r in results]}
+    print(json.dumps(manifest, indent=2))
+    if any(r["state"] == "FAILED" for r in results):
+        sys.exit(1)
+
+
 _PENDING = {"ACCEPTED", "IN_PROGRESS", "CANCELING", "STOPPING"}
 _SUCCESS = {"SUCCEEDED"}
 _FAILURE = {"FAILED", "CANCELED", "STOPPED"}
@@ -333,3 +431,7 @@ def size_provenance(keys, tier_dicts, tier_labels) -> dict:
                 out[key] = label
                 break
     return out
+
+
+if __name__ == "__main__":
+    main()

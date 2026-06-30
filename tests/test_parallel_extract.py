@@ -77,6 +77,46 @@ class TestMergeSizeTiers:
         assert out[("CETIP", "A")] == 40.0          # median of the single resolved value
 
 
+class TestParseArgs:
+    def test_dry_run_and_defaults(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", [
+            "parallel_extract", "--application-id", "app", "--compartment-id", "cmp",
+            "--tables", "A,B", "--dry-run"])
+        a = P.parse_arguments()
+        assert a.dry_run is True and a.max_concurrent_runs == 4 and a.tables == "A,B"
+
+    def test_env_satisfies_required(self, monkeypatch):
+        monkeypatch.setenv("DATAGEN_DATAFLOW_APP_ID", "envapp")
+        monkeypatch.setenv("DATAGEN_OCI_COMPARTMENT_ID", "envcmp")
+        monkeypatch.setattr(sys, "argv", ["parallel_extract", "--tables", "A"])
+        a = P.parse_arguments()
+        assert a.application_id == "envapp" and a.compartment_id == "envcmp"
+
+    def test_missing_application_and_compartment_errors(self, monkeypatch):
+        monkeypatch.delenv("DATAGEN_DATAFLOW_APP_ID", raising=False)
+        monkeypatch.delenv("DATAGEN_OCI_COMPARTMENT_ID", raising=False)
+        monkeypatch.setattr(sys, "argv", ["parallel_extract", "--tables", "A"])
+        with pytest.raises(SystemExit):
+            P.parse_arguments()
+
+
+class TestPlanReport:
+    def _opts(self):
+        return dict(application_id="app", compartment_id="cmp", num_executors=2,
+                    driver_shape="d", executor_shape="e", driver_shape_config=None,
+                    executor_shape_config=None, passthrough=[])
+
+    def test_plan_lists_buckets_commands_and_skew(self):
+        weights = {("S", "A"): 9.0, ("S", "B"): 1.0}
+        prov = {("S", "A"): "all_tables", ("S", "B"): "median"}
+        plan = P.build_plan(weights, num_buckets=2, opts=self._opts(), provenance=prov)
+        assert len(plan["buckets"]) == 2
+        assert all({"command", "tables", "weight"} <= set(b) for b in plan["buckets"])
+        assert any(b["tables"] == ["S.A"] for b in plan["buckets"])    # heaviest isolated
+        assert plan["balance_skew"] == 9.0                             # max/min bucket weight
+        assert plan["sizes_report"][("S", "A")] == {"weight": 9.0, "tier": "all_tables"}
+
+
 class TestLifecycleClassify:
     @pytest.mark.parametrize("state,kind", [
         ("SUCCEEDED", "success"), ("FAILED", "failure"), ("CANCELED", "failure"),
