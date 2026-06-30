@@ -805,10 +805,11 @@ def parse_arguments():
     p.add_argument("--dry-run", action="store_true",
                    help="Plan (sizes + buckets + commands) and exit without submitting.")
     args = p.parse_args()
-    for name in ("application_id", "compartment_id"):
+    env_for = {"application_id": "DATAGEN_DATAFLOW_APP_ID",
+               "compartment_id": "DATAGEN_OCI_COMPARTMENT_ID"}
+    for name, env in env_for.items():
         if not getattr(args, name):
-            p.error(f"--{name.replace('_', '-')} is required "
-                    f"(flag or env {('DATAGEN_DATAFLOW_APP_ID' if name == 'application_id' else 'DATAGEN_OCI_COMPARTMENT_ID')}).")
+            p.error(f"--{name.replace('_', '-')} is required (flag or env {env}).")
     return args
 
 
@@ -845,7 +846,8 @@ a `(owner, table)` key (default owner = `DATAGEN_SOURCE_DB_USER`) →
 → `weights = {k: ... }` keyed by `(owner,table)` (the `weights` dict bin_pack expects) →
 `num_buckets = args.num_buckets or args.max_concurrent_runs` →
 `plan = build_plan(weights, num_buckets, _opts_from_args(args), provenance)`. If
-`--sizes-report` is set, write `plan["sizes_report"]` to that path. If `--dry-run`: log the
+`--sizes-report` is set, write `plan["sizes_report"]` to that path **with keys stringified
+to `"OWNER.TABLE"`** (`json.dump` can't serialize tuple keys). If `--dry-run`: log the
 sizes report + `balance_skew` + each bucket's tables/weight/command, exit 0 (no submission).
 Else: `run_buckets(buckets, _opts_from_args(args))` (rebuild the `buckets` list from
 `bin_pack`, or reuse `plan`), write the manifest (buckets + run ids + states + retries),
