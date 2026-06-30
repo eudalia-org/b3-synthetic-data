@@ -50,8 +50,10 @@ produces exactly:
 export/TABLE_1/   export/TABLE_2/   export/TABLE_3/   ...
 ```
 
-one folder per table, all siblings under `export/`. The orchestrator passes this env
-identically to every run; it does not compute per-run output paths.
+one folder per table, all siblings under `export/`. This env lives on the **Application's**
+configuration, so **every run of that Application inherits the same `export/` prefix** —
+the orchestrator does not (and cannot) inject it per run; it overrides only the table list
+and shape. It never computes per-run output paths.
 
 ### Concurrency safety of the shared prefix
 
@@ -92,28 +94,52 @@ parse args / env
 
 ### 1. Live size fetch — fallback chain
 
-The orchestrator connects to the **source** Oracle using **`python-oracledb` thin mode**
-(pure-Python, no Instant Client; `pip install oracledb`), reusing the source connection
-details (host/service/credentials derived from the same source config the extract uses).
+**Connection (a first-class decision, not an implementation detail).** The extract reaches
+Oracle via the **JDBC** driver using `DATAGEN_SOURCE_JDBC_URL` (an Oracle thin/TNS URL, an
+mTLS-wallet alias for an Autonomous DB). `python-oracledb` **thin** mode cannot consume a
+JDBC URL or a `cwallet.sso` directly — it needs a parsed DSN (host/port/service or a TLS
+descriptor) plus credentials. So the orchestrator must:
+1. **Derive an oracledb DSN** from `DATAGEN_SOURCE_JDBC_URL` (strip the `jdbc:oracle:thin:@`
+   prefix; pass the resulting EZConnect/TNS descriptor to `oracledb.connect`). For a
+   wallet/mTLS ADB, point oracledb at the wallet via `config_dir`/`wallet_location`
+   (`TNS_ADMIN`) and `wallet_password`; the plan must name the exact env that supplies the
+   wallet path. Credentials come from `DATAGEN_SOURCE_DB_USER` + `DATAGEN_SOURCE_DB_PASSWORD`.
+2. **Run a tier-0 connectivity probe** (`SELECT 1 FROM dual`) that **fails loudly** (clear
+   error, non-zero exit unless `--allow-equal-weight-fallback`) rather than letting a broken
+   connection silently cascade all tables to tier 5 — otherwise the whole size mechanism is
+   dead code that still "succeeds".
 
-It resolves a `{table: weight}` map by trying tiers **in order**, each filling only the
-tables still missing a weight. Every tier is wrapped so that a privilege error
-(`ORA-00942`), a `NULL`/absent statistic, or a timeout **falls through** to the next tier
-rather than aborting:
+**Owner handling.** `--tables` entries may be schema-qualified (`OWNER.TABLE`); unqualified
+names default to `DATAGEN_SOURCE_DB_USER`, exactly as `save_tables.py` resolves them. The
+size map is therefore keyed on **`(owner, table)`**, and every tier query selects the owner
+column so multi-schema sets don't collide.
 
-| Tier | Source | Query shape (for `:owner`) | Typical failure → fallthrough |
+It resolves a `{(owner, table): rows}` map by trying tiers **in order**, each filling only
+the keys still missing a value. Every tier is wrapped so that a privilege error
+(`ORA-00942`), a `NULL`/absent statistic, or a timeout **falls through** to the next tier:
+
+| Tier | Source | Query shape | Typical failure → fallthrough |
 |---|---|---|---|
-| 1 | physical bytes | `SELECT SEGMENT_NAME, SUM(BYTES) FROM DBA_SEGMENTS WHERE OWNER=:owner AND SEGMENT_TYPE LIKE 'TABLE%' GROUP BY SEGMENT_NAME` | `ORA-00942` (no catalog priv) |
-| 2 | stats bytes | `SELECT TABLE_NAME, NUM_ROWS*AVG_ROW_LEN FROM ALL_TABLES WHERE OWNER=:owner` | `NUM_ROWS`/`AVG_ROW_LEN` NULL (no stats) |
-| 3 | stats rows | `SELECT TABLE_NAME, NUM_ROWS FROM ALL_TAB_STATISTICS WHERE OWNER=:owner AND PARTITION_NAME IS NULL` | NULL rows |
-| 4 | sampled rows | `SELECT COUNT(*) FROM :owner.:table SAMPLE(0.1)` per still-missing table, scaled ×1000 | (rare) read error |
-| 5 | equal weight | assign the **median** of resolved weights (or 1.0 if none resolved) | never fails |
+| 1 | physical bytes → rows | `SELECT OWNER, SEGMENT_NAME, SUM(BYTES) FROM DBA_SEGMENTS WHERE OWNER IN (:owners) AND SEGMENT_TYPE LIKE 'TABLE%' GROUP BY OWNER, SEGMENT_NAME` | `ORA-00942` (no catalog priv) |
+| 2 | stats rows | `SELECT OWNER, TABLE_NAME, NUM_ROWS, AVG_ROW_LEN FROM ALL_TABLES WHERE OWNER IN (:owners)` | `NUM_ROWS` NULL (no stats) |
+| 3 | stats rows | `SELECT OWNER, TABLE_NAME, NUM_ROWS FROM ALL_TAB_STATISTICS WHERE OWNER IN (:owners) AND PARTITION_NAME IS NULL` | NULL rows |
+| 4 | sampled rows | per still-missing `(owner,table)`: `SELECT COUNT(*) FROM <owner>.<table> SAMPLE(0.1)`, scaled ×1000 | (rare) read error |
+| 5 | equal weight | assign the **median** of resolved row-weights (or 1.0 if none resolved) | never fails |
 
-Units differ across tiers (bytes vs rows). Because weights are used **only** for relative
-bin balance, the orchestrator normalizes each table's weight to a fraction of the total
-within whatever tier produced it; cross-tier mixing is approximate and affects only
-balance, never correctness. The resolved tier per table is captured for the
+**One common unit.** All tiers normalize to a single unit — **estimated rows** — so weights
+are directly comparable: tier 1's `SUM(BYTES)` is divided by a nominal/observed
+`AVG_ROW_LEN` to estimate rows (or, where tier 2 also resolves, bytes are simply unused);
+tiers 2–4 are already rows. Bin-packing uses these raw row-weights directly — **no
+fraction-within-tier normalization** (which would let a lone tier-4 table dominate).
+Tier 4's SQL is built by **validated string interpolation** of the identifier (reusing
+`IDENTIFIER_PATTERN` from `save_tables.py`), never bind variables — Oracle cannot bind a
+schema/table *identifier*. The resolved tier per `(owner,table)` is captured for the
 **`--sizes-report`**.
+
+The DB fetch and the **merge** (tier-by-tier gap-fill + tier-5 backstop + median) are
+factored into separate functions: `merge_size_tiers(tier_dicts) -> {(owner,table): rows}`
+is pure and unit-testable by passing in tier dicts; only the per-tier query functions touch
+the DB.
 
 ### 2. Bin-packing
 
@@ -125,15 +151,29 @@ smaller buckets and a smoother tail.
 
 ### 3. Run submission
 
-One `oci data-flow run create` per bucket, all sharing `--application-id`, overriding:
+One `oci data-flow run create` per bucket, all sharing `--application-id` and
+`--compartment-id` (a **required** flag for `run create` — sourced from a
+`DATAGEN_OCI_COMPARTMENT_ID` env or `--compartment-id` orchestrator flag), overriding:
 
-- `--application-arguments '["--tables","T1,T2,…", <passthrough>]'` — the bucket's table
-  list plus any pass-through extract flags (e.g. `--continue-on-error`).
-- `--display-name extract-bucket-<i>`.
+- the **application arguments** — `["--tables","T1,T2,…", <passthrough>]"` — the bucket's
+  table list plus any pass-through extract flags (e.g. `--continue-on-error`).
+- the **display name** — `extract-bucket-<i>`.
 - **Extract-tuned shape** (IO-bound, deliberately small so `max-concurrent-runs` can be
-  high): `--num-executors`, `--driver-shape`, `--executor-shape`, and flex
-  `--driver-shape-config` / `--executor-shape-config` — all CLI-overridable, with
-  conservative defaults.
+  high): executor count + driver/executor shapes (incl. flex shape configs) — all
+  orchestrator-overridable, with conservative defaults.
+
+> **Implementer must verify exact flag spellings** against `oci data-flow run create --help`
+> before wiring `build_run_create_command` — e.g. the run-arguments flag is `--arguments`
+> (not `--application-arguments`), and confirm the shape flag names
+> (`--num-executors`, `--driver-shape`, `--executor-shape`, `--driver-shape-config`,
+> `--executor-shape-config`). The plan includes a `--help` check step.
+
+**Env is inherited from the Application, not injected per run.** `oci data-flow run create`
+has no per-run env flag — the source JDBC URL/password and **`DATAGEN_RAW_PREFIX=export`**
+(hence the shared `export/` output and per-table subfolders) live on the **Application's**
+configuration. The orchestrator overrides only the **arguments** (table list) and the
+**shape**; everything else is the Application's existing config. The plan must confirm
+`DATAGEN_RAW_PREFIX=export` (and the source/output config) is set on the target Application.
 
 The command is built by a **pure function** `build_run_create_command(bucket, opts)` so it
 can be unit-tested and printed verbatim in `--dry-run`.
@@ -143,8 +183,10 @@ can be unit-tested and printed verbatim in `--dry-run`.
 - A work queue of buckets; at most `--max-concurrent-runs` runs in flight. As one reaches
   a terminal state, the next bucket is submitted.
 - Poll `oci data-flow run get --run-id <id>` for `lifecycle-state` every `--poll-seconds`.
-  Terminal states: `SUCCEEDED`, `FAILED`, `CANCELED` (treat `CANCELING`/`STOPPED` as
-  terminal-failure for retry purposes).
+  The full Data Flow state set: **non-terminal** `ACCEPTED`, `IN_PROGRESS`, `CANCELING`,
+  `STOPPING` (keep polling); **terminal-success** `SUCCEEDED`; **terminal-failure**
+  `FAILED`, `CANCELED`, `STOPPED`. Any unrecognized state is logged and treated as
+  non-terminal (keep polling) rather than silently classified as done/failed.
 - On `FAILED`, retry the bucket up to `--max-retries` (extract is idempotent per table —
   re-running overwrites that table's `export/<TABLE>/`).
 
@@ -184,8 +226,12 @@ throttling/connection errors appear; back off one step.
 
 ## Error handling / interactions
 
-- **Oracle fetch fully fails** (all tiers error): tier 5 assigns equal weight → degrades to
-  round-robin bucketing; the run still proceeds. Logged prominently.
+- **Oracle is unreachable** (tier-0 probe fails — bad DSN/wallet/credentials): fail loudly
+  with a clear message and non-zero exit, *unless* `--allow-equal-weight-fallback` is set
+  (then degrade to equal-weight/round-robin and warn). This prevents the size mechanism
+  silently becoming dead code.
+- **Oracle reachable but no stats** (tiers 1–4 yield nothing for some/all tables): tier 5
+  assigns the median/equal weight for those keys → bin-packing still proceeds. Logged.
 - **`oci` CLI not configured / `run create` error:** abort before submitting further runs
   in a clear message; already-submitted runs are listed so they can be tracked/cancelled.
 - **Partial failure:** with `--max-retries` exhausted on some buckets, the orchestrator
@@ -196,14 +242,20 @@ throttling/connection errors appear; back off one step.
 ## Testing
 
 Pure functions, unit-tested with **no cloud/DB**:
-- **Fallback merge** — tier coverage and gap-fill: later tiers fill only missing tables;
-  tier 5 backstops; weight normalization is correct.
+- **`merge_size_tiers`** — tier coverage and gap-fill: later tiers fill only missing
+  `(owner,table)` keys; tier-5 median backstop; single-unit (rows) weights; owner-qualified
+  keys don't collide across schemas.
 - **Bin-packing** — balance quality and determinism; N buckets; disjoint coverage of all
   input tables.
-- **`build_run_create_command`** — correct `application-arguments` JSON, display name, shape
-  flags, escaping.
+- **`build_run_create_command`** — correct arguments JSON, display name, shape flags,
+  `--compartment-id`, escaping.
+- **JDBC-URL → oracledb DSN** derivation — parses `DATAGEN_SOURCE_JDBC_URL` into a usable
+  DSN (the wallet/TLS path is exercised manually).
 
 Manual / live verification (in the plan, not automated):
+- **`oci data-flow run create --help`** check to confirm exact flag spellings before wiring.
+- **Tier-0 connectivity probe** against the real source (confirms oracledb thin + wallet
+  reach the ADB and which size tier actually fires) — this is what `--dry-run` surfaces.
 - **2-table concurrency smoke test** for the shared-`export/` overwrite scope (the safety
   gate above).
 - A small end-to-end ramp run.
@@ -214,5 +266,3 @@ Manual / live verification (in the plan, not automated):
 - Size-aware *hybrid* bucketing (dedicated run per huge table) — start with balanced
   buckets; revisit if a single table dominates a bucket's tail.
 - Auto-ramp (orchestrator self-tunes `max-concurrent-runs`) — manual ramp first.
-- Driving the source `:owner` / connect string: reuse the extract's source config; exact
-  derivation from `DATAGEN_SOURCE_JDBC_URL` is an implementation detail.
