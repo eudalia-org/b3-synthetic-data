@@ -92,6 +92,16 @@ class TestValidIdentifier:
     def test_rejects_injection(self):
         with pytest.raises(ValueError):
             P.valid_identifier("OPER; DROP TABLE X")
+
+
+class TestParseTables:
+    def test_comma_split_and_dedup(self):
+        assert P.parse_tables("A, B ,A", None) == ["A", "B"]
+
+    def test_file_with_comments_and_blanks(self, tmp_path):
+        f = tmp_path / "t.txt"
+        f.write_text("A\n# comment\n\nB\n")
+        assert P.parse_tables(None, str(f)) == ["A", "B"]
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -138,6 +148,23 @@ def split_owner_table(table: str, default_owner: str) -> tuple[str, str]:
     else:
         owner, name = default_owner, table
     return owner.upper(), name.upper()
+
+
+def parse_tables(tables: str | None, tables_file: str | None) -> list[str]:
+    """Comma list or one-per-line file (# comments, blanks ignored), order-preserving dedup.
+
+    Vendored from save_tables.py:173 — kept self-contained (no datagen.* import).
+    """
+    if tables:
+        parsed = [t.strip() for t in tables.split(",")]
+    else:
+        from pathlib import Path
+        lines = Path(tables_file or "").read_text().splitlines()
+        parsed = [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
+    deduped = list(dict.fromkeys(t for t in parsed if t))
+    if not deduped:
+        raise ValueError("No tables provided")
+    return deduped
 
 
 def jdbc_url_to_dsn(jdbc_url: str) -> str:
@@ -207,6 +234,15 @@ class TestMergeSizeTiers:
         tiers = [{("CETIP", "A"): 0.0, ("CETIP", "B"): 40.0}]    # 0 -> treat as unresolved
         out = P.merge_size_tiers(keys, tiers)
         assert out[("CETIP", "A")] == 40.0          # median of the single resolved value
+
+
+class TestSizeProvenance:
+    def test_reports_resolving_tier_index_else_median(self):
+        keys = [("S", "A"), ("S", "B"), ("S", "C")]
+        tiers = [{("S", "A"): 10.0}, {("S", "B"): 20.0}]        # C unresolved
+        prov = P.size_provenance(keys, tiers, tier_labels=["dba_segments", "all_tables"])
+        assert prov == {("S", "A"): "dba_segments", ("S", "B"): "all_tables",
+                        ("S", "C"): "median"}
 ```
 
 - [ ] **Step 2: Run tests to verify they fail.**
@@ -235,9 +271,26 @@ def merge_size_tiers(keys, tier_dicts) -> dict:
     else:
         median = 1.0
     return {key: resolved.get(key, median) for key in keys}
+
+
+def size_provenance(keys, tier_dicts, tier_labels) -> dict:
+    """Which tier resolved each key (else 'median'). For the --sizes-report. Pure.
+
+    Same precedence as merge_size_tiers (earliest positive wins). tier_labels names
+    tiers positionally; len(tier_labels) == len(tier_dicts).
+    """
+    out = {}
+    for key in keys:
+        out[key] = "median"
+        for label, tier in zip(tier_labels, tier_dicts):
+            w = tier.get(key)
+            if w and w > 0:
+                out[key] = label
+                break
+    return out
 ```
 
-- [ ] **Step 4: Run tests to verify they pass.** **Step 5: Commit** `feat(extract): merge_size_tiers fallback/median backstop`.
+- [ ] **Step 4: Run tests to verify they pass.** **Step 5: Commit** `feat(extract): merge_size_tiers + size_provenance`.
 
 ---
 
@@ -250,13 +303,14 @@ def merge_size_tiers(keys, tier_dicts) -> dict:
 ```python
 class TestBinPack:
     def test_balances_and_covers_all(self):
-        weights = {("S", "A"): 8.0, ("S", "B"): 4.0, ("S", "C"): 4.0, ("S", "D"): 2.0}
+        # 6,5,4,3 (sum 18) splits evenly: A+D=9 | B+C=9
+        weights = {("S", "A"): 6.0, ("S", "B"): 5.0, ("S", "C"): 4.0, ("S", "D"): 3.0}
         buckets = P.bin_pack(weights, 2)
         assert len(buckets) == 2
         flat = sorted(k for b in buckets for k in b)
         assert flat == sorted(weights)                       # disjoint + complete
         totals = sorted(sum(weights[k] for k in b) for b in buckets)
-        assert totals == [9.0, 9.0]                          # A | B+C+D... balanced
+        assert totals == [9.0, 9.0]                          # greedy LPT: A,D | B,C
 
     def test_deterministic_tie_break_by_name(self):
         weights = {("S", "A"): 5.0, ("S", "B"): 5.0}
@@ -410,6 +464,22 @@ class TestBytesToRows:
 
     def test_zero_bytes(self):
         assert P.bytes_to_rows(0) == 0.0
+
+
+class TestResolveSizes:
+    def test_unreachable_without_flag_exits(self):
+        def boom():
+            raise RuntimeError("no route to host")
+        with pytest.raises(SystemExit):
+            P.resolve_sizes([("S", "A")], connect=boom, allow_fallback=False)
+
+    def test_unreachable_with_flag_equal_weight(self):
+        def boom():
+            raise RuntimeError("no route to host")
+        weights, prov = P.resolve_sizes([("S", "A"), ("S", "B")], connect=boom,
+                                        allow_fallback=True)
+        assert weights == {("S", "A"): 1.0, ("S", "B"): 1.0}
+        assert set(prov.values()) == {"equal-weight-fallback"}
 ```
 
 - [ ] **Step 2: Run tests to verify they fail.**
@@ -493,12 +563,37 @@ def fetch_size_tiers(conn, keys) -> list:
             logger.warning("size tier sample(%s.%s) failed: %s", owner, table, exc)
     tiers.append(tier4)
     return tiers
+
+
+TIER_LABELS = ["dba_segments", "all_tables", "all_tab_statistics", "sample_count"]
+
+def resolve_sizes(keys, connect=connect_source, allow_fallback=False):
+    """Resolve {(owner,table): rows} + provenance, with the loud-fail/fallback gate.
+
+    Tries `connect()` (which runs the tier-0 probe). On failure: if allow_fallback,
+    return equal weights (1.0) with 'equal-weight-fallback' provenance + a warning;
+    otherwise log and `sys.exit(2)`. Injectable `connect` for tests.
+    """
+    try:
+        conn = connect()
+    except Exception as exc:                                  # noqa: BLE001
+        if not allow_fallback:
+            logger.error("Source unreachable (%s). Pass --allow-equal-weight-fallback to "
+                         "bucket on equal weights instead.", exc)
+            sys.exit(2)
+        logger.warning("Source unreachable (%s); falling back to equal weights.", exc)
+        return ({k: 1.0 for k in keys}, {k: "equal-weight-fallback" for k in keys})
+    try:
+        tiers = fetch_size_tiers(conn, keys)
+    finally:
+        conn.close()
+    return merge_size_tiers(keys, tiers), size_provenance(keys, tiers, TIER_LABELS)
 ```
 
-- [ ] **Step 4: Run tests to verify they pass** (pure pieces). The DB path is exercised in
-  Task 8's manual probe.
+- [ ] **Step 4: Run tests to verify they pass** (pure pieces + `resolve_sizes` both branches
+  via injected `connect`). The live DB tier queries are exercised in Task 8's manual probe.
 
-- [ ] **Step 5: Commit** `feat(extract): oracledb size-fetch tiers + tier-0 probe`.
+- [ ] **Step 5: Commit** `feat(extract): size-fetch tiers, tier-0 probe, resolve_sizes gate`.
 
 ---
 
@@ -643,23 +738,36 @@ class TestParseArgs:
         a = P.parse_arguments()
         assert a.dry_run is True and a.max_concurrent_runs == 4 and a.tables == "A,B"
 
-    def test_requires_application_and_compartment(self, monkeypatch):
+    def test_env_satisfies_required(self, monkeypatch):
+        monkeypatch.setenv("DATAGEN_DATAFLOW_APP_ID", "envapp")
+        monkeypatch.setenv("DATAGEN_OCI_COMPARTMENT_ID", "envcmp")
+        monkeypatch.setattr(sys, "argv", ["parallel_extract", "--tables", "A"])
+        a = P.parse_arguments()
+        assert a.application_id == "envapp" and a.compartment_id == "envcmp"
+
+    def test_missing_application_and_compartment_errors(self, monkeypatch):
+        monkeypatch.delenv("DATAGEN_DATAFLOW_APP_ID", raising=False)
+        monkeypatch.delenv("DATAGEN_OCI_COMPARTMENT_ID", raising=False)
         monkeypatch.setattr(sys, "argv", ["parallel_extract", "--tables", "A"])
         with pytest.raises(SystemExit):
             P.parse_arguments()
 
 
 class TestPlanReport:
-    def test_plan_lists_buckets_and_commands(self):
-        weights = {("S", "A"): 9.0, ("S", "B"): 1.0}
-        opts = dict(application_id="app", compartment_id="cmp", num_executors=2,
+    def _opts(self):
+        return dict(application_id="app", compartment_id="cmp", num_executors=2,
                     driver_shape="d", executor_shape="e", driver_shape_config=None,
                     executor_shape_config=None, passthrough=[])
-        plan = P.build_plan(weights, num_buckets=2, opts=opts)
+
+    def test_plan_lists_buckets_commands_and_skew(self):
+        weights = {("S", "A"): 9.0, ("S", "B"): 1.0}
+        prov = {("S", "A"): "all_tables", ("S", "B"): "median"}
+        plan = P.build_plan(weights, num_buckets=2, opts=self._opts(), provenance=prov)
         assert len(plan["buckets"]) == 2
-        assert all("command" in b and "tables" in b and "weight" in b for b in plan["buckets"])
-        # heaviest table isolated in its own bucket
-        assert any(b["tables"] == ["S.A"] for b in plan["buckets"])
+        assert all({"command", "tables", "weight"} <= set(b) for b in plan["buckets"])
+        assert any(b["tables"] == ["S.A"] for b in plan["buckets"])    # heaviest isolated
+        assert plan["balance_skew"] == 9.0                             # max/min bucket weight
+        assert plan["sizes_report"][("S", "A")] == {"weight": 9.0, "tier": "all_tables"}
 ```
 
 - [ ] **Step 2: Run tests to verify they fail.**
@@ -673,10 +781,9 @@ def parse_arguments():
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--tables", help="Comma-separated source table list (OWNER.TABLE or TABLE).")
     src.add_argument("--tables-file", help="Local file, one table per line (# comments ok).")
-    p.add_argument("--application-id", required=True,
-                   default=os.environ.get("DATAGEN_DATAFLOW_APP_ID"))
-    p.add_argument("--compartment-id", required=True,
-                   default=os.environ.get("DATAGEN_OCI_COMPARTMENT_ID"))
+    # env-or-flag: default from env, validated after parse (required=True would ignore the env)
+    p.add_argument("--application-id", default=os.environ.get("DATAGEN_DATAFLOW_APP_ID"))
+    p.add_argument("--compartment-id", default=os.environ.get("DATAGEN_OCI_COMPARTMENT_ID"))
     p.add_argument("--max-concurrent-runs", type=int, default=4)
     p.add_argument("--num-buckets", type=int, default=None,
                    help="Default = --max-concurrent-runs.")
@@ -693,9 +800,16 @@ def parse_arguments():
     p.add_argument("--allow-equal-weight-fallback", action="store_true",
                    help="If the source is unreachable, bucket on equal weights instead of "
                         "failing.")
+    p.add_argument("--sizes-report", default=None,
+                   help="Write the per-table resolved-tier + weight report to this JSON path.")
     p.add_argument("--dry-run", action="store_true",
                    help="Plan (sizes + buckets + commands) and exit without submitting.")
-    return p.parse_args()
+    args = p.parse_args()
+    for name in ("application_id", "compartment_id"):
+        if not getattr(args, name):
+            p.error(f"--{name.replace('_', '-')} is required "
+                    f"(flag or env {('DATAGEN_DATAFLOW_APP_ID' if name == 'application_id' else 'DATAGEN_OCI_COMPARTMENT_ID')}).")
+    return args
 
 
 def _opts_from_args(a) -> dict:
@@ -708,26 +822,34 @@ def _opts_from_args(a) -> dict:
                 poll_seconds=a.poll_seconds)
 
 
-def build_plan(weights: dict, num_buckets: int, opts: dict) -> dict:
+def build_plan(weights: dict, num_buckets: int, opts: dict, provenance: dict) -> dict:
     buckets = bin_pack(weights, num_buckets)
-    out = {"buckets": []}
+    plan_buckets = []
     for i, bucket in enumerate(buckets):
-        out["buckets"].append({
+        plan_buckets.append({
             "index": i,
             "tables": [f"{o}.{t}" for o, t in bucket],
             "weight": sum(weights[k] for k in bucket),
             "command": build_run_create_command(bucket, i, opts) if bucket else None,
         })
-    return out
+    nonempty = [b["weight"] for b in plan_buckets if b["weight"] > 0]
+    skew = (max(nonempty) / min(nonempty)) if nonempty else 1.0
+    sizes_report = {k: {"weight": weights[k], "tier": provenance.get(k, "median")}
+                    for k in weights}
+    return {"buckets": plan_buckets, "balance_skew": skew, "sizes_report": sizes_report}
 ```
 
-`main` ties it together: parse args → read tables (vendored `parse_tables` like
-`save_tables.py`) → split each into `(owner, table)` → fetch sizes (guarded by
-`--allow-equal-weight-fallback` on connect failure) → `merge_size_tiers` →
-`num_buckets = args.num_buckets or args.max_concurrent_runs` → `build_plan`. If `--dry-run`:
-log the sizes report + each bucket's tables/weight/command, write the plan JSON, exit 0.
-Else: `run_buckets`, write the manifest (buckets + run ids + states + retries), exit non-zero
-if any bucket ended `FAILED`.
+`main` ties it together: `parse_arguments` → `parse_tables` → `split_owner_table` each into
+a `(owner, table)` key (default owner = `DATAGEN_SOURCE_DB_USER`) →
+`weights, provenance = resolve_sizes(keys, connect=connect_source, allow_fallback=args.allow_equal_weight_fallback)`
+→ `weights = {k: ... }` keyed by `(owner,table)` (the `weights` dict bin_pack expects) →
+`num_buckets = args.num_buckets or args.max_concurrent_runs` →
+`plan = build_plan(weights, num_buckets, _opts_from_args(args), provenance)`. If
+`--sizes-report` is set, write `plan["sizes_report"]` to that path. If `--dry-run`: log the
+sizes report + `balance_skew` + each bucket's tables/weight/command, exit 0 (no submission).
+Else: `run_buckets(buckets, _opts_from_args(args))` (rebuild the `buckets` list from
+`bin_pack`, or reuse `plan`), write the manifest (buckets + run ids + states + retries),
+exit non-zero if any bucket ended `FAILED`.
 
 - [ ] **Step 4: Run tests to verify they pass.** **Step 5: Commit** `feat(extract): dry-run planner, CLI, manifest, main`.
 
@@ -772,3 +894,7 @@ if any bucket ended `FAILED`.
   URL/password, and output bucket live on the Data Flow Application (confirm before a live run).
 - **`--help` gate is real:** do not trust the Task 4 flag constants until Step 1 of Task 8
   confirms them.
+- **Common unit is rows:** tiers 2–4 use `NUM_ROWS`/sampled counts directly (no
+  `AVG_ROW_LEN` — that's deliberate, not an omission); only tier-1 `SUM(BYTES)` is converted
+  via `bytes_to_rows`. `tier4_count_sql` emits `SAMPLE (0.1)` (with the space) — the test
+  pins that exact string, so keep it.
