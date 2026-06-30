@@ -351,3 +351,34 @@ class TestDefaultOwner:
         monkeypatch.setenv("DATAGEN_SOURCE_SCHEMA", "FROMENV")
         monkeypatch.setattr(sys, "argv", self._argv())
         assert P.parse_arguments().owner == "FROMENV"
+
+
+class TestShapeOmitInherits:
+    def _opts(self, **kw):
+        base = dict(application_id="app", compartment_id="cmp", num_executors=None,
+                    driver_shape=None, executor_shape=None, driver_shape_config=None,
+                    executor_shape_config=None, passthrough=[])
+        base.update(kw)
+        return base
+
+    def test_omitted_shapes_absent_from_command(self):
+        cmd = P.build_run_create_command([("S", "A")], 0, self._opts())
+        assert "--num-executors" not in cmd
+        assert "--driver-shape" not in cmd
+        assert "--executor-shape" not in cmd
+
+    def test_set_shapes_present(self):
+        cmd = P.build_run_create_command(
+            [("S", "A")], 0, self._opts(num_executors=3, driver_shape="VM.X",
+                                        executor_shape="VM.Y"))
+        assert cmd[cmd.index("--num-executors") + 1] == "3"
+        assert "VM.X" in cmd
+        assert "VM.Y" in cmd
+
+    def test_parse_args_shapes_default_none(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["parallel_extract", "--application-id", "a",
+                                          "--compartment-id", "c", "--tables", "A"])
+        a = P.parse_arguments()
+        assert a.num_executors is None
+        assert a.driver_shape is None
+        assert a.executor_shape is None

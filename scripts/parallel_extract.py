@@ -111,9 +111,13 @@ def parse_arguments():
                    help="Default = --max-concurrent-runs.")
     p.add_argument("--max-retries", type=int, default=1)
     p.add_argument("--poll-seconds", type=int, default=30)
-    p.add_argument("--num-executors", type=int, default=2)
-    p.add_argument("--driver-shape", default="VM.Standard.E4.Flex")
-    p.add_argument("--executor-shape", default="VM.Standard.E4.Flex")
+    # Shape flags default to None -> omitted -> the run inherits the Application's config.
+    p.add_argument("--num-executors", type=int, default=None,
+                   help="Override executor count (default: inherit from the Application).")
+    p.add_argument("--driver-shape", default=None,
+                   help="Override driver shape (default: inherit from the Application).")
+    p.add_argument("--executor-shape", default=None,
+                   help="Override executor shape (default: inherit from the Application).")
     p.add_argument("--driver-shape-config", default=None)
     p.add_argument("--executor-shape-config", default=None)
     p.add_argument("--profile", default=None, help="OCI CLI profile name.")
@@ -400,10 +404,13 @@ def build_run_create_command(bucket: list, index: int, opts: dict) -> list:
         "--compartment-id", opts["compartment_id"],
         "--display-name", f"extract-bucket-{index}",
         RUN_ARGS_FLAG, json.dumps(arguments),
-        "--num-executors", str(opts["num_executors"]),
-        "--driver-shape", opts["driver_shape"],
-        "--executor-shape", opts["executor_shape"],
     ]
+    if opts.get("num_executors"):
+        cmd += ["--num-executors", str(opts["num_executors"])]
+    if opts.get("driver_shape"):
+        cmd += ["--driver-shape", opts["driver_shape"]]
+    if opts.get("executor_shape"):
+        cmd += ["--executor-shape", opts["executor_shape"]]
     if opts.get("driver_shape_config"):
         cmd += ["--driver-shape-config", opts["driver_shape_config"]]
     if opts.get("executor_shape_config"):
