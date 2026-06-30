@@ -79,6 +79,31 @@ def jdbc_url_to_dsn(jdbc_url: str) -> str:
     return f"{host}:{port}/{sid}"
 
 
+# Confirmed against `oci data-flow run create --help` (Task 8, Step 1).
+RUN_ARGS_FLAG = "--arguments"        # JSON array of application arguments
+
+
+def build_run_create_command(bucket: list, index: int, opts: dict) -> list:
+    """Build the argv for `oci data-flow run create` for one bucket. Pure."""
+    tables = ",".join(f"{owner}.{name}" for owner, name in bucket)
+    arguments = ["--tables", tables, *opts["passthrough"]]
+    cmd = [
+        "oci", "data-flow", "run", "create",
+        "--application-id", opts["application_id"],
+        "--compartment-id", opts["compartment_id"],
+        "--display-name", f"extract-bucket-{index}",
+        RUN_ARGS_FLAG, json.dumps(arguments),
+        "--num-executors", str(opts["num_executors"]),
+        "--driver-shape", opts["driver_shape"],
+        "--executor-shape", opts["executor_shape"],
+    ]
+    if opts.get("driver_shape_config"):
+        cmd += ["--driver-shape-config", opts["driver_shape_config"]]
+    if opts.get("executor_shape_config"):
+        cmd += ["--executor-shape-config", opts["executor_shape_config"]]
+    return cmd
+
+
 def bin_pack(weights: dict, num_buckets: int) -> list:
     """Greedy LPT: assign each table (heaviest first) to the lightest bucket.
 

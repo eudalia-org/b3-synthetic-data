@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 
@@ -74,6 +75,43 @@ class TestMergeSizeTiers:
         tiers = [{("CETIP", "A"): 0.0, ("CETIP", "B"): 40.0}]    # 0 -> treat as unresolved
         out = P.merge_size_tiers(keys, tiers)
         assert out[("CETIP", "A")] == 40.0          # median of the single resolved value
+
+
+class TestBuildRunCreateCommand:
+    def _opts(self, **kw):
+        base = dict(application_id="ocid1.dataflowapplication.x",
+                    compartment_id="ocid1.compartment.y", num_executors=2,
+                    driver_shape="VM.Standard.E4.Flex", executor_shape="VM.Standard.E4.Flex",
+                    driver_shape_config=None, executor_shape_config=None, passthrough=[])
+        base.update(kw)
+        return base
+
+    def test_includes_ids_and_display_name(self):
+        cmd = P.build_run_create_command([("CETIP", "A"), ("CETIP", "B")], 0, self._opts())
+        assert cmd[:3] == ["oci", "data-flow", "run"]
+        assert "create" in cmd
+        joined = " ".join(cmd)
+        assert "ocid1.dataflowapplication.x" in joined
+        assert "ocid1.compartment.y" in joined
+        assert "extract-bucket-0" in joined
+
+    def test_arguments_is_json_array_of_tables(self):
+        cmd = P.build_run_create_command([("CETIP", "A"), ("CETIP", "B")], 1, self._opts())
+        idx = cmd.index("--arguments")
+        args = json.loads(cmd[idx + 1])
+        assert args == ["--tables", "CETIP.A,CETIP.B"]
+
+    def test_passthrough_flags_appended_to_arguments(self):
+        cmd = P.build_run_create_command(
+            [("CETIP", "A")], 0, self._opts(passthrough=["--continue-on-error"]))
+        idx = cmd.index("--arguments")
+        assert json.loads(cmd[idx + 1]) == ["--tables", "CETIP.A", "--continue-on-error"]
+
+    def test_shape_config_included_when_present(self):
+        cfg = '{"ocpus": 2, "memoryInGBs": 16}'
+        cmd = P.build_run_create_command(
+            [("CETIP", "A")], 0, self._opts(executor_shape_config=cfg))
+        assert cfg in cmd
 
 
 class TestBinPack:
