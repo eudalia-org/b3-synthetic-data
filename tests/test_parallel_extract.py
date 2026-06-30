@@ -384,27 +384,22 @@ class TestShapeOmitInherits:
         assert a.executor_shape is None
 
 
-class TestFkClosure:
-    def test_walks_parents_transitively(self):
+class TestFkParents:
+    def test_includes_direct_parents_only(self):
         seed = [("C", "OPERACAO")]
-        edges = [(("C", "OPERACAO"), ("C", "EVENTO")),
-                 (("C", "EVENTO"), ("C", "CONDICAO_IF")),
+        edges = [(("C", "OPERACAO"), ("C", "EVENTO")),       # direct parent -> included
+                 (("C", "EVENTO"), ("C", "CONDICAO_IF")),    # parent-of-parent -> excluded
                  (("C", "UNRELATED"), ("C", "XYZ"))]
-        assert P.fk_closure(seed, edges) == {
-            ("C", "OPERACAO"), ("C", "EVENTO"), ("C", "CONDICAO_IF")}
-
-    def test_handles_cycles(self):
-        edges = [(("C", "A"), ("C", "B")), (("C", "B"), ("C", "A"))]
-        assert P.fk_closure([("C", "A")], edges) == {("C", "A"), ("C", "B")}
+        assert P.fk_parents(seed, edges) == {("C", "OPERACAO"), ("C", "EVENTO")}
 
     def test_self_reference(self):
-        assert P.fk_closure([("C", "IF")], [(("C", "IF"), ("C", "IF"))]) == {("C", "IF")}
+        assert P.fk_parents([("C", "IF")], [(("C", "IF"), ("C", "IF"))]) == {("C", "IF")}
 
     def test_no_edges_returns_seed(self):
-        assert P.fk_closure([("C", "A"), ("C", "B")], []) == {("C", "A"), ("C", "B")}
+        assert P.fk_parents([("C", "A"), ("C", "B")], []) == {("C", "A"), ("C", "B")}
 
 
-class TestExpandFkClosure:
+class TestExpandFkParents:
     def test_expands_using_edges_from_conn(self):
         class FakeCur:
             def execute(self, sql, binds):
@@ -418,25 +413,25 @@ class TestExpandFkClosure:
             def close(self):
                 pass
 
-        out = P.expand_fk_closure([("C", "OPERACAO")], connect=lambda: FakeConn())
+        out = P.expand_fk_parents([("C", "OPERACAO")], connect=lambda: FakeConn())
         assert ("C", "EVENTO") in out and ("C", "OPERACAO") in out
 
     def test_exits_when_source_unreachable(self):
         def boom():
             raise RuntimeError("down")
         with pytest.raises(SystemExit):
-            P.expand_fk_closure([("C", "A")], connect=boom)
+            P.expand_fk_parents([("C", "A")], connect=boom)
 
 
-class TestFkClosureArg:
+class TestFkParentsArg:
     def _argv(self, *extra):
         return ["parallel_extract", "--application-id", "a", "--compartment-id", "c",
                 "--specs", "specs.json", *extra]
 
     def test_flag_default_false(self, monkeypatch):
         monkeypatch.setattr(sys, "argv", self._argv())
-        assert P.parse_arguments().include_fk_closure is False
+        assert P.parse_arguments().include_fk_parents is False
 
     def test_flag_true(self, monkeypatch):
-        monkeypatch.setattr(sys, "argv", self._argv("--include-fk-closure"))
-        assert P.parse_arguments().include_fk_closure is True
+        monkeypatch.setattr(sys, "argv", self._argv("--include-fk-parents"))
+        assert P.parse_arguments().include_fk_parents is True

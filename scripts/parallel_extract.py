@@ -132,10 +132,10 @@ def parse_arguments():
     p.add_argument("--allow-equal-weight-fallback", action="store_true",
                    help="If the source is unreachable, bucket on equal weights instead of "
                         "failing.")
-    p.add_argument("--include-fk-closure", action="store_true",
-                   help="Expand the table set to the full transitive FK closure (every "
-                        "parent table) via the live source ALL_CONSTRAINTS graph. Requires a "
-                        "reachable source; not bypassable by --allow-equal-weight-fallback.")
+    p.add_argument("--include-fk-parents", action="store_true",
+                   help="Expand the table set with the direct (1-level) FK parents of the "
+                        "seed tables, read from the live source ALL_CONSTRAINTS graph. "
+                        "Requires a reachable source.")
     p.add_argument("--sizes-report", default=None,
                    help="Write the per-table resolved-tier + weight report to this JSON path.")
     p.add_argument("--dry-run", action="store_true",
@@ -193,10 +193,10 @@ def main():
     raw_tables = (tables_from_specs(args.specs) if args.specs
                   else parse_tables(args.tables, args.tables_file))
     keys = [split_owner_table(t, args.owner) for t in raw_tables]
-    if args.include_fk_closure:
+    if args.include_fk_parents:
         before = len(keys)
-        keys = expand_fk_closure(keys)
-        logger.info("FK closure: %d seed table(s) -> %d total (+%d parents)",
+        keys = expand_fk_parents(keys)
+        logger.info("FK parents: %d seed table(s) -> %d total (+%d parents)",
                     before, len(keys), len(keys) - before)
     opts = _opts_from_args(args)
     weights, provenance = resolve_sizes(
@@ -373,25 +373,15 @@ def fetch_size_tiers(conn, keys) -> list:
     return tiers
 
 
-def fk_closure(seed, edges) -> set:
-    """Transitive FK closure: BFS the child->parent graph from seed.
+def fk_parents(seed, edges) -> set:
+    """Seed plus their direct (1-level) FK parents.
 
     seed: iterable of (owner, table). edges: iterable of (child_key, parent_key).
-    Returns the closure set including the seed. Cycles and self-refs are safe.
+    Returns seed | {parent for each edge whose child is in seed}. Not transitive.
     """
-    from collections import deque
-    adj: dict = {}
-    for child, parent in edges:
-        adj.setdefault(child, []).append(parent)
-    seen = set(seed)
-    queue = deque(seen)
-    while queue:
-        node = queue.popleft()
-        for parent in adj.get(node, ()):
-            if parent not in seen:
-                seen.add(parent)
-                queue.append(parent)
-    return seen
+    seed = set(seed)
+    parents = {parent for child, parent in edges if child in seed}
+    return seed | parents
 
 
 def fetch_fk_edges(conn, owners) -> list:
@@ -411,24 +401,24 @@ def fetch_fk_edges(conn, owners) -> list:
     return [((row[0], row[1]), (row[2], row[3])) for row in cur]
 
 
-def expand_fk_closure(keys, connect=connect_source) -> list:
-    """Expand `keys` to the full transitive FK closure via the live source.
+def expand_fk_parents(keys, connect=connect_source) -> list:
+    """Expand `keys` with their direct FK parents read from the live source.
 
-    Requires a reachable source (the closure has no offline form) — exits loudly
-    if the connection fails. Returns the sorted closure key list.
+    Requires a reachable source (no offline form) — exits loudly if the
+    connection fails. Returns the sorted key list (seed + 1-level parents).
     """
     owners = {o for o, _ in keys}
     try:
         conn = connect()
     except Exception as exc:                                  # noqa: BLE001
-        logger.error("--include-fk-closure needs a reachable source to read the FK "
+        logger.error("--include-fk-parents needs a reachable source to read the FK "
                      "graph (%s).", exc)
         sys.exit(2)
     try:
         edges = fetch_fk_edges(conn, owners)
     finally:
         conn.close()
-    return sorted(fk_closure(keys, edges))
+    return sorted(fk_parents(keys, edges))
 
 
 TIER_LABELS = ["dba_segments", "all_tables", "all_tab_statistics", "sample_count"]
