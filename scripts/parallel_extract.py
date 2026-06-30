@@ -79,6 +79,24 @@ def jdbc_url_to_dsn(jdbc_url: str) -> str:
     return f"{host}:{port}/{sid}"
 
 
+def bin_pack(weights: dict, num_buckets: int) -> list:
+    """Greedy LPT: assign each table (heaviest first) to the lightest bucket.
+
+    Returns a list of `num_buckets` lists of (owner, table) keys. Deterministic:
+    ties broken by key. Empty buckets are kept (so callers can map bucket->run 1:1).
+    """
+    if num_buckets < 1:
+        raise ValueError("num_buckets must be >= 1")
+    order = sorted(weights, key=lambda k: (-weights[k], k))
+    totals = [0.0] * num_buckets
+    buckets: list = [[] for _ in range(num_buckets)]
+    for key in order:
+        i = min(range(num_buckets), key=lambda b: (totals[b], b))
+        buckets[i].append(key)
+        totals[i] += weights[key]
+    return buckets
+
+
 def merge_size_tiers(keys, tier_dicts) -> dict:
     """Resolve {(owner,table): rows} by tier precedence, median-backfilling the rest.
 

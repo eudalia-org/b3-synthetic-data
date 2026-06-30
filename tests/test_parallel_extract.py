@@ -76,6 +76,32 @@ class TestMergeSizeTiers:
         assert out[("CETIP", "A")] == 40.0          # median of the single resolved value
 
 
+class TestBinPack:
+    def test_balances_and_covers_all(self):
+        # 6,5,4,3 (sum 18) splits evenly: A+D=9 | B+C=9
+        weights = {("S", "A"): 6.0, ("S", "B"): 5.0, ("S", "C"): 4.0, ("S", "D"): 3.0}
+        buckets = P.bin_pack(weights, 2)
+        assert len(buckets) == 2
+        flat = sorted(k for b in buckets for k in b)
+        assert flat == sorted(weights)                       # disjoint + complete
+        totals = sorted(sum(weights[k] for k in b) for b in buckets)
+        assert totals == [9.0, 9.0]                          # greedy LPT: A,D | B,C
+
+    def test_deterministic_tie_break_by_name(self):
+        weights = {("S", "A"): 5.0, ("S", "B"): 5.0}
+        assert P.bin_pack(weights, 2) == P.bin_pack(weights, 2)
+
+    def test_more_buckets_than_tables(self):
+        weights = {("S", "A"): 1.0}
+        buckets = P.bin_pack(weights, 3)
+        assert sum(len(b) for b in buckets) == 1             # no table duplicated
+        assert len(buckets) == 3                             # empty buckets preserved
+
+    def test_single_bucket(self):
+        weights = {("S", "A"): 1.0, ("S", "B"): 2.0}
+        assert sorted(P.bin_pack(weights, 1)[0]) == [("S", "A"), ("S", "B")]
+
+
 class TestSizeProvenance:
     def test_reports_resolving_tier_index_else_median(self):
         keys = [("S", "A"), ("S", "B"), ("S", "C")]
