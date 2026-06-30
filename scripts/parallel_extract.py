@@ -55,6 +55,16 @@ def parse_tables(tables: str | None, tables_file: str | None) -> list[str]:
     return deduped
 
 
+def tables_from_specs(specs_path: str) -> list[str]:
+    """All table names from a specs.json (every key — static and non-static)."""
+    with open(specs_path) as fh:
+        specs = json.load(fh)
+    tables = list(specs)
+    if not tables:
+        raise ValueError(f"No tables in specs: {specs_path}")
+    return tables
+
+
 def jdbc_url_to_dsn(jdbc_url: str) -> str:
     """Parse an on-prem Oracle thin JDBC URL into an oracledb EZConnect DSN.
 
@@ -86,6 +96,8 @@ def parse_arguments():
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--tables", help="Comma-separated source table list (OWNER.TABLE or TABLE).")
     src.add_argument("--tables-file", help="Local file, one table per line (# comments ok).")
+    src.add_argument("--specs", help="specs.json path; extracts every table in it "
+                                     "(static and non-static).")
     # env-or-flag: default from env, validated after parse (required=True would ignore the env)
     p.add_argument("--application-id", default=os.environ.get("DATAGEN_DATAFLOW_APP_ID"))
     p.add_argument("--compartment-id", default=os.environ.get("DATAGEN_OCI_COMPARTMENT_ID"))
@@ -148,7 +160,8 @@ def build_plan(weights: dict, num_buckets: int, opts: dict, provenance: dict) ->
 
 def main():
     args = parse_arguments()
-    raw_tables = parse_tables(args.tables, args.tables_file)
+    raw_tables = (tables_from_specs(args.specs) if args.specs
+                  else parse_tables(args.tables, args.tables_file))
     default_owner = os.environ.get("DATAGEN_SOURCE_DB_USER", "")
     keys = [split_owner_table(t, default_owner) for t in raw_tables]
     opts = _opts_from_args(args)

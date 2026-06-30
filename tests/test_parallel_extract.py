@@ -264,3 +264,34 @@ class TestSizeProvenance:
         prov = P.size_provenance(keys, tiers, tier_labels=["dba_segments", "all_tables"])
         assert prov == {("S", "A"): "dba_segments", ("S", "B"): "all_tables",
                         ("S", "C"): "median"}
+
+
+class TestTablesFromSpecs:
+    def test_returns_all_keys_order_preserved(self, tmp_path):
+        import json as _j
+        f = tmp_path / "specs.json"
+        f.write_text(_j.dumps({"OPERACAO": {"static": False}, "TIPO_IF": {"static": True}}))
+        assert P.tables_from_specs(str(f)) == ["OPERACAO", "TIPO_IF"]
+
+    def test_empty_specs_raises(self, tmp_path):
+        f = tmp_path / "e.json"
+        f.write_text("{}")
+        with pytest.raises(ValueError):
+            P.tables_from_specs(str(f))
+
+
+class TestSpecsSource:
+    def test_specs_accepted_as_source(self, monkeypatch):
+        monkeypatch.setenv("DATAGEN_DATAFLOW_APP_ID", "a")
+        monkeypatch.setenv("DATAGEN_OCI_COMPARTMENT_ID", "c")
+        monkeypatch.setattr(sys, "argv", ["parallel_extract", "--specs", "specs.json"])
+        a = P.parse_arguments()
+        assert a.specs == "specs.json"
+
+    def test_specs_mutually_exclusive_with_tables(self, monkeypatch):
+        monkeypatch.setenv("DATAGEN_DATAFLOW_APP_ID", "a")
+        monkeypatch.setenv("DATAGEN_OCI_COMPARTMENT_ID", "c")
+        monkeypatch.setattr(sys, "argv",
+                            ["parallel_extract", "--specs", "s.json", "--tables", "A"])
+        with pytest.raises(SystemExit):
+            P.parse_arguments()
