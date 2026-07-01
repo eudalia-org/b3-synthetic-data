@@ -110,12 +110,25 @@ def fecho_ancestrais(alvo: Set[str], fks: Dict[str, List[dict]]) -> Set[str]:
     return conjunto
 
 
+def _tem_parquet_spark(spark, bases: List[str], table: str) -> bool:
+    for base in bases:
+        path = f"{base.rstrip('/')}/{table}"
+        try:
+            spark.read.parquet(path).take(1)
+            return True
+        except Exception:
+            continue
+    return False
+
+
 def gera(
     *,
     pk_csv: str,
     fk_csv: str,
     saida: str = "spec_config.json",
     parquet_disponivel: Optional[Set[str]] = None,
+    spark=None,
+    parquet_bases: Optional[List[str]] = None,
 ) -> dict:
     pks = le_pks(pk_csv)
     fks = le_fks(fk_csv)
@@ -155,9 +168,16 @@ def gera(
         json.dump(specs, f, ensure_ascii=False, indent=2)
 
     # --- Buraco C: ancestrais (com bloco) sem parquet ---
-    disp = {_norm(x) for x in (parquet_disponivel or set())}
     ancestrais = sorted(t for t in specs if t not in TABELAS_ALVO)
-    if disp:
+    disp = {_norm(x) for x in (parquet_disponivel or set())}
+    usar_spark = spark is not None and parquet_bases
+
+    if usar_spark:
+        # checa parquet SÓ dos ancestrais do fecho (não das 1600 do schema)
+        sem_parquet = [t for t in ancestrais
+                       if not _tem_parquet_spark(spark, parquet_bases, t)]
+        parquet_desconhecido = []
+    elif disp:
         sem_parquet = [t for t in ancestrais if t not in disp]
         parquet_desconhecido = []
     else:
@@ -189,16 +209,16 @@ def gera(
         print("  OK: todos os pais do fecho têm PK.")
 
     print("\n--- Buraco C: ancestrais SEM parquet (synthesizer pula -> FK órfã) ---")
-    if disp:
+    print(f"  (checando só os {len(ancestrais)} ancestrais do fecho, não o schema inteiro)")
+    if usar_spark or disp:
         if sem_parquet:
             print(f"  [ATENÇÃO] {len(sem_parquet)} ancestral(is) sem parquet: {sem_parquet}")
             print("  Precisam de parquet no OCI ou a FK fica órfã (NOT NULL -> ORA-01400).")
         else:
-            print("  OK: todos os ancestrais têm parquet disponível.")
+            print("  OK: todos os ancestrais do fecho têm parquet.")
     else:
-        print(f"  [VERIFICAR] {len(parquet_desconhecido)} ancestral(is) — passe")
-        print("  parquet_disponivel (ou rode diagnostica_pais_fk com spark) para saber")
-        print(f"  quais têm parquet: {parquet_desconhecido}")
+        print(f"  [VERIFICAR] passe spark+parquet_bases ou parquet_disponivel para checar.")
+        print(f"  Ancestrais do fecho: {parquet_desconhecido}")
 
     # valida JSON
     with open(saida, encoding="utf-8") as f:
