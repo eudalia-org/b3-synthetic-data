@@ -380,8 +380,16 @@ def _sanitize_specs_against_known_tables(
         for fk in spec.foreign_keys:
             problems: List[str] = []
 
-            if fk.parent_table == name:
-                problems.append("self-reference não é suportado")
+            if fk.parent_table == name and set(fk.columns) & set(fk.parent_columns):
+                # Self-reference GENUÍNA (FK -> PK da mesma tabela, colunas
+                # distintas) é suportada: o loop de síntese remapeia com o
+                # mapping old->new da própria tabela, preservando estrutura
+                # e auto-loops. Só o caso degenerado é rejeitado: coluna FK
+                # de si mesma, cujo remap sobrescreveria a própria origem.
+                problems.append(
+                    "self-reference com sobreposição entre columns e "
+                    "parent_columns (coluna FK de si mesma) não é suportada"
+                )
 
             if fk.parent_table not in specs:
                 problems.append(
@@ -561,8 +569,17 @@ def _sanitize_specs_for_available_relationships(
                     f"parent_columns {list(fk.parent_columns)}"
                 )
 
-            if fk.parent_table == name:
-                problems.append("self-reference não é suportado")
+            if fk.parent_table == name and set(fk.columns) & set(fk.parent_columns):
+                # Mesmo critério do sanitizador estrutural: self-reference
+                # genuína fica ATIVA (remap in-loop com o mapping da própria
+                # tabela); só a degenerada é rejeitada. A checagem de órfãos
+                # (_fk_has_data_problem) roda normalmente para a self-FK:
+                # a fonte chega aqui já fechada (fecho ascendente com ponto
+                # fixo intra-tabela) e neutralizada, então passa.
+                problems.append(
+                    "self-reference com sobreposição entre columns e "
+                    "parent_columns (coluna FK de si mesma) não é suportada"
+                )
 
             if fk.parent_table not in specs:
                 problems.append(
@@ -693,8 +710,11 @@ def _validate_specs(
             if len(fk.columns) != len(fk.parent_columns):
                 raise ValueError(f"FK inválida em `{name}`: tamanhos diferentes.")
 
-            if fk.parent_table == name:
-                raise ValueError(f"Self-reference não suportado: `{name}`.")
+            if fk.parent_table == name and set(fk.columns) & set(fk.parent_columns):
+                raise ValueError(
+                    f"Self-reference degenerada em `{name}`: coluna FK de si "
+                    "mesma (columns sobrepõe parent_columns)."
+                )
 
             if fk.parent_table not in specs:
                 raise ValueError(
@@ -1616,6 +1636,13 @@ def synthesize_multitable_spark(
     result: Dict[str, DataFrame] = {}
     mappings: Dict[Tuple[str, Tuple[str, ...]], DataFrame] = {}
     intermediates: List[DataFrame] = []
+    # FKs cujo mapping do pai ainda não existia na visita da filha (aresta
+    # quebrada por CICLO: a filha foi forçada antes do pai na ordem
+    # topológica). São remapeadas num passe adiado após o loop principal,
+    # quando todos os mappings existem. Sem isso a coluna sai com os valores
+    # ANTIGOS do pai e null_orphan_fks a anula por completo (100% órfã
+    # contra as PKs sintéticas novas).
+    deferred_fks: List[Tuple[str, ForeignKeySpec, int]] = []
 
     # How many child tables still need each parent mapping. Once a parent's last
     # consumer is synthesized, its mapping is unpersisted instead of being held
@@ -1728,10 +1755,103 @@ def synthesize_multitable_spark(
                     pk_max_override=(pk_max_by_table or {}).get(table_name),
                 )
 
+                # Self-FK genuína: o mapping PK_antiga -> PK_nova da PRÓPRIA
+                # tabela será derivado deste work. Materializa antes, para o
+                # mapping e o frame final enxergarem EXATAMENTE as mesmas
+                # linhas bootstrapadas (e para a cadeia de bootstrap não ser
+                # computada duas vezes).
+                has_self_fk = any(f.parent_table == table_name
+                                  for f in spec.foreign_keys)
+                if has_self_fk:
+                    work = _materialize(work, storage_level, truncate_lineage)
+                    intermediates.append(work)
+
                 for fk_idx, fk in enumerate(spec.foreign_keys):
                     key = (fk.parent_table, tuple(fk.parent_columns))
 
+                    if fk.parent_table == table_name:
+                        # ---- Self-reference (ex.: CONTA_PARTICIPANTE.
+                        # NUM_CONTA_PARTICIPANTE_CETIP -> NUM_CONTA_
+                        # PARTICIPANTE). O remap por VALOR com o mapping da
+                        # própria tabela preserva a ESTRUTURA: a cópia de X
+                        # aponta para uma cópia do MESMO Y que X apontava na
+                        # origem. Nulos permanecem nulos (taxa preservada);
+                        # valores sem candidato no mapping viram NULL.
+                        if set(fk.columns) & set(spec.pk_cols):
+                            _warn_or_raise(
+                                "Self-FK com coluna dentro da PK: "
+                                f"{_format_fk(table_name, fk)}. Remapear "
+                                "tocaria a PK; delegada aos passes "
+                                "bind/null_orphan.",
+                                policy=relationship_policy,
+                            )
+                            _release_mapping_consumer(key)
+                            continue
+
+                        # Marca ANTES do remap os auto-loops literais
+                        # (fk_antiga == pk_antiga, o padrão "conta própria"):
+                        # o remap genérico apontaria para uma cópia QUALQUER
+                        # da linha original; aqui garantimos fk_nova :=
+                        # pk_nova DA PRÓPRIA LINHA.
+                        selfloop_col = f"__selfloop_{fk_idx}"
+                        eh_selfloop = reduce(
+                            lambda a, b: a & b,
+                            [work[c] == work[f"__old__{p}"]
+                             for c, p in zip(fk.columns, fk.parent_columns)],
+                        )
+                        work = work.withColumn(selfloop_col, eh_selfloop)
+
+                        self_mapping = _build_mapping_for_parent_cols(
+                            work,
+                            tuple(fk.parent_columns),
+                            storage_level=storage_level,
+                        )
+                        self_mapping.count()
+                        intermediates.append(self_mapping)
+
+                        work = _apply_fk_mapping(
+                            work,
+                            fk,
+                            self_mapping,
+                            seed=_stable_seed(
+                                seed,
+                                table_name,
+                                fk.parent_table,
+                                fk.columns,
+                                fk.parent_columns,
+                            ),
+                            broadcast_fk_counts=broadcast_fk_counts,
+                            fk_index=fk_idx,
+                        )
+
+                        for c, p in zip(fk.columns, fk.parent_columns):
+                            child_type = _get_field_type(work, c)
+                            work = work.withColumn(
+                                c,
+                                F.when(F.col(selfloop_col),
+                                       F.col(p).cast(child_type))
+                                 .otherwise(F.col(c)),
+                            )
+                        work = work.drop(selfloop_col)
+                        logger.info(
+                            "Self-FK remapeada estruturalmente: %s "
+                            "(estrutura e auto-loops preservados).",
+                            _format_fk(table_name, fk))
+                        _release_mapping_consumer(key)
+                        continue
+
                     if key not in mappings:
+                        if fk.parent_table not in result:
+                            # Pai ainda não sintetizado -> aresta quebrada
+                            # por ciclo. Adia o remap para depois do loop;
+                            # NÃO libera o consumer, para o mapping do pai
+                            # (construído quando ele for visitado) ficar
+                            # vivo até o passe adiado.
+                            logger.info(
+                                "FK adiada (ciclo): %s — remapeada após a "
+                                "síntese do pai.", _format_fk(table_name, fk))
+                            deferred_fks.append((table_name, fk, fk_idx))
+                            continue
                         _warn_or_raise(
                             "Mapping ausente para relacionamento ativo: "
                             f"{_format_fk(table_name, fk)}. "
@@ -1772,13 +1892,19 @@ def synthesize_multitable_spark(
 
             if table_name in parent_refs:
                 for cols in parent_refs[table_name]:
+                    key = (table_name, tuple(cols))
+                    if mapping_consumers.get(key, 0) <= 0:
+                        # Únicos consumidores eram self-FKs desta tabela, já
+                        # atendidas com mapping efêmero no loop acima — não
+                        # há filha futura para consumir; economiza o build.
+                        continue
                     mapping_df = _build_mapping_for_parent_cols(
                         work,
                         tuple(cols),
                         storage_level=storage_level,
                     )
                     mapping_df.count()
-                    mappings[(table_name, tuple(cols))] = mapping_df
+                    mappings[key] = mapping_df
                     intermediates.append(mapping_df)
 
             synth = work.select(*original_cols)
@@ -1791,6 +1917,49 @@ def synthesize_multitable_spark(
             # no longer needed — free them now instead of at end-of-component.
             _safe_unpersist(work)
             _safe_unpersist(src_indexed)
+
+        # Passe adiado: remapeia as FKs de arestas de ciclo agora que TODOS
+        # os mappings existem. _apply_fk_mapping opera por VALOR nas colunas
+        # da FK (não precisa de __synthetic_pos no lado da filha), então
+        # funciona direto sobre o frame final em `result`. A mesma seed do
+        # caminho inline mantém o resultado determinístico.
+        for child_name, fk, fk_idx in deferred_fks:
+            key = (fk.parent_table, tuple(fk.parent_columns))
+            mapping = mappings.get(key)
+            if mapping is None:
+                _warn_or_raise(
+                    "Mapping ausente mesmo após o loop para FK adiada: "
+                    f"{_format_fk(child_name, fk)}. "
+                    "A FK será mantida sem remapeamento nesta tabela.",
+                    policy=relationship_policy,
+                )
+                _release_mapping_consumer(key)
+                continue
+            repaired = _apply_fk_mapping(
+                result[child_name],
+                fk,
+                mapping,
+                seed=_stable_seed(
+                    seed,
+                    child_name,
+                    fk.parent_table,
+                    fk.columns,
+                    fk.parent_columns,
+                ),
+                broadcast_fk_counts=broadcast_fk_counts,
+                fk_index=fk_idx,
+            )
+            # Materializa ANTES de liberar o mapping: o plano do frame
+            # reparado referencia o mapping; persistir+count corta a
+            # dependência de recompute para os consumidores downstream
+            # (bind/remap_self/null_orphan/gravação).
+            repaired = _persist(repaired, storage_level)
+            repaired.count()
+            _safe_unpersist(result[child_name])
+            result[child_name] = repaired
+            logger.info(
+                "FK adiada remapeada: %s.", _format_fk(child_name, fk))
+            _release_mapping_consumer(key)
 
         if validate_mode == "full":
             if verbose:
@@ -2509,6 +2678,22 @@ def get_engorda_env() -> dict[str, str]:
     return config
 
 
+def _fk_identidade_degenerada(table: str, fk: dict) -> bool:
+    """True para FK auto-referente IDENTIDADE: mesma tabela e cada coluna
+    apontando para si mesma (ex.: CONTA_PARTICIPANTE.NUM_CONTA_PARTICIPANTE_
+    CETIP -> CONTA_PARTICIPANTE.NUM_CONTA_PARTICIPANTE_CETIP). Trivialmente
+    satisfeita por construção (todo valor existe na própria coluna) — é
+    artefato de geração de spec, não um relacionamento. Removida em
+    normalize_specs para não gerar warning nem trabalho em nenhum consumidor.
+    """
+    if fk.get("parent_table") != table:
+        return False
+    cols = list(fk.get("columns") or [])
+    pcols = list(fk.get("parent_columns") or [])
+    return bool(cols) and len(cols) == len(pcols) and all(
+        c == p for c, p in zip(cols, pcols))
+
+
 def normalize_specs(specs: dict) -> dict:
     out: dict = {}
     for raw_name, cfg in specs.items():
@@ -2526,6 +2711,20 @@ def normalize_specs(specs: dict) -> dict:
             for fk in fks:
                 if isinstance(fk, dict) and fk.get("parent_table"):
                     fk["parent_table"] = table_path_name(str(fk["parent_table"]))
+            # FKs auto-referentes identidade são spec-lixo: satisfeitas por
+            # construção, só geravam o warning "self-reference não é
+            # suportado" e joins inúteis nos passes de órfãos. Removidas
+            # aqui, ANTES de qualquer consumidor (referential_sample,
+            # sanitização de síntese, null_orphan_fks).
+            filtradas = [fk for fk in fks
+                         if not (isinstance(fk, dict)
+                                 and _fk_identidade_degenerada(name, fk))]
+            if len(filtradas) != len(fks):
+                logger.info(
+                    "normalize_specs: %d FK(s) identidade auto-referente(s) "
+                    "removida(s) de %s (trivialmente satisfeitas).",
+                    len(fks) - len(filtradas), name)
+            new_cfg[fk_key] = filtradas
         out[name] = new_cfg
     return out
 
@@ -2860,9 +3059,129 @@ def referential_sample(spark, config, comp_specs, limit: int | None) -> dict:
     # Passo ascendente: garante que toda chave de FK presente numa filha
     # mantida exista no pai amostrado, puxando do Parquet completo as linhas
     # de pai que o filtro/poda removeu mas que continuam referenciadas.
-    return completa_pais_referenciados(
+    sampled = completa_pais_referenciados(
         spark, config, comp_specs, sampled, broadcast_missing=broadcast_keys
     )
+    # O que resta de órfão após o fecho é órfão DE PRODUÇÃO (a chave não
+    # existe nem no Parquet completo do pai). Neutraliza na fonte para que
+    # _fk_has_data_problem encontre zero órfãos e a FK seja PRESERVADA na
+    # síntese — antes, um único órfão descartava a FK inteira e
+    # null_orphan_fks anulava a coluna toda.
+    return neutraliza_orfaos_na_fonte(comp_specs, sampled)
+
+
+def neutraliza_orfaos_na_fonte(comp_specs, sampled: dict) -> dict:
+    """Anula (ou dropa) na FONTE amostrada os valores de FK sem pai.
+
+    Motivação: `_fk_has_data_problem` descarta o relacionamento INTEIRO se
+    existir UM órfão sequer — o sintetizador então gera a coluna sem remap e
+    `null_orphan_fks` a anula por completo. Um punhado de órfãos de produção
+    (ex.: 69k chaves em CONDICAO_IF -> INSTRUMENTO_FINANCEIRO) destruía a FK
+    para os milhões de linhas válidas. Aqui o órfão é neutralizado LINHA a
+    LINHA na fonte, e o relacionamento sobrevive para o resto.
+
+    Executa APÓS completa_pais_referenciados: o fecho ascendente já puxou do
+    Parquet completo todo pai que existia; o que resta referenciado sem pai
+    não existe em lugar nenhum (órfão de produção) e não há o que preservar.
+
+    Regras por FK (espelham null_orphan_fks, mas na fonte):
+      - linhas com QUALQUER coluna da FK nula nunca são tocadas (MATCH
+        SIMPLE: FK parcialmente nula não é checada pelo banco);
+      - colunas da FK que NÃO são PK -> anuladas apenas nas linhas órfãs
+        (basta uma coluna nula para desligar a checagem composta);
+      - FK cujas colunas são TODAS parte da PK -> não dá para anular (NOT
+        NULL): a linha órfã é DROPADA, com warning. O drop é seguro para os
+        descendentes porque o passe corre em ordem topológica (pais antes de
+        filhas): filhas que referenciem a linha dropada são vistas DEPOIS,
+        contra o pai já encolhido, e neutralizadas do mesmo jeito.
+
+    A ordem topológica também dá, de brinde, a checagem das arestas puladas
+    pela quebra de ciclo na descida: aqui TODAS as tabelas já estão em
+    `sampled`, então nenhuma aresta é pulada por `parent not in sampled`.
+
+    Self-FKs (parent == table) TAMBÉM são neutralizadas: após o fecho
+    intra-tabela de completa_pais_referenciados, um valor auto-referente sem
+    correspondente é órfão de produção como qualquer outro — e, como a
+    self-FK agora fica ATIVA nas specs de síntese, `_fk_has_data_problem`
+    a checaria e descartaria por um órfão residual. O pai da checagem é o
+    PRÓPRIO df corrente. No caso raro de self-FK dentro da PK (drop), o
+    drop pode encadear (a linha dropada era pai de outra): itera a ponto
+    fixo, limitado.
+
+    Custo: por FK, um anti-join de chaves DISTINTAS + isEmpty (barato); o
+    rewrite da filha (join contra as chaves órfãs, tipicamente poucas) e o
+    novo localCheckpoint só acontecem quando há órfão de fato.
+    """
+    MAX_ITER_SELF_DROP = 10
+    order = topo_order_tables(comp_specs)
+    for table in order:
+        df = sampled.get(table)
+        if df is None:
+            continue
+        cfg = comp_specs[table]
+        pk_set = set(cfg.get("pk_cols") or [])
+        changed = False
+        for fk in _fk_list(cfg):
+            parent = fk.get("parent_table")
+            cols = list(fk.get("columns") or [])
+            pcols = list(fk.get("parent_columns") or [])
+            eh_self = parent == table
+            if (parent not in sampled or not cols or len(cols) != len(pcols)
+                    or (eh_self and set(cols) & set(pcols))):
+                continue  # fora do componente / malformada / self degenerada
+            nullable_cols = [c for c in cols if c not in pk_set]
+            # self + drop pode encadear (linha dropada era pai de outra);
+            # nos demais casos uma rodada basta.
+            rodadas = MAX_ITER_SELF_DROP if (eh_self and not nullable_cols) else 1
+            for _ in range(rodadas):
+                base_pai = df if eh_self else sampled[parent]
+                parent_keys = (base_pai
+                               .select(*[F.col(p).alias(c)
+                                         for c, p in zip(cols, pcols)])
+                               .distinct())
+                orfas = (df.select(*cols).dropna().distinct()
+                         .join(parent_keys, on=cols, how="left_anti"))
+                if orfas.isEmpty():
+                    break
+                # Join por igualdade nas colunas da FK: linhas com FK nula
+                # nunca casam com `orfas` (null != null) -> ficam intactas.
+                joined = df.join(orfas.withColumn("__orf", F.lit(True)),
+                                 on=cols, how="left")
+                if nullable_cols:
+                    logger.warning(
+                        "neutraliza_orfaos_na_fonte: %s.%s -> %s%s: anulando "
+                        "FK de linhas órfãs de produção (chave inexistente "
+                        "no Parquet completo do pai).",
+                        table, ",".join(cols), parent,
+                        " (self)" if eh_self else "")
+                    for c in nullable_cols:
+                        joined = joined.withColumn(
+                            c, F.when(F.col("__orf"),
+                                      F.lit(None).cast(df.schema[c].dataType))
+                                .otherwise(F.col(c)))
+                    df = joined.drop("__orf")
+                else:
+                    # FK inteira dentro da PK: NOT NULL impede anular -> dropa.
+                    logger.warning(
+                        "neutraliza_orfaos_na_fonte: %s.%s -> %s%s: FK é "
+                        "parte da PK (NOT NULL); DROPANDO linhas órfãs de "
+                        "produção.",
+                        table, ",".join(cols), parent,
+                        " (self)" if eh_self else "")
+                    df = joined.where(F.col("__orf").isNull()).drop("__orf")
+                changed = True
+                if eh_self and not nullable_cols:
+                    # o drop mudou o conjunto de PKs: reavalia contra o df
+                    # corrente na próxima rodada (plano raso via checkpoint).
+                    df = df.localCheckpoint(eager=True)
+                    continue
+                break
+        if changed:
+            # Checkpoint por tabela alterada: filhas mais abaixo na ordem
+            # topológica leem sampled[table] já neutralizado (necessário para
+            # o cascateamento do caso de drop) sem reanálise de plano fundo.
+            sampled[table] = df.localCheckpoint(eager=True)
+    return sampled
 
 
 def completa_pais_referenciados(
@@ -2884,16 +3203,24 @@ def completa_pais_referenciados(
     de ciclo em _toposort_break_cycles podem deixar resíduo transitivo; esse
     resíduo (raro) segue coberto por null_orphan_fks na síntese.
 
-    Auto-referências (parent == child) são puladas: fechar recursivamente
-    dentro da mesma tabela exigiria iterar até ponto fixo (custo proibitivo
-    no full run); null_orphan_fks neutraliza esses casos.
+    Auto-referências (parent == child) são fechadas DENTRO da própria tabela,
+    por iteração a ponto fixo ANTES das FKs normais da mesma tabela: uma
+    linha mantida cuja self-FK aponte para uma linha podada puxa-a de volta
+    do Parquet completo; a linha puxada pode referenciar outra, e assim por
+    diante — a iteração converge em ~profundidade-da-hierarquia passos
+    (limitada por MAX_ITER_FECHO_SELF; hierarquias reais são rasas). O
+    critério de parada por CONTAGEM estagnada (e não só por vazio) evita
+    loop infinito quando restam apenas chaves inexistentes no Parquet
+    completo (órfãs de produção), que ficam para neutraliza_orfaos_na_fonte.
+    Rodar o fecho self ANTES das FKs normais garante que as linhas puxadas
+    também tenham seus pais externos completados no mesmo passe.
 
-    Custo: `faltantes` é checado com isEmpty() antes de tocar o Parquet do
-    pai — no caso comum (poda descendente já garantiu a FK) a passada custa
-    apenas um anti-join de chaves distintas, sem leitura extra nem novo
-    checkpoint. O union + localCheckpoint só acontece quando há de fato
-    linhas a completar, mantendo o plano do pai raso para os consumidores
-    downstream (síntese, validação).
+    Custo: `faltantes` é checado com isEmpty()/count antes de tocar o
+    Parquet do pai — no caso comum (poda descendente já garantiu a FK) a
+    passada custa apenas um anti-join de chaves distintas, sem leitura extra
+    nem novo checkpoint. O union + localCheckpoint só acontece quando há de
+    fato linhas a completar, mantendo o plano do pai raso para os
+    consumidores downstream (síntese, validação).
 
     broadcast_missing:
         True (caminho --limit) -> `faltantes` é pequeno por construção
@@ -2901,18 +3228,57 @@ def completa_pais_referenciados(
         broadcast no left_semi evita shuffle do Parquet completo do pai.
         False (full run) -> deixa o AQE decidir, como no passo descendente.
     """
+    MAX_ITER_FECHO_SELF = 20
     order = topo_order_tables(comp_specs)
     for child in reversed(order):
         child_df = sampled.get(child)
         if child_df is None:
             continue
-        for fk in _fk_list(comp_specs[child]):
+        fks = _fk_list(comp_specs[child])
+
+        # ---- 1) fecho intra-tabela (self-FKs), a ponto fixo -------------
+        for fk in fks:
+            parent = fk.get("parent_table")
+            cols = list(fk.get("columns") or [])
+            pcols = list(fk.get("parent_columns") or [])
+            if (parent != child or not cols or len(cols) != len(pcols)
+                    or set(cols) & set(pcols)):
+                continue  # não-self / malformada / degenerada
+            n_anterior = -1
+            for _ in range(MAX_ITER_FECHO_SELF):
+                ref_keys = (child_df
+                            .select(*[F.col(c).alias(p)
+                                      for c, p in zip(cols, pcols)])
+                            .dropna().distinct())
+                faltantes = ref_keys.join(
+                    child_df.select(*pcols).distinct(),
+                    on=pcols, how="left_anti")
+                n_faltantes = faltantes.count()
+                if n_faltantes == 0 or n_faltantes == n_anterior:
+                    # convergiu, ou só restam chaves inexistentes no Parquet
+                    # completo (órfãs de produção -> neutralização cuida).
+                    break
+                n_anterior = n_faltantes
+                faltantes_side = (F.broadcast(faltantes)
+                                  if broadcast_missing else faltantes)
+                extra = (read_parquet(spark, raw_path(config, child))
+                         .join(faltantes_side, on=pcols, how="left_semi"))
+                logger.info(
+                    "completa_pais_referenciados: %s.%s -> %s (self): "
+                    "puxando %d linha(s) referenciada(s) podada(s)",
+                    child, ",".join(cols), child, n_faltantes)
+                child_df = (child_df.unionByName(extra)
+                            .localCheckpoint(eager=True))
+            sampled[child] = child_df
+
+        # ---- 2) FKs normais (filha -> pai externo) ----------------------
+        for fk in fks:
             parent = fk.get("parent_table")
             cols = list(fk.get("columns") or [])
             pcols = list(fk.get("parent_columns") or [])
             if (parent == child or parent not in sampled
                     or not cols or len(cols) != len(pcols)):
-                continue  # self-ref / fora do componente / malformada
+                continue  # self já tratada acima / fora do componente
             # Chaves referenciadas pela filha, já no nome das colunas do pai.
             # dropna(): FK com QUALQUER coluna NULL não exige pai (MATCH
             # SIMPLE); os casos parciais seguem com null_orphan_fks.
@@ -3181,6 +3547,9 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
                 truncate_lineage=(limit is not None),
             )
             synthetic = bind_shared_key_children(synthetic, comp_specs)
+            # Self-FKs genuínas são remapeadas DENTRO da síntese (mapping
+            # old->new da própria tabela), preservando estrutura e
+            # auto-loops; null_orphan_fks segue como rede de segurança.
             synthetic = null_orphan_fks(synthetic, comp_specs)
             for name, df in synthetic.items():
                 out_path = f"{save_base}/{name}"
