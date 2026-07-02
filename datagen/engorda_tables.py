@@ -40,13 +40,23 @@ DEFAULT_SEED = 42
 # ---------------------------------------------------------------------------
 # Filtro de domínio: CDB simplificado.
 #
-# Toda tabela de origem que possuir a coluna NUM_TIPO_IF é filtrada para
-# NUM_TIPO_IF == 49 ANTES da síntese, garantindo que o modelo seja gerado
-# usando apenas o CDB simplificado. Tabelas que NÃO possuem a coluna passam
-# intactas. O filtro é aplicado por `_aplica_filtro_tipo_if` (logo após
-# `read_parquet`) nos dois pontos de leitura da fonte de síntese:
-#   1. referential_sample  (caminho --limit);
-#   2. engorda             (caminho sem --limit).
+# O universo NUM_TIPO_IF == 49 é definido por CHAVE, não por coluna: o filtro
+# por NUM_TIPO_IF é aplicado APENAS nas tabelas-raiz listadas em
+# TABELAS_RAIZ_FILTRO (hoje só INSTRUMENTO_FINANCEIRO). Todas as demais
+# tabelas entram no universo exclusivamente pela propagação referencial de
+# `referential_sample` (semi-join de chave, pais -> filhas), mesmo que
+# possuam uma cópia denormalizada de NUM_TIPO_IF.
+#
+# Motivo: quando o pertencimento era decidido DUAS vezes (coluna própria em
+# quem tinha NUM_TIPO_IF, chave em quem não tinha), qualquer inconsistência
+# da coluna denormalizada gerava filhas órfãs (passavam no filtro próprio,
+# falhavam na chave) e null_orphan_fks acabava anulando a FK inteira. Com o
+# filtro só na raiz, filha e pai nunca divergem por construção.
+#
+# Complementarmente, `completa_pais_referenciados` fecha o universo PARA
+# CIMA: toda chave de FK presente numa filha mantida passa a existir no pai
+# amostrado, puxando do Parquet completo (sem filtro de tipo) as linhas de
+# pai referenciadas que o filtro/poda tenha removido.
 #
 # IMPORTANTE: a leitura de max(pk) em compute_pk_maxes NÃO usa este filtro
 # de propósito — ela precisa do max real da tabela inteira para que as PKs
@@ -54,6 +64,9 @@ DEFAULT_SEED = 42
 # ---------------------------------------------------------------------------
 FILTRO_TIPO_IF_COLUMN = "NUM_TIPO_IF"
 FILTRO_TIPO_IF_VALUE = 49 #filtro cdb simplificado
+# Únicas tabelas filtradas pela PRÓPRIA coluna NUM_TIPO_IF; o restante do
+# universo é derivado por chave (semi-joins descendo + fecho subindo).
+TABELAS_RAIZ_FILTRO = frozenset({"INSTRUMENTO_FINANCEIRO"})
 
 # ---------------------------------------------------------------------------
 # Regras de engorda por coluna.
@@ -2664,19 +2677,26 @@ def read_parquet(spark: SparkSession, path: str, limit: int | None = None) -> Da
     return df.limit(limit) if limit is not None else df
 
 
-def _aplica_filtro_tipo_if(df: DataFrame) -> DataFrame:
+def _aplica_filtro_tipo_if(df: DataFrame, table: str) -> DataFrame:
     """Filtra a fonte de síntese para o CDB simplificado (NUM_TIPO_IF == 49).
 
-    Aplica o filtro APENAS quando a coluna NUM_TIPO_IF existe no DataFrame;
-    tabelas sem a coluna passam intactas. Linhas com NUM_TIPO_IF NULL são
-    descartadas (não casam com == 49), o que é o comportamento desejado.
+    O filtro por coluna é aplicado APENAS nas tabelas-raiz do universo
+    (TABELAS_RAIZ_FILTRO). Todas as demais tabelas — inclusive as que possuem
+    uma cópia denormalizada de NUM_TIPO_IF — passam intactas aqui e entram no
+    universo exclusivamente pela propagação referencial de chave em
+    referential_sample. Isso garante que o pertencimento ao universo é
+    decidido UMA única vez (pela chave), eliminando as filhas órfãs criadas
+    quando a coluna denormalizada discordava do pai filtrado.
 
-    Usado somente na leitura da FONTE de síntese (referential_sample e o
-    caminho sem --limit de engorda). A leitura de max(pk) em compute_pk_maxes
-    é intencionalmente NÃO filtrada: ela precisa do max real da tabela inteira
-    para evitar colisão das PKs sintéticas com linhas de outros NUM_TIPO_IF.
+    Na raiz, linhas com NUM_TIPO_IF NULL são descartadas (não casam com
+    == 49), o que é o comportamento desejado.
+
+    Usado somente na leitura da FONTE de síntese (referential_sample). A
+    leitura de max(pk) em compute_pk_maxes é intencionalmente NÃO filtrada:
+    ela precisa do max real da tabela inteira para evitar colisão das PKs
+    sintéticas com linhas de outros NUM_TIPO_IF.
     """
-    if FILTRO_TIPO_IF_COLUMN in df.columns:
+    if table in TABELAS_RAIZ_FILTRO and FILTRO_TIPO_IF_COLUMN in df.columns:
         return df.where(F.col(FILTRO_TIPO_IF_COLUMN) == F.lit(FILTRO_TIPO_IF_VALUE))
     return df
 
@@ -2770,21 +2790,30 @@ def compute_pk_maxes(spark, config, comp_specs, floor: int = 0, band: int = 0,
 def referential_sample(spark, config, comp_specs, limit: int | None) -> dict:
     """Subset referencial pais-antes-de-filhos, mantendo a FK consistente.
 
-    Percorre o componente pais-antes-de-filhos: lê cada tabela, aplica o filtro
-    de domínio CDB simplificado (NUM_TIPO_IF == 49) onde a coluna existe, e
-    mantém só as linhas-filhas cuja FK cai num pai já subsetado (ou é NULL).
+    Percorre o componente pais-antes-de-filhos: lê cada tabela, aplica o
+    filtro de domínio CDB simplificado (NUM_TIPO_IF == 49) SOMENTE nas
+    tabelas-raiz (TABELAS_RAIZ_FILTRO), e mantém só as linhas-filhas cuja FK
+    cai num pai já subsetado (ou é NULL).
 
-    Isto PROPAGA o filtro de domínio PARA BAIXO na árvore de FK, PELA CHAVE:
-    uma filha SEM a coluna NUM_TIPO_IF (ex.: CARTEIRA_COMITENTE) fica restrita
-    ao universo CDB porque seu NUM_IF precisa casar com uma linha de
-    INSTRUMENTO_FINANCEIRO que sobreviveu ao filtro de tipo no pai. Sem essa
-    propagação, o pai encolhe para o tipo 49, a filha mantém TODAS as linhas,
-    toda chave-filha vira órfã e null_orphan_fks zera a FK inteira — o sintoma
-    "CARTEIRA_COMITENTE.NUM_IF 100% nulo" observado no caminho full antigo.
+    O universo é definido por CHAVE: o filtro por coluna acontece uma única
+    vez, na raiz, e desce a árvore por semi-join. Filhas COM cópia
+    denormalizada de NUM_TIPO_IF não são filtradas pela própria coluna —
+    filtrá-las criava uma segunda definição do universo e, quando a coluna
+    discordava do pai (denormalização inconsistente), a filha virava órfã e
+    null_orphan_fks zerava a FK inteira.
+
+    Ao final, `completa_pais_referenciados` fecha o universo PARA CIMA: os
+    valores de FK que sobraram em filhas mantidas mas cujo pai não sobreviveu
+    ao filtro/poda (FKs ausentes no spec, arestas quebradas por ciclo) são
+    completados puxando as linhas de pai do Parquet completo. O resultado é
+    FK-fechado por construção; os únicos órfãos restantes são os que já eram
+    órfãos na produção (tratados por null_orphan_fks na síntese).
 
     limit:
         int  -> também limita cada tabela a `limit` linhas (teste rápido). Os
                 conjuntos de chave do pai são pequenos -> broadcast é seguro.
+                NB: o fecho ascendente pode deixar tabelas-PAI com mais de
+                `limit` linhas — é intencional (integridade > cap).
         None -> run COMPLETO: sem cap de linhas. Os conjuntos de chave do pai
                 podem ser grandes -> o join de chave NÃO usa F.broadcast (deixa
                 o AQE decidir) para evitar OOM no driver.
@@ -2793,10 +2822,10 @@ def referential_sample(spark, config, comp_specs, limit: int | None) -> dict:
     sampled: dict = {}
     broadcast_keys = limit is not None
     for table in order:
-        # Filtra para o CDB simplificado (NUM_TIPO_IF == 49) ANTES da propagação
-        # referencial, para que a consistência de FK seja calculada sobre o
-        # subconjunto 49. Tabelas sem a coluna passam intactas.
-        df = _aplica_filtro_tipo_if(read_parquet(spark, raw_path(config, table)))
+        # Filtra para o CDB simplificado (NUM_TIPO_IF == 49) APENAS na raiz;
+        # a propagação referencial abaixo restringe as demais tabelas por
+        # chave, e a consistência de FK é calculada sobre o subconjunto 49.
+        df = _aplica_filtro_tipo_if(read_parquet(spark, raw_path(config, table)), table)
         for fk in _fk_list(comp_specs[table]):
             parent = fk.get("parent_table")
             cols = list(fk.get("columns") or [])
@@ -2827,6 +2856,93 @@ def referential_sample(spark, config, comp_specs, limit: int | None) -> dict:
         # analyzer ainda percorre a árvore de plano cacheada; localCheckpoint a
         # substitui por uma folha RDD rasa.
         sampled[table] = df.localCheckpoint(eager=True)
+
+    # Passo ascendente: garante que toda chave de FK presente numa filha
+    # mantida exista no pai amostrado, puxando do Parquet completo as linhas
+    # de pai que o filtro/poda removeu mas que continuam referenciadas.
+    return completa_pais_referenciados(
+        spark, config, comp_specs, sampled, broadcast_missing=broadcast_keys
+    )
+
+
+def completa_pais_referenciados(
+    spark, config, comp_specs, sampled: dict, broadcast_missing: bool = False
+) -> dict:
+    """Fecho ascendente: todo valor de FK numa filha mantida passa a existir
+    no pai amostrado.
+
+    Percorre o componente em ordem topológica REVERSA (filhas -> pais): para
+    cada FK de uma filha mantida, calcula as chaves referenciadas que NÃO
+    estão no pai amostrado e puxa essas linhas do Parquet COMPLETO do pai —
+    sem o filtro de tipo, de propósito: a linha é necessária para a
+    integridade referencial mesmo que pertença a outro NUM_TIPO_IF.
+
+    A ordem reversa resolve necessidades transitivas em UMA passada num DAG:
+    as linhas adicionadas a um pai ainda terão as PRÓPRIAS FKs completadas
+    quando esse pai for visitado depois (pais vêm antes das filhas na ordem
+    topológica, logo depois delas na reversa). Arestas removidas pela quebra
+    de ciclo em _toposort_break_cycles podem deixar resíduo transitivo; esse
+    resíduo (raro) segue coberto por null_orphan_fks na síntese.
+
+    Auto-referências (parent == child) são puladas: fechar recursivamente
+    dentro da mesma tabela exigiria iterar até ponto fixo (custo proibitivo
+    no full run); null_orphan_fks neutraliza esses casos.
+
+    Custo: `faltantes` é checado com isEmpty() antes de tocar o Parquet do
+    pai — no caso comum (poda descendente já garantiu a FK) a passada custa
+    apenas um anti-join de chaves distintas, sem leitura extra nem novo
+    checkpoint. O union + localCheckpoint só acontece quando há de fato
+    linhas a completar, mantendo o plano do pai raso para os consumidores
+    downstream (síntese, validação).
+
+    broadcast_missing:
+        True (caminho --limit) -> `faltantes` é pequeno por construção
+        (limitado pelas chaves distintas de uma filha com <= limit linhas);
+        broadcast no left_semi evita shuffle do Parquet completo do pai.
+        False (full run) -> deixa o AQE decidir, como no passo descendente.
+    """
+    order = topo_order_tables(comp_specs)
+    for child in reversed(order):
+        child_df = sampled.get(child)
+        if child_df is None:
+            continue
+        for fk in _fk_list(comp_specs[child]):
+            parent = fk.get("parent_table")
+            cols = list(fk.get("columns") or [])
+            pcols = list(fk.get("parent_columns") or [])
+            if (parent == child or parent not in sampled
+                    or not cols or len(cols) != len(pcols)):
+                continue  # self-ref / fora do componente / malformada
+            # Chaves referenciadas pela filha, já no nome das colunas do pai.
+            # dropna(): FK com QUALQUER coluna NULL não exige pai (MATCH
+            # SIMPLE); os casos parciais seguem com null_orphan_fks.
+            ref_keys = (child_df
+                        .select(*[F.col(c).alias(p) for c, p in zip(cols, pcols)])
+                        .dropna()
+                        .distinct())
+            faltantes = ref_keys.join(
+                sampled[parent].select(*pcols).distinct(),
+                on=pcols, how="left_anti")
+            # Ação barata (limit 1) que evita, no caso comum de zero
+            # faltantes, a leitura do Parquet completo do pai, o union e um
+            # novo localCheckpoint.
+            if faltantes.isEmpty():
+                continue
+            # Puxa do Parquet COMPLETO, SEM filtro de tipo: a linha é
+            # necessária para a integridade, mesmo que seja de outro tipo.
+            faltantes_side = F.broadcast(faltantes) if broadcast_missing else faltantes
+            extra = (read_parquet(spark, raw_path(config, parent))
+                     .join(faltantes_side, on=pcols, how="left_semi"))
+            logger.info(
+                "completa_pais_referenciados: %s.%s -> %s: completando pai com "
+                "linhas referenciadas ausentes",
+                child, ",".join(cols), parent)
+            # localCheckpoint eager: sampled[parent] pode ser aumentado por
+            # várias filhas e consumido por vários downstreams; sem truncar,
+            # o plano cresce a cada union.
+            sampled[parent] = (sampled[parent]
+                               .unionByName(extra)
+                               .localCheckpoint(eager=True))
     return sampled
 
 
@@ -3019,14 +3135,16 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
                 # whose FK lands in a sampled parent -> FK-consistent under --limit.
                 comp_tables = referential_sample(spark, config, comp_specs, limit)
             else:
-                # Run COMPLETO: MESMA propagação referencial do filtro de domínio,
-                # agora sem cap de linhas. Filtra INSTRUMENTO_FINANCEIRO por
-                # NUM_TIPO_IF==46 e propaga o universo CDB pela árvore de FK, de
-                # modo que filhas SEM a coluna (CARTEIRA_COMITENTE, CARTEIRA_
-                # PARTICIPANTE, CREDITO, OPERACAO, ...) fiquem restritas ao tipo
-                # 46 via NUM_IF. Antes o filtro era por tabela isolada: o pai
-                # encolhia, as filhas passavam inteiras e viravam órfãs ->
-                # null_orphan_fks zerava a FK (NUM_IF 100% nulo).
+                # Run COMPLETO: MESMA propagação referencial do filtro de
+                # domínio, agora sem cap de linhas. O filtro NUM_TIPO_IF==49 é
+                # aplicado APENAS na raiz (TABELAS_RAIZ_FILTRO) e o universo
+                # desce pela árvore de FK por chave, de modo que TODAS as
+                # demais tabelas (com ou sem cópia denormalizada da coluna)
+                # fiquem restritas ao tipo 49 via NUM_IF. Ao final, o fecho
+                # ascendente (completa_pais_referenciados) puxa do Parquet
+                # completo as linhas de pai referenciadas por filhas mantidas
+                # que o filtro/poda tenha removido -> o subset sai FK-fechado
+                # e null_orphan_fks deixa de anular FKs por órfão estrutural.
                 comp_tables = referential_sample(spark, config, comp_specs, None)
             counts = {t: comp_tables[t].count() for t in comp}
             for t in comp:
