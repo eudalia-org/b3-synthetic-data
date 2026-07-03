@@ -3608,30 +3608,98 @@ def bind_shared_key_children(synthetic: dict, comp_specs: dict) -> dict:
     return synthetic
 
 
+def _rebind_orphan_fk_to_valid_parent(
+    child_df: DataFrame, parent_df: DataFrame,
+    cols: list[str], pcols: list[str], *, seed: int) -> DataFrame:
+    """Reaponta linhas órfãs de uma FK NOT NULL para chaves VÁLIDAS do pai.
+
+    Preserva a linha (não dropa, não anula): a FK órfã recebe uma chave que
+    existe no pai sintético, escolhida de forma determinística. Cada linha órfã
+    é pareada por posição contígua (0..N-1) com uma chave do pai; se há mais
+    órfãs que chaves distintas, as chaves são recicladas por módulo — o que é
+    aceitável para dado sintético (o vínculo original já não existia).
+
+    Só é chamado quando o pai TEM ao menos uma chave; o caller trata o caso de
+    pai sem chave nenhuma (drop inevitável).
+    """
+    n = len(cols)
+    # Chaves distintas do pai, numeradas 0..K-1.
+    pkeys = (parent_df
+             .select(*[F.col(pc).alias(f"__rb_np{i}") for i, pc in enumerate(pcols)])
+             .dropna().distinct())
+    pkeys = _with_contiguous_row_id(pkeys, "__rb_k")
+    k = pkeys.count()
+    if k == 0:
+        return child_df  # sem chave no pai: caller decide (drop)
+
+    # Marca órfãs: FK não-nula sem correspondência no pai.
+    match = (pkeys.select(*[F.col(f"__rb_np{i}").alias(f"__rb_m{i}") for i in range(n)])
+                  .withColumn("__rb_hit", F.lit(True)))
+    cond = reduce(lambda a, b: a & b,
+                  [child_df[cols[i]] == match[f"__rb_m{i}"] for i in range(n)])
+    j = child_df.join(match, cond, "left")
+    any_fk_set = reduce(lambda a, b: a | b, [F.col(c).isNotNull() for c in cols])
+    is_orphan = F.col("__rb_hit").isNull() & any_fk_set
+
+    # Número contíguo SÓ das linhas órfãs, para parear com chaves do pai.
+    j = j.withColumn("__rb_isorf", is_orphan)
+    orf = j.where(F.col("__rb_isorf"))
+    nonorf = j.where(~F.col("__rb_isorf") | F.col("__rb_isorf").isNull())
+    if orf.isEmpty():
+        drop_tmp = (["__rb_hit", "__rb_isorf"]
+                    + [f"__rb_m{i}" for i in range(n)])
+        return j.drop(*drop_tmp)
+
+    orf = _with_contiguous_row_id(orf, "__rb_rn")
+    # chave do pai = rn % k, escolha determinística (seed entra na ordem de
+    # numeração do pai, que é estável; o módulo distribui de forma reprodutível).
+    orf = orf.withColumn("__rb_pick", (F.col("__rb_rn") % F.lit(k)).cast("long"))
+    picks = pkeys  # tem __rb_k (0..k-1) e __rb_np{i}
+    orf = orf.join(F.broadcast(picks), orf["__rb_pick"] == picks["__rb_k"], "left")
+    for i, c in enumerate(cols):
+        ctype = _get_field_type(orf, c)
+        orf = orf.withColumn(c, F.col(f"__rb_np{i}").cast(ctype))
+    orf = orf.drop("__rb_rn", "__rb_pick", "__rb_k",
+                   *[f"__rb_np{i}" for i in range(n)])
+
+    drop_tmp = ["__rb_hit", "__rb_isorf"] + [f"__rb_m{i}" for i in range(n)]
+    orf = orf.drop(*drop_tmp)
+    nonorf = nonorf.drop(*drop_tmp)
+    return nonorf.unionByName(orf)
+
+
 def null_orphan_fks(synthetic: dict, comp_specs: dict) -> dict:
-    """Neutraliza FK órfã pós-síntese: ANULA se a coluna for anulável, senão
-    DROPA a linha.
+    """Neutraliza FK órfã pós-síntese, em ordem topológica, SEM esvaziar tabela.
 
     Rede de segurança final para referências que o sintetizador não conseguiu
     remapear — self-refs, relações ignoradas (órfão de fonte / pai ausente),
-    órfãos residuais de amostragem — para o load não bater em parent-key-not-
-    found (ORA-02291).
+    órfãos residuais de amostragem — para o load não bater em ORA-02291.
 
-    Decisão por FK, espelhando neutraliza_orfaos_na_fonte:
-      - colunas ANULÁVEIS (não-PK E não NOT NULL) da FK -> anuladas nas linhas
-        órfãs; sob MATCH SIMPLE uma coluna nula desliga a checagem composta e
-        as colunas PK/NOT NULL ficam intactas;
-      - se NENHUMA coluna da FK é anulável (todas PK e/ou NOT NULL), anular
-        violaria NOT NULL (ORA-01400) -> as linhas órfãs são DROPADAS.
+    Decisão por FK:
+      - colunas ANULÁVEIS (não-PK E não NOT NULL) -> anuladas nas linhas órfãs
+        (sob MATCH SIMPLE uma coluna nula desliga a checagem composta);
+      - FK sem coluna anulável (toda PK e/ou NOT NULL) -> REBIND determinístico
+        das linhas órfãs para uma chave VÁLIDA do pai sintético (preserva a
+        linha; ver _rebind_orphan_fk_to_valid_parent). Só quando o pai não tem
+        NENHUMA chave é que as órfãs são dropadas (inevitável) — com warning.
 
-    NOT NULL vem de not_null_cols (spec com cols_real.csv). Sem a lista, só a PK
-    bloqueia a anulação — comportamento antigo; a validação final
-    (assert_not_null_ok) barra o append se sobrar coluna NOT NULL nula.
+    Por que rebind e não drop: o drop puro (a) esvaziava tabelas-alvo quando a
+    FK ficava 100% órfã na amostra (--limit) e (b) rodando sem cascata deixava
+    órfãos RESIDUAIS nas filhas (ex.: CARTEIRA_*.NUM_CONTA_PARTICIPANTE -> 12/26
+    órfãs), porque encolher CONTA_PARTICIPANTE aqui não rechecava as filhas já
+    processadas. O rebind não encolhe pai nenhum, então nenhuma filha vira órfã
+    por causa deste passe.
 
-    Whole-PK FKs (toda coluna da FK também é PK) são domínio de
-    bind_shared_key_children; aqui caem no ramo do drop se ficarem órfãs.
+    ORDEM TOPOLÓGICA (pais antes de filhas): garante que, ao rebindar/anular uma
+    filha, o pai já está no seu estado final — a chave escolhida é válida no
+    frame que será gravado. Whole-PK FKs seguem sob bind_shared_key_children;
+    se restarem órfãs aqui, também são rebindadas.
     """
-    for child, cfg in comp_specs.items():
+    order = topo_order_tables(comp_specs)
+    for child in order:
+        cfg = comp_specs.get(child)
+        if cfg is None:
+            continue
         child_df = synthetic.get(child)
         if child_df is None:
             continue
@@ -3645,39 +3713,52 @@ def null_orphan_fks(synthetic: dict, comp_specs: dict) -> dict:
             if parent_df is None or not cols or len(cols) != len(pcols):
                 continue
 
-            # Anulável = não-PK E não NOT NULL. Se vazio, não dá para desligar a
-            # checagem sem violar NOT NULL -> dropa a linha órfã.
             nullable_cols = [c for c in cols if c not in pk_set and c not in nn_set]
 
-            keys = (parent_df
-                    .select(*[F.col(pc).alias(f"__pk{i}") for i, pc in enumerate(pcols)])
-                    .dropna().distinct()
-                    .withColumn("__match", F.lit(True)))
-            cond = reduce(lambda a, b: a & b,
-                          [child_df[cols[i]] == keys[f"__pk{i}"] for i in range(len(cols))])
-            # Sem F.broadcast: as chaves distintas de um pai sintético grande
-            # estouram o threshold de broadcast (OOM no driver / fallback
-            # silencioso). O AQE ainda faz broadcast automático quando o build
-            # side é de fato pequeno.
-            joined = child_df.join(keys, cond, "left")
-            any_fk_set = reduce(lambda a, b: a | b, [F.col(c).isNotNull() for c in cols])
-            is_orphan = F.col("__match").isNull() & any_fk_set
-
             if nullable_cols:
+                # Anula só as colunas anuláveis nas linhas órfãs.
+                keys = (parent_df
+                        .select(*[F.col(pc).alias(f"__pk{i}") for i, pc in enumerate(pcols)])
+                        .dropna().distinct()
+                        .withColumn("__match", F.lit(True)))
+                cond = reduce(lambda a, b: a & b,
+                              [child_df[cols[i]] == keys[f"__pk{i}"] for i in range(len(cols))])
+                joined = child_df.join(keys, cond, "left")
+                any_fk_set = reduce(lambda a, b: a | b, [F.col(c).isNotNull() for c in cols])
+                is_orphan = F.col("__match").isNull() & any_fk_set
                 for c in nullable_cols:
                     joined = joined.withColumn(
                         c, F.when(is_orphan, F.lit(None).cast(child_df.schema[c].dataType))
                             .otherwise(F.col(c)))
                 child_df = joined.drop("__match", *[f"__pk{i}" for i in range(len(pcols))])
             else:
-                # FK inteira NOT NULL/PK e órfã: anular quebraria NOT NULL.
-                # Dropa a linha órfã (decisão de negócio: drop com cascata).
-                logger.warning(
-                    "null_orphan_fks: %s.%s -> %s: FK NOT NULL órfã pós-síntese; "
-                    "DROPANDO linha(s) órfã(s).",
-                    child, ",".join(cols), parent)
-                child_df = (joined.where(~is_orphan)
-                            .drop("__match", *[f"__pk{i}" for i in range(len(pcols))]))
+                # FK NOT NULL órfã: rebind para chave válida do pai (preserva
+                # a linha). Se o pai não tem chave nenhuma, dropa (inevitável).
+                parent_has_key = not (
+                    parent_df.select(*pcols).dropna().isEmpty())
+                if parent_has_key:
+                    logger.info(
+                        "null_orphan_fks: %s.%s -> %s: FK NOT NULL órfã; "
+                        "REBIND para chave válida do pai (linha preservada).",
+                        child, ",".join(cols), parent)
+                    child_df = _rebind_orphan_fk_to_valid_parent(
+                        child_df, parent_df, cols, pcols,
+                        seed=_stable_seed(0, child, parent, tuple(cols)))
+                else:
+                    logger.warning(
+                        "null_orphan_fks: %s.%s -> %s: FK NOT NULL órfã e pai "
+                        "SEM chave sintética; DROPANDO linha(s) órfã(s) "
+                        "(inevitável).", child, ",".join(cols), parent)
+                    keys = (parent_df
+                            .select(*[F.col(pc).alias(f"__pk{i}") for i, pc in enumerate(pcols)])
+                            .dropna().distinct().withColumn("__match", F.lit(True)))
+                    cond = reduce(lambda a, b: a & b,
+                                  [child_df[cols[i]] == keys[f"__pk{i}"] for i in range(len(cols))])
+                    joined = child_df.join(keys, cond, "left")
+                    any_fk_set = reduce(lambda a, b: a | b, [F.col(c).isNotNull() for c in cols])
+                    is_orphan = F.col("__match").isNull() & any_fk_set
+                    child_df = (joined.where(~is_orphan)
+                                .drop("__match", *[f"__pk{i}" for i in range(len(pcols))]))
         synthetic[child] = child_df
     return synthetic
 
@@ -3695,10 +3776,17 @@ def assert_not_null_ok(synthetic: dict, comp_specs: dict) -> None:
     validar e o comportamento antigo prevalece.
     """
     problemas: list[str] = []
+    vazias_alvo: list[str] = []
     for table, cfg in comp_specs.items():
         df = synthetic.get(table)
         if df is None:
             continue
+        # Tabela ALVO (não-static) que ficou VAZIA após os passes = sinal de que
+        # um drop apagou tudo (FK NOT NULL 100% órfã). Melhor abortar com log do
+        # que gravar tabela vazia silenciosamente (o rebind deve evitar isso;
+        # esta é a rede de segurança).
+        if not cfg.get("static") and df.isEmpty():
+            vazias_alvo.append(table)
         nn = [c for c in _not_null_cols(cfg) if c in df.columns]
         if not nn:
             continue
@@ -3706,10 +3794,20 @@ def assert_not_null_ok(synthetic: dict, comp_specs: dict) -> None:
         for col, n in counts.items():
             if n > 0:
                 problemas.append(f"{table}.{col}={n} nulo(s)")
+    msgs: list[str] = []
     if problemas:
-        raise ValueError(
+        msgs.append(
             "Colunas NOT NULL ficaram nulas após a síntese (o append quebraria "
-            "com ORA-01400): " + "; ".join(sorted(problemas))
+            "com ORA-01400): " + "; ".join(sorted(problemas)))
+    if vazias_alvo:
+        msgs.append(
+            "Tabela(s)-alvo ficaram VAZIAS após a síntese (provável drop de FK "
+            "NOT NULL 100% órfã): " + ", ".join(sorted(vazias_alvo))
+            + ". Rode com --limit maior (amostra pegou poucas linhas do pai) ou "
+            "verifique o fecho/rebind dessas FKs.")
+    if msgs:
+        raise ValueError(
+            " | ".join(msgs)
             + ". Verifique o remap/fecho dessas FKs ou o not_null_cols do spec.")
 
 
