@@ -53,6 +53,27 @@ DEFAULT_SEED = 42
 # falhavam na chave) e null_orphan_fks acabava anulando a FK inteira. Com o
 # filtro só na raiz, filha e pai nunca divergem por construção.
 #
+# FK de domínio vs FK de integridade: durante a descida em `referential_sample`
+# a poda por semi-join NÃO pode usar TODAS as FKs de uma tabela indistintamente.
+# Uma tabela orientada a instrumento financeiro (TITULO, CARTEIRA_COMITENTE,
+# CARTEIRA_PARTICIPANTE, CREDITO, DEPOSITO_AUTOMATICO_IF, CONDICAO_IF etc. —
+# e a própria INSTRUMENTO_FINANCEIRO) também carrega FKs LATERAIS para tabelas
+# de referência compartilhadas (CONTA_PARTICIPANTE, PARTICIPANTE, tabelas de
+# lookup...) que nada têm a ver com o domínio 49 e cuja amostra, sendo
+# independente, não intersecta necessariamente as linhas válidas do domínio.
+# Usar essas FKs laterais como critério de sobrevivência na MESMA passada
+# zera artificialmente linhas que são perfeitamente válidas no domínio — e,
+# como a poda acontece ANTES do fecho ascendente, a linha descartada não pode
+# mais ser recuperada por `completa_pais_referenciados` (que só completa PAIS
+# de filhas que sobreviveram). `_dominio_spine` resolve isso calculando, só a
+# partir do grafo de FKs, o conjunto de tabelas cuja amostra é garantidamente
+# consistente com o domínio (a raiz + tudo alcançável dela por uma cadeia de
+# FKs); a poda em `referential_sample` só usa FKs cujo parent_table esteja
+# nesse conjunto. As FKs laterais (para fora do conjunto) NÃO podam nada na
+# descida — ficam para `completa_pais_referenciados` (fecho de integridade
+# para cima) e `neutraliza_orfaos_na_fonte` (só então descarta/anula órfão
+# real de produção) resolverem depois.
+#
 # Complementarmente, `completa_pais_referenciados` fecha o universo PARA
 # CIMA: toda chave de FK presente numa filha mantida passa a existir no pai
 # amostrado, puxando do Parquet completo (sem filtro de tipo) as linhas de
@@ -2986,13 +3007,59 @@ def compute_pk_maxes(spark, config, comp_specs, floor: int = 0, band: int = 0,
     return out
 
 
+def _dominio_spine(comp_specs: Mapping[str, Any]) -> frozenset:
+    """Tabelas cuja amostra, ao final da descida em `referential_sample`, é
+    garantidamente consistente com o domínio (NUM_TIPO_IF == 49): a raiz
+    (TABELAS_RAIZ_FILTRO) e toda tabela alcançável a partir dela por uma
+    cadeia de FKs — mesmo que a tabela tenha OUTRAS FKs laterais (para
+    referências compartilhadas como CONTA_PARTICIPANTE, PARTICIPANTE,
+    tabelas de lookup etc.) que não entram nessa cadeia.
+
+    Só uma FK cujo parent_table esteja neste conjunto pode ser usada para
+    podar linhas durante a descida. Não é preciso que TODAS as FKs de uma
+    tabela sejam para o domínio: a poda usa só as que forem; o restante
+    (FK lateral) não poda nada nessa etapa e é resolvido depois por
+    `completa_pais_referenciados` / `neutraliza_orfaos_na_fonte`. Ver
+    comentário no topo do arquivo (FK de domínio vs FK de integridade).
+
+    Ponto fixo sobre o grafo de FKs de `comp_specs`, sem tocar em dados: uma
+    tabela entra no conjunto assim que tiver PELO MENOS UMA FK (não-self)
+    cujo pai já esteja no conjunto — não precisa ser a FK direta para a
+    raiz. Isso propaga corretamente por cadeias de 1 FK só (ex.:
+    JUROS_FLUTUANTE/RESGATE -> CONDICAO_IF -> INSTRUMENTO_FINANCEIRO) sem
+    arrastar tabelas cujo único vínculo é lateral (ex.: CONTA_PARTICIPANTE,
+    que não tem nenhuma FK própria apontando para o domínio).
+    """
+    spine = {t for t in TABELAS_RAIZ_FILTRO if t in comp_specs}
+    changed = True
+    while changed:
+        changed = False
+        for table, cfg in comp_specs.items():
+            if table in spine:
+                continue
+            for fk in _fk_list(cfg):
+                parent = fk.get("parent_table")
+                if parent != table and parent in spine:
+                    spine.add(table)
+                    changed = True
+                    break
+    return frozenset(spine)
+
+
 def referential_sample(spark, config, comp_specs, limit: int | None) -> dict:
     """Subset referencial pais-antes-de-filhos, mantendo a FK consistente.
 
     Percorre o componente pais-antes-de-filhos: lê cada tabela, aplica o
     filtro de domínio CDB simplificado (NUM_TIPO_IF == 49) SOMENTE nas
     tabelas-raiz (TABELAS_RAIZ_FILTRO), e mantém só as linhas-filhas cuja FK
-    cai num pai já subsetado (ou é NULL).
+    DE DOMÍNIO (parent_table em `_dominio_spine`) cai num pai já subsetado
+    (ou é NULL). FKs LATERAIS (para tabelas fora do espinhaço de domínio,
+    ex.: CONTA_PARTICIPANTE, PARTICIPANTE, tabelas de lookup) NÃO podam
+    nada nesta etapa — podar por elas aqui zerava artificialmente linhas
+    válidas do domínio sempre que a amostra independente do pai lateral não
+    intersectava a filha, e a linha descartada não podia mais ser
+    recuperada pelo fecho ascendente. Essas FKs continuam sendo resolvidas
+    (pai completado ou órfão neutralizado) pelos passos seguintes.
 
     O universo é definido por CHAVE: o filtro por coluna acontece uma única
     vez, na raiz, e desce a árvore por semi-join. Filhas COM cópia
@@ -3003,10 +3070,11 @@ def referential_sample(spark, config, comp_specs, limit: int | None) -> dict:
 
     Ao final, `completa_pais_referenciados` fecha o universo PARA CIMA: os
     valores de FK que sobraram em filhas mantidas mas cujo pai não sobreviveu
-    ao filtro/poda (FKs ausentes no spec, arestas quebradas por ciclo) são
-    completados puxando as linhas de pai do Parquet completo. O resultado é
-    FK-fechado por construção; os únicos órfãos restantes são os que já eram
-    órfãos na produção (tratados por null_orphan_fks na síntese).
+    ao filtro/poda (FKs ausentes no spec, arestas quebradas por ciclo, FKs
+    laterais não usadas na poda) são completados puxando as linhas de pai do
+    Parquet completo. O resultado é FK-fechado por construção; os únicos
+    órfãos restantes são os que já eram órfãos na produção (tratados por
+    neutraliza_orfaos_na_fonte / null_orphan_fks).
 
     limit:
         int  -> também limita cada tabela a `limit` linhas (teste rápido). Os
@@ -3018,6 +3086,7 @@ def referential_sample(spark, config, comp_specs, limit: int | None) -> dict:
                 o AQE decidir) para evitar OOM no driver.
     """
     order = topo_order_tables(comp_specs)
+    spine = _dominio_spine(comp_specs)
     sampled: dict = {}
     broadcast_keys = limit is not None
     for table in order:
@@ -3029,8 +3098,9 @@ def referential_sample(spark, config, comp_specs, limit: int | None) -> dict:
             parent = fk.get("parent_table")
             cols = list(fk.get("columns") or [])
             pcols = list(fk.get("parent_columns") or [])
-            if parent == table or parent not in sampled or not cols or len(cols) != len(pcols):
-                continue  # self-ref / out-of-component / malformed -> handled by null pass
+            if (parent == table or parent not in sampled or not cols
+                    or len(cols) != len(pcols) or parent not in spine):
+                continue  # self-ref / out-of-component / malformed / FK lateral (fora do domínio) -> completada/neutralizada depois
             keys = (sampled[parent]
                     .select(*[F.col(pc).alias(f"__k{i}") for i, pc in enumerate(pcols)])
                     .dropna().distinct())
