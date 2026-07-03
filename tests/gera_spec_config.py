@@ -25,13 +25,18 @@ ENTRADA:
     pk_real.csv  -> TABLE_NAME, COLUMN_NAME, POSITION           (schema inteiro, SEM filtro IN)
     fk_real.csv  -> CONSTRAINT_NAME, CHILD_TABLE, CHILD_COLUMN, COL_POSITION,
                     PARENT_TABLE, PARENT_COLUMN                 (schema inteiro, SEM filtro IN)
+    cols_real.csv-> TABLE_NAME, COLUMN_NAME, NULLABLE (Y/N)      (schema inteiro, SEM filtro IN)
+                    Alimenta `not_null_cols` no spec, usado pelo engorda para
+                    DROPAR (em vez de anular) linhas órfãs em colunas NOT NULL.
 
 SAÍDA:
-    spec_config.json com as 15 + ancestrais (fecho), static correto.
+    spec_config.json com as 15 + ancestrais (fecho), static correto, e
+    not_null_cols por tabela (quando cols_real.csv é informado).
 
 USO:
     from gera_specs_fecho import gera
-    gera(pk_csv="pk_real.csv", fk_csv="fk_real.csv", saida="spec_config.json",
+    gera(pk_csv="pk_real.csv", fk_csv="fk_real.csv", cols_csv="cols_real.csv",
+         saida="spec_config.json",
          parquet_disponivel={"COMITENTE","GRP_MODALIDADE_LIQUIDACAO", ...})  # opcional
 """
 
@@ -64,6 +69,28 @@ def le_pks(caminho: str) -> Dict[str, List[str]]:
                 (int(row["POSITION"]), _norm(row["COLUMN_NAME"]))
             )
     return {t: [c for _, c in sorted(v)] for t, v in acc.items()}
+
+
+def le_not_null(caminho: str) -> Dict[str, List[str]]:
+    """Colunas NOT NULL por tabela, lidas do cols_real.csv.
+
+    Espera as colunas TABLE_NAME, COLUMN_NAME, NULLABLE (Y/N). Retorna, por
+    tabela, a lista ordenada das colunas com NULLABLE == 'N'. Essa informação
+    alimenta `not_null_cols` no spec, para o engorda decidir entre ANULAR
+    (coluna nullable órfã) e DROPAR a linha (coluna NOT NULL órfã) em vez de
+    anular às cegas e violar NOT NULL no append (ORA-01400).
+    """
+    acc: Dict[str, List[str]] = defaultdict(list)
+    with open(caminho, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        campos = reader.fieldnames or []
+        for obrig in ("TABLE_NAME", "COLUMN_NAME", "NULLABLE"):
+            if obrig not in campos:
+                raise ValueError(f"cols_real.csv precisa da coluna {obrig}.")
+        for row in reader:
+            if _norm(row["NULLABLE"]) == "N":
+                acc[_norm(row["TABLE_NAME"])].append(_norm(row["COLUMN_NAME"]))
+    return {t: sorted(set(v)) for t, v in acc.items()}
 
 
 # FK por constraint: child -> lista de (columns, parent, parent_columns)
@@ -125,6 +152,7 @@ def gera(
     *,
     pk_csv: str,
     fk_csv: str,
+    cols_csv: Optional[str] = None,
     saida: str = "spec_config.json",
     parquet_disponivel: Optional[Set[str]] = None,
     spark=None,
@@ -132,6 +160,11 @@ def gera(
 ) -> dict:
     pks = le_pks(pk_csv)
     fks = le_fks(fk_csv)
+    # not_null_cols alimenta a decisão anula-vs-dropa do engorda. Sem o CSV de
+    # colunas o spec sai SEM essa informação e o engorda cai no comportamento
+    # antigo (anula sempre) — que reintroduz o risco de ORA-01400. Por isso é
+    # fortemente recomendado passar cols_csv; um aviso é emitido se faltar.
+    not_null = le_not_null(cols_csv) if cols_csv else {}
 
     # --- Buraco B: alguma das 15 sem PK? ---
     alvo_sem_pk = sorted(t for t in TABELAS_ALVO if t not in pks)
@@ -161,6 +194,12 @@ def gera(
             cfg["foreign_keys"] = sorted(
                 fk_list, key=lambda x: (x["parent_table"], tuple(x["columns"]))
             )
+        # Colunas NOT NULL da tabela (só as que existem no pk_real como pista de
+        # que a tabela é conhecida; a fonte é o cols_real). O engorda usa isto
+        # para dropar (em vez de anular) linhas órfãs em colunas NOT NULL.
+        nn = not_null.get(t, [])
+        if nn:
+            cfg["not_null_cols"] = nn
         cfg["static"] = t not in TABELAS_ALVO
         specs[t] = cfg
 
@@ -220,6 +259,22 @@ def gera(
         print(f"  [VERIFICAR] passe spark+parquet_bases ou parquet_disponivel para checar.")
         print(f"  Ancestrais do fecho: {parquet_desconhecido}")
 
+    print("\n--- Buraco D: NOT NULL das colunas (anula-vs-dropa no engorda) ---")
+    if not cols_csv:
+        print("  [ATENÇÃO] cols_csv NÃO informado: o spec sai SEM not_null_cols.")
+        print("  O engorda cairá no modo antigo (anula FK órfã sempre), reabrindo o")
+        print("  risco de ORA-01400 em coluna NOT NULL. Passe cols_real.csv.")
+    else:
+        com_nn = sorted(t for t in specs if specs[t].get("not_null_cols"))
+        alvo_sem_nn = sorted(t for t in TABELAS_ALVO
+                             if t in specs and not specs[t].get("not_null_cols"))
+        n_nn = sum(len(specs[t]["not_null_cols"]) for t in com_nn)
+        print(f"  OK: not_null_cols em {len(com_nn)}/{len(specs)} tabela(s), "
+              f"{n_nn} coluna(s) NOT NULL no total.")
+        if alvo_sem_nn:
+            print(f"  [VERIFICAR] alvo(s) sem NENHUMA coluna NOT NULL no cols_real "
+                  f"(esperado ao menos a PK): {alvo_sem_nn}")
+
     # valida JSON
     with open(saida, encoding="utf-8") as f:
         json.load(f)
@@ -230,12 +285,16 @@ def gera(
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
+    if len(sys.argv) < 4:
         raise SystemExit(
-            "Uso: python gera_specs_fecho.py pk_real.csv fk_real.csv [saida.json] "
-            "[parquet_disp separados por virgula]"
+            "Uso: python gera_specs_fecho.py pk_real.csv fk_real.csv cols_real.csv "
+            "[saida.json] [parquet_disp separados por virgula]\n"
+            "  cols_real.csv (TABLE_NAME,COLUMN_NAME,NULLABLE) alimenta not_null_cols; "
+            "passe '-' para omitir (NÃO recomendado — reabre risco de ORA-01400)."
         )
-    pk_csv, fk_csv = sys.argv[1], sys.argv[2]
-    saida = sys.argv[3] if len(sys.argv) > 3 else "spec_config.json"
-    disp = set(sys.argv[4].split(",")) if len(sys.argv) > 4 else None
-    gera(pk_csv=pk_csv, fk_csv=fk_csv, saida=saida, parquet_disponivel=disp)
+    pk_csv, fk_csv, cols_csv = sys.argv[1], sys.argv[2], sys.argv[3]
+    cols_csv = None if cols_csv == "-" else cols_csv
+    saida = sys.argv[4] if len(sys.argv) > 4 else "spec_config.json"
+    disp = set(sys.argv[5].split(",")) if len(sys.argv) > 5 else None
+    gera(pk_csv=pk_csv, fk_csv=fk_csv, cols_csv=cols_csv, saida=saida,
+         parquet_disponivel=disp)
