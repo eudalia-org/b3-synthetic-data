@@ -78,20 +78,44 @@ def _ensure_stdout_logging() -> None:
     if stream_handlers:
         for h in stream_handlers:
             h.setStream(sys.stdout)
+            # O handler não pode filtrar acima de DEBUG, senão os relatórios
+            # [DEBUG N] deste módulo (que propagam para os handlers do root)
+            # seriam descartados na saída mesmo com o logger em DEBUG.
+            if h.level > logging.DEBUG:
+                h.setLevel(logging.DEBUG)
     else:
         h = logging.StreamHandler(sys.stdout)
         h.setFormatter(fmt)
+        h.setLevel(logging.DEBUG)
         root.addHandler(h)
 
 
+# Loggers de terceiros que explodem em DEBUG e soterram os relatórios: py4j
+# loga CADA chamada JVM ("Answer received", "Command to send"); Spark e o
+# conector OCI (BMC) também são verbosos. Mantidos em WARNING mesmo no modo
+# debug — só o log DESTE módulo sobe para DEBUG.
+_NOISY_DEBUG_LOGGERS = (
+    "py4j", "py4j.java_gateway", "py4j.clientserver",
+    "pyspark", "org.apache.spark", "com.oracle.bmc", "oci",
+)
+
+
 def _set_debug(enabled: bool) -> None:
-    """Liga/desliga o modo debug em tempo de execução (usado pela flag CLI)."""
+    """Liga/desliga o modo debug em tempo de execução (usado pela flag CLI).
+
+    Sobe SÓ o logger deste módulo para DEBUG. O root fica em INFO e os loggers
+    ruidosos (py4j/Spark/OCI) são fixados em WARNING — senão o DEBUG global
+    despeja o protocolo py4j inteiro no stdout e esconde os relatórios de FK.
+    """
     global DEBUG_ENABLED
     DEBUG_ENABLED = enabled
     if enabled:
         _ensure_stdout_logging()
-        logging.getLogger().setLevel(logging.DEBUG)
+        # NÃO sobe o root para DEBUG (evita o dilúvio do py4j). Só este módulo.
+        logging.getLogger().setLevel(logging.INFO)
         logger.setLevel(logging.DEBUG)
+        for noisy in _NOISY_DEBUG_LOGGERS:
+            logging.getLogger(noisy).setLevel(logging.WARNING)
         logger.debug("Debug mode ATIVADO: relatórios de integridade por estágio ligados.")
 
 
