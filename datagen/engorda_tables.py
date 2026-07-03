@@ -2877,6 +2877,18 @@ def _fk_list(cfg: dict) -> list[dict]:
     return [fk for fk in (fks or []) if isinstance(fk, dict)]
 
 
+def _not_null_cols(cfg: dict) -> set[str]:
+    """Colunas NOT NULL declaradas no spec (gera_spec_config lê do cols_real).
+
+    Vazio quando o spec foi gerado sem cols_real.csv -> o engorda cai no
+    comportamento antigo (anula FK órfã sempre), que pode violar NOT NULL no
+    append. Com a lista presente, uma FK órfã cuja coluna é NOT NULL é DROPADA
+    em vez de anulada (ver neutraliza_orfaos_na_fonte / null_orphan_fks).
+    """
+    raw = cfg.get("not_null_cols") or []
+    return {str(c) for c in raw if isinstance(c, str)}
+
+
 def _fk_is_whole_pk(pk_cols: list[str], fk: dict) -> bool:
     """True when a FK's columns are exactly the child's primary key.
 
@@ -3281,13 +3293,20 @@ def neutraliza_orfaos_na_fonte(comp_specs, sampled: dict) -> dict:
     Regras por FK (espelham null_orphan_fks, mas na fonte):
       - linhas com QUALQUER coluna da FK nula nunca são tocadas (MATCH
         SIMPLE: FK parcialmente nula não é checada pelo banco);
-      - colunas da FK que NÃO são PK -> anuladas apenas nas linhas órfãs
-        (basta uma coluna nula para desligar a checagem composta);
-      - FK cujas colunas são TODAS parte da PK -> não dá para anular (NOT
-        NULL): a linha órfã é DROPADA, com warning. O drop é seguro para os
-        descendentes porque o passe corre em ordem topológica (pais antes de
-        filhas): filhas que referenciem a linha dropada são vistas DEPOIS,
-        contra o pai já encolhido, e neutralizadas do mesmo jeito.
+      - anular exige ao menos UMA coluna da FK que seja ANULÁVEL — isto é,
+        não-PK E não declarada em not_null_cols. Basta uma coluna nula para
+        desligar a checagem composta, então anulamos essas;
+      - se NENHUMA coluna da FK for anulável (todas PK e/ou NOT NULL), não dá
+        para desligar a checagem sem violar NOT NULL: a linha órfã é DROPADA,
+        com warning. O drop é seguro para os descendentes porque o passe corre
+        em ordem topológica (pais antes de filhas): filhas que referenciem a
+        linha dropada são vistas DEPOIS, contra o pai já encolhido, e
+        neutralizadas do mesmo jeito.
+
+    NOT NULL vem de `not_null_cols` (spec gerado com cols_real.csv). Sem essa
+    lista, cai no critério antigo (só PK bloqueia a anulação) — que pode anular
+    uma coluna NOT NULL e quebrar o append com ORA-01400; a validação final
+    antes da escrita (assert_not_null_ok) é a rede de segurança nesse caso.
 
     A ordem topológica também dá, de brinde, a checagem das arestas puladas
     pela quebra de ciclo na descida: aqui TODAS as tabelas já estão em
@@ -3314,6 +3333,7 @@ def neutraliza_orfaos_na_fonte(comp_specs, sampled: dict) -> dict:
             continue
         cfg = comp_specs[table]
         pk_set = set(cfg.get("pk_cols") or [])
+        nn_set = _not_null_cols(cfg)
         changed = False
         for fk in _fk_list(cfg):
             parent = fk.get("parent_table")
@@ -3323,7 +3343,10 @@ def neutraliza_orfaos_na_fonte(comp_specs, sampled: dict) -> dict:
             if (parent not in sampled or not cols or len(cols) != len(pcols)
                     or (eh_self and set(cols) & set(pcols))):
                 continue  # fora do componente / malformada / self degenerada
-            nullable_cols = [c for c in cols if c not in pk_set]
+            # Anulável = não-PK E não NOT NULL. Anular uma coluna NOT NULL
+            # trocaria ORA-02291 (FK órfã) por ORA-01400 (NOT NULL); nesse
+            # caso a linha é dropada (nullable_cols vazio -> ramo do drop).
+            nullable_cols = [c for c in cols if c not in pk_set and c not in nn_set]
             # self + drop pode encadear (linha dropada era pai de outra);
             # nos demais casos uma rodada basta.
             rodadas = MAX_ITER_SELF_DROP if (eh_self and not nullable_cols) else 1
@@ -3555,24 +3578,34 @@ def bind_shared_key_children(synthetic: dict, comp_specs: dict) -> dict:
 
 
 def null_orphan_fks(synthetic: dict, comp_specs: dict) -> dict:
-    """Set any FK value with no matching parent PK to NULL (nullable columns).
+    """Neutraliza FK órfã pós-síntese: ANULA se a coluna for anulável, senão
+    DROPA a linha.
 
-    Catches references the synthesizer could not remap — self-references,
-    relationships it ignored (source orphans / parent absent), and residual
-    sampling orphans — so the load doesn't hit a parent-key-not-found violation.
+    Rede de segurança final para referências que o sintetizador não conseguiu
+    remapear — self-refs, relações ignoradas (órfão de fonte / pai ausente),
+    órfãos residuais de amostragem — para o load não bater em parent-key-not-
+    found (ORA-02291).
 
-    Whole-PK FKs (every FK col is also a PK col) are handled by
-    bind_shared_key_children. For a PARTIAL overlap (some FK cols are PK, some
-    aren't) we still neutralize the orphan by nulling only the NON-PK columns:
-    under Oracle MATCH SIMPLE a single NULL column disables the composite-FK
-    check, and the PK columns stay intact (NOT NULL). Only safe for nullable
-    FK columns, which the non-PK ones are.
+    Decisão por FK, espelhando neutraliza_orfaos_na_fonte:
+      - colunas ANULÁVEIS (não-PK E não NOT NULL) da FK -> anuladas nas linhas
+        órfãs; sob MATCH SIMPLE uma coluna nula desliga a checagem composta e
+        as colunas PK/NOT NULL ficam intactas;
+      - se NENHUMA coluna da FK é anulável (todas PK e/ou NOT NULL), anular
+        violaria NOT NULL (ORA-01400) -> as linhas órfãs são DROPADAS.
+
+    NOT NULL vem de not_null_cols (spec com cols_real.csv). Sem a lista, só a PK
+    bloqueia a anulação — comportamento antigo; a validação final
+    (assert_not_null_ok) barra o append se sobrar coluna NOT NULL nula.
+
+    Whole-PK FKs (toda coluna da FK também é PK) são domínio de
+    bind_shared_key_children; aqui caem no ramo do drop se ficarem órfãs.
     """
     for child, cfg in comp_specs.items():
         child_df = synthetic.get(child)
         if child_df is None:
             continue
         pk_set = set(cfg.get("pk_cols") or [])
+        nn_set = _not_null_cols(cfg)
         for fk in _fk_list(cfg):
             parent = fk.get("parent_table")
             parent_df = synthetic.get(parent)
@@ -3581,14 +3614,9 @@ def null_orphan_fks(synthetic: dict, comp_specs: dict) -> dict:
             if parent_df is None or not cols or len(cols) != len(pcols):
                 continue
 
-            # Colunas da FK que NÃO são PK. Se TODAS forem PK -> território do
-            # bind_shared_key_children, pula. Antes, qualquer interseção
-            # (set(cols) & pk_set) pulava a FK inteira e deixava órfãos de uma
-            # sobreposição PARCIAL passarem direto pro load (ORA-02291). Agora
-            # anulamos só as não-PK, o que basta para desligar a checagem.
-            nullable_cols = [c for c in cols if c not in pk_set]
-            if not nullable_cols:
-                continue
+            # Anulável = não-PK E não NOT NULL. Se vazio, não dá para desligar a
+            # checagem sem violar NOT NULL -> dropa a linha órfã.
+            nullable_cols = [c for c in cols if c not in pk_set and c not in nn_set]
 
             keys = (parent_df
                     .select(*[F.col(pc).alias(f"__pk{i}") for i, pc in enumerate(pcols)])
@@ -3603,13 +3631,55 @@ def null_orphan_fks(synthetic: dict, comp_specs: dict) -> dict:
             joined = child_df.join(keys, cond, "left")
             any_fk_set = reduce(lambda a, b: a | b, [F.col(c).isNotNull() for c in cols])
             is_orphan = F.col("__match").isNull() & any_fk_set
-            for c in nullable_cols:
-                joined = joined.withColumn(
-                    c, F.when(is_orphan, F.lit(None).cast(child_df.schema[c].dataType))
-                        .otherwise(F.col(c)))
-            child_df = joined.drop("__match", *[f"__pk{i}" for i in range(len(pcols))])
+
+            if nullable_cols:
+                for c in nullable_cols:
+                    joined = joined.withColumn(
+                        c, F.when(is_orphan, F.lit(None).cast(child_df.schema[c].dataType))
+                            .otherwise(F.col(c)))
+                child_df = joined.drop("__match", *[f"__pk{i}" for i in range(len(pcols))])
+            else:
+                # FK inteira NOT NULL/PK e órfã: anular quebraria NOT NULL.
+                # Dropa a linha órfã (decisão de negócio: drop com cascata).
+                logger.warning(
+                    "null_orphan_fks: %s.%s -> %s: FK NOT NULL órfã pós-síntese; "
+                    "DROPANDO linha(s) órfã(s).",
+                    child, ",".join(cols), parent)
+                child_df = (joined.where(~is_orphan)
+                            .drop("__match", *[f"__pk{i}" for i in range(len(pcols))]))
         synthetic[child] = child_df
     return synthetic
+
+
+def assert_not_null_ok(synthetic: dict, comp_specs: dict) -> None:
+    """Barra a escrita se alguma coluna NOT NULL ficou nula após todos os passes.
+
+    Rede de segurança final contra ORA-01400: percorre as colunas declaradas em
+    not_null_cols de cada tabela e conta nulos. Se qualquer uma tiver nulo,
+    levanta ValueError com a tabela/coluna/contagem — melhor abortar o
+    componente com log claro do que gravar dado que o append vai rejeitar.
+
+    Só custa um agg de contagem por tabela com not_null_cols; tabelas sem a
+    lista (spec gerado sem cols_real.csv) são puladas — nesse caso não há como
+    validar e o comportamento antigo prevalece.
+    """
+    problemas: list[str] = []
+    for table, cfg in comp_specs.items():
+        df = synthetic.get(table)
+        if df is None:
+            continue
+        nn = [c for c in _not_null_cols(cfg) if c in df.columns]
+        if not nn:
+            continue
+        counts = _dbg_null_counts(df, nn)
+        for col, n in counts.items():
+            if n > 0:
+                problemas.append(f"{table}.{col}={n} nulo(s)")
+    if problemas:
+        raise ValueError(
+            "Colunas NOT NULL ficaram nulas após a síntese (o append quebraria "
+            "com ORA-01400): " + "; ".join(sorted(problemas))
+            + ". Verifique o remap/fecho dessas FKs ou o not_null_cols do spec.")
 
 
 def release(*dataframes) -> None:
@@ -3878,6 +3948,10 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
             # nascia nula (origem) ou se null_orphan_fks a anulou (órfão).
             debug_fk_integrity_report("6.final_before_write", synthetic,
                                       comp_specs, label=label)
+            # Rede de segurança: aborta o componente ANTES de gravar se alguma
+            # coluna NOT NULL ficou nula (evita ORA-01400 no append). Só valida
+            # tabelas cujo spec tem not_null_cols (gerado com cols_real.csv).
+            assert_not_null_ok(synthetic, comp_specs)
             for name, df in synthetic.items():
                 out_path = f"{save_base}/{name}"
                 logger.info("[%d/%d] writing %s -> %s", index, total, name, out_path)
