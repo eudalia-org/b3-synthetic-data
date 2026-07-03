@@ -26,8 +26,91 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
+    # OCI Data Flow expõe o log do driver em spark_application_stdout; o default
+    # do logging é stderr (spark_application_stderr). Direciona para stdout para
+    # que INFO/DEBUG (inclusive os relatórios de debug) apareçam onde se olha.
+    stream=sys.stdout,
 )
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Debug mode.
+#
+# Ativado por --debug (CLI) ou pela env var DATAGEN_DEBUG in {"1","true","yes",
+# "on"}. Quando ligado:
+#   * o nível de log global sobe para DEBUG;
+#   * `engorda` roda um relatório de integridade de FK (nulos + órfãos por
+#     coluna) ENTRE cada estágio do pipeline (leitura -> filtro de domínio ->
+#     amostra referencial -> fecho ascendente -> neutralização -> síntese ->
+#     bind -> null_orphan), para localizar EM QUE ESTÁGIO cada coluna começa a
+#     apresentar nulos/órfãos — que é exatamente a informação que falta para
+#     diagnosticar as falhas do pre-append check (ver DEBUG_WATCH_COLUMNS).
+#
+# O relatório é a única coisa que dispara ações Spark extras; para não pesar no
+# run completo, ele só roda quando o debug está ligado.
+# ---------------------------------------------------------------------------
+DEBUG_ENABLED = os.environ.get("DATAGEN_DEBUG", "").strip().lower() in (
+    "1", "true", "yes", "on"
+)
+
+# Colunas sob suspeita no pre-append check. O relatório de debug SEMPRE inclui
+# todas as colunas de FK do componente, mas destaca (marca com "<<<") estas
+# para facilitar a leitura do log. Ajuste conforme novos achados.
+DEBUG_WATCH_COLUMNS = {
+    ("OPERACAO", "NUM_CONTA_PARTICIPANTE_P2"),
+    ("OPERACAO", "NUM_CONTA_PARTICIPANTE_P1"),
+    ("LANCAMENTO", "NUM_ID_ENTIDADE"),
+    ("ESPECIFICACAO_COMITENTE", "NUM_ID_ENTIDADE"),
+    ("CONDICAO_IF", "NUM_IF"),
+}
+
+
+def _ensure_stdout_logging() -> None:
+    """Garante que o log do driver saia em stdout (spark_application_stdout).
+
+    logging.basicConfig é no-op se o root logger já tiver handler (a plataforma
+    do Data Flow pode instalar um, tipicamente em stderr). Aqui apontamos os
+    handlers existentes para stdout; se não houver nenhum, criamos um.
+    """
+    root = logging.getLogger()
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%Y-%m-%d %H:%M:%S")
+    stream_handlers = [h for h in root.handlers if isinstance(h, logging.StreamHandler)]
+    if stream_handlers:
+        for h in stream_handlers:
+            h.setStream(sys.stdout)
+    else:
+        h = logging.StreamHandler(sys.stdout)
+        h.setFormatter(fmt)
+        root.addHandler(h)
+
+
+def _set_debug(enabled: bool) -> None:
+    """Liga/desliga o modo debug em tempo de execução (usado pela flag CLI)."""
+    global DEBUG_ENABLED
+    DEBUG_ENABLED = enabled
+    if enabled:
+        _ensure_stdout_logging()
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.setLevel(logging.DEBUG)
+        logger.debug("Debug mode ATIVADO: relatórios de integridade por estágio ligados.")
+
+
+def _dbg() -> bool:
+    return DEBUG_ENABLED
+
+
+# Se True, o run é uma AMOSTRA (--limit): as chaves de pai são pequenas, então
+# o relatório de debug computa órfãos e usa broadcast nos joins com segurança.
+# Se False (run COMPLETO em tabelas de 50M–1B linhas), o relatório PULA a
+# contagem de órfãos — um dropna().distinct().left_anti contra um pai gigante é
+# caro/arriscado (OOM de executor) — e reporta só nulos, que são baratos.
+DEBUG_SAMPLED = False
+
+
+def _set_debug_sampled(sampled: bool) -> None:
+    global DEBUG_SAMPLED
+    DEBUG_SAMPLED = sampled
+
 
 REQUIRED_ENV_VARS = (
     "DATAGEN_RAW_BASE_URI",
@@ -2889,6 +2972,14 @@ def parse_arguments() -> argparse.Namespace:
                              "se o prazo original for inválido, usa 365 dias.")
     parser.add_argument("--specs", default=None,
                         help="Override DATAGEN_SPECS_URI (URI of a single specs.json object).")
+    parser.add_argument("--debug", action="store_true", default=DEBUG_ENABLED,
+                        help="Modo debug: sobe o log para DEBUG e emite um relatório de "
+                             "integridade de FK (nulos + órfãos por coluna) ENTRE cada estágio "
+                             "do pipeline (amostra -> fecho -> neutralização -> síntese -> bind "
+                             "-> null_orphan), para localizar em que estágio uma coluna começa a "
+                             "ter nulos/órfãos. Também ligável via DATAGEN_DEBUG=1. Dispara "
+                             "actions Spark extras; use em runs de diagnóstico (idealmente com "
+                             "--limit).")
     return parser.parse_args()
 
 
@@ -3094,6 +3185,21 @@ def referential_sample(spark, config, comp_specs, limit: int | None) -> dict:
         # a propagação referencial abaixo restringe as demais tabelas por
         # chave, e a consistência de FK é calculada sobre o subconjunto 49.
         df = _aplica_filtro_tipo_if(read_parquet(spark, raw_path(config, table)), table)
+        # Baseline BRUTO (pós-filtro de domínio, PRÉ-poda por semi-join): nulos
+        # das colunas de FK direto da origem. Comparar com o estágio
+        # "1.after_descending_sample" isola o que já vinha nulo na origem vs. o
+        # que a poda tornou órfão. Só custa um agg de contagem de nulos.
+        if _dbg():
+            fk_cols_raw: list[str] = []
+            for _fk in _fk_list(comp_specs[table]):
+                for _c in (_fk.get("columns") or []):
+                    if _c not in fk_cols_raw:
+                        fk_cols_raw.append(_c)
+            if fk_cols_raw:
+                nulls_raw = _dbg_null_counts(df, fk_cols_raw)
+                logger.debug(
+                    "[DEBUG 0.raw_source] %s: nulos por coluna de FK na origem "
+                    "(pós-filtro NUM_TIPO_IF, pré-poda) = %s", table, nulls_raw)
         for fk in _fk_list(comp_specs[table]):
             parent = fk.get("parent_table")
             cols = list(fk.get("columns") or [])
@@ -3126,18 +3232,36 @@ def referential_sample(spark, config, comp_specs, limit: int | None) -> dict:
         # substitui por uma folha RDD rasa.
         sampled[table] = df.localCheckpoint(eager=True)
 
+    # Estado logo após a descida (filtro na raiz + poda por semi-join),
+    # ANTES de qualquer fecho/neutralização: mostra os órfãos "estruturais"
+    # herdados do subset (pais podados) vs. os que sobrarão como órfãos de
+    # produção depois do fecho.
+    debug_fk_integrity_report("1.after_descending_sample", sampled, comp_specs)
+
     # Passo ascendente: garante que toda chave de FK presente numa filha
     # mantida exista no pai amostrado, puxando do Parquet completo as linhas
     # de pai que o filtro/poda removeu mas que continuam referenciadas.
     sampled = completa_pais_referenciados(
         spark, config, comp_specs, sampled, broadcast_missing=broadcast_keys
     )
+    # Após o fecho ascendente: os órfãos que RESTAREM aqui são órfãos de
+    # PRODUÇÃO (chave inexistente até no Parquet completo do pai). Se uma
+    # coluna do pre-append check ainda mostra órfãos NESTE ponto, o problema
+    # é dado de origem, não a amostragem.
+    debug_fk_integrity_report("2.after_completa_pais", sampled, comp_specs)
     # O que resta de órfão após o fecho é órfão DE PRODUÇÃO (a chave não
     # existe nem no Parquet completo do pai). Neutraliza na fonte para que
     # _fk_has_data_problem encontre zero órfãos e a FK seja PRESERVADA na
     # síntese — antes, um único órfão descartava a FK inteira e
     # null_orphan_fks anulava a coluna toda.
-    return neutraliza_orfaos_na_fonte(comp_specs, sampled)
+    sampled = neutraliza_orfaos_na_fonte(comp_specs, sampled)
+    # Fonte final entregue à síntese. Aqui a contagem de órfãos DEVE ser 0
+    # para toda FK do domínio; nulos são esperados (FK opcional / órfão de
+    # produção anulado na fonte). Nulos altos numa coluna do pre-append check
+    # aqui = origem já vinha nula OU neutraliza anulou muitos órfãos de
+    # produção -> a coluna nasce nula, não é a síntese que a quebra.
+    debug_fk_integrity_report("3.source_for_synthesis", sampled, comp_specs)
+    return sampled
 
 
 def neutraliza_orfaos_na_fonte(comp_specs, sampled: dict) -> dict:
@@ -3541,12 +3665,128 @@ def load_specs(spark: SparkSession, specs_uri: str) -> dict:
     return normalize_specs(parsed)
 
 
+def _dbg_null_counts(df: DataFrame, cols: list[str]) -> dict[str, int]:
+    """Contagem de nulos por coluna numa única passada (um só agg/action)."""
+    present = [c for c in cols if c in df.columns]
+    if not present:
+        return {}
+    row = df.agg(*[
+        F.count(F.when(F.col(c).isNull(), F.lit(1))).alias(c) for c in present
+    ]).first()
+    return {c: int(row[c]) for c in present}
+
+
+def _dbg_orphan_count(child_df: DataFrame, parent_df: DataFrame,
+                      cols: list[str], pcols: list[str],
+                      *, broadcast_parent: bool = False) -> int:
+    """Chaves-filhas distintas, NÃO nulas, sem correspondência no pai.
+
+    Espelha MATCH SIMPLE: linhas com QUALQUER coluna da FK nula não são
+    contadas como órfãs (a checagem de FK composta é desligada por elas). É
+    exatamente a definição que o pre-append check / o load Oracle aplicam.
+
+    broadcast_parent: só sob --limit, quando as chaves do pai são pequenas.
+    No run completo o build side (chaves distintas de um pai de 50M–1B linhas)
+    estoura o broadcast -> deixa sem, e o AQE decide.
+    """
+    child_keys = (child_df.select(*cols).dropna().distinct())
+    parent_keys = (parent_df
+                   .select(*[F.col(p).alias(c) for c, p in zip(cols, pcols)])
+                   .dropna().distinct())
+    if broadcast_parent:
+        parent_keys = F.broadcast(parent_keys)
+    return child_keys.join(parent_keys, on=cols, how="left_anti").count()
+
+
+def debug_fk_integrity_report(stage: str, tables: dict, comp_specs: dict,
+                              *, label: str = "") -> None:
+    """Loga nulos + órfãos por coluna de FK, para TODAS as FKs do componente.
+
+    Executado ENTRE estágios do pipeline (só quando o debug está ligado) para
+    revelar em QUE estágio uma coluna passa a ter nulos ou órfãos. `tables` é o
+    dict {nome_tabela: DataFrame} do estágio; `comp_specs` são as specs (forma
+    dict) do componente. `parent` pode ou não estar em `tables` — se não
+    estiver, a contagem de órfãos é pulada (reportada como n/d) mas os nulos da
+    coluna ainda são reportados.
+
+    O relatório NÃO altera nenhum DataFrame; apenas dispara actions de
+    contagem. Colunas em DEBUG_WATCH_COLUMNS são marcadas com "<<<".
+    """
+    if not _dbg():
+        return
+    prefix = f"[DEBUG {stage}]" + (f" {{{label}}}" if label else "")
+    logger.debug("%s — relatório de integridade de FK (nulos / órfãos)", prefix)
+    for table in sorted(tables):
+        df = tables.get(table)
+        if df is None:
+            continue
+        cfg = comp_specs.get(table)
+        if cfg is None:
+            continue
+        fks = _fk_list(cfg)
+        try:
+            total = df.count()
+        except Exception as exc:  # pragma: no cover - defensivo
+            logger.debug("%s   %s: falha ao contar linhas: %s", prefix, table, exc)
+            continue
+        if not fks:
+            logger.debug("%s   %s: %d linha(s), sem FK", prefix, table, total)
+            continue
+        # Todas as colunas de FK da tabela, para um único agg de nulos.
+        all_fk_cols: list[str] = []
+        for fk in fks:
+            for c in (fk.get("columns") or []):
+                if c not in all_fk_cols:
+                    all_fk_cols.append(c)
+        nulls = _dbg_null_counts(df, all_fk_cols)
+        logger.debug("%s   %s: %d linha(s)", prefix, table, total)
+        for fk in fks:
+            parent = fk.get("parent_table")
+            cols = list(fk.get("columns") or [])
+            pcols = list(fk.get("parent_columns") or [])
+            if not cols or len(cols) != len(pcols):
+                logger.debug("%s     FK malformada -> %s: cols=%s pcols=%s",
+                             prefix, parent, cols, pcols)
+                continue
+            watch = any((table, c) in DEBUG_WATCH_COLUMNS for c in cols)
+            mark = " <<<" if watch else ""
+            null_desc = ", ".join(
+                f"{c}={nulls.get(c, 'n/d')}"
+                + (f"({100.0 * nulls[c] / total:.1f}%)" if total and c in nulls else "")
+                for c in cols
+            )
+            parent_df = tables.get(parent)
+            if parent_df is None:
+                orphan_desc = "órfãos=n/d (pai fora do estágio)"
+            elif not DEBUG_SAMPLED:
+                # Run completo (50M–1B linhas): o anti-join de órfãos é
+                # caro demais. Reporta só nulos; use --limit para os órfãos.
+                orphan_desc = "órfãos=pulado (full run; rode com --limit)"
+            else:
+                try:
+                    n_orphan = _dbg_orphan_count(df, parent_df, cols, pcols,
+                                                 broadcast_parent=True)
+                    orphan_desc = f"órfãos={n_orphan}"
+                except Exception as exc:  # pragma: no cover - defensivo
+                    orphan_desc = f"órfãos=ERRO({exc})"
+            logger.debug("%s     %s.%s -> %s.%s | nulos: %s | %s%s",
+                         prefix, table, ",".join(cols), parent, ",".join(pcols),
+                         null_desc, orphan_desc, mark)
+
+
 def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
             limit=None, pk_offset=None, pk_safety_band=None,
             dt_vencimento_prazo_dias=None) -> None:
     components = connected_components(specs)
     save_base = synthetic_base_path(config)
     total = len(components)
+    # Órfãos no relatório de debug só são computados sob --limit (chaves de pai
+    # pequenas). No full run, o report emite só nulos (ver debug_fk_integrity_report).
+    _set_debug_sampled(limit is not None)
+    if _dbg():
+        logger.info("Debug ATIVO. Relatório de FK por estágio %s.",
+                    "com nulos+órfãos (amostra)" if limit is not None
+                    else "SÓ com nulos (full run; use --limit para incluir órfãos)")
     if limit is not None:
         logger.info("Input limit active: reading at most %d row(s) per raw table", limit)
     if pk_offset is not None:
@@ -3616,11 +3856,28 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
                 # localCheckpoint. The full run keeps persist (recomputable).
                 truncate_lineage=(limit is not None),
             )
+            # Logo após a síntese (bootstrap + remap de FK + geração de PK),
+            # ANTES de bind/null_orphan. Órfãos aqui = o remap de FK não
+            # encontrou o pai sintético (aresta quebrada por ciclo, mapping
+            # ausente, FK não preservada por _fk_has_data_problem). É o ponto
+            # em que a síntese "quebra" uma coluna que estava íntegra na fonte.
+            debug_fk_integrity_report("4.after_synthesis", synthetic, comp_specs,
+                                      label=label)
             synthetic = bind_shared_key_children(synthetic, comp_specs)
+            debug_fk_integrity_report("5.after_bind_shared_key", synthetic,
+                                      comp_specs, label=label)
             # Self-FKs genuínas são remapeadas DENTRO da síntese (mapping
             # old->new da própria tabela), preservando estrutura e
             # auto-loops; null_orphan_fks segue como rede de segurança.
             synthetic = null_orphan_fks(synthetic, comp_specs)
+            # Estado FINAL escrito no destino = o que o pre-append check lê.
+            # null_orphan_fks já anulou órfãos: órfãos DEVE ser ~0; o que
+            # restar de nulo aqui é o que o check reporta como "N Nulos".
+            # Comparando os nulos deste estágio com os de "3.source_for_
+            # synthesis" e "4.after_synthesis" fica claro se a coluna já
+            # nascia nula (origem) ou se null_orphan_fks a anulou (órfão).
+            debug_fk_integrity_report("6.final_before_write", synthetic,
+                                      comp_specs, label=label)
             for name, df in synthetic.items():
                 out_path = f"{save_base}/{name}"
                 logger.info("[%d/%d] writing %s -> %s", index, total, name, out_path)
@@ -3711,6 +3968,7 @@ def create_spark_session(app_name: str) -> SparkSession:
 
 def main() -> None:
     args = parse_arguments()
+    _set_debug(bool(args.debug))
     config = get_engorda_env()
     spark = create_spark_session("DataGenEngordaTables")
     try:
