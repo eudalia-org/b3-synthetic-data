@@ -61,6 +61,7 @@ DEBUG_WATCH_COLUMNS = {
     ("OPERACAO", "NUM_CONTA_PARTICIPANTE_P1"),
     ("LANCAMENTO", "NUM_ID_ENTIDADE"),
     ("ESPECIFICACAO_COMITENTE", "NUM_ID_ENTIDADE"),
+    ("CARTEIRA_COMITENTE", "NUM_ID_ENTIDADE"),
     ("CONDICAO_IF", "NUM_IF"),
 }
 
@@ -750,6 +751,12 @@ def _sanitize_specs_for_available_relationships(
                     problems.append(data_problem)
 
             if problems:
+                # Log INFO explícito (além do warning): no modo debug o stdout
+                # mostra QUAIS FKs a síntese descartou e por quê — a FK ignorada
+                # sai sem remap e vira órfã/nula no estágio 4, então saber disso
+                # aqui liga o "4.after_synthesis" à causa.
+                logger.info("FK descartada na síntese: %s. Motivo(s): %s",
+                            _format_fk(name, fk), "; ".join(problems))
                 _warn_or_raise(
                     "Relacionamento ignorado: "
                     f"{_format_fk(name, fk)}. Motivo(s): "
