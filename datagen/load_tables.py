@@ -485,6 +485,13 @@ def parse_arguments() -> argparse.Namespace:
         action="store_true",
         help="Validate the synthetic data against the target schema and exit; insert nothing.",
     )
+    parser.add_argument(
+        "--skip-validation",
+        action="store_true",
+        help="Bypass the pre-flight validation entirely and load. Use only when the target "
+             "constraints have been deliberately disabled/relaxed to accept known "
+             "violations (nulls/orphans); the PK dup-guard still runs.",
+    )
     return parser.parse_args()
 
 
@@ -1058,14 +1065,18 @@ def main() -> None:
         target_schema = config["DATAGEN_TARGET_SCHEMA"]
         properties = build_connection_properties(config)
 
-        logger.info("Pre-flight validation against %s ...", target_schema)
-        violations = validate_load(
-            spark, properties, config, specs, target_schema, tables, args.limit)
-        if violations:
-            logger.error("Pre-flight FAILED (%d violation(s)) — nothing inserted:\n%s",
-                         len(violations), format_violation_report(violations))
-            sys.exit(1)
-        logger.info("Pre-flight validation passed.")
+        if args.skip_validation:
+            logger.warning("Pre-flight validation SKIPPED (--skip-validation); relying on "
+                           "the target's disabled/relaxed constraints.")
+        else:
+            logger.info("Pre-flight validation against %s ...", target_schema)
+            violations = validate_load(
+                spark, properties, config, specs, target_schema, tables, args.limit)
+            if violations:
+                logger.error("Pre-flight FAILED (%d violation(s)) — nothing inserted:\n%s",
+                             len(violations), format_violation_report(violations))
+                sys.exit(1)
+            logger.info("Pre-flight validation passed.")
         if args.dry_run:
             logger.info("Dry run: validation only, nothing loaded.")
             return

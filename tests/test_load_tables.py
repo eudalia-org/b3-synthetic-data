@@ -364,3 +364,14 @@ class TestManifest:
             "target_schema": "CETIP",
             "tables": entries,
         }
+
+
+class TestSkipValidationArg:
+    def test_default_false(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["load_tables", "--specs", "specs.json"])
+        assert load_tables.parse_arguments().skip_validation is False
+
+    def test_flag_true(self, monkeypatch):
+        monkeypatch.setattr("sys.argv",
+                            ["load_tables", "--specs", "specs.json", "--skip-validation"])
+        assert load_tables.parse_arguments().skip_validation is True
