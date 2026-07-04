@@ -87,3 +87,91 @@ ALTER TABLE CETIP.CONDICAO_IF             MODIFY (NUM_IF NULL);
 --   Restoring NOT NULL (MODIFY ... NOT NULL) also fails while nulls remain.
 -- =====================================================================
 -- ALTER TABLE CETIP.LANCAMENTO ENABLE NOVALIDATE CONSTRAINT <fk_name_from_section_1>;
+
+
+-- =====================================================================
+-- BULK / SCHEMA-WIDE — disable EVERY constraint that can block ingestion.
+--
+-- Blockers for an INSERT: R (foreign key -> ORA-02291) and C (check,
+-- incl. NOT NULL -> ORA-01400/02290). P/U (PK/unique) are left enabled by
+-- default — synthetic PKs are unique by design and the load's pk-guard
+-- protects against ORA-00001; see the OPTIONAL block to include them.
+--
+-- SCOPE: defaults to the whole CETIP schema. On a shared/production target
+-- this removes integrity protection on ALL tables while disabled — prefer
+-- scoping to the loaded tables (uncomment the AND table_name IN (...) line).
+-- Only ENABLED constraints are touched; existing rows are never modified.
+-- =====================================================================
+
+-- 0. LIST what would be disabled (run this first, eyeball it):
+SELECT table_name, constraint_type, constraint_name, status
+FROM   all_constraints
+WHERE  owner = 'CETIP'
+  AND  status = 'ENABLED'
+  AND  constraint_type IN ('R','C')
+--  AND table_name IN ('INSTRUMENTO_FINANCEIRO','OPERACAO','EVENTO','CONDICAO_IF',
+--                     'LANCAMENTO','ESPECIFICACAO','ESPECIFICACAO_COMITENTE',
+--                     'DADO_OPERACAO','CREDITO','RESGATE','TITULO','JUROS_FLUTUANTE',
+--                     'CARTEIRA_COMITENTE','CARTEIRA_PARTICIPANTE','DEPOSITO_AUTOMATICO_IF')
+ORDER BY table_name, constraint_type;
+
+-- 1. DISABLE all blocking (R + C) constraints:
+SET SERVEROUTPUT ON;
+BEGIN
+  FOR c IN (
+    SELECT owner, table_name, constraint_name, constraint_type
+    FROM   all_constraints
+    WHERE  owner = 'CETIP'
+      AND  status = 'ENABLED'
+      AND  constraint_type IN ('R','C')
+--    AND table_name IN ( ... same list as above ... )
+  ) LOOP
+    BEGIN
+      EXECUTE IMMEDIATE 'ALTER TABLE "'||c.owner||'"."'||c.table_name||
+                        '" DISABLE CONSTRAINT "'||c.constraint_name||'"';
+      DBMS_OUTPUT.PUT_LINE('disabled '||c.constraint_type||' '||
+                           c.table_name||'.'||c.constraint_name);
+    EXCEPTION WHEN OTHERS THEN
+      DBMS_OUTPUT.PUT_LINE('SKIP '||c.table_name||'.'||c.constraint_name||' : '||SQLERRM);
+    END;
+  END LOOP;
+END;
+/
+
+-- OPTIONAL — also disable UNIQUE (U) and PRIMARY KEY (P). Drops their indexes
+-- and removes ORA-00001 protection; only if the synthetic data may violate them.
+-- R must already be disabled (done above) so no enabled FK depends on them;
+-- CASCADE is a backstop. Change 'R','C' above to add 'U','P', or run:
+-- BEGIN
+--   FOR c IN (SELECT owner, table_name, constraint_name FROM all_constraints
+--             WHERE owner='CETIP' AND status='ENABLED' AND constraint_type IN ('U','P')) LOOP
+--     BEGIN
+--       EXECUTE IMMEDIATE 'ALTER TABLE "'||c.owner||'"."'||c.table_name||
+--                         '" DISABLE CONSTRAINT "'||c.constraint_name||'" CASCADE';
+--     EXCEPTION WHEN OTHERS THEN DBMS_OUTPUT.PUT_LINE('SKIP '||c.constraint_name||' '||SQLERRM);
+--     END;
+--   END LOOP;
+-- END;
+-- /
+
+-- 2. POST-LOAD re-enable (NOVALIDATE keeps your loaded rows, enforces new inserts).
+--    NOTE: this re-enables ALL currently-DISABLED R/C in CETIP — if some were
+--    already disabled before you started, exclude them or accept they get enabled.
+--    ENABLE VALIDATE would fail on the rows you just force-loaded; use NOVALIDATE.
+BEGIN
+  FOR c IN (
+    SELECT owner, table_name, constraint_name
+    FROM   all_constraints
+    WHERE  owner = 'CETIP'
+      AND  status = 'DISABLED'
+      AND  constraint_type IN ('R','C')
+  ) LOOP
+    BEGIN
+      EXECUTE IMMEDIATE 'ALTER TABLE "'||c.owner||'"."'||c.table_name||
+                        '" ENABLE NOVALIDATE CONSTRAINT "'||c.constraint_name||'"';
+    EXCEPTION WHEN OTHERS THEN
+      DBMS_OUTPUT.PUT_LINE('SKIP '||c.table_name||'.'||c.constraint_name||' : '||SQLERRM);
+    END;
+  END LOOP;
+END;
+/
