@@ -3596,9 +3596,15 @@ def bind_shared_key_children(synthetic: dict, comp_specs: dict) -> dict:
             keys = (parent_df
                     .select(*[F.col(pc).alias(f"__np{i}") for i, pc in enumerate(pcols)])
                     .dropna().distinct())
-            keys = _with_contiguous_row_id(keys, "__bind_rn")
-
-            numbered = _with_contiguous_row_id(child_df, "__bind_rn")
+            # MATERIALIZA cada lado após numerar. _with_contiguous_row_id usa
+            # monotonically_increasing_id() — não-determinístico entre
+            # avaliações. Sem congelar, o inner join por __bind_rn reavalia cada
+            # lado independentemente e o pareamento 1:1 vira instável (mesma
+            # classe de bug do rebind: numeração diverge entre avaliações do
+            # plano lazy). localCheckpoint fixa __bind_rn dos dois lados, então
+            # o join pareia de forma estável e reprodutível dentro do run.
+            keys = _with_contiguous_row_id(keys, "__bind_rn").localCheckpoint(eager=True)
+            numbered = _with_contiguous_row_id(child_df, "__bind_rn").localCheckpoint(eager=True)
 
             joined = numbered.join(keys, "__bind_rn", "inner")
             for i, c in enumerate(cols):
@@ -3638,22 +3644,38 @@ def _rebind_orphan_fk_to_valid_parent(
     cond = reduce(lambda a, b: a & b,
                   [child_df[cols[i]] == match[f"__rb_m{i}"] for i in range(n)])
     j = child_df.join(match, cond, "left")
-    any_fk_set = reduce(lambda a, b: a | b, [F.col(c).isNotNull() for c in cols])
-    is_orphan = F.col("__rb_hit").isNull() & any_fk_set
+    # MATCH SIMPLE: só é órfã a linha com TODAS as colunas da FK preenchidas e
+    # sem correspondência no pai. Uma FK composta PARCIALMENTE nula não é
+    # checada pelo banco (a checagem composta é desligada), então NÃO é órfã e
+    # NÃO deve ser tocada — antes usava `any_fk_set` (qualquer col preenchida),
+    # o que reescrevia indevidamente linhas válidas de FK composta parcial.
+    all_fk_set = reduce(lambda a, b: a & b, [F.col(c).isNotNull() for c in cols])
+    is_orphan = F.col("__rb_hit").isNull() & all_fk_set
 
-    # Número contíguo SÓ das linhas órfãs, para parear com chaves do pai.
-    j = j.withColumn("__rb_isorf", is_orphan)
+    # Congela is_orphan ANTES de fatiar em orf/nonorf. `j` é um join lazy; se
+    # não materializar, cada ramo (orf, nonorf) reavalia `j` de forma
+    # independente e não-determinística (o join + a numeração adiante embutem
+    # ordem instável), e uma mesma linha poderia cair em orf numa avaliação e
+    # em nonorf noutra — ou em nenhuma. localCheckpoint fixa a marcação de órfã
+    # de uma vez, garantindo partição exata e sem perda/duplicação de linha.
+    j = j.withColumn("__rb_isorf", is_orphan).localCheckpoint(eager=True)
     orf = j.where(F.col("__rb_isorf"))
-    nonorf = j.where(~F.col("__rb_isorf") | F.col("__rb_isorf").isNull())
+    nonorf = j.where(~F.col("__rb_isorf"))
     if orf.isEmpty():
         drop_tmp = (["__rb_hit", "__rb_isorf"]
                     + [f"__rb_m{i}" for i in range(n)])
         return j.drop(*drop_tmp)
 
     orf = _with_contiguous_row_id(orf, "__rb_rn")
-    # chave do pai = rn % k, escolha determinística (seed entra na ordem de
-    # numeração do pai, que é estável; o módulo distribui de forma reprodutível).
-    orf = orf.withColumn("__rb_pick", (F.col("__rb_rn") % F.lit(k)).cast("long"))
+    # chave do pai = (rn + seed) % k. O seed (estável por (child,parent,cols) via
+    # _stable_seed no caller) desloca o início do ciclo, então a distribuição das
+    # órfãs entre as chaves do pai não é sempre "as primeiras k órfãs -> chaves
+    # 0..k-1". NB: isto NÃO torna o rebind reprodutível ENTRE runs — a numeração
+    # __rb_rn vem de monotonically_increasing_id, instável entre execuções; o
+    # determinismo é garantido só DENTRO do run (após o localCheckpoint acima).
+    seed_off = int(seed) % k if k else 0
+    orf = orf.withColumn(
+        "__rb_pick", ((F.col("__rb_rn") + F.lit(seed_off)) % F.lit(k)).cast("long"))
     picks = pkeys  # tem __rb_k (0..k-1) e __rb_np{i}
     orf = orf.join(F.broadcast(picks), orf["__rb_pick"] == picks["__rb_k"], "left")
     for i, c in enumerate(cols):
@@ -3737,13 +3759,24 @@ def null_orphan_fks(synthetic: dict, comp_specs: dict) -> dict:
                 parent_has_key = not (
                     parent_df.select(*pcols).dropna().isEmpty())
                 if parent_has_key:
-                    logger.info(
-                        "null_orphan_fks: %s.%s -> %s: FK NOT NULL órfã; "
-                        "REBIND para chave válida do pai (linha preservada).",
-                        child, ",".join(cols), parent)
-                    child_df = _rebind_orphan_fk_to_valid_parent(
-                        child_df, parent_df, cols, pcols,
-                        seed=_stable_seed(0, child, parent, tuple(cols)))
+                    # Guarda barata: só chama o rebind (que faz localCheckpoint
+                    # do join inteiro — caro numa filha grande) se HOUVER órfã de
+                    # fato. Anti-join de chaves distintas + isEmpty não
+                    # materializa nada; no caso comum (fecho ascendente já
+                    # garantiu a FK) pula o rebind e o checkpoint por completo.
+                    ck = (child_df.select(*cols).dropna().distinct())
+                    pk = (parent_df.select(*[F.col(p).alias(c)
+                                             for c, p in zip(cols, pcols)])
+                          .dropna().distinct())
+                    tem_orfa = not ck.join(pk, on=cols, how="left_anti").isEmpty()
+                    if tem_orfa:
+                        logger.info(
+                            "null_orphan_fks: %s.%s -> %s: FK NOT NULL órfã; "
+                            "REBIND para chave válida do pai (linha preservada).",
+                            child, ",".join(cols), parent)
+                        child_df = _rebind_orphan_fk_to_valid_parent(
+                            child_df, parent_df, cols, pcols,
+                            seed=_stable_seed(0, child, parent, tuple(cols)))
                 else:
                     logger.warning(
                         "null_orphan_fks: %s.%s -> %s: FK NOT NULL órfã e pai "
@@ -3774,8 +3807,21 @@ def assert_not_null_ok(synthetic: dict, comp_specs: dict) -> None:
     Só custa um agg de contagem por tabela com not_null_cols; tabelas sem a
     lista (spec gerado sem cols_real.csv) são puladas — nesse caso não há como
     validar e o comportamento antigo prevalece.
+
+    C1 — distingue a NATUREZA da coluna NOT NULL nula, porque o CONSERTO é em
+    lugar diferente:
+      - NOT NULL que É FK -> algum passe (rebind/fecho/neutralização) deveria
+        tê-la resolvido; se sobrou nula, é bug DESSES passes ou pai sem chave.
+      - NOT NULL que NÃO é FK -> nenhum passe deste pipeline toca (rebind/anula
+        só mexem em coluna de FK). Ela nasceu nula na SÍNTESE/bootstrap/
+        postprocess ou já vinha nula da origem. Insistir no null_orphan não
+        resolve — o conserto é na geração da coluna ou no dado de entrada.
+    Ambos os casos ABORTAM (não gravar dado que o append rejeita), mas com
+    mensagens separadas apontando o lugar certo, para não virar "beco sem
+    saída" silencioso (rodar de novo sem mudar nada falharia igual).
     """
-    problemas: list[str] = []
+    problemas_fk: list[str] = []
+    problemas_naofk: list[str] = []
     vazias_alvo: list[str] = []
     for table, cfg in comp_specs.items():
         df = synthetic.get(table)
@@ -3790,15 +3836,30 @@ def assert_not_null_ok(synthetic: dict, comp_specs: dict) -> None:
         nn = [c for c in _not_null_cols(cfg) if c in df.columns]
         if not nn:
             continue
+        # Conjunto das colunas que participam de ALGUMA FK desta tabela.
+        fk_cols = {c for fk in _fk_list(cfg) for c in (fk.get("columns") or [])}
         counts = _dbg_null_counts(df, nn)
         for col, n in counts.items():
             if n > 0:
-                problemas.append(f"{table}.{col}={n} nulo(s)")
+                if col in fk_cols:
+                    problemas_fk.append(f"{table}.{col}={n} nulo(s)")
+                else:
+                    problemas_naofk.append(f"{table}.{col}={n} nulo(s)")
     msgs: list[str] = []
-    if problemas:
+    if problemas_fk:
         msgs.append(
-            "Colunas NOT NULL ficaram nulas após a síntese (o append quebraria "
-            "com ORA-01400): " + "; ".join(sorted(problemas)))
+            "Colunas NOT NULL de FK ficaram nulas após os passes (o append "
+            "quebraria com ORA-01400): " + "; ".join(sorted(problemas_fk))
+            + ". CONSERTO: verifique rebind/fecho dessas FKs (pai sem chave "
+            "sintética? aresta de ciclo?), não a origem.")
+    if problemas_naofk:
+        msgs.append(
+            "Colunas NOT NULL que NÃO são FK ficaram nulas (o append quebraria "
+            "com ORA-01400): " + "; ".join(sorted(problemas_naofk))
+            + ". CONSERTO: NENHUM passe deste pipeline gera essas colunas — elas "
+            "nasceram nulas na síntese/postprocess ou já vinham nulas da origem. "
+            "Rodar de novo sem mudar nada falha igual; corrija a geração da "
+            "coluna ou o dado de entrada (ou reveja not_null_cols do spec).")
     if vazias_alvo:
         msgs.append(
             "Tabela(s)-alvo ficaram VAZIAS após a síntese (provável drop de FK "
@@ -3806,9 +3867,7 @@ def assert_not_null_ok(synthetic: dict, comp_specs: dict) -> None:
             + ". Rode com --limit maior (amostra pegou poucas linhas do pai) ou "
             "verifique o fecho/rebind dessas FKs.")
     if msgs:
-        raise ValueError(
-            " | ".join(msgs)
-            + ". Verifique o remap/fecho dessas FKs ou o not_null_cols do spec.")
+        raise ValueError(" | ".join(msgs))
 
 
 def release(*dataframes) -> None:
@@ -4069,12 +4128,34 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
             # old->new da própria tabela), preservando estrutura e
             # auto-loops; null_orphan_fks segue como rede de segurança.
             synthetic = null_orphan_fks(synthetic, comp_specs)
+            # MATERIALIZA o resultado do rebind ANTES de qualquer leitura.
+            # null_orphan_fks/_rebind usam _with_contiguous_row_id, que depende
+            # de monotonically_increasing_id() — NÃO-determinístico entre
+            # avaliações. Sem congelar aqui, o plano lazy é reavaliado 3x
+            # (debug 6, assert, write), cada vez com numeração diferente: o
+            # pareamento órfã->chave muda, então linhas rebindadas numa
+            # avaliação voltam a ser órfãs em outra. Era ISSO que fazia o
+            # "[DEBUG 6] nulos=0" divergir do "assert=13k nulos" (mesmo plano,
+            # resultados diferentes) — e o que seria ESCRITO era uma 3ª versão.
+            # localCheckpoint(eager) congela o resultado: debug, assert e write
+            # passam a ver EXATAMENTE o mesmo dado.
+            #
+            # SÓ materializa tabelas que bind/null_orphan PODEM ter tocado —
+            # isto é, que têm ao menos uma FK. Tabela sem FK não passa por
+            # rebind/anulação/bind, então seu synthetic[t] já veio materializado
+            # da síntese (synth = _persist + count); recheckpointá-la só
+            # gastaria disco à toa. Isso reduz a pressão de scratch disk no full
+            # run (tabelas de 50M–1B linhas sem FK não são reescritas aqui).
+            for _name in list(synthetic):
+                _df = synthetic.get(_name)
+                if _df is None:
+                    continue
+                _cfg = comp_specs.get(_name) or {}
+                if not _fk_list(_cfg):
+                    continue  # sem FK -> não foi tocada por bind/null_orphan
+                synthetic[_name] = _df.localCheckpoint(eager=True)
             # Estado FINAL escrito no destino = o que o pre-append check lê.
-            # null_orphan_fks já anulou órfãos: órfãos DEVE ser ~0; o que
-            # restar de nulo aqui é o que o check reporta como "N Nulos".
-            # Comparando os nulos deste estágio com os de "3.source_for_
-            # synthesis" e "4.after_synthesis" fica claro se a coluna já
-            # nascia nula (origem) ou se null_orphan_fks a anulou (órfão).
+            # Agora congelado: os nulos aqui são os mesmos do assert e do write.
             debug_fk_integrity_report("6.final_before_write", synthetic,
                                       comp_specs, label=label)
             # Rede de segurança: aborta o componente ANTES de gravar se alguma
