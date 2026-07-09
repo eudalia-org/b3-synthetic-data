@@ -213,6 +213,7 @@ FILTRO_TIPO_IF_VALUE = 49 #filtro cdb simplificado
 # Predicados de fonte por tabela para o CDB simplificado. Cada predicado é uma
 # tupla (coluna, op, valor):
 #   ("==", v)      -> col == v            (igualdade exata)
+#   (">", v)       -> col > v             (maior que; linha com col NULL sai)
 #   ("ieq", v)     -> upper(trim(col)) == v  (igualdade string case/space-insensitive)
 #   ("isnull", _)  -> col IS NULL
 # Aplicados em AND. Um predicado cuja coluna não exista no schema da tabela é
@@ -232,6 +233,12 @@ FILTROS_FONTE: dict[str, list[tuple[str, str, object]]] = {
     ],
     "CONDICAO_IF": [
         ("DAT_EXCLUSAO", "isnull", None),
+    ],
+    "CARTEIRA_COMITENTE": [
+        ("QTD_CARTEIRA_COMITENTE", ">", 0),
+    ],
+    "CARTEIRA_PARTICIPANTE": [
+        ("QTD_CARTEIRA_PARTICIPANTE", ">", 0),
     ],
 }
 # Únicas tabelas filtradas pela coluna NUM_TIPO_IF; a raiz do universo. O
@@ -3135,6 +3142,7 @@ def _aplica_filtros_fonte(df: DataFrame, table: str) -> DataFrame:
 
     Operadores suportados (ver FILTROS_FONTE):
       "=="     -> col == valor              (igualdade exata, tipada)
+      ">"      -> col > valor               (maior que; linha com col NULL sai)
       "ieq"    -> upper(trim(col)) == valor (string case/space-insensitive)
       "isnull" -> col IS NULL
 
@@ -3158,6 +3166,10 @@ def _aplica_filtros_fonte(df: DataFrame, table: str) -> DataFrame:
             df = df.where(F.upper(F.trim(F.col(col))) == F.lit(valor))
         elif op == "==":
             df = df.where(F.col(col) == F.lit(valor))
+        elif op == ">":
+            # NULL > valor é NULL (não TRUE) -> linha com col NULL é descartada,
+            # que é a semântica desejada de "maior que zero".
+            df = df.where(F.col(col) > F.lit(valor))
         else:
             raise ValueError(
                 f"_aplica_filtros_fonte: operador desconhecido {op!r} "
