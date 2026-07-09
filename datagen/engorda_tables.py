@@ -148,18 +148,31 @@ DEFAULT_SEED = 42
 # ---------------------------------------------------------------------------
 # Filtro de domínio: CDB simplificado.
 #
-# O universo NUM_TIPO_IF == 49 é definido por CHAVE, não por coluna: o filtro
-# por NUM_TIPO_IF é aplicado APENAS nas tabelas-raiz listadas em
-# TABELAS_RAIZ_FILTRO (hoje só INSTRUMENTO_FINANCEIRO). Todas as demais
-# tabelas entram no universo exclusivamente pela propagação referencial de
-# `referential_sample` (semi-join de chave, pais -> filhas), mesmo que
-# possuam uma cópia denormalizada de NUM_TIPO_IF.
+# O produto CDB simplificado é definido por um conjunto de PREDICADOS DE FONTE
+# por tabela (FILTROS_FONTE). Esses predicados são a PRIMEIRA etapa do
+# pipeline: são aplicados na LEITURA de cada Parquet, ANTES de qualquer
+# amostragem, propagação referencial ou síntese. A partir daí não existe mais
+# "Parquet completo sem filtro" para essas tabelas — toda leitura de fonte
+# passa por `_read_source`, então nenhuma etapa posterior (nem o fecho de pais
+# em `completa_pais_referenciados`) consegue re-injetar uma linha que o filtro
+# removeu.
 #
-# Motivo: quando o pertencimento era decidido DUAS vezes (coluna própria em
-# quem tinha NUM_TIPO_IF, chave em quem não tinha), qualquer inconsistência
-# da coluna denormalizada gerava filhas órfãs (passavam no filtro próprio,
-# falhavam na chave) e null_orphan_fks acabava anulando a FK inteira. Com o
-# filtro só na raiz, filha e pai nunca divergem por construção.
+# Regras do CDB simplificado (imagem do produto):
+#   INSTRUMENTO_FINANCEIRO : NUM_TIPO_IF = 49 E DAT_EXCLUSAO IS NULL
+#   RESGATE                : COD_COND_RESGATE = 'SEM TABELA' E DAT_EXCLUSAO IS NULL
+#   TITULO                 : COD_TIPO_ESCALONAMENTO IS NULL
+#   CONDICAO_IF            : DAT_EXCLUSAO IS NULL
+#
+# Propagação por chave (inalterada): a raiz do universo continua sendo
+# INSTRUMENTO_FINANCEIRO (TABELAS_RAIZ_FILTRO) e o pertencimento desce a árvore
+# de FK por semi-join em `referential_sample`, restrito a `_dominio_spine`. Os
+# predicados de fonte acima são uma poda ADICIONAL em cima disso: cada tabela
+# nasce já com suas próprias linhas fora do produto descartadas, e a descida
+# por chave apenas restringe mais. Como a fonte já vem filtrada em TODO ponto
+# de leitura, filha e pai não podem divergir por re-injeção — se um pai é
+# removido pelo seu filtro, ele simplesmente não existe para ninguém, e a
+# filha órfã cai na neutralização normal (null_orphan_fks anula FK nullable;
+# drop_orphan_rows dropa quando a FK é NOT NULL).
 #
 # FK de domínio vs FK de integridade: durante a descida em `referential_sample`
 # a poda por semi-join NÃO pode usar TODAS as FKs de uma tabela indistintamente.
@@ -167,7 +180,7 @@ DEFAULT_SEED = 42
 # CARTEIRA_PARTICIPANTE, CREDITO, DEPOSITO_AUTOMATICO_IF, CONDICAO_IF etc. —
 # e a própria INSTRUMENTO_FINANCEIRO) também carrega FKs LATERAIS para tabelas
 # de referência compartilhadas (CONTA_PARTICIPANTE, PARTICIPANTE, tabelas de
-# lookup...) que nada têm a ver com o domínio 49 e cuja amostra, sendo
+# lookup...) que nada têm a ver com o domínio e cuja amostra, sendo
 # independente, não intersecta necessariamente as linhas válidas do domínio.
 # Usar essas FKs laterais como critério de sobrevivência na MESMA passada
 # zera artificialmente linhas que são perfeitamente válidas no domínio — e,
@@ -184,17 +197,46 @@ DEFAULT_SEED = 42
 #
 # Complementarmente, `completa_pais_referenciados` fecha o universo PARA
 # CIMA: toda chave de FK presente numa filha mantida passa a existir no pai
-# amostrado, puxando do Parquet completo (sem filtro de tipo) as linhas de
-# pai referenciadas que o filtro/poda tenha removido.
+# amostrado, puxando as linhas de pai referenciadas ausentes. Essa leitura
+# TAMBÉM passa por `_read_source` (fonte filtrada): um pai que não pertence ao
+# produto NÃO volta — a filha que o referenciava vira órfã e é neutralizada.
 #
-# IMPORTANTE: a leitura de max(pk) em compute_pk_maxes NÃO usa este filtro
+# IMPORTANTE: a leitura de max(pk) em compute_pk_maxes NÃO usa estes filtros
 # de propósito — ela precisa do max real da tabela inteira para que as PKs
-# sintéticas não colidam com linhas de produção de OUTROS NUM_TIPO_IF.
+# sintéticas não colidam com linhas de produção de OUTROS registros (outros
+# NUM_TIPO_IF, linhas excluídas etc.). Por isso ela lê via `read_parquet`
+# direto, não via `_read_source`.
 # ---------------------------------------------------------------------------
 FILTRO_TIPO_IF_COLUMN = "NUM_TIPO_IF"
 FILTRO_TIPO_IF_VALUE = 49 #filtro cdb simplificado
-# Únicas tabelas filtradas pela PRÓPRIA coluna NUM_TIPO_IF; o restante do
-# universo é derivado por chave (semi-joins descendo + fecho subindo).
+
+# Predicados de fonte por tabela para o CDB simplificado. Cada predicado é uma
+# tupla (coluna, op, valor):
+#   ("==", v)      -> col == v            (igualdade exata)
+#   ("ieq", v)     -> upper(trim(col)) == v  (igualdade string case/space-insensitive)
+#   ("isnull", _)  -> col IS NULL
+# Aplicados em AND. Um predicado cuja coluna não exista no schema da tabela é
+# ignorado (defensivo contra variação de schema); ver `_aplica_filtros_fonte`.
+FILTROS_FONTE: dict[str, list[tuple[str, str, object]]] = {
+    "INSTRUMENTO_FINANCEIRO": [
+        (FILTRO_TIPO_IF_COLUMN, "==", FILTRO_TIPO_IF_VALUE),
+        ("DAT_EXCLUSAO", "isnull", None),
+    ],
+    "RESGATE": [
+        # 'SEM TABELA' com upper+trim por segurança contra caixa/espaços.
+        ("COD_COND_RESGATE", "ieq", "SEM TABELA"),
+        ("DAT_EXCLUSAO", "isnull", None),
+    ],
+    "TITULO": [
+        ("COD_TIPO_ESCALONAMENTO", "isnull", None),
+    ],
+    "CONDICAO_IF": [
+        ("DAT_EXCLUSAO", "isnull", None),
+    ],
+}
+# Únicas tabelas filtradas pela coluna NUM_TIPO_IF; a raiz do universo. O
+# restante do domínio é derivado por chave (semi-joins descendo + fecho
+# subindo) e, adicionalmente, podado pelos predicados de FILTROS_FONTE.
 TABELAS_RAIZ_FILTRO = frozenset({"INSTRUMENTO_FINANCEIRO"})
 
 # ---------------------------------------------------------------------------
@@ -207,22 +249,36 @@ TABELAS_RAIZ_FILTRO = frozenset({"INSTRUMENTO_FINANCEIRO"})
 # Regras aplicadas quando a coluna existir na tabela:
 #   DAT_INCLUSAO              -> data/hora da engorda (timestamp)
 #   DAT_ALTERACAO             -> mesma data/hora de DAT_INCLUSAO (timestamp)
-#   DT_EMISSAO                -> data da engorda, sem timestamp
-#   DT_VENCIMENTO             -> data da engorda + prazo, sem timestamp
+#   DAT_INCLUSAO_REGISTRO     -> mesma data/hora de DAT_INCLUSAO (timestamp)
+#   DAT_EMISSAO               -> data da engorda, sem timestamp
+#   DAT_VENCIMENTO            -> data da engorda + prazo, sem timestamp
 #
 # NUM_ID_CERTIFICACAO_CETIP NÃO entra aqui: ela é PK e a geração de PK
 # (compute_pk_maxes + _set_unique_pk_column) já a faz incremental acima do max
 # real da tabela inteira, com a folga do --pk-safety-band. Tratá-la de novo
 # desfazia a folga e relia o max sem necessidade.
 #
-# Para DT_VENCIMENTO, se não for informado um prazo fixo por tabela, o código
-# preserva o prazo original da linha bootstrapada: DT_VENCIMENTO - DT_EMISSAO.
+# Para DAT_VENCIMENTO, se não for informado um prazo fixo por tabela, o código
+# preserva o prazo original da linha bootstrapada: DAT_VENCIMENTO - DAT_EMISSAO.
 # Se esse prazo não existir, for inválido ou <= 0, usa 365 dias por segurança.
+#
+# NB (correção): as colunas de emissão/vencimento no schema real são
+# DAT_EMISSAO / DAT_VENCIMENTO (prefixo DAT_). Versões anteriores procuravam
+# DT_EMISSAO / DT_VENCIMENTO, que não casavam com o dado -> a regra virava
+# no-op silencioso (a função é tolerante a coluna ausente).
 # ---------------------------------------------------------------------------
 ENGORDA_COL_DAT_INCLUSAO = "DAT_INCLUSAO"
 ENGORDA_COL_DAT_ALTERACAO = "DAT_ALTERACAO"
-ENGORDA_COL_DT_VENCIMENTO = "DT_VENCIMENTO"
-ENGORDA_COL_DT_EMISSAO = "DT_EMISSAO"
+ENGORDA_COL_DAT_INCLUSAO_REGISTRO = "DAT_INCLUSAO_REGISTRO"
+ENGORDA_COL_DAT_VENCIMENTO = "DAT_VENCIMENTO"
+ENGORDA_COL_DAT_EMISSAO = "DAT_EMISSAO"
+# Colunas que recebem o MESMO timestamp único da engorda. Declarativo: para
+# tratar mais uma coluna de timestamp, basta adicioná-la aqui.
+ENGORDA_COLS_TIMESTAMP = (
+    ENGORDA_COL_DAT_INCLUSAO,
+    ENGORDA_COL_DAT_ALTERACAO,
+    ENGORDA_COL_DAT_INCLUSAO_REGISTRO,
+)
 DEFAULT_DT_VENCIMENTO_PRAZO_DIAS = 30
 MIN_DT_VENCIMENTO_PRAZO_DIAS = 1
 
@@ -351,10 +407,11 @@ def _apply_engorda_business_rules(
     Aplica as regras de DATA do engorda às colunas existentes na tabela.
 
     Regras (aplicadas só quando a coluna existir; tipo físico preservado):
-      DAT_INCLUSAO  -> timestamp da engorda
-      DAT_ALTERACAO -> mesmo timestamp de DAT_INCLUSAO
-      DT_EMISSAO    -> data da engorda, sem hora
-      DT_VENCIMENTO -> data da engorda + prazo, sem hora
+      DAT_INCLUSAO          -> timestamp da engorda
+      DAT_ALTERACAO         -> mesmo timestamp de DAT_INCLUSAO
+      DAT_INCLUSAO_REGISTRO -> mesmo timestamp de DAT_INCLUSAO
+      DAT_EMISSAO           -> data da engorda, sem hora
+      DAT_VENCIMENTO        -> data da engorda + prazo, sem hora
 
     NUM_ID_CERTIFICACAO_CETIP NÃO é tratada aqui: é PK, e a geração de PK
     (compute_pk_maxes + _set_unique_pk_column) já a faz incremental acima do max
@@ -365,21 +422,21 @@ def _apply_engorda_business_rules(
     """
     engorda_dt = _engorda_date(engorda_ts)
 
-    # 1) Calcula prazo de vencimento ANTES de sobrescrever DT_EMISSAO.
+    # 1) Calcula prazo de vencimento ANTES de sobrescrever DAT_EMISSAO.
     tmp_prazo_col = "__engorda_prazo_dias"
     while tmp_prazo_col in work.columns:
         tmp_prazo_col = f"_{tmp_prazo_col}"
 
-    has_vencimento = ENGORDA_COL_DT_VENCIMENTO in work.columns
-    has_emissao = ENGORDA_COL_DT_EMISSAO in work.columns
+    has_vencimento = ENGORDA_COL_DAT_VENCIMENTO in work.columns
+    has_emissao = ENGORDA_COL_DAT_EMISSAO in work.columns
 
     if has_vencimento:
         if dt_vencimento_prazo_dias is not None:
             prazo_expr = F.lit(int(dt_vencimento_prazo_dias)).cast("int")
         elif has_emissao:
             prazo_expr = F.datediff(
-                F.to_date(F.col(ENGORDA_COL_DT_VENCIMENTO)),
-                F.to_date(F.col(ENGORDA_COL_DT_EMISSAO)),
+                F.to_date(F.col(ENGORDA_COL_DAT_VENCIMENTO)),
+                F.to_date(F.col(ENGORDA_COL_DAT_EMISSAO)),
             ).cast("int")
         else:
             prazo_expr = F.lit(int(default_dt_vencimento_prazo_dias)).cast("int")
@@ -395,8 +452,9 @@ def _apply_engorda_business_rules(
 
         work = work.withColumn(tmp_prazo_col, prazo_expr)
 
-    # 2) DAT_INCLUSAO e DAT_ALTERACAO usam exatamente o mesmo timestamp.
-    for col_name in (ENGORDA_COL_DAT_INCLUSAO, ENGORDA_COL_DAT_ALTERACAO):
+    # 2) DAT_INCLUSAO, DAT_ALTERACAO e DAT_INCLUSAO_REGISTRO usam exatamente o
+    #    mesmo timestamp único da engorda (ENGORDA_COLS_TIMESTAMP).
+    for col_name in ENGORDA_COLS_TIMESTAMP:
         if col_name in work.columns:
             work = work.withColumn(
                 col_name,
@@ -406,26 +464,26 @@ def _apply_engorda_business_rules(
                 ),
             )
 
-    # 3) DT_EMISSAO = data da engorda sem timestamp.
+    # 3) DAT_EMISSAO = data da engorda sem timestamp.
     if has_emissao:
         work = work.withColumn(
-            ENGORDA_COL_DT_EMISSAO,
+            ENGORDA_COL_DAT_EMISSAO,
             _date_literal_for_type(
                 engorda_dt,
-                _get_field_type(work, ENGORDA_COL_DT_EMISSAO),
+                _get_field_type(work, ENGORDA_COL_DAT_EMISSAO),
             ),
         )
 
-    # 4) DT_VENCIMENTO = data da engorda + prazo, sem timestamp.
+    # 4) DAT_VENCIMENTO = data da engorda + prazo, sem timestamp.
     if has_vencimento:
         venc_expr = F.expr(
             f"date_add(DATE '{engorda_dt.isoformat()}', CAST({tmp_prazo_col} AS INT))"
         )
         work = work.withColumn(
-            ENGORDA_COL_DT_VENCIMENTO,
+            ENGORDA_COL_DAT_VENCIMENTO,
             _date_expression_for_type(
                 venc_expr,
-                _get_field_type(work, ENGORDA_COL_DT_VENCIMENTO),
+                _get_field_type(work, ENGORDA_COL_DAT_VENCIMENTO),
             ),
         ).drop(tmp_prazo_col)
 
@@ -2920,6 +2978,41 @@ def _not_null_cols(cfg: dict) -> set[str]:
     return {str(c) for c in raw if isinstance(c, str)}
 
 
+def _warn_filtros_fonte_sem_not_null(specs: dict) -> None:
+    """Alerta quando os filtros do produto podem gerar ORA-01400 silencioso.
+
+    Os predicados de FILTROS_FONTE podem remover uma linha-PAI que uma filha
+    referencia (ex.: CONDICAO_IF com DAT_EXCLUSAO não-nula, referida por um
+    RESGATE válido). Como o fecho de pais lê a fonte JÁ FILTRADA, o pai não é
+    re-injetado e a filha vira órfã. A neutralização então DROPA a linha se a
+    FK for NOT NULL — MAS só sabe que é NOT NULL se `not_null_cols` estiver no
+    spec (gerado com cols_real.csv). Sem essa lista, a FK órfã é ANULADA e, se
+    a coluna for NOT NULL no Oracle, o append falha com ORA-01400 sem que
+    assert_not_null_ok consiga barrar (ele também depende de not_null_cols).
+
+    Portanto: quando há tabela de FILTROS_FONTE no run mas alguma tabela que a
+    referencia não tem `not_null_cols`, emite um WARNING claro de que
+    cols_real.csv passou a ser efetivamente obrigatório para este produto.
+    """
+    filtradas = {t for t in FILTROS_FONTE if t in specs}
+    if not filtradas:
+        return
+    afetadas = []
+    for table, cfg in specs.items():
+        parents = {fk.get("parent_table") for fk in _fk_list(cfg)}
+        if parents & filtradas and not _not_null_cols(cfg):
+            afetadas.append(table)
+    if afetadas:
+        logger.warning(
+            "FILTROS_FONTE ativos em %s, mas estas tabelas que as referenciam "
+            "NÃO têm not_null_cols no spec: %s. Um pai removido pelo filtro "
+            "torna a filha órfã; sem not_null_cols a FK órfã é ANULADA (não "
+            "dropada) e pode violar NOT NULL no append (ORA-01400) sem ser "
+            "barrada por assert_not_null_ok. Gere o spec COM cols_real.csv "
+            "(ver gera_spec_config.py) para este produto.",
+            sorted(filtradas), sorted(afetadas))
+
+
 def _fk_is_whole_pk(pk_cols: list[str], fk: dict) -> bool:
     """True when a FK's columns are exactly the child's primary key.
 
@@ -3010,7 +3103,7 @@ def parse_arguments() -> argparse.Namespace:
                              "grow between the max read and the load without colliding. Default: "
                              "no gap (start right after true_max).")
     parser.add_argument("--dt-vencimento-prazo-dias", type=positive_int, default=None,
-                        help="Prazo fixo em dias para DT_VENCIMENTO = data da engorda + X. "
+                        help="Prazo fixo em dias para DAT_VENCIMENTO = data da engorda + X. "
                              "Se omitido, preserva o prazo original da linha quando possível; "
                              "se o prazo original for inválido, usa 365 dias.")
     parser.add_argument("--specs", default=None,
@@ -3031,28 +3124,71 @@ def read_parquet(spark: SparkSession, path: str, limit: int | None = None) -> Da
     return df.limit(limit) if limit is not None else df
 
 
-def _aplica_filtro_tipo_if(df: DataFrame, table: str) -> DataFrame:
-    """Filtra a fonte de síntese para o CDB simplificado (NUM_TIPO_IF == 49).
+def _aplica_filtros_fonte(df: DataFrame, table: str) -> DataFrame:
+    """Aplica os predicados de fonte do CDB simplificado (FILTROS_FONTE[table]).
 
-    O filtro por coluna é aplicado APENAS nas tabelas-raiz do universo
-    (TABELAS_RAIZ_FILTRO). Todas as demais tabelas — inclusive as que possuem
-    uma cópia denormalizada de NUM_TIPO_IF — passam intactas aqui e entram no
-    universo exclusivamente pela propagação referencial de chave em
-    referential_sample. Isso garante que o pertencimento ao universo é
-    decidido UMA única vez (pela chave), eliminando as filhas órfãs criadas
-    quando a coluna denormalizada discordava do pai filtrado.
+    PRIMEIRA etapa do pipeline: recorta a fonte de cada tabela para o produto
+    ANTES de amostragem/propagação/síntese. Os predicados de uma tabela são
+    combinados em AND. Um predicado cuja coluna não exista no schema é
+    ignorado (defensivo): o produto é definido pelas colunas presentes, e uma
+    coluna ausente não deve zerar a tabela nem quebrar a leitura.
 
-    Na raiz, linhas com NUM_TIPO_IF NULL são descartadas (não casam com
-    == 49), o que é o comportamento desejado.
+    Operadores suportados (ver FILTROS_FONTE):
+      "=="     -> col == valor              (igualdade exata, tipada)
+      "ieq"    -> upper(trim(col)) == valor (string case/space-insensitive)
+      "isnull" -> col IS NULL
 
-    Usado somente na leitura da FONTE de síntese (referential_sample). A
-    leitura de max(pk) em compute_pk_maxes é intencionalmente NÃO filtrada:
-    ela precisa do max real da tabela inteira para evitar colisão das PKs
-    sintéticas com linhas de outros NUM_TIPO_IF.
+    NÃO é usado por compute_pk_maxes: o max(pk) precisa da tabela inteira para
+    que as PKs sintéticas não colidam com linhas de produção de OUTROS
+    registros (fora do produto). Ver comentário no topo do arquivo.
     """
-    if table in TABELAS_RAIZ_FILTRO and FILTRO_TIPO_IF_COLUMN in df.columns:
-        return df.where(F.col(FILTRO_TIPO_IF_COLUMN) == F.lit(FILTRO_TIPO_IF_VALUE))
+    preds = FILTROS_FONTE.get(table)
+    if not preds:
+        return df
+    cols = set(df.columns)
+    for col, op, valor in preds:
+        if col not in cols:
+            logger.warning(
+                "_aplica_filtros_fonte: coluna %s ausente em %s; predicado "
+                "(%s %s %r) ignorado", col, table, col, op, valor)
+            continue
+        if op == "isnull":
+            df = df.where(F.col(col).isNull())
+        elif op == "ieq":
+            df = df.where(F.upper(F.trim(F.col(col))) == F.lit(valor))
+        elif op == "==":
+            df = df.where(F.col(col) == F.lit(valor))
+        else:
+            raise ValueError(
+                f"_aplica_filtros_fonte: operador desconhecido {op!r} "
+                f"para {table}.{col}")
+    if _dbg():
+        # Só a contagem PÓS-filtro (um único scan, com pushdown). Confere o
+        # efeito de cada predicado — em especial o match de string 'SEM
+        # TABELA' em RESGATE: se vier 0, suspeite de caixa/espaço no dado.
+        # NÃO contamos o total PRÉ-filtro de propósito: seria um segundo scan
+        # da tabela INTEIRA sem pushdown, caro em tabelas de 50M-1B linhas e
+        # repetido a cada chamada de _read_source (inclusive dentro do loop de
+        # fecho de pais em completa_pais_referenciados).
+        logger.debug(
+            "[DEBUG filtros_fonte] %s: %d linha(s) após predicados %s",
+            table, df.count(),
+            [(c, o, v) for c, o, v in preds])
     return df
+
+
+def _read_source(spark, config, table: str, limit: int | None = None) -> DataFrame:
+    """Leitura ÚNICA e canônica da fonte de uma tabela, já filtrada pelo produto.
+
+    Todo ponto que consome dados de produção como FONTE de síntese
+    (referential_sample e o fecho de pais em completa_pais_referenciados) deve
+    ler por aqui — nunca por read_parquet direto — para que os predicados de
+    FILTROS_FONTE valham em TODAS as etapas e nenhum passo consiga re-injetar
+    uma linha fora do produto. A única exceção deliberada é compute_pk_maxes,
+    que precisa do max(pk) da tabela inteira (ver topo do arquivo).
+    """
+    return _aplica_filtros_fonte(
+        read_parquet(spark, raw_path(config, table), limit), table)
 
 
 def _read_pk_max(spark, path: str, pk_col: str):
@@ -3112,11 +3248,13 @@ def compute_pk_maxes(spark, config, comp_specs, floor: int = 0, band: int = 0,
             continue
         pk_col = pk_cols[-1]  # the synthesizer generates the last PK column
         try:
-            # NB: max(pk) é lido da tabela INTEIRA, sem o filtro NUM_TIPO_IF==46,
-            # de propósito. As PKs sintéticas precisam ficar acima do max real de
-            # TODOS os NUM_TIPO_IF para não colidirem com linhas de produção de
-            # outros tipos de IF (ver validate_collision_producao). Filtrar aqui
-            # reduziria o max e poderia gerar PKs que colidem com dados reais.
+            # NB: max(pk) é lido da tabela INTEIRA (read_parquet direto, NÃO
+            # _read_source), sem NENHUM dos predicados de FILTROS_FONTE, de
+            # propósito. As PKs sintéticas precisam ficar acima do max real de
+            # TODAS as linhas de produção (todos os NUM_TIPO_IF, inclusive
+            # linhas excluídas / fora do produto) para não colidirem com dados
+            # reais (ver validate_collision_producao). Filtrar aqui reduziria o
+            # max e poderia gerar PKs que colidem com produção.
             raw_max = _read_pk_max(spark, raw_path(config, table), pk_col)
             true_max = int(raw_max) if raw_max is not None else None
             cap = _pk_capacity(spark, raw_path(config, table), pk_col)
@@ -3183,32 +3321,36 @@ def _dominio_spine(comp_specs: Mapping[str, Any]) -> frozenset:
 def referential_sample(spark, config, comp_specs, limit: int | None) -> dict:
     """Subset referencial pais-antes-de-filhos, mantendo a FK consistente.
 
-    Percorre o componente pais-antes-de-filhos: lê cada tabela, aplica o
-    filtro de domínio CDB simplificado (NUM_TIPO_IF == 49) SOMENTE nas
-    tabelas-raiz (TABELAS_RAIZ_FILTRO), e mantém só as linhas-filhas cuja FK
-    DE DOMÍNIO (parent_table em `_dominio_spine`) cai num pai já subsetado
-    (ou é NULL). FKs LATERAIS (para tabelas fora do espinhaço de domínio,
-    ex.: CONTA_PARTICIPANTE, PARTICIPANTE, tabelas de lookup) NÃO podam
-    nada nesta etapa — podar por elas aqui zerava artificialmente linhas
-    válidas do domínio sempre que a amostra independente do pai lateral não
-    intersectava a filha, e a linha descartada não podia mais ser
-    recuperada pelo fecho ascendente. Essas FKs continuam sendo resolvidas
-    (pai completado ou órfão neutralizado) pelos passos seguintes.
+    Percorre o componente pais-antes-de-filhos: lê cada tabela JÁ FILTRADA
+    pelos predicados de fonte do CDB simplificado (`_read_source` /
+    FILTROS_FONTE) e mantém só as linhas-filhas cuja FK DE DOMÍNIO
+    (parent_table em `_dominio_spine`) cai num pai já subsetado (ou é NULL).
+    FKs LATERAIS (para tabelas fora do espinhaço de domínio, ex.:
+    CONTA_PARTICIPANTE, PARTICIPANTE, tabelas de lookup) NÃO podam nada nesta
+    etapa — podar por elas aqui zerava artificialmente linhas válidas do
+    domínio sempre que a amostra independente do pai lateral não intersectava
+    a filha, e a linha descartada não podia mais ser recuperada pelo fecho
+    ascendente. Essas FKs continuam sendo resolvidas (pai completado ou órfão
+    neutralizado) pelos passos seguintes.
 
-    O universo é definido por CHAVE: o filtro por coluna acontece uma única
-    vez, na raiz, e desce a árvore por semi-join. Filhas COM cópia
-    denormalizada de NUM_TIPO_IF não são filtradas pela própria coluna —
-    filtrá-las criava uma segunda definição do universo e, quando a coluna
-    discordava do pai (denormalização inconsistente), a filha virava órfã e
-    null_orphan_fks zerava a FK inteira.
+    Duas camadas de recorte combinam aqui:
+      (a) predicados de fonte (FILTROS_FONTE), aplicados na leitura de CADA
+          tabela — a primeira etapa do pipeline; e
+      (b) propagação por CHAVE a partir da raiz (TABELAS_RAIZ_FILTRO),
+          descendo a árvore por semi-join sobre `_dominio_spine`.
+    Como a fonte já vem filtrada em TODO ponto de leitura, pai e filha não
+    podem divergir por re-injeção: um pai fora do produto simplesmente não
+    existe para ninguém.
 
     Ao final, `completa_pais_referenciados` fecha o universo PARA CIMA: os
     valores de FK que sobraram em filhas mantidas mas cujo pai não sobreviveu
     ao filtro/poda (FKs ausentes no spec, arestas quebradas por ciclo, FKs
-    laterais não usadas na poda) são completados puxando as linhas de pai do
-    Parquet completo. O resultado é FK-fechado por construção; os únicos
-    órfãos restantes são os que já eram órfãos na produção (tratados por
-    neutraliza_orfaos_na_fonte / null_orphan_fks).
+    laterais não usadas na poda) são completados puxando as linhas de pai da
+    FONTE JÁ FILTRADA (`_read_source`). O resultado é FK-fechado por
+    construção; os únicos órfãos restantes são os que já eram órfãos na
+    produção OU cujo pai foi removido pelos predicados de fonte — ambos
+    tratados por neutraliza_orfaos_na_fonte / null_orphan_fks (anula FK
+    nullable; dropa linha quando a FK é NOT NULL).
 
     limit:
         int  -> também limita cada tabela a `limit` linhas (teste rápido). Os
@@ -3224,11 +3366,12 @@ def referential_sample(spark, config, comp_specs, limit: int | None) -> dict:
     sampled: dict = {}
     broadcast_keys = limit is not None
     for table in order:
-        # Filtra para o CDB simplificado (NUM_TIPO_IF == 49) APENAS na raiz;
-        # a propagação referencial abaixo restringe as demais tabelas por
-        # chave, e a consistência de FK é calculada sobre o subconjunto 49.
-        df = _aplica_filtro_tipo_if(read_parquet(spark, raw_path(config, table)), table)
-        # Baseline BRUTO (pós-filtro de domínio, PRÉ-poda por semi-join): nulos
+        # Fonte JÁ FILTRADA pelos predicados do CDB simplificado
+        # (FILTROS_FONTE), a primeira etapa. A propagação referencial abaixo
+        # restringe adicionalmente por chave a partir da raiz, e a
+        # consistência de FK é calculada sobre esse subconjunto.
+        df = _read_source(spark, config, table)
+        # Baseline BRUTO (pós-filtros de fonte, PRÉ-poda por semi-join): nulos
         # das colunas de FK direto da origem. Comparar com o estágio
         # "1.after_descending_sample" isola o que já vinha nulo na origem vs. o
         # que a poda tornou órfão. Só custa um agg de contagem de nulos.
@@ -3242,7 +3385,7 @@ def referential_sample(spark, config, comp_specs, limit: int | None) -> dict:
                 nulls_raw = _dbg_null_counts(df, fk_cols_raw)
                 logger.debug(
                     "[DEBUG 0.raw_source] %s: nulos por coluna de FK na origem "
-                    "(pós-filtro NUM_TIPO_IF, pré-poda) = %s", table, nulls_raw)
+                    "(pós-filtros de fonte, pré-poda) = %s", table, nulls_raw)
         for fk in _fk_list(comp_specs[table]):
             parent = fk.get("parent_table")
             cols = list(fk.get("columns") or [])
@@ -3275,28 +3418,33 @@ def referential_sample(spark, config, comp_specs, limit: int | None) -> dict:
         # substitui por uma folha RDD rasa.
         sampled[table] = df.localCheckpoint(eager=True)
 
-    # Estado logo após a descida (filtro na raiz + poda por semi-join),
+    # Estado logo após a descida (filtros de fonte + poda por semi-join),
     # ANTES de qualquer fecho/neutralização: mostra os órfãos "estruturais"
-    # herdados do subset (pais podados) vs. os que sobrarão como órfãos de
-    # produção depois do fecho.
+    # herdados do subset (pais podados) vs. os que sobrarão como órfãos após
+    # o fecho.
     debug_fk_integrity_report("1.after_descending_sample", sampled, comp_specs)
 
     # Passo ascendente: garante que toda chave de FK presente numa filha
-    # mantida exista no pai amostrado, puxando do Parquet completo as linhas
-    # de pai que o filtro/poda removeu mas que continuam referenciadas.
+    # mantida exista no pai amostrado, puxando da FONTE JÁ FILTRADA
+    # (`_read_source`) as linhas de pai referenciadas que a poda removeu.
+    # Um pai que os predicados de FILTROS_FONTE excluíram NÃO é puxado.
     sampled = completa_pais_referenciados(
         spark, config, comp_specs, sampled, broadcast_missing=broadcast_keys
     )
-    # Após o fecho ascendente: os órfãos que RESTAREM aqui são órfãos de
-    # PRODUÇÃO (chave inexistente até no Parquet completo do pai). Se uma
-    # coluna do pre-append check ainda mostra órfãos NESTE ponto, o problema
-    # é dado de origem, não a amostragem.
+    # Após o fecho ascendente, os órfãos que RESTAREM têm DUAS origens
+    # possíveis (ambas esperadas, não falha de amostragem):
+    #   (a) órfão de PRODUÇÃO — a chave não existe nem na tabela completa; e
+    #   (b) pai REMOVIDO pelos predicados de FILTROS_FONTE — a chave existe no
+    #       Parquet completo, mas o pai não pertence ao produto CDB
+    #       simplificado (ex.: CONDICAO_IF/INSTRUMENTO_FINANCEIRO com
+    #       DAT_EXCLUSAO não-nula), então o fecho não o re-injeta.
+    # Ao investigar um órfão aqui, distinga (a) de (b) antes de concluir que é
+    # dado de origem: (b) é consequência intencional do filtro do produto.
     debug_fk_integrity_report("2.after_completa_pais", sampled, comp_specs)
-    # O que resta de órfão após o fecho é órfão DE PRODUÇÃO (a chave não
-    # existe nem no Parquet completo do pai). Neutraliza na fonte para que
-    # _fk_has_data_problem encontre zero órfãos e a FK seja PRESERVADA na
-    # síntese — antes, um único órfão descartava a FK inteira e
-    # null_orphan_fks anulava a coluna toda.
+    # Os órfãos remanescentes (produção OU pai fora do produto) são
+    # neutralizados na fonte para que _fk_has_data_problem encontre zero
+    # órfãos e a FK seja PRESERVADA na síntese — antes, um único órfão
+    # descartava a FK inteira e null_orphan_fks anulava a coluna toda.
     sampled = neutraliza_orfaos_na_fonte(comp_specs, sampled)
     # Fonte final entregue à síntese. Aqui a contagem de órfãos DEVE ser 0
     # para toda FK do domínio; nulos são esperados (FK opcional / órfão de
@@ -3440,9 +3588,14 @@ def completa_pais_referenciados(
 
     Percorre o componente em ordem topológica REVERSA (filhas -> pais): para
     cada FK de uma filha mantida, calcula as chaves referenciadas que NÃO
-    estão no pai amostrado e puxa essas linhas do Parquet COMPLETO do pai —
-    sem o filtro de tipo, de propósito: a linha é necessária para a
-    integridade referencial mesmo que pertença a outro NUM_TIPO_IF.
+    estão no pai amostrado e puxa essas linhas da FONTE JÁ FILTRADA do pai
+    (`_read_source` / FILTROS_FONTE), NÃO do Parquet completo. Um pai que não
+    pertence ao produto CDB simplificado (ex.: CONDICAO_IF com DAT_EXCLUSAO
+    não-nula) portanto NÃO é re-injetado aqui: a chave permanece faltante, a
+    filha que a referenciava vira órfã e é neutralizada depois
+    (null_orphan_fks anula FK nullable; drop_orphan_rows dropa quando NOT
+    NULL). Assim os predicados de fonte valem também no fecho ascendente —
+    nenhuma etapa consegue trazer de volta uma linha fora do produto.
 
     A ordem reversa resolve necessidades transitivas em UMA passada num DAG:
     as linhas adicionadas a um pai ainda terão as PRÓPRIAS FKs completadas
@@ -3454,7 +3607,7 @@ def completa_pais_referenciados(
     Auto-referências (parent == child) são fechadas DENTRO da própria tabela,
     por iteração a ponto fixo ANTES das FKs normais da mesma tabela: uma
     linha mantida cuja self-FK aponte para uma linha podada puxa-a de volta
-    do Parquet completo; a linha puxada pode referenciar outra, e assim por
+    da fonte JÁ FILTRADA; a linha puxada pode referenciar outra, e assim por
     diante — a iteração converge em ~profundidade-da-hierarquia passos
     (limitada por MAX_ITER_FECHO_SELF; hierarquias reais são rasas). O
     critério de parada por CONTAGEM estagnada (e não só por vazio) evita
@@ -3503,13 +3656,14 @@ def completa_pais_referenciados(
                     on=pcols, how="left_anti")
                 n_faltantes = faltantes.count()
                 if n_faltantes == 0 or n_faltantes == n_anterior:
-                    # convergiu, ou só restam chaves inexistentes no Parquet
-                    # completo (órfãs de produção -> neutralização cuida).
+                    # convergiu, ou só restam chaves inexistentes na fonte
+                    # JÁ FILTRADA — órfãs de produção OU pais removidos pelos
+                    # predicados de fonte; ambos ficam para a neutralização.
                     break
                 n_anterior = n_faltantes
                 faltantes_side = (F.broadcast(faltantes)
                                   if broadcast_missing else faltantes)
-                extra = (read_parquet(spark, raw_path(config, child))
+                extra = (_read_source(spark, config, child)
                          .join(faltantes_side, on=pcols, how="left_semi"))
                 logger.info(
                     "completa_pais_referenciados: %s.%s -> %s (self): "
@@ -3537,15 +3691,17 @@ def completa_pais_referenciados(
             faltantes = ref_keys.join(
                 sampled[parent].select(*pcols).distinct(),
                 on=pcols, how="left_anti")
-            # Ação barata (limit 1) que evita, no caso comum de zero
-            # faltantes, a leitura do Parquet completo do pai, o union e um
-            # novo localCheckpoint.
+            # Ação barata (isEmpty) que evita, no caso comum de zero
+            # faltantes, a leitura da fonte do pai, o union e um novo
+            # localCheckpoint.
             if faltantes.isEmpty():
                 continue
-            # Puxa do Parquet COMPLETO, SEM filtro de tipo: a linha é
-            # necessária para a integridade, mesmo que seja de outro tipo.
+            # Puxa da FONTE JÁ FILTRADA do pai (`_read_source` / FILTROS_FONTE),
+            # NÃO do Parquet completo: um pai fora do produto CDB simplificado
+            # não é re-injetado; a chave faltante remanescente torna a filha
+            # órfã e a neutralização (null_orphan_fks / drop_orphan_rows) cuida.
             faltantes_side = F.broadcast(faltantes) if broadcast_missing else faltantes
-            extra = (read_parquet(spark, raw_path(config, parent))
+            extra = (_read_source(spark, config, parent)
                      .join(faltantes_side, on=pcols, how="left_semi"))
             logger.info(
                 "completa_pais_referenciados: %s.%s -> %s: completando pai com "
@@ -4052,6 +4208,7 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
     if pk_safety_band is not None:
         logger.info("PK safety band active: synthetic PKs start at true_max + %d", pk_safety_band)
     logger.info("Loaded %d table(s) in %d component(s)", len(specs), total)
+    _warn_filtros_fonte_sem_not_null(specs)
     run_started = time.perf_counter()
     failures: list[str] = []
     engorda_ts = _normalize_engorda_ts(None)
@@ -4070,15 +4227,15 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
                 comp_tables = referential_sample(spark, config, comp_specs, limit)
             else:
                 # Run COMPLETO: MESMA propagação referencial do filtro de
-                # domínio, agora sem cap de linhas. O filtro NUM_TIPO_IF==49 é
-                # aplicado APENAS na raiz (TABELAS_RAIZ_FILTRO) e o universo
-                # desce pela árvore de FK por chave, de modo que TODAS as
-                # demais tabelas (com ou sem cópia denormalizada da coluna)
-                # fiquem restritas ao tipo 49 via NUM_IF. Ao final, o fecho
-                # ascendente (completa_pais_referenciados) puxa do Parquet
-                # completo as linhas de pai referenciadas por filhas mantidas
-                # que o filtro/poda tenha removido -> o subset sai FK-fechado
-                # e null_orphan_fks deixa de anular FKs por órfão estrutural.
+                # domínio, agora sem cap de linhas. Os predicados de fonte do
+                # CDB simplificado (FILTROS_FONTE) são aplicados na leitura de
+                # CADA tabela (primeira etapa) e a raiz (TABELAS_RAIZ_FILTRO)
+                # ancora a descida por chave pela árvore de FK. Ao final, o
+                # fecho ascendente (completa_pais_referenciados) puxa da FONTE
+                # JÁ FILTRADA as linhas de pai referenciadas por filhas
+                # mantidas -> um pai fora do produto NÃO volta; o subset sai
+                # FK-fechado dentro do produto e os órfãos remanescentes
+                # (pai fora do produto ou órfão de produção) são neutralizados.
                 comp_tables = referential_sample(spark, config, comp_specs, None)
             counts = {t: comp_tables[t].count() for t in comp}
             for t in comp:
