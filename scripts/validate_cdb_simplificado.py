@@ -33,9 +33,9 @@ Environment variables
   DATAGEN_SYNTHETIC_BASE_URI     base URI of the synthetic output (required)
   DATAGEN_SYNTHETIC_PREFIX       optional sub-prefix under the base
   DATAGEN_SOURCE_JDBC_URL        jdbc:oracle:thin:@host:1521:sid  (required unless --no-oracle)
-  DATAGEN_SOURCE_JDBC_USER       Oracle user
-  DATAGEN_SOURCE_JDBC_PASSWORD   Oracle password
-  DATAGEN_SOURCE_JDBC_SCHEMA     owner filter for ALL_* views (default: CETIP)
+  DATAGEN_SOURCE_DB_USER         Oracle user
+  DATAGEN_SOURCE_DB_PASSWORD     Oracle password
+  DATAGEN_SOURCE_SCHEMA          owner filter for ALL_* views (default: CETIP)
 
 Usage
 -----
@@ -171,13 +171,13 @@ def read_config(no_oracle: bool) -> Config:
     if prefix:
         base = f"{base.rstrip('/')}/{prefix}"
     jdbc_url = os.environ.get("DATAGEN_SOURCE_JDBC_URL", "").strip() or None
-    jdbc_user = os.environ.get("DATAGEN_SOURCE_JDBC_USER", "").strip() or None
-    jdbc_pwd = os.environ.get("DATAGEN_SOURCE_JDBC_PASSWORD", "")
-    schema = os.environ.get("DATAGEN_SOURCE_JDBC_SCHEMA", "CETIP").strip().upper()
+    jdbc_user = os.environ.get("DATAGEN_SOURCE_DB_USER", "").strip() or None
+    jdbc_pwd = os.environ.get("DATAGEN_SOURCE_DB_PASSWORD", "")
+    schema = os.environ.get("DATAGEN_SOURCE_SCHEMA", "CETIP").strip().upper()
     if not no_oracle and not (jdbc_url and jdbc_user):
         raise SystemExit(
             "Oracle metadata requires DATAGEN_SOURCE_JDBC_URL and "
-            "DATAGEN_SOURCE_JDBC_USER (or run with --no-oracle)."
+            "DATAGEN_SOURCE_DB_USER (or run with --no-oracle)."
         )
     return Config(base.rstrip("/"), jdbc_url, jdbc_user, jdbc_pwd, schema)
 
@@ -238,7 +238,8 @@ def load_oracle_metadata(spark: SparkSession, cfg: Config) -> Metadata:
         f"FROM all_constraints c "
         f"JOIN all_cons_columns ccc ON ccc.owner=c.owner AND ccc.constraint_name=c.constraint_name "
         f"JOIN all_constraints pc ON pc.owner=c.r_owner AND pc.constraint_name=c.r_constraint_name "
-        f"JOIN all_cons_columns pcc ON pcc.owner=pc.owner AND pcc.constraint_name=pc.constraint_name "
+        f"JOIN all_cons_columns pcc ON pcc.owner=pc.owner "
+        f"                          AND pcc.constraint_name=pc.constraint_name "
         f"                          AND pcc.position=ccc.position "
         f"WHERE c.owner='{owner}' AND c.constraint_type='R'"
     )
@@ -505,7 +506,8 @@ def check_polymorphism(
             "1b.unknown_tipo", "CONDICAO_IF polymorphism", SEV_WARN,
             CONDICAO_IF_TABLE, False, count=c, column=CONDICAO_IF_TIPO_COL,
             sample=_sample_keys(unknown.select(F.col("ctipo")).distinct(), ["ctipo"], sample),
-            hint="Add these COD_TIPO_CONDICAO_IF values to SUBTYPE_BY_TIPO (verify against TipoCondicaoIFDO).",
+            hint="Add these COD_TIPO_CONDICAO_IF values to SUBTYPE_BY_TIPO "
+                 "(verify against TipoCondicaoIFDO).",
             message="COD_TIPO_CONDICAO_IF value not in the curated subtype map.",
         ))
 
@@ -576,8 +578,9 @@ def check_domain(tables: Dict[str, DataFrame], meta: Metadata, sample: int) -> L
                     "2.domain", "Domain conformance",
                     SEV_ERROR if c else SEV_INFO, table, c == 0, count=c,
                     sample=_sample_keys(bad, pk_cols, sample),
-                    hint="Row outside the CDB-simplificado product (FILTROS_FONTE). A fecho/rebind "
-                         "pass re-injected an out-of-product row, or the source filter was not applied.",
+                    hint="Row outside the CDB-simplificado product (FILTROS_FONTE). A "
+                         "fecho/rebind pass re-injected an out-of-product row, or the "
+                         "source filter was not applied.",
                     message=f"Rows violating domain predicate: {pred}",
                 ))
             except Exception as exc:  # noqa: BLE001
@@ -613,8 +616,8 @@ def _parent_keys(
     cols = ", ".join(fk.parent_cols)
     try:
         cnt = _jdbc(spark, cfg,
-                    f"SELECT COUNT(*) n FROM (SELECT DISTINCT {cols} FROM {cfg.schema}.{fk.parent_table})"
-                    ).collect()[0]["N"]
+                    f"SELECT COUNT(*) n FROM (SELECT DISTINCT {cols} "
+                    f"FROM {cfg.schema}.{fk.parent_table})").collect()[0]["N"]
         if cnt and int(cnt) > max_parent_keys:
             return None, f"parent {fk.parent_table} has {cnt} distinct keys > --max-parent-keys"
         q = f"SELECT DISTINCT {cols} FROM {cfg.schema}.{fk.parent_table}"
@@ -645,20 +648,24 @@ def check_referential(
                 ))
                 continue
 
-            not_null_all = reduce(lambda a, b: a & b, [F.col(a).isNotNull() for a in child_actual])
+            not_null_all = reduce(lambda a, b: a & b,
+                                  [F.col(a).isNotNull() for a in child_actual])
             child_keys = df.where(not_null_all).select(
                 *[F.col(a).cast("string").alias(f"k{i}") for i, a in enumerate(child_actual)]
             ).dropDuplicates()
-            orphans = child_keys.join(pkeys, [f"k{i}" for i in range(len(child_actual))], "left_anti")
+            orphans = child_keys.join(
+                pkeys, [f"k{i}" for i in range(len(child_actual))], "left_anti")
             c = orphans.count()
             out.append(Finding(
                 "3.fk_orphan", "Referential integrity",
                 SEV_ERROR if c else SEV_INFO, table, c == 0, count=c,
                 column=",".join(fk.child_cols),
-                sample=_sample_keys(orphans, [f"k{i}" for i in range(len(child_actual))], sample),
+                sample=_sample_keys(
+                    orphans, [f"k{i}" for i in range(len(child_actual))], sample),
                 hint="Orphan FK: child value not present in parent. Check FK remap / fecho / "
                      "null_orphan_fks for this edge.",
-                message=f"FK {table}.{list(fk.child_cols)} -> {fk.parent_table}.{list(fk.parent_cols)}",
+                message=f"FK {table}.{list(fk.child_cols)} -> "
+                        f"{fk.parent_table}.{list(fk.parent_cols)}",
             ))
 
             # Shared-key 1:1 cardinality (PK == FK).
@@ -670,8 +677,8 @@ def check_referential(
                     "3.shared_key_dup", "Referential integrity",
                     SEV_ERROR if dup else SEV_INFO, table, dup == 0, count=dup,
                     column=",".join(fk.child_cols),
-                    hint="Shared-key (PK==FK) 1:1 child has duplicate keys; bind_shared_key_children "
-                         "should pair 1:1 with distinct parent keys.",
+                    hint="Shared-key (PK==FK) 1:1 child has duplicate keys; "
+                         "bind_shared_key_children should pair 1:1 with distinct parent keys.",
                     message=f"Duplicate shared-key values in {table}.",
                 ))
     return out
@@ -705,11 +712,12 @@ def check_not_null(tables: Dict[str, DataFrame], meta: Metadata, sample: int) ->
             is_fk = col_upper in fk_cols
             if cnt:
                 hint = (
-                    "NOT NULL FK column left null -> the rebind/fecho pass should have resolved it "
-                    "(parent without synthetic key? cycle edge?)."
+                    "NOT NULL FK column left null -> the rebind/fecho pass should have "
+                    "resolved it (parent without synthetic key? cycle edge?)."
                     if is_fk else
-                    "NOT NULL non-FK column left null -> no pipeline pass generates it; it was born "
-                    "null in synthesis/bootstrap/postprocess or came null from source. Populate it "
+                    "NOT NULL non-FK column left null -> no pipeline pass generates it; "
+                    "it was born null in synthesis/bootstrap/postprocess or came null "
+                    "from source. Populate it "
                     "in generation (this is the ORA-01400 class, e.g. COD_MOTIVO)."
                 )
             else:
@@ -747,7 +755,8 @@ def check_dates(tables: Dict[str, DataFrame], meta: Metadata, sample: int) -> Li
             "5.date_order", "Date coherence",
             SEV_ERROR if c else SEV_INFO, table, c == 0, count=c, column=f"{lcol}{op}{rcol}",
             sample=_sample_keys(bad, _pk_cols_for(meta, table, df), sample),
-            hint="Check the engorda date rules (_apply_engorda_business_rules) / prazo de vencimento.",
+            hint="Check the engorda date rules (_apply_engorda_business_rules) / "
+                 "prazo de vencimento.",
             message=f"Rows where NOT ({lcol} {op} {rcol}).",
         ))
     return out
@@ -766,8 +775,8 @@ def check_lookup_combos(
                         message="OPERACAO not in output; combo check skipped.")]
     if not cfg.jdbc_url:
         return [Finding("6.combo", "Lookup combinations", SEV_WARN, OPERACAO_TABLE, False,
-                        message="No Oracle connection; cannot resolve valid (tipo_operacao, modalidade, "
-                                "servico) combinations for CDB.")]
+                        message="No Oracle connection; cannot resolve valid "
+                                "(tipo_operacao, modalidade, servico) combinations for CDB.")]
 
     # Discover a candidate service-mapping table.
     combo_table = None
@@ -784,30 +793,34 @@ def check_lookup_combos(
 
     if not combo_table:
         return [Finding("6.combo", "Lookup combinations", SEV_WARN, OPERACAO_TABLE, False,
-                        hint="Identify the tipo_operacao x modalidade x servico mapping table and add it "
-                             "to COMBO_TABLE_PATTERNS to enable a full combo anti-join.",
-                        message="Could not resolve the operation/service mapping table; SEM MODALIDADE "
-                                "risk not fully validated. Verify TIPO_OPERACAO/MODALIDADE_LIQUIDACAO refs "
+                        hint="Identify the tipo_operacao x modalidade x servico mapping table "
+                             "and add it to COMBO_TABLE_PATTERNS to enable a full combo "
+                             "anti-join.",
+                        message="Could not resolve the operation/service mapping table; "
+                                "SEM MODALIDADE risk not fully validated. Verify "
+                                "TIPO_OPERACAO/MODALIDADE_LIQUIDACAO refs "
                                 "are seeded for CDB operations.")]
 
     to_col = resolve(op_df, "NUM_ID_TIPO_OPERACAO")
     mod_col = resolve(op_df, "NUM_ID_MODALIDADE_LIQUIDACAO")
     if not to_col or not mod_col:
         return [Finding("6.combo", "Lookup combinations", SEV_INFO, OPERACAO_TABLE, True,
-                        message=f"OPERACAO lacks tipo_operacao/modalidade columns; using {combo_table} "
-                                "not possible. Skipped.")]
+                        message=f"OPERACAO lacks tipo_operacao/modalidade columns; "
+                                f"using {combo_table} not possible. Skipped.")]
 
     try:
         combo_cols = meta.col_type.get(combo_table, {})
         c_to = "NUM_ID_TIPO_OPERACAO" if "NUM_ID_TIPO_OPERACAO" in combo_cols else None
-        c_mod = "NUM_ID_MODALIDADE_LIQUIDACAO" if "NUM_ID_MODALIDADE_LIQUIDACAO" in combo_cols else None
+        c_mod = ("NUM_ID_MODALIDADE_LIQUIDACAO"
+                 if "NUM_ID_MODALIDADE_LIQUIDACAO" in combo_cols else None)
         if not c_to or not c_mod:
             return [Finding("6.combo", "Lookup combinations", SEV_WARN, OPERACAO_TABLE, False,
-                            message=f"Mapping table {combo_table} lacks the expected combo columns; "
-                                    "SEM MODALIDADE risk not validated.")]
+                            message=f"Mapping table {combo_table} lacks the expected combo "
+                                    "columns; SEM MODALIDADE risk not validated.")]
         valid = _jdbc(spark, cfg,
                       f"SELECT DISTINCT {c_to} t, {c_mod} m FROM {cfg.schema}.{combo_table}")
-        valid = valid.select(F.col("T").cast("string").alias("t"), F.col("M").cast("string").alias("m"))
+        valid = valid.select(F.col("T").cast("string").alias("t"),
+                             F.col("M").cast("string").alias("m"))
         used = op_df.select(
             F.col(to_col).cast("string").alias("t"),
             F.col(mod_col).cast("string").alias("m"),
@@ -819,8 +832,9 @@ def check_lookup_combos(
             SEV_ERROR if c else SEV_INFO, OPERACAO_TABLE, c == 0, count=c,
             column="NUM_ID_TIPO_OPERACAO,NUM_ID_MODALIDADE_LIQUIDACAO",
             sample=_sample_keys(missing, ["t", "m"], sample),
-            hint=f"Operation uses a (tipo_operacao, modalidade) with no mapping in {combo_table} "
-                 "for CDB -> 'SEM MODALIDADE / servico_ft nao encontrado'. Seed/verify the mapping.",
+            hint=f"Operation uses a (tipo_operacao, modalidade) with no mapping in "
+                 f"{combo_table} for CDB -> 'SEM MODALIDADE / servico_ft nao encontrado'. "
+                 "Seed/verify the mapping.",
             message=f"OPERACAO (tipo_operacao, modalidade) pairs absent from {combo_table}.",
         ))
     except Exception as exc:  # noqa: BLE001
@@ -897,9 +911,11 @@ def parse_args() -> argparse.Namespace:
                    help="Minimum severity that makes the run exit non-zero.")
     p.add_argument("--sample-size", type=int, default=20, help="Offending keys sampled per check.")
     p.add_argument("--validate-against", default="union", choices=["synthetic", "union"],
-                   help="Resolve FK parents only within the synthetic output, or also against Oracle.")
+                   help="Resolve FK parents only within the synthetic output, "
+                        "or also against Oracle.")
     p.add_argument("--max-parent-keys", type=int, default=5_000_000,
-                   help="Skip a union FK check if the Oracle parent has more distinct keys than this.")
+                   help="Skip a union FK check if the Oracle parent has more distinct "
+                        "keys than this.")
     p.add_argument("--skip-check", action="append", default=[],
                    help="Check-id prefix(es) to skip (repeatable), e.g. 6.combo.")
     p.add_argument("--no-oracle", action="store_true",

@@ -155,8 +155,8 @@ spark-submit --jars ojdbc8.jar validate_cdb_simplificado.py \
     --report-path report.json --fail-severity error --validate-against union
 ```
 Env: `DATAGEN_SYNTHETIC_BASE_URI` (+ `DATAGEN_SYNTHETIC_PREFIX`), `DATAGEN_SOURCE_JDBC_URL`,
-`DATAGEN_SOURCE_JDBC_USER`, `DATAGEN_SOURCE_JDBC_PASSWORD`, `DATAGEN_SOURCE_JDBC_SCHEMA` (default
-`CETIP`).
+`DATAGEN_SOURCE_DB_USER`, `DATAGEN_SOURCE_DB_PASSWORD`, `DATAGEN_SOURCE_SCHEMA` (default
+`CETIP`) — the same names the other datagen jobs use.
 
 ---
 
