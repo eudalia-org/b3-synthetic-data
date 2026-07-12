@@ -247,6 +247,50 @@ FILTROS_FONTE: dict[str, list[tuple[str, str, object]]] = {
 TABELAS_RAIZ_FILTRO = frozenset({"INSTRUMENTO_FINANCEIRO"})
 
 # ---------------------------------------------------------------------------
+# Polimorfismo de CONDICAO_IF (joined-subclass do Hibernate SEM discriminador).
+#
+# CONDICAO_IF é uma superclasse cujo tipo concreto (juros fixo, flutuante,
+# resgate, ...) é resolvido pelo Hibernate SOMENTE por QUAL tabela-subtipo
+# física contém a linha daquele NUM_CONDICAO_IF — não há coluna discriminadora.
+# A coluna COD_TIPO_CONDICAO_IF do PAI é o que a aplicação lê para decidir o
+# tipo e fazer o cast (ex.: tipo=2 -> (JurosFixoDO) ...). A invariante que a
+# aplicação assume é, para cada NUM_CONDICAO_IF:
+#   (a) existe EXATAMENTE UMA linha-subtipo;
+#   (b) na tabela indicada por COD_TIPO_CONDICAO_IF;
+#   (c) e em nenhuma outra tabela-subtipo.
+# Violá-la é o que produz o ClassCastException
+# "JurosFlutuanteDO cannot be cast to JurosFixoDO" no batch da NoMe.
+#
+# NUM_CONDICAO_IF é, em cada subtipo, PK **e** FK-para-o-pai (shared-key 1:1);
+# por isso o alinhamento é feito em bind_shared_key_children, que agora usa
+# este mapa para vincular cada subtipo APENAS às chaves do seu próprio tipo.
+# Mapa COD_TIPO_CONDICAO_IF -> nome da tabela-subtipo (de TipoCondicaoIFDO +
+# CondicaoIFDO.hbm.xml; espelha SUBTYPE_BY_TIPO em valida_regras_aplicacao.py).
+CONDICAO_IF_TABLE = "CONDICAO_IF"
+CONDICAO_IF_PK = "NUM_CONDICAO_IF"
+CONDICAO_IF_TIPO_COL = "COD_TIPO_CONDICAO_IF"
+SUBTYPE_BY_TIPO: dict[str, str] = {
+    "1": "AMORTIZACAO",
+    "2": "JUROS_FIXO",
+    "3": "JUROS_FLUTUANTE",
+    "4": "ATUALIZACAO_POS",
+    "5": "SPREAD",
+    "6": "PARTICIPACAO_LUCROS",
+    "7": "PREMIO",
+    "14": "ATUALIZACAO_PRE",
+    "15": "PREMIO_OPCAO",
+    "16": "TERMO",
+    "17": "PARAMETRO_LIMITE",
+    "20": "RESGATE",
+    "21": "PREMIO_CONTRATO",
+    "22": "OPCAO",
+    "23": "RESET",
+    "24": "DESDOBRAMENTO",
+}
+# Tabelas-subtipo -> COD_TIPO_CONDICAO_IF esperado (inverso de SUBTYPE_BY_TIPO).
+TIPO_BY_SUBTYPE: dict[str, str] = {v: k for k, v in SUBTYPE_BY_TIPO.items()}
+
+# ---------------------------------------------------------------------------
 # Regras de engorda por coluna.
 #
 # Data de engorda = instante em que este script começa a executar. A mesma data
@@ -3728,6 +3772,44 @@ def completa_pais_referenciados(
     return sampled
 
 
+def _is_condicao_if_subtype(child: str, parent: str, cols: list[str]) -> bool:
+    """True se (child, parent, FK) é uma tabela-subtipo de CONDICAO_IF conhecida.
+
+    Ou seja: o pai é CONDICAO_IF, a FK shared-key é sobre NUM_CONDICAO_IF, e o
+    filho é uma das tabelas-subtipo mapeadas em SUBTYPE_BY_TIPO. Só nesse caso o
+    bind precisa particionar as chaves do pai por COD_TIPO_CONDICAO_IF.
+    """
+    return (parent == CONDICAO_IF_TABLE
+            and child in TIPO_BY_SUBTYPE
+            and [c.upper() for c in cols] == [CONDICAO_IF_PK])
+
+
+def _condicao_if_keys_for_subtype(
+    parent_df: DataFrame, pcols: list[str], subtype_table: str
+) -> Optional[DataFrame]:
+    """Chaves do CONDICAO_IF pai cujo COD_TIPO_CONDICAO_IF casa com `subtype_table`.
+
+    Retorna o DF de chaves (aliased __np{i}) restrito ao tipo do subtipo, ou None
+    se o pai não tiver a coluna de tipo (aí o caller cai no comportamento antigo:
+    usar todas as chaves). Particionar por tipo garante fatias DISJUNTAS entre
+    subtipos -> nenhum NUM_CONDICAO_IF cai em dois subtipos (ambíguo), cada linha
+    fica no subtipo do tipo certo (mismatch), e o 1:1 por fatia mantém unicidade.
+    """
+    if not _has_column(parent_df, CONDICAO_IF_TIPO_COL):
+        return None
+    expected_tipo = TIPO_BY_SUBTYPE.get(subtype_table)
+    if expected_tipo is None:
+        return None
+    # Normaliza o código do pai a string trimada sem ".0" (IDs numéricos lidos
+    # como double/decimal viram "2.0"); compara com o código esperado do mapa.
+    tipo_norm = F.regexp_replace(
+        F.trim(F.col(CONDICAO_IF_TIPO_COL).cast("string")), r"\.0$", "")
+    filtered = parent_df.where(tipo_norm == F.lit(expected_tipo))
+    return (filtered
+            .select(*[F.col(pc).alias(f"__np{i}") for i, pc in enumerate(pcols)])
+            .dropna().distinct())
+
+
 def bind_shared_key_children(synthetic: dict, comp_specs: dict) -> dict:
     """Rebind 1:1 shared-key children (PK == FK) to distinct synthetic parent keys.
 
@@ -3737,6 +3819,21 @@ def bind_shared_key_children(synthetic: dict, comp_specs: dict) -> dict:
     Here we overwrite those columns with a distinct slice of the parent's
     synthetic keys, guaranteeing valid, unique, non-null keys. Child rows beyond
     the number of parent keys are dropped (1:1 cardinality).
+
+    SUBTYPE-AWARE (correção do polimorfismo CONDICAO_IF): quando o par
+    (child, parent) é uma tabela-subtipo de CONDICAO_IF (ver
+    _is_condicao_if_subtype), a fatia de chaves do pai NÃO é "todas as chaves
+    0..N", e sim APENAS as chaves cujo COD_TIPO_CONDICAO_IF corresponde àquele
+    subtipo (ex.: JUROS_FIXO recebe só as chaves de tipo 2). Como cada subtipo
+    consome uma fatia DISJUNTA do espaço de chaves do pai, garante-se de uma vez:
+      (a) 1:1 por fatia -> chaves únicas (sem shared_key_dup);
+      (b) exatamente uma tabela por chave -> sem ambiguidade (o
+          ClassCastException) e sem "subtype_mismatch".
+    O único resíduo possível — CONDICAO_IF de um tipo cujo subtipo NÃO está no
+    run (dangling) — é resolvido incluindo o subtipo em TABELAS_ALVO
+    (gera_spec_config.py) e é barrado por assert_polymorphism_ok antes da
+    gravação. FKs shared-key que não são subtipos de CONDICAO_IF mantêm o
+    comportamento antigo (todas as chaves do pai).
     """
     for child, cfg in comp_specs.items():
         child_df = synthetic.get(child)
@@ -3752,18 +3849,30 @@ def bind_shared_key_children(synthetic: dict, comp_specs: dict) -> dict:
                     or not _fk_is_whole_pk(pk_cols, fk)):
                 continue
 
-            # Numbering em PARALELO via _with_contiguous_row_id em vez de
-            # row_number() sobre Window sem partitionBy. O padrão antigo virava
-            # Exchange SinglePartition (sort serial numa única task) e estourava
-            # num pai grande tipo CONDICAO_IF; o lado do filho, com
-            # orderBy(monotonically_increasing_id()), ainda era NÃO-determinístico
-            # (mid é reavaliado por estágio), variando o pareamento entre runs.
-            # _with_contiguous_row_id dá id contíguo 0..N-1 bijetivo dos dois
-            # lados; o inner join pareia 1:1 e descarta filhos acima do nº de
-            # chaves do pai (mesma cardinalidade documentada), sem sort global.
-            keys = (parent_df
-                    .select(*[F.col(pc).alias(f"__np{i}") for i, pc in enumerate(pcols)])
-                    .dropna().distinct())
+            # Fatia de chaves do pai. Para subtipos de CONDICAO_IF, restringe ao
+            # COD_TIPO_CONDICAO_IF do subtipo (fatias disjuntas por tipo). Para
+            # os demais shared-key, todas as chaves do pai (comportamento antigo).
+            keys = None
+            if _is_condicao_if_subtype(child, parent, cols):
+                keys = _condicao_if_keys_for_subtype(parent_df, pcols, child)
+                if keys is not None:
+                    logger.info(
+                        "bind_shared_key_children: %s é subtipo de CONDICAO_IF "
+                        "(tipo=%s); vinculando SÓ às chaves desse tipo.",
+                        child, TIPO_BY_SUBTYPE.get(child))
+            if keys is None:
+                # Numbering em PARALELO via _with_contiguous_row_id em vez de
+                # row_number() sobre Window sem partitionBy. O padrão antigo virava
+                # Exchange SinglePartition (sort serial numa única task) e estourava
+                # num pai grande tipo CONDICAO_IF; o lado do filho, com
+                # orderBy(monotonically_increasing_id()), ainda era NÃO-determinístico
+                # (mid é reavaliado por estágio), variando o pareamento entre runs.
+                # _with_contiguous_row_id dá id contíguo 0..N-1 bijetivo dos dois
+                # lados; o inner join pareia 1:1 e descarta filhos acima do nº de
+                # chaves do pai (mesma cardinalidade documentada), sem sort global.
+                keys = (parent_df
+                        .select(*[F.col(pc).alias(f"__np{i}") for i, pc in enumerate(pcols)])
+                        .dropna().distinct())
             # MATERIALIZA cada lado após numerar. _with_contiguous_row_id usa
             # monotonically_increasing_id() — não-determinístico entre
             # avaliações. Sem congelar, o inner join por __bind_rn reavalia cada
@@ -4036,6 +4145,117 @@ def assert_not_null_ok(synthetic: dict, comp_specs: dict) -> None:
             "verifique o fecho/rebind dessas FKs.")
     if msgs:
         raise ValueError(" | ".join(msgs))
+
+
+def assert_polymorphism_ok(synthetic: dict, comp_specs: dict) -> None:
+    """Barra a escrita se o polimorfismo de CONDICAO_IF ficou inconsistente.
+
+    Rede de segurança final contra o ClassCastException do batch da NoMe
+    (JurosFlutuanteDO cannot be cast to JurosFixoDO). Após bind_shared_key_children,
+    verifica as três invariantes que a aplicação assume para cada NUM_CONDICAO_IF
+    (o subtipo é resolvido pela tabela física que contém a linha):
+
+      1a.dangling  — CONDICAO_IF de um tipo CONCRETO conhecido (SUBTYPE_BY_TIPO)
+                     sem NENHUMA linha na tabela-subtipo daquele tipo. Some ao
+                     incluir o subtipo em TABELAS_ALVO (gera_spec_config.py).
+      1a.ambiguous — mesmo NUM_CONDICAO_IF presente em MAIS DE UMA tabela-subtipo.
+      1b.mismatch  — subtipo presente numa tabela que NÃO corresponde ao
+                     COD_TIPO_CONDICAO_IF do pai.
+
+    Só roda quando CONDICAO_IF está no componente. Tabelas-subtipo ausentes do
+    run não geram dangling para os tipos que elas representam SE nenhuma linha
+    do pai tiver aquele COD_TIPO — mas se houver, é dangling e abortamos, porque
+    o append passaria e o batch quebraria depois (falha silenciosa pior).
+    """
+    cond = synthetic.get(CONDICAO_IF_TABLE)
+    if cond is None or not _has_column(cond, CONDICAO_IF_PK):
+        return
+    if not _has_column(cond, CONDICAO_IF_TIPO_COL):
+        logger.warning(
+            "assert_polymorphism_ok: CONDICAO_IF sem %s; checagem de "
+            "polimorfismo pulada.", CONDICAO_IF_TIPO_COL)
+        return
+
+    tipo_norm = F.regexp_replace(
+        F.trim(F.col(CONDICAO_IF_TIPO_COL).cast("string")), r"\.0$", "")
+    cond_norm = cond.select(
+        F.col(CONDICAO_IF_PK).cast("string").alias("__cnci"),
+        tipo_norm.alias("__ctipo"),
+    )
+
+    # Membership de cada NUM_CONDICAO_IF nas tabelas-subtipo presentes no run.
+    memb = None
+    for subtype in TIPO_BY_SUBTYPE:  # só tabelas-subtipo conhecidas
+        sdf = synthetic.get(subtype)
+        if sdf is None or not _has_column(sdf, CONDICAO_IF_PK):
+            continue
+        piece = (sdf.select(F.col(CONDICAO_IF_PK).cast("string").alias("__nci"))
+                    .withColumn("__tbl", F.lit(subtype)))
+        memb = piece if memb is None else memb.unionByName(piece)
+
+    problemas: list[str] = []
+
+    # Tipos concretos conhecidos presentes no pai mas SEM subtipo no run:
+    # dangling garantido para essas linhas.
+    tipos_presentes = {str(r["__ctipo"]) for r in
+                       cond_norm.select("__ctipo").distinct().collect()
+                       if r["__ctipo"] is not None}
+    for tipo in sorted(tipos_presentes):
+        subtype = SUBTYPE_BY_TIPO.get(tipo)
+        if subtype is None:
+            continue  # tipo fora do mapa curado -> não é subtipo concreto aqui
+        if synthetic.get(subtype) is None:
+            n = cond_norm.where(F.col("__ctipo") == F.lit(tipo)).count()
+            if n:
+                problemas.append(
+                    f"1a.dangling: {n} CONDICAO_IF com COD_TIPO={tipo} "
+                    f"({subtype}) mas a tabela {subtype} não está no run")
+
+    if memb is not None:
+        agg = memb.groupBy("__nci").agg(F.collect_set("__tbl").alias("__tbls"))
+        joined = cond_norm.join(agg, cond_norm["__cnci"] == agg["__nci"], "left")
+        joined = joined.withColumn(
+            "__n_tbls",
+            F.when(F.col("__tbls").isNull(), F.lit(0)).otherwise(F.size(F.col("__tbls"))))
+
+        # 1a.dangling: pai de tipo concreto conhecido sem subtipo algum.
+        map_pairs: list = []
+        for k, v in SUBTYPE_BY_TIPO.items():
+            map_pairs += [F.lit(k), F.lit(v)]
+        expected = F.create_map(*map_pairs)[F.col("__ctipo")]
+        joined = joined.withColumn("__expected", expected)
+
+        n_dangling = joined.where(
+            (F.col("__n_tbls") == 0) & F.col("__expected").isNotNull()).count()
+        if n_dangling:
+            problemas.append(
+                f"1a.dangling: {n_dangling} CONDICAO_IF de tipo concreto sem "
+                "nenhuma linha-subtipo (Hibernate não consegue tipá-los)")
+
+        # 1a.ambiguous: presente em mais de uma tabela-subtipo.
+        n_amb = joined.where(F.col("__n_tbls") > 1).count()
+        if n_amb:
+            problemas.append(
+                f"1a.ambiguous: {n_amb} NUM_CONDICAO_IF em MAIS DE UMA "
+                "tabela-subtipo (causa direta do ClassCastException)")
+
+        # 1b.mismatch: subtipo único, mas não o que COD_TIPO indica.
+        n_mismatch = joined.where(
+            (F.col("__n_tbls") == 1)
+            & F.col("__expected").isNotNull()
+            & (F.col("__tbls")[0] != F.col("__expected"))).count()
+        if n_mismatch:
+            problemas.append(
+                f"1b.mismatch: {n_mismatch} CONDICAO_IF cuja tabela-subtipo não "
+                "corresponde ao COD_TIPO_CONDICAO_IF")
+
+    if problemas:
+        raise ValueError(
+            "Polimorfismo de CONDICAO_IF inconsistente (o batch da NoMe "
+            "quebraria com ClassCastException): " + " | ".join(problemas)
+            + ". CONSERTO: garanta que todo subtipo de CDB está em TABELAS_ALVO "
+            "(gera_spec_config.py) e que bind_shared_key_children vinculou cada "
+            "subtipo só às chaves do seu COD_TIPO_CONDICAO_IF.")
 
 
 def release(*dataframes) -> None:
@@ -4331,6 +4551,10 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
             # coluna NOT NULL ficou nula (evita ORA-01400 no append). Só valida
             # tabelas cujo spec tem not_null_cols (gerado com cols_real.csv).
             assert_not_null_ok(synthetic, comp_specs)
+            # Rede de segurança do polimorfismo: aborta ANTES de gravar se
+            # CONDICAO_IF ficou com subtipo dangling/ambíguo/mismatch (evita o
+            # ClassCastException do batch da NoMe, que o append NÃO detecta).
+            assert_polymorphism_ok(synthetic, comp_specs)
             for name, df in synthetic.items():
                 out_path = f"{save_base}/{name}"
                 logger.info("[%d/%d] writing %s -> %s", index, total, name, out_path)
