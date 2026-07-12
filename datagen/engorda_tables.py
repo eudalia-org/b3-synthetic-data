@@ -3296,6 +3296,96 @@ def _remove_linhas_pk_nula(df: DataFrame, cfg: dict, table: str) -> DataFrame:
     return filtrado
 
 
+def _repara_not_null_origem(df: DataFrame, cfg: dict, table: str) -> DataFrame:
+    """Preenche, na leitura da fonte, colunas NOT NULL não-FK efetivamente nulas.
+
+    Caso real: lookups static trazem da extração uma linha com PK VÁLIDA mas
+    NULL/'' numa coluna que o Oracle declara NOT NULL (DETENTOR_IF.
+    NOM_DETENTOR_IF, MOTIVO_SITUACAO_IF.COD/DES_MOTIVO_SITUACAO_IF,
+    UNIDADE_MEDIDA.COD_UNIDADE_MEDIDA). Essa combinação não existe na origem
+    real (o Oracle guarda '' como NULL e a coluna é NOT NULL): é artefato de
+    extração, primo da linha de PK nula de _remove_linhas_pk_nula. Sem
+    conserto, a linha atravessa o pipeline intacta (nenhum passe de FK a toca)
+    e assert_not_null_ok aborta o componente — rodar de novo falha igual.
+
+    DROPAR a linha (como se faz com PK nula) seria PIOR que preencher: a PK é
+    válida e pode ser referenciada por FK NOT NULL de tabela-alvo (ex.:
+    INSTRUMENTO_FINANCEIRO.NUM_ID_MOTIVO_SITUACAO_IF -> MOTIVO_SITUACAO_IF);
+    o pai dropado tornaria essas filhas órfãs e a neutralização as DROPARIA em
+    cascata (linhas VÁLIDAS do domínio perdidas). Preencher preserva a linha,
+    a identidade da PK e toda a integridade referencial.
+
+    Escopo deliberado (só o que nenhum outro passe cobre):
+      - PK fica fora — linha de PK nula é dropada por _remove_linhas_pk_nula;
+      - coluna de FK fica fora — NULL em FK é assunto dos passes de órfão
+        (fecho/neutralização/rebind); inventar uma referência aqui criaria
+        órfão novo;
+      - só colunas declaradas em not_null_cols (spec gerado com cols_real.csv)
+        e presentes no DataFrame.
+
+    Valor de preenchimento: o MENOR valor válido do tipo, porque o spec não
+    conhece a largura física da coluna no Oracle — string vira "0" (1 char:
+    cabe em qualquer CHAR/VARCHAR2, inclusive indicadores CHAR(1), sem risco
+    de ORA-12899; exceção: DAT_* fisicamente string recebe data formatada),
+    número vira 0, data/timestamp viram o instante corrente (coerente com a
+    data de engorda). Tipos além desses ficam como estão e
+    assert_not_null_ok continua barrando, apontando para cá.
+
+    Custo: projeção pura (um when/otherwise por coluna reparável), sem scan
+    nem agg extra; contagem de reparos só sob --debug.
+    """
+    pk_set = set(cfg.get("pk_cols") or [])
+    fk_cols = {c for fk in _fk_list(cfg) for c in (fk.get("columns") or [])}
+    alvo = [c for c in sorted(_not_null_cols(cfg))
+            if _has_column(df, c) and c not in pk_set and c not in fk_cols]
+    if not alvo:
+        return df
+    if _dbg():
+        nulos = _null_efetivo_counts(df, alvo)
+        for c, n in nulos.items():
+            if n:
+                logger.debug(
+                    "[DEBUG repara_not_null] %s.%s: %d valor(es) efetivamente "
+                    "nulo(s) (NULL/'') preenchido(s) na leitura da fonte.",
+                    table, c, n)
+    for c in alvo:
+        dt = _get_field_type(df, c)
+        col = F.col(c)
+        if _is_string_type(dt):
+            eff_null = col.isNull() | (F.trim(col) == F.lit(""))
+            if c.startswith("DAT_"):
+                # Coluna de data fisicamente STRING (CSV lido com inferSchema):
+                # "0" quebraria o append com ORA-01858; usa o mesmo formato de
+                # _timestamp_literal_for_type para coluna string.
+                fill = F.date_format(F.current_timestamp(), "yyyy-MM-dd HH:mm:ss")
+            else:
+                fill = F.lit("0")
+        elif _is_numeric_pk_type(dt):
+            eff_null = col.isNull()
+            fill = F.lit(0).cast(dt)
+        elif isinstance(dt, T.DateType):
+            eff_null = col.isNull()
+            fill = F.current_date()
+        elif isinstance(dt, T.TimestampType):
+            eff_null = col.isNull()
+            fill = F.current_timestamp()
+        else:
+            continue  # tipo não reparável -> assert_not_null_ok segue barrando
+        df = df.withColumn(c, F.when(eff_null, fill).otherwise(col))
+    return df
+
+
+def _saneia_fonte(df: DataFrame, cfg: dict, table: str) -> DataFrame:
+    """Saneamento canônico da fonte já filtrada, num único ponto de entrada:
+    (1) remove linhas de PK nula/vazia e (2) preenche colunas NOT NULL não-FK
+    efetivamente nulas — os dois artefatos de extração que tornariam a linha
+    não-apendável (ORA-01400). Todo ponto que consome fonte para amostra/fecho
+    deve ler por aqui, para que síntese, bootstrap e cópia static enxerguem a
+    MESMA fonte saneada."""
+    return _repara_not_null_origem(
+        _remove_linhas_pk_nula(df, cfg, table), cfg, table)
+
+
 def _read_pk_max(spark, path: str, pk_col: str):
     """max(pk_col) from the full Parquet at `path` (footer-fast with pushdown)."""
     row = read_parquet(spark, path).agg(F.max(F.col(pk_col))).first()
@@ -3475,8 +3565,9 @@ def referential_sample(spark, config, comp_specs, limit: int | None) -> dict:
         # (FILTROS_FONTE), a primeira etapa. A propagação referencial abaixo
         # restringe adicionalmente por chave a partir da raiz, e a
         # consistência de FK é calculada sobre esse subconjunto. Linhas com
-        # PK nula/vazia (artefato de extração) saem já na leitura.
-        df = _remove_linhas_pk_nula(
+        # PK nula/vazia saem já na leitura e colunas NOT NULL não-FK
+        # efetivamente nulas são preenchidas (artefatos de extração).
+        df = _saneia_fonte(
             _read_source(spark, config, table), comp_specs[table], table)
         # Baseline BRUTO (pós-filtros de fonte, PRÉ-poda por semi-join): nulos
         # das colunas de FK direto da origem. Comparar com o estágio
@@ -3789,7 +3880,7 @@ def completa_pais_referenciados(
                 n_anterior = n_faltantes
                 faltantes_side = (F.broadcast(faltantes)
                                   if broadcast_missing else faltantes)
-                extra = (_remove_linhas_pk_nula(
+                extra = (_saneia_fonte(
                              _read_source(spark, config, child),
                              comp_specs[child], child)
                          .join(faltantes_side, on=pcols, how="left_semi"))
@@ -3829,7 +3920,7 @@ def completa_pais_referenciados(
             # não é re-injetado; a chave faltante remanescente torna a filha
             # órfã e a neutralização (null_orphan_fks / drop_orphan_rows) cuida.
             faltantes_side = F.broadcast(faltantes) if broadcast_missing else faltantes
-            extra = (_remove_linhas_pk_nula(
+            extra = (_saneia_fonte(
                          _read_source(spark, config, parent),
                          comp_specs[parent], parent)
                      .join(faltantes_side, on=pcols, how="left_semi"))
@@ -4403,7 +4494,8 @@ def _null_efetivo_counts(df: DataFrame, cols: list[str]) -> dict[str, int]:
     ORA-01400 (caso real: linha "vazia" vinda da origem em lookups static —
     DETENTOR_IF.NOM_DETENTOR_IF, UNIDADE_MEDIDA.COD_UNIDADE_MEDIDA etc. — que
     o assert com isNull() puro deixava passar e o validador pós-escrita
-    acusava como "NULL/empty")."""
+    acusava como "NULL/empty"; hoje essas linhas são consertadas na leitura
+    da fonte por _repara_not_null_origem)."""
     present = [c for c in cols if c in df.columns]
     if not present:
         return {}
@@ -4491,10 +4583,11 @@ def assert_not_null_ok(synthetic: dict, comp_specs: dict) -> None:
             "Colunas NOT NULL que NÃO são FK ficaram nulas (NULL ou '' string; "
             "o append quebraria com ORA-01400): "
             + "; ".join(sorted(problemas_naofk))
-            + ". CONSERTO: NENHUM passe deste pipeline gera essas colunas — elas "
-            "nasceram nulas na síntese/postprocess ou já vinham nulas da origem. "
-            "Rodar de novo sem mudar nada falha igual; corrija a geração da "
-            "coluna ou o dado de entrada (ou reveja not_null_cols do spec).")
+            + ". CONSERTO: _repara_not_null_origem preenche essas colunas na "
+            "leitura da fonte (string->'0', número->0, data->hoje); se ainda "
+            "assim ficou nulo, ou o tipo físico da coluna não é reparável, ou "
+            "o nulo foi introduzido DEPOIS da leitura (síntese/postprocess/"
+            "bind) — investigue esse passe (ou reveja not_null_cols do spec).")
     if vazias_alvo:
         msgs.append(
             "Tabela(s)-alvo ficaram VAZIAS após a síntese (provável drop de FK "
@@ -4513,9 +4606,13 @@ def assert_polymorphism_ok(synthetic: dict, comp_specs: dict) -> None:
     verifica as três invariantes que a aplicação assume para cada NUM_CONDICAO_IF
     (o subtipo é resolvido pela tabela física que contém a linha):
 
-      1a.dangling  — CONDICAO_IF de um tipo CONCRETO conhecido (SUBTYPE_BY_TIPO)
-                     sem NENHUMA linha na tabela-subtipo daquele tipo. Some ao
-                     incluir o subtipo em TABELAS_ALVO (gera_spec_config.py).
+      1a.dangling  — CONDICAO_IF sem NENHUMA linha em tabela-subtipo alguma:
+                     tipo CONHECIDO (SUBTYPE_BY_TIPO) sem linha na tabela do
+                     seu tipo (some ao incluir o subtipo em TABELAS_ALVO,
+                     gera_spec_config.py) e também tipo FORA do mapa curado
+                     (paridade com o validador pós-escrita, que não filtra
+                     por tipo conhecido — nesse caso o conserto é curar
+                     SUBTYPE_BY_TIPO nos dois lados).
       1a.ambiguous — mesmo NUM_CONDICAO_IF presente em MAIS DE UMA tabela-subtipo.
       1b.mismatch  — subtipo presente numa tabela que NÃO corresponde ao
                      COD_TIPO_CONDICAO_IF do pai.
@@ -4552,20 +4649,37 @@ def assert_polymorphism_ok(synthetic: dict, comp_specs: dict) -> None:
     problemas: list[str] = []
 
     # Tipos concretos conhecidos presentes no pai mas SEM subtipo no run:
-    # dangling garantido para essas linhas.
+    # dangling garantido para essas linhas. Tipos FORA do mapa curado são
+    # tratados adiante por membership (nenhuma tabela do run pode contê-los
+    # -> dangling também; o validador pós-escrita reprova igual).
     tipos_presentes = {str(r["__ctipo"]) for r in
                        cond_norm.select("__ctipo").distinct().collect()
                        if r["__ctipo"] is not None}
+    tipos_desconhecidos = sorted(
+        t for t in tipos_presentes if t not in SUBTYPE_BY_TIPO)
     for tipo in sorted(tipos_presentes):
         subtype = SUBTYPE_BY_TIPO.get(tipo)
         if subtype is None:
-            continue  # tipo fora do mapa curado -> não é subtipo concreto aqui
+            continue  # fora do mapa curado -> checado por membership abaixo
         if synthetic.get(subtype) is None:
             n = cond_norm.where(F.col("__ctipo") == F.lit(tipo)).count()
             if n:
                 problemas.append(
                     f"1a.dangling: {n} CONDICAO_IF com COD_TIPO={tipo} "
                     f"({subtype}) mas a tabela {subtype} não está no run")
+
+    if memb is None and tipos_desconhecidos:
+        # Sem NENHUMA tabela-subtipo no run, toda linha de tipo desconhecido é
+        # dangling por definição (as de tipo conhecido já foram acusadas acima).
+        n = cond_norm.where(F.col("__ctipo").isin(tipos_desconhecidos)).count()
+        if n:
+            problemas.append(
+                f"1a.dangling: {n} CONDICAO_IF com COD_TIPO fora do mapa "
+                f"curado ({tipos_desconhecidos}) e nenhuma tabela-subtipo no "
+                "run — o Hibernate não consegue tipá-las e o validador "
+                "pós-escrita reprova (1a.dangling); se o tipo tem tabela "
+                "física, adicione-a a SUBTYPE_BY_TIPO (aqui e no validador) "
+                "e a TABELAS_ALVO")
 
     if memb is not None:
         agg = memb.groupBy("__nci").agg(F.collect_set("__tbl").alias("__tbls"))
@@ -4587,6 +4701,20 @@ def assert_polymorphism_ok(synthetic: dict, comp_specs: dict) -> None:
             problemas.append(
                 f"1a.dangling: {n_dangling} CONDICAO_IF de tipo concreto sem "
                 "nenhuma linha-subtipo (Hibernate não consegue tipá-los)")
+
+        # PARIDADE com o validador pós-escrita: lá o 1a.dangling NÃO filtra
+        # por tipo conhecido — linha de COD_TIPO fora do mapa curado sem
+        # linha-subtipo em NENHUMA tabela do run também é ERROR. Sem este
+        # check o engorda gravava e o validador reprovava depois.
+        n_unk = joined.where(
+            (F.col("__n_tbls") == 0) & F.col("__expected").isNull()).count()
+        if n_unk:
+            problemas.append(
+                f"1a.dangling: {n_unk} CONDICAO_IF com COD_TIPO fora do mapa "
+                f"curado ({tipos_desconhecidos}) e sem linha em nenhuma "
+                "tabela-subtipo do run; se o tipo tem tabela física, "
+                "adicione-a a SUBTYPE_BY_TIPO (aqui e no validador) e a "
+                "TABELAS_ALVO")
 
         # 1a.ambiguous: presente em mais de uma tabela-subtipo.
         n_amb = joined.where(F.col("__n_tbls") > 1).count()
