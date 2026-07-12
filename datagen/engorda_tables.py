@@ -3802,9 +3802,8 @@ def _condicao_if_keys_for_subtype(
         return None
     # Normaliza o código do pai a string trimada sem ".0" (IDs numéricos lidos
     # como double/decimal viram "2.0"); compara com o código esperado do mapa.
-    tipo_norm = F.regexp_replace(
-        F.trim(F.col(CONDICAO_IF_TIPO_COL).cast("string")), r"\.0$", "")
-    filtered = parent_df.where(tipo_norm == F.lit(expected_tipo))
+    filtered = parent_df.where(
+        _condicao_if_tipo_norm_expr() == F.lit(expected_tipo))
     return (filtered
             .select(*[F.col(pc).alias(f"__np{i}") for i, pc in enumerate(pcols)])
             .dropna().distinct())
@@ -3829,10 +3828,19 @@ def bind_shared_key_children(synthetic: dict, comp_specs: dict) -> dict:
       (a) 1:1 por fatia -> chaves únicas (sem shared_key_dup);
       (b) exatamente uma tabela por chave -> sem ambiguidade (o
           ClassCastException) e sem "subtype_mismatch".
-    O único resíduo possível — CONDICAO_IF de um tipo cujo subtipo NÃO está no
-    run (dangling) — é resolvido incluindo o subtipo em TABELAS_ALVO
-    (gera_spec_config.py) e é barrado por assert_polymorphism_ok antes da
-    gravação. FKs shared-key que não são subtipos de CONDICAO_IF mantêm o
+    Resíduos possíveis e quem os resolve:
+      * subtipo NO run mas com MENOS linhas que as chaves do pai daquele tipo
+        (inclusive ZERO linhas — domínio/amostra sem o subtipo, caso típico do
+        CDB simplificado com AMORTIZACAO/PARTICIPACAO_LUCROS/RESET/
+        DESDOBRAMENTO): as chaves de pai não cobertas ficariam dangling; são
+        REMOVIDAS do CONDICAO_IF por alinha_condicao_if_aos_subtipos logo após
+        este bind, e as filhas que as referenciavam são neutralizadas por
+        null_orphan_fks (ordem topológica).
+      * subtipo que NÃO está no run com linhas de pai daquele tipo: continua
+        sendo erro de spec — resolvido incluindo o subtipo em TABELAS_ALVO
+        (gera_spec_config.py) e barrado por assert_polymorphism_ok antes da
+        gravação.
+    FKs shared-key que não são subtipos de CONDICAO_IF mantêm o
     comportamento antigo (todas as chaves do pai).
     """
     for child, cfg in comp_specs.items():
@@ -3888,6 +3896,122 @@ def bind_shared_key_children(synthetic: dict, comp_specs: dict) -> dict:
                 joined = joined.withColumn(c, F.col(f"__np{i}"))
             child_df = joined.drop("__bind_rn", *[f"__np{i}" for i in range(len(pcols))])
         synthetic[child] = child_df
+    return synthetic
+
+
+def _condicao_if_tipo_norm_expr():
+    """COD_TIPO_CONDICAO_IF normalizado a string trimada sem ".0" (IDs lidos
+    como double/decimal viram "2.0"); mesma normalização usada no bind e nos
+    asserts, para as comparações de tipo serem consistentes entre os passes."""
+    return F.regexp_replace(
+        F.trim(F.col(CONDICAO_IF_TIPO_COL).cast("string")), r"\.0$", "")
+
+
+def _subtipo_vazio_e_legitimo(synthetic: dict, table: str) -> bool:
+    """True se `table` é subtipo de CONDICAO_IF e o pai sintético NÃO tem
+    nenhuma linha do COD_TIPO correspondente.
+
+    Nesse caso a tabela-subtipo vazia é o resultado CORRETO — a invariante do
+    polimorfismo (exatamente uma linha-subtipo por pai de tipo concreto) vale
+    trivialmente: zero pais do tipo -> zero linhas no subtipo. É o que acontece
+    no domínio CDB simplificado com tipos que não se aplicam a CDB (ex.:
+    AMORTIZACAO/PARTICIPACAO_LUCROS/RESET/DESDOBRAMENTO), onde a fonte
+    filtrada/amostrada simplesmente não tem linhas do subtipo. Abortar o run
+    por isso (como o vazias_alvo fazia) transforma um dado VÁLIDO em falha.
+    """
+    tipo = TIPO_BY_SUBTYPE.get(table)
+    if tipo is None:
+        return False
+    cond = synthetic.get(CONDICAO_IF_TABLE)
+    if cond is None or not _has_column(cond, CONDICAO_IF_TIPO_COL):
+        return False
+    return cond.where(_condicao_if_tipo_norm_expr() == F.lit(tipo)).isEmpty()
+
+
+def alinha_condicao_if_aos_subtipos(synthetic: dict, comp_specs: dict) -> dict:
+    """Remove do CONDICAO_IF sintético as linhas de tipo concreto que ficaram
+    SEM linha-subtipo (dangling) após bind_shared_key_children.
+
+    Por que existe: o bind vincula cada subtipo APENAS às chaves do pai com o
+    seu COD_TIPO_CONDICAO_IF, num pareamento 1:1 por posição. Quando o subtipo
+    tem MENOS linhas que as chaves do pai daquele tipo — inclusive ZERO linhas,
+    caso típico do CDB simplificado, cujo domínio não tem AMORTIZACAO/
+    PARTICIPACAO_LUCROS/RESET/DESDOBRAMENTO — as chaves excedentes do pai ficam
+    sem linha-subtipo. O Hibernate não conseguiria tipá-las (dangling), o
+    assert_polymorphism_ok abortaria e, no caso de subtipo 100% vazio, o
+    vazias_alvo do assert_not_null_ok abortava antes. Como não dá para FABRICAR
+    linhas-subtipo (não há linha de fonte para bootstrapar), a única saída
+    consistente é encolher o pai para as chaves efetivamente cobertas.
+
+    O que faz, para cada tabela-subtipo PRESENTE no run (em synthetic):
+      1. coleta as chaves NUM_CONDICAO_IF cobertas pelo subtipo (pós-bind);
+      2. mantém no pai apenas linhas cujo (chave, tipo) está coberto;
+      3. linhas de tipo NULL, de tipo fora do mapa curado ou de subtipo que
+         NÃO está no run passam intactas — para subtipo fora do run a política
+         continua sendo a do assert_polymorphism_ok (erro de spec: inclua a
+         tabela em TABELAS_ALVO).
+
+    DEVE rodar ANTES de null_orphan_fks: as filhas de CONDICAO_IF que
+    referenciavam chaves removidas são então neutralizadas pela rede de
+    segurança existente (anulação/rebind em ordem topológica).
+    """
+    cfg = comp_specs.get(CONDICAO_IF_TABLE)
+    cond = synthetic.get(CONDICAO_IF_TABLE)
+    if (cfg is None or cfg.get("static") or cond is None
+            or not _has_column(cond, CONDICAO_IF_PK)
+            or not _has_column(cond, CONDICAO_IF_TIPO_COL)):
+        return synthetic
+
+    covered = None
+    aligned_tipos: list[str] = []
+    for subtype, tipo in TIPO_BY_SUBTYPE.items():
+        sdf = synthetic.get(subtype)
+        if sdf is None or not _has_column(sdf, CONDICAO_IF_PK):
+            continue
+        aligned_tipos.append(tipo)
+        piece = (sdf.select(F.col(CONDICAO_IF_PK).cast("string").alias("__al_key"))
+                    .dropna().distinct()
+                    .withColumn("__al_tipo", F.lit(tipo)))
+        covered = piece if covered is None else covered.unionByName(piece)
+
+    if covered is None:
+        return synthetic
+
+    work = (cond
+            .withColumn("__al_key", F.col(CONDICAO_IF_PK).cast("string"))
+            .withColumn("__al_tipo", _condicao_if_tipo_norm_expr()))
+    hit = covered.withColumn("__al_hit", F.lit(True))
+    # `covered` é distinct por (chave, tipo) -> o left join não multiplica
+    # linhas do pai.
+    joined = work.join(hit, ["__al_key", "__al_tipo"], "left")
+    # keep nunca é NULL: os dois primeiros disjuntos são is[Not]Null (sempre
+    # booleanos) e ~isin só é NULL com tipo NULL, caso já coberto pelo isNull.
+    keep = (
+        F.col("__al_hit").isNotNull()
+        | F.col("__al_tipo").isNull()
+        | ~F.col("__al_tipo").isin(aligned_tipos)
+    )
+
+    stats = (joined.where(~keep)
+             .groupBy("__al_tipo")
+             .agg(F.count(F.lit(1)).alias("__al_n"))
+             .collect())
+    if not stats:
+        return synthetic
+
+    total = sum(int(r["__al_n"]) for r in stats)
+    detalhe = ", ".join(
+        f"tipo={r['__al_tipo']} ({SUBTYPE_BY_TIPO.get(str(r['__al_tipo']), '?')}): "
+        f"{r['__al_n']}"
+        for r in sorted(stats, key=lambda r: str(r["__al_tipo"])))
+    logger.warning(
+        "alinha_condicao_if_aos_subtipos: removendo %d linha(s) de CONDICAO_IF "
+        "sem linha-subtipo correspondente (dangling apos o bind): %s. Filhas "
+        "que referenciavam essas chaves serao neutralizadas por "
+        "null_orphan_fks.", total, detalhe)
+
+    synthetic[CONDICAO_IF_TABLE] = (
+        joined.where(keep).drop("__al_key", "__al_tipo", "__al_hit"))
     return synthetic
 
 
@@ -4107,9 +4231,19 @@ def assert_not_null_ok(synthetic: dict, comp_specs: dict) -> None:
         # Tabela ALVO (não-static) que ficou VAZIA após os passes = sinal de que
         # um drop apagou tudo (FK NOT NULL 100% órfã). Melhor abortar com log do
         # que gravar tabela vazia silenciosamente (o rebind deve evitar isso;
-        # esta é a rede de segurança).
+        # esta é a rede de segurança). EXCEÇÃO legítima: subtipo de CONDICAO_IF
+        # cujo tipo não tem NENHUMA linha no pai sintético — aí vazio é o
+        # resultado correto (domínio/amostra sem o subtipo; ver
+        # _subtipo_vazio_e_legitimo), não um drop acidental.
         if not cfg.get("static") and df.isEmpty():
-            vazias_alvo.append(table)
+            if _subtipo_vazio_e_legitimo(synthetic, table):
+                logger.warning(
+                    "assert_not_null_ok: %s vazia e LEGITIMA — subtipo de "
+                    "CONDICAO_IF (tipo=%s) sem nenhuma linha do pai desse "
+                    "tipo no dominio/amostra; tabela sera gravada vazia.",
+                    table, TIPO_BY_SUBTYPE.get(table))
+            else:
+                vazias_alvo.append(table)
         nn = [c for c in _not_null_cols(cfg) if c in df.columns]
         if not nn:
             continue
@@ -4176,11 +4310,9 @@ def assert_polymorphism_ok(synthetic: dict, comp_specs: dict) -> None:
             "polimorfismo pulada.", CONDICAO_IF_TIPO_COL)
         return
 
-    tipo_norm = F.regexp_replace(
-        F.trim(F.col(CONDICAO_IF_TIPO_COL).cast("string")), r"\.0$", "")
     cond_norm = cond.select(
         F.col(CONDICAO_IF_PK).cast("string").alias("__cnci"),
-        tipo_norm.alias("__ctipo"),
+        _condicao_if_tipo_norm_expr().alias("__ctipo"),
     )
 
     # Membership de cada NUM_CONDICAO_IF nas tabelas-subtipo presentes no run.
@@ -4512,6 +4644,15 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
                                       label=label)
             synthetic = bind_shared_key_children(synthetic, comp_specs)
             debug_fk_integrity_report("5.after_bind_shared_key", synthetic,
+                                      comp_specs, label=label)
+            # Alinha o pai aos subtipos: remove de CONDICAO_IF as linhas de
+            # tipo concreto que ficaram sem linha-subtipo após o bind (subtipo
+            # com menos linhas que chaves do pai — inclusive zero, caso do CDB
+            # simplificado sem AMORTIZACAO/PARTICIPACAO_LUCROS/RESET/
+            # DESDOBRAMENTO). Precisa vir ANTES de null_orphan_fks, que então
+            # neutraliza as filhas que referenciavam as chaves removidas.
+            synthetic = alinha_condicao_if_aos_subtipos(synthetic, comp_specs)
+            debug_fk_integrity_report("5b.after_align_condicao_if", synthetic,
                                       comp_specs, label=label)
             # Self-FKs genuínas são remapeadas DENTRO da síntese (mapping
             # old->new da própria tabela), preservando estrutura e
