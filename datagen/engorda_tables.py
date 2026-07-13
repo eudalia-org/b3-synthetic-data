@@ -225,11 +225,7 @@ FILTROS_FONTE: dict[str, list[tuple[str, str, object]]] = {
     ],
     "RESGATE": [
         # 'SEM TABELA' com upper+trim por segurança contra caixa/espaços.
-        ("COD_COND_RESGATE", "ieq", "SEM TABELA"),
         ("DAT_EXCLUSAO", "isnull", None),
-    ],
-    "TITULO": [
-        ("COD_TIPO_ESCALONAMENTO", "isnull", None),
     ],
     "CONDICAO_IF": [
         ("DAT_EXCLUSAO", "isnull", None),
