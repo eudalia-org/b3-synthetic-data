@@ -159,7 +159,8 @@ DEFAULT_SEED = 42
 #
 # Regras do CDB simplificado (imagem do produto):
 #   INSTRUMENTO_FINANCEIRO : NUM_TIPO_IF = 49 E DAT_EXCLUSAO IS NULL
-#   RESGATE                : DAT_EXCLUSAO IS NULL
+#   RESGATE                : COD_COND_RESGATE = 'SEM TABELA' E DAT_EXCLUSAO IS NULL
+#   TITULO                 : COD_TIPO_ESCALONAMENTO IS NULL
 #   CONDICAO_IF            : DAT_EXCLUSAO IS NULL
 #
 # Propagação por chave (inalterada): a raiz do universo continua sendo
@@ -224,7 +225,11 @@ FILTROS_FONTE: dict[str, list[tuple[str, str, object]]] = {
     ],
     "RESGATE": [
         # 'SEM TABELA' com upper+trim por segurança contra caixa/espaços.
+        ("COD_COND_RESGATE", "ieq", "SEM TABELA"),
         ("DAT_EXCLUSAO", "isnull", None),
+    ],
+    "TITULO": [
+        ("COD_TIPO_ESCALONAMENTO", "isnull", None),
     ],
     "CONDICAO_IF": [
         ("DAT_EXCLUSAO", "isnull", None),
@@ -3702,11 +3707,7 @@ def neutraliza_orfaos_na_fonte(comp_specs, sampled: dict) -> dict:
     novo localCheckpoint só acontecem quando há órfão de fato.
     """
     MAX_ITER_SELF_DROP = 10
-    # 30 rodadas (era 10): cascatas de drop atravessando os hubs de auditoria
-    # (USUARIO <-> ENTIDADE, fora da ordenação topológica) podem precisar de
-    # mais de 10 rodadas para assentar; rodada já convergida custa só um
-    # anti-join de chaves distintas por FK, então o teto alto é barato.
-    MAX_RODADAS_NEUTRALIZA = 30
+    MAX_RODADAS_NEUTRALIZA = 10
     order = topo_order_tables(comp_specs)
     for rodada_global in range(1, MAX_RODADAS_NEUTRALIZA + 1):
         mudou_algo = False
@@ -3813,23 +3814,12 @@ def completa_pais_referenciados(
     NULL). Assim os predicados de fonte valem também no fecho ascendente —
     nenhuma etapa consegue trazer de volta uma linha fora do produto.
 
-    A ordem reversa resolve necessidades transitivas em UMA passada num DAG
-    PERFEITO: as linhas adicionadas a um pai ainda terão as PRÓPRIAS FKs
-    completadas quando esse pai for visitado depois (pais vêm antes das
-    filhas na ordem topológica, logo depois delas na reversa). MAS o grafo
-    real NÃO é um DAG perfeito: arestas quebradas por ciclo em
-    _toposort_break_cycles e arestas excluídas da ordenação
-    (PARENTS_FORA_DA_ORDENACAO, ex.: auditoria -> USUARIO) permitem que
-    linhas sejam puxadas para um pai que JÁ FOI visitado — essas linhas
-    ficariam com as próprias FKs incompletas e virariam cascata de
-    drop/anulação na neutralização (linhas VÁLIDAS do domínio perdidas, ou
-    pais ausentes na saída). Por isso a passada reversa agora REPETE A PONTO
-    FIXO (MAX_PASSES_FECHO): um passe extra só custa, por aresta já sã, um
-    anti-join de chaves distintas; e o critério de ESTAGNAÇÃO por aresta
-    (contagem de faltantes igual à do passe anterior) garante terminação
-    quando as chaves restantes simplesmente não existem na fonte já filtrada
-    (órfãs de produção / pai fora do produto), que ficam para
-    neutraliza_orfaos_na_fonte anular/dropar.
+    A ordem reversa resolve necessidades transitivas em UMA passada num DAG:
+    as linhas adicionadas a um pai ainda terão as PRÓPRIAS FKs completadas
+    quando esse pai for visitado depois (pais vêm antes das filhas na ordem
+    topológica, logo depois delas na reversa). Arestas removidas pela quebra
+    de ciclo em _toposort_break_cycles podem deixar resíduo transitivo; esse
+    resíduo (raro) segue coberto por null_orphan_fks na síntese.
 
     Auto-referências (parent == child) são fechadas DENTRO da própria tabela,
     por iteração a ponto fixo ANTES das FKs normais da mesma tabela: uma
@@ -3857,128 +3847,93 @@ def completa_pais_referenciados(
         False (full run) -> deixa o AQE decidir, como no passo descendente.
     """
     MAX_ITER_FECHO_SELF = 20
-    MAX_PASSES_FECHO = 5
     order = topo_order_tables(comp_specs)
-    # Contagem de faltantes por aresta no último passe. Estagnação (mesma
-    # contagem de um passe para o outro) = as chaves restantes não existem na
-    # fonte JÁ FILTRADA do pai — puxar de novo seria um no-op caro; a aresta
-    # fica para a neutralização e deixa de re-disparar passes.
-    ultimo_faltantes: dict = {}
-    for passe in range(1, MAX_PASSES_FECHO + 1):
-        puxou_algo = False
-        for child in reversed(order):
-            child_df = sampled.get(child)
-            if child_df is None:
-                continue
-            fks = _fk_list(comp_specs[child])
+    for child in reversed(order):
+        child_df = sampled.get(child)
+        if child_df is None:
+            continue
+        fks = _fk_list(comp_specs[child])
 
-            # ---- 1) fecho intra-tabela (self-FKs), a ponto fixo ---------
-            for fk in fks:
-                parent = fk.get("parent_table")
-                cols = list(fk.get("columns") or [])
-                pcols = list(fk.get("parent_columns") or [])
-                if (parent != child or not cols or len(cols) != len(pcols)
-                        or set(cols) & set(pcols)):
-                    continue  # não-self / malformada / degenerada
-                n_anterior = -1
-                for _ in range(MAX_ITER_FECHO_SELF):
-                    ref_keys = (child_df
-                                .select(*[F.col(c).alias(p)
-                                          for c, p in zip(cols, pcols)])
-                                .dropna().distinct())
-                    faltantes = ref_keys.join(
-                        child_df.select(*pcols).distinct(),
-                        on=pcols, how="left_anti")
-                    n_faltantes = faltantes.count()
-                    if n_faltantes == 0 or n_faltantes == n_anterior:
-                        # convergiu, ou só restam chaves inexistentes na
-                        # fonte JÁ FILTRADA — órfãs de produção OU pais
-                        # removidos pelos predicados de fonte; ambos ficam
-                        # para a neutralização.
-                        break
-                    n_anterior = n_faltantes
-                    faltantes_side = (F.broadcast(faltantes)
-                                      if broadcast_missing else faltantes)
-                    extra = (_saneia_fonte(
-                                 _read_source(spark, config, child),
-                                 comp_specs[child], child)
-                             .join(faltantes_side, on=pcols, how="left_semi"))
-                    logger.info(
-                        "completa_pais_referenciados: %s.%s -> %s (self): "
-                        "puxando %d linha(s) referenciada(s) podada(s)",
-                        child, ",".join(cols), child, n_faltantes)
-                    child_df = (child_df.unionByName(extra)
-                                .localCheckpoint(eager=True))
-                # NB: o fecho self NÃO seta puxou_algo — ele já converge a
-                # ponto fixo DENTRO do passe (e linhas puxadas aqui têm as FKs
-                # externas completadas logo abaixo, no mesmo passe). Setar a
-                # flag aqui faria chaves self irrecuperáveis (órfãs de
-                # produção) re-dispararem passes globais com pulls vazios.
-                sampled[child] = child_df
-
-            # ---- 2) FKs normais (filha -> pai externo) ------------------
-            for fk in fks:
-                parent = fk.get("parent_table")
-                cols = list(fk.get("columns") or [])
-                pcols = list(fk.get("parent_columns") or [])
-                if (parent == child or parent not in sampled
-                        or not cols or len(cols) != len(pcols)):
-                    continue  # self já tratada acima / fora do componente
-                aresta = (child, tuple(cols), parent)
-                # Chaves referenciadas pela filha, já no nome das colunas do
-                # pai. dropna(): FK com QUALQUER coluna NULL não exige pai
-                # (MATCH SIMPLE); os casos parciais seguem com null_orphan_fks.
+        # ---- 1) fecho intra-tabela (self-FKs), a ponto fixo -------------
+        for fk in fks:
+            parent = fk.get("parent_table")
+            cols = list(fk.get("columns") or [])
+            pcols = list(fk.get("parent_columns") or [])
+            if (parent != child or not cols or len(cols) != len(pcols)
+                    or set(cols) & set(pcols)):
+                continue  # não-self / malformada / degenerada
+            n_anterior = -1
+            for _ in range(MAX_ITER_FECHO_SELF):
                 ref_keys = (child_df
-                            .select(*[F.col(c).alias(p) for c, p in zip(cols, pcols)])
-                            .dropna()
-                            .distinct())
+                            .select(*[F.col(c).alias(p)
+                                      for c, p in zip(cols, pcols)])
+                            .dropna().distinct())
                 faltantes = ref_keys.join(
-                    sampled[parent].select(*pcols).distinct(),
+                    child_df.select(*pcols).distinct(),
                     on=pcols, how="left_anti")
-                # Contagem (uma ação barata de chaves distintas) que evita, no
-                # caso comum de zero faltantes, a leitura da fonte do pai, o
-                # union e um novo localCheckpoint — e que detecta ESTAGNAÇÃO
-                # entre passes (mesma contagem = as chaves restantes não
-                # existem na fonte já filtrada; puxar de novo é no-op).
                 n_faltantes = faltantes.count()
-                if n_faltantes == 0:
-                    ultimo_faltantes.pop(aresta, None)
-                    continue
-                if ultimo_faltantes.get(aresta) == n_faltantes:
-                    continue  # estagnou -> fica para a neutralização
-                ultimo_faltantes[aresta] = n_faltantes
-                # Puxa da FONTE JÁ FILTRADA do pai (`_read_source` /
-                # FILTROS_FONTE), NÃO do Parquet completo: um pai fora do
-                # produto CDB simplificado não é re-injetado; a chave faltante
-                # remanescente torna a filha órfã e a neutralização
-                # (null_orphan_fks / drop_orphan_rows) cuida.
-                faltantes_side = F.broadcast(faltantes) if broadcast_missing else faltantes
+                if n_faltantes == 0 or n_faltantes == n_anterior:
+                    # convergiu, ou só restam chaves inexistentes na fonte
+                    # JÁ FILTRADA — órfãs de produção OU pais removidos pelos
+                    # predicados de fonte; ambos ficam para a neutralização.
+                    break
+                n_anterior = n_faltantes
+                faltantes_side = (F.broadcast(faltantes)
+                                  if broadcast_missing else faltantes)
                 extra = (_saneia_fonte(
-                             _read_source(spark, config, parent),
-                             comp_specs[parent], parent)
+                             _read_source(spark, config, child),
+                             comp_specs[child], child)
                          .join(faltantes_side, on=pcols, how="left_semi"))
                 logger.info(
-                    "completa_pais_referenciados: %s.%s -> %s: completando pai "
-                    "com linhas referenciadas ausentes (passe %d, %d chave(s))",
-                    child, ",".join(cols), parent, passe, n_faltantes)
-                # localCheckpoint eager: sampled[parent] pode ser aumentado por
-                # várias filhas e consumido por vários downstreams; sem
-                # truncar, o plano cresce a cada union.
-                sampled[parent] = (sampled[parent]
-                                   .unionByName(extra)
-                                   .localCheckpoint(eager=True))
-                puxou_algo = True
-        if not puxou_algo:
-            if passe > 1:
-                logger.info(
-                    "completa_pais_referenciados: convergiu no passe %d.", passe)
-            break
-    else:
-        logger.warning(
-            "completa_pais_referenciados: NÃO convergiu em %d passe(s) — ainda "
-            "havia pai a completar no último. O resíduo fica para a "
-            "neutralização e para o gate de fechamento de FK pré-escrita.",
-            MAX_PASSES_FECHO)
+                    "completa_pais_referenciados: %s.%s -> %s (self): "
+                    "puxando %d linha(s) referenciada(s) podada(s)",
+                    child, ",".join(cols), child, n_faltantes)
+                child_df = (child_df.unionByName(extra)
+                            .localCheckpoint(eager=True))
+            sampled[child] = child_df
+
+        # ---- 2) FKs normais (filha -> pai externo) ----------------------
+        for fk in fks:
+            parent = fk.get("parent_table")
+            cols = list(fk.get("columns") or [])
+            pcols = list(fk.get("parent_columns") or [])
+            if (parent == child or parent not in sampled
+                    or not cols or len(cols) != len(pcols)):
+                continue  # self já tratada acima / fora do componente
+            # Chaves referenciadas pela filha, já no nome das colunas do pai.
+            # dropna(): FK com QUALQUER coluna NULL não exige pai (MATCH
+            # SIMPLE); os casos parciais seguem com null_orphan_fks.
+            ref_keys = (child_df
+                        .select(*[F.col(c).alias(p) for c, p in zip(cols, pcols)])
+                        .dropna()
+                        .distinct())
+            faltantes = ref_keys.join(
+                sampled[parent].select(*pcols).distinct(),
+                on=pcols, how="left_anti")
+            # Ação barata (isEmpty) que evita, no caso comum de zero
+            # faltantes, a leitura da fonte do pai, o union e um novo
+            # localCheckpoint.
+            if faltantes.isEmpty():
+                continue
+            # Puxa da FONTE JÁ FILTRADA do pai (`_read_source` / FILTROS_FONTE),
+            # NÃO do Parquet completo: um pai fora do produto CDB simplificado
+            # não é re-injetado; a chave faltante remanescente torna a filha
+            # órfã e a neutralização (null_orphan_fks / drop_orphan_rows) cuida.
+            faltantes_side = F.broadcast(faltantes) if broadcast_missing else faltantes
+            extra = (_saneia_fonte(
+                         _read_source(spark, config, parent),
+                         comp_specs[parent], parent)
+                     .join(faltantes_side, on=pcols, how="left_semi"))
+            logger.info(
+                "completa_pais_referenciados: %s.%s -> %s: completando pai com "
+                "linhas referenciadas ausentes",
+                child, ",".join(cols), parent)
+            # localCheckpoint eager: sampled[parent] pode ser aumentado por
+            # várias filhas e consumido por vários downstreams; sem truncar,
+            # o plano cresce a cada union.
+            sampled[parent] = (sampled[parent]
+                               .unionByName(extra)
+                               .localCheckpoint(eager=True))
     return sampled
 
 
@@ -4423,10 +4378,7 @@ def null_orphan_fks(synthetic: dict, comp_specs: dict) -> dict:
     do arquivo: resultado de _with_contiguous_row_id/mono_id deve ser
     materializado antes de múltiplas leituras.
     """
-    # 30 rodadas (era 10): mesma justificativa de MAX_RODADAS_NEUTRALIZA — a
-    # cascata drop-em-static/rebind pode ping-pongar por ciclos quebrados e
-    # arestas fora da ordenação; rodada convergida custa só a guarda barata.
-    MAX_RODADAS = 30
+    MAX_RODADAS = 10
     order = topo_order_tables(comp_specs)
     for rodada in range(1, MAX_RODADAS + 1):
         mudou_algo = False
@@ -4530,97 +4482,6 @@ def null_orphan_fks(synthetic: dict, comp_specs: dict) -> dict:
             "null_orphan_fks: NÃO convergiu em %d rodadas — ainda havia "
             "mudança na última. Órfãos residuais possíveis; verifique ciclos "
             "de FK whole-PK entre as tabelas alteradas.", MAX_RODADAS)
-    return synthetic
-
-
-def _fk_arestas_orfas(synthetic: dict, comp_specs: dict) -> list:
-    """Lista as arestas de FK do componente que AINDA têm órfã (MATCH SIMPLE).
-
-    Mesma definição do validador pós-escrita e do load Oracle: só conta como
-    órfã a chave com TODAS as colunas da FK preenchidas e sem correspondência
-    no pai. Retorna [(child, cols_csv, parent, n_chaves_orfas)], vazio quando
-    o componente está FK-fechado. A guarda por aresta é o anti-join barato de
-    _tem_orfa; a contagem (para o log/erro) só roda nas arestas sujas.
-    """
-    sujas: list = []
-    for child, cfg in comp_specs.items():
-        child_df = synthetic.get(child)
-        if child_df is None:
-            continue
-        for fk in _fk_list(cfg):
-            parent = fk.get("parent_table")
-            cols = list(fk.get("columns") or [])
-            pcols = list(fk.get("parent_columns") or [])
-            parent_df = child_df if parent == child else synthetic.get(parent)
-            if (parent_df is None or not cols or len(cols) != len(pcols)
-                    or (parent == child and set(cols) & set(pcols))):
-                continue  # fora do componente / malformada / self degenerada
-            if _tem_orfa(child_df, parent_df, cols, pcols):
-                n = _dbg_orphan_count(child_df, parent_df, cols, pcols)
-                sujas.append((child, ",".join(cols), parent, n))
-    return sujas
-
-
-# Varreduras do gate de fechamento de FK. Cada varredura extra só acontece se
-# a anterior encontrou órfã (e então reaplica null_orphan_fks, que anula/dropa
-# /rebinda e CONGELA as tabelas alteradas); anular/dropar nunca CRIA valor de
-# FK novo, então o conjunto de chaves órfãs é estritamente decrescente e 3
-# varreduras são folga — se não fechar, é bug estrutural e o run DEVE abortar.
-MAX_VARREDURAS_GATE_FK = 3
-
-
-def garante_fk_fechada(synthetic: dict, comp_specs: dict) -> dict:
-    """Gate de FECHAMENTO DE FK pré-escrita: verifica, cura e, em último
-    caso, ABORTA — espelho interno do check `3.fk_orphan` do validador.
-
-    Por que existe: NOT NULL e polimorfismo têm gates duros antes da escrita
-    (assert_not_null_ok / assert_polymorphism_ok), mas integridade de FK —
-    exatamente a classe que o pre-append check acusa como 3.fk_orphan — era
-    garantida só por passes "best effort": os pontos fixos de neutralização
-    param no teto de rodadas com um WARNING e o run segue gravando; qualquer
-    resíduo (não-convergência, aresta pulada, plano reavaliado, versão antiga
-    de uma etapa) ia parar no Parquet e só aparecia no validador externo
-    (caso real: COMITENTE.NUM_ID_PAIS_NACIONALIDADE, PESSOA_JURIDICA.
-    NUM_ID_PAIS -> PAIS; CONTEXTO_MENSAGEM.NUM_ID_TP_ESTADO -> TIPO_ESTADO;
-    LOTE.NUM_TIPO_IF -> TIPO_IF — 4 arestas static->static, todas anuláveis,
-    reprovadas no pre-append check).
-
-    O gate roda APÓS o congelamento final (localCheckpoint) — isto é, sobre
-    EXATAMENTE os DataFrames que serão gravados — e:
-      1. verifica TODAS as arestas de FK de comp_specs (_fk_arestas_orfas);
-      2. se houver órfã, reaplica null_orphan_fks (anula FK anulável, dropa
-         órfã NOT NULL em static, rebinda NOT NULL em sintetizada — as
-         tabelas alteradas saem congeladas de lá) e verifica de novo;
-      3. se após MAX_VARREDURAS_GATE_FK ainda houver órfã, levanta
-         RuntimeError ANTES da escrita — o componente falha ruidosamente em
-         vez de gravar dado que o validador reprovaria.
-
-    Custo no caminho feliz (o comum): um anti-join de chaves distintas por
-    aresta — a mesma ordem de custo da guarda dos passes de neutralização.
-    """
-    for varredura in range(1, MAX_VARREDURAS_GATE_FK + 1):
-        sujas = _fk_arestas_orfas(synthetic, comp_specs)
-        if not sujas:
-            if varredura > 1:
-                logger.info(
-                    "garante_fk_fechada: componente FK-fechado na varredura %d.",
-                    varredura)
-            return synthetic
-        logger.warning(
-            "garante_fk_fechada: %d aresta(s) com órfã ANTES da escrita "
-            "(varredura %d/%d): %s. Reaplicando null_orphan_fks.",
-            len(sujas), varredura, MAX_VARREDURAS_GATE_FK,
-            "; ".join(f"{c}.{cols} -> {p} ({n} chave(s))"
-                      for c, cols, p, n in sujas))
-        synthetic = null_orphan_fks(synthetic, comp_specs)
-    sujas = _fk_arestas_orfas(synthetic, comp_specs)
-    if sujas:
-        raise RuntimeError(
-            "garante_fk_fechada: órfã(s) de FK persistem após "
-            f"{MAX_VARREDURAS_GATE_FK} varredura(s); abortando o componente "
-            "ANTES da escrita (o pre-append check reprovaria). Arestas: "
-            + "; ".join(f"{c}.{cols} -> {p} ({n} chave(s))"
-                        for c, cols, p, n in sujas))
     return synthetic
 
 
@@ -5175,12 +5036,6 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
                 if not _fk_list(_cfg):
                     continue  # sem FK -> não foi tocada por bind/null_orphan
                 synthetic[_name] = _df.localCheckpoint(eager=True)
-            # GATE de fechamento de FK sobre os DataFrames JÁ CONGELADOS (=
-            # o que será gravado): verifica toda aresta de FK do spec, cura
-            # resíduos reaplicando null_orphan_fks e ABORTA o componente se
-            # não fechar — espelho interno do 3.fk_orphan do pre-append
-            # check, na mesma posição de rede dura de assert_not_null_ok.
-            synthetic = garante_fk_fechada(synthetic, comp_specs)
             # Estado FINAL escrito no destino = o que o pre-append check lê.
             # Agora congelado: os nulos aqui são os mesmos do assert e do write.
             debug_fk_integrity_report("6.final_before_write", synthetic,
