@@ -148,18 +148,31 @@ DEFAULT_SEED = 42
 # ---------------------------------------------------------------------------
 # Filtro de domínio: CDB simplificado.
 #
-# O universo NUM_TIPO_IF == 49 é definido por CHAVE, não por coluna: o filtro
-# por NUM_TIPO_IF é aplicado APENAS nas tabelas-raiz listadas em
-# TABELAS_RAIZ_FILTRO (hoje só INSTRUMENTO_FINANCEIRO). Todas as demais
-# tabelas entram no universo exclusivamente pela propagação referencial de
-# `referential_sample` (semi-join de chave, pais -> filhas), mesmo que
-# possuam uma cópia denormalizada de NUM_TIPO_IF.
+# O produto CDB simplificado é definido por um conjunto de PREDICADOS DE FONTE
+# por tabela (FILTROS_FONTE). Esses predicados são a PRIMEIRA etapa do
+# pipeline: são aplicados na LEITURA de cada Parquet, ANTES de qualquer
+# amostragem, propagação referencial ou síntese. A partir daí não existe mais
+# "Parquet completo sem filtro" para essas tabelas — toda leitura de fonte
+# passa por `_read_source`, então nenhuma etapa posterior (nem o fecho de pais
+# em `completa_pais_referenciados`) consegue re-injetar uma linha que o filtro
+# removeu.
 #
-# Motivo: quando o pertencimento era decidido DUAS vezes (coluna própria em
-# quem tinha NUM_TIPO_IF, chave em quem não tinha), qualquer inconsistência
-# da coluna denormalizada gerava filhas órfãs (passavam no filtro próprio,
-# falhavam na chave) e null_orphan_fks acabava anulando a FK inteira. Com o
-# filtro só na raiz, filha e pai nunca divergem por construção.
+# Regras do CDB simplificado (imagem do produto):
+#   INSTRUMENTO_FINANCEIRO : NUM_TIPO_IF = 49 E DAT_EXCLUSAO IS NULL
+#   RESGATE                : COD_COND_RESGATE = 'SEM TABELA' E DAT_EXCLUSAO IS NULL
+#   TITULO                 : COD_TIPO_ESCALONAMENTO IS NULL
+#   CONDICAO_IF            : DAT_EXCLUSAO IS NULL
+#
+# Propagação por chave (inalterada): a raiz do universo continua sendo
+# INSTRUMENTO_FINANCEIRO (TABELAS_RAIZ_FILTRO) e o pertencimento desce a árvore
+# de FK por semi-join em `referential_sample`, restrito a `_dominio_spine`. Os
+# predicados de fonte acima são uma poda ADICIONAL em cima disso: cada tabela
+# nasce já com suas próprias linhas fora do produto descartadas, e a descida
+# por chave apenas restringe mais. Como a fonte já vem filtrada em TODO ponto
+# de leitura, filha e pai não podem divergir por re-injeção — se um pai é
+# removido pelo seu filtro, ele simplesmente não existe para ninguém, e a
+# filha órfã cai na neutralização normal (null_orphan_fks anula FK nullable;
+# drop_orphan_rows dropa quando a FK é NOT NULL).
 #
 # FK de domínio vs FK de integridade: durante a descida em `referential_sample`
 # a poda por semi-join NÃO pode usar TODAS as FKs de uma tabela indistintamente.
@@ -167,7 +180,7 @@ DEFAULT_SEED = 42
 # CARTEIRA_PARTICIPANTE, CREDITO, DEPOSITO_AUTOMATICO_IF, CONDICAO_IF etc. —
 # e a própria INSTRUMENTO_FINANCEIRO) também carrega FKs LATERAIS para tabelas
 # de referência compartilhadas (CONTA_PARTICIPANTE, PARTICIPANTE, tabelas de
-# lookup...) que nada têm a ver com o domínio 49 e cuja amostra, sendo
+# lookup...) que nada têm a ver com o domínio e cuja amostra, sendo
 # independente, não intersecta necessariamente as linhas válidas do domínio.
 # Usar essas FKs laterais como critério de sobrevivência na MESMA passada
 # zera artificialmente linhas que são perfeitamente válidas no domínio — e,
@@ -184,18 +197,98 @@ DEFAULT_SEED = 42
 #
 # Complementarmente, `completa_pais_referenciados` fecha o universo PARA
 # CIMA: toda chave de FK presente numa filha mantida passa a existir no pai
-# amostrado, puxando do Parquet completo (sem filtro de tipo) as linhas de
-# pai referenciadas que o filtro/poda tenha removido.
+# amostrado, puxando as linhas de pai referenciadas ausentes. Essa leitura
+# TAMBÉM passa por `_read_source` (fonte filtrada): um pai que não pertence ao
+# produto NÃO volta — a filha que o referenciava vira órfã e é neutralizada.
 #
-# IMPORTANTE: a leitura de max(pk) em compute_pk_maxes NÃO usa este filtro
+# IMPORTANTE: a leitura de max(pk) em compute_pk_maxes NÃO usa estes filtros
 # de propósito — ela precisa do max real da tabela inteira para que as PKs
-# sintéticas não colidam com linhas de produção de OUTROS NUM_TIPO_IF.
+# sintéticas não colidam com linhas de produção de OUTROS registros (outros
+# NUM_TIPO_IF, linhas excluídas etc.). Por isso ela lê via `read_parquet`
+# direto, não via `_read_source`.
 # ---------------------------------------------------------------------------
 FILTRO_TIPO_IF_COLUMN = "NUM_TIPO_IF"
 FILTRO_TIPO_IF_VALUE = 49 #filtro cdb simplificado
-# Únicas tabelas filtradas pela PRÓPRIA coluna NUM_TIPO_IF; o restante do
-# universo é derivado por chave (semi-joins descendo + fecho subindo).
+
+# Predicados de fonte por tabela para o CDB simplificado. Cada predicado é uma
+# tupla (coluna, op, valor):
+#   ("==", v)      -> col == v            (igualdade exata)
+#   (">", v)       -> col > v             (maior que; linha com col NULL sai)
+#   ("ieq", v)     -> upper(trim(col)) == v  (igualdade string case/space-insensitive)
+#   ("isnull", _)  -> col IS NULL
+# Aplicados em AND. Um predicado cuja coluna não exista no schema da tabela é
+# ignorado (defensivo contra variação de schema); ver `_aplica_filtros_fonte`.
+FILTROS_FONTE: dict[str, list[tuple[str, str, object]]] = {
+    "INSTRUMENTO_FINANCEIRO": [
+        (FILTRO_TIPO_IF_COLUMN, "==", FILTRO_TIPO_IF_VALUE),
+        ("DAT_EXCLUSAO", "isnull", None),
+    ],
+    "RESGATE": [
+        # 'SEM TABELA' com upper+trim por segurança contra caixa/espaços.
+        ("COD_COND_RESGATE", "ieq", "SEM TABELA"),
+        ("DAT_EXCLUSAO", "isnull", None),
+    ],
+    "TITULO": [
+        ("COD_TIPO_ESCALONAMENTO", "isnull", None),
+    ],
+    "CONDICAO_IF": [
+        ("DAT_EXCLUSAO", "isnull", None),
+    ],
+    "CARTEIRA_COMITENTE": [
+        ("QTD_CARTEIRA_COMITENTE", ">", 0),
+    ],
+    "CARTEIRA_PARTICIPANTE": [
+        ("QTD_CARTEIRA_PARTICIPANTE", ">", 0),
+    ],
+}
+# Únicas tabelas filtradas pela coluna NUM_TIPO_IF; a raiz do universo. O
+# restante do domínio é derivado por chave (semi-joins descendo + fecho
+# subindo) e, adicionalmente, podado pelos predicados de FILTROS_FONTE.
 TABELAS_RAIZ_FILTRO = frozenset({"INSTRUMENTO_FINANCEIRO"})
+
+# ---------------------------------------------------------------------------
+# Polimorfismo de CONDICAO_IF (joined-subclass do Hibernate SEM discriminador).
+#
+# CONDICAO_IF é uma superclasse cujo tipo concreto (juros fixo, flutuante,
+# resgate, ...) é resolvido pelo Hibernate SOMENTE por QUAL tabela-subtipo
+# física contém a linha daquele NUM_CONDICAO_IF — não há coluna discriminadora.
+# A coluna COD_TIPO_CONDICAO_IF do PAI é o que a aplicação lê para decidir o
+# tipo e fazer o cast (ex.: tipo=2 -> (JurosFixoDO) ...). A invariante que a
+# aplicação assume é, para cada NUM_CONDICAO_IF:
+#   (a) existe EXATAMENTE UMA linha-subtipo;
+#   (b) na tabela indicada por COD_TIPO_CONDICAO_IF;
+#   (c) e em nenhuma outra tabela-subtipo.
+# Violá-la é o que produz o ClassCastException
+# "JurosFlutuanteDO cannot be cast to JurosFixoDO" no batch da NoMe.
+#
+# NUM_CONDICAO_IF é, em cada subtipo, PK **e** FK-para-o-pai (shared-key 1:1);
+# por isso o alinhamento é feito em bind_shared_key_children, que agora usa
+# este mapa para vincular cada subtipo APENAS às chaves do seu próprio tipo.
+# Mapa COD_TIPO_CONDICAO_IF -> nome da tabela-subtipo (de TipoCondicaoIFDO +
+# CondicaoIFDO.hbm.xml; espelha SUBTYPE_BY_TIPO em valida_regras_aplicacao.py).
+CONDICAO_IF_TABLE = "CONDICAO_IF"
+CONDICAO_IF_PK = "NUM_CONDICAO_IF"
+CONDICAO_IF_TIPO_COL = "COD_TIPO_CONDICAO_IF"
+SUBTYPE_BY_TIPO: dict[str, str] = {
+    "1": "AMORTIZACAO",
+    "2": "JUROS_FIXO",
+    "3": "JUROS_FLUTUANTE",
+    "4": "ATUALIZACAO_POS",
+    "5": "SPREAD",
+    "6": "PARTICIPACAO_LUCROS",
+    "7": "PREMIO",
+    "14": "ATUALIZACAO_PRE",
+    "15": "PREMIO_OPCAO",
+    "16": "TERMO",
+    "17": "PARAMETRO_LIMITE",
+    "20": "RESGATE",
+    "21": "PREMIO_CONTRATO",
+    "22": "OPCAO",
+    "23": "RESET",
+    "24": "DESDOBRAMENTO",
+}
+# Tabelas-subtipo -> COD_TIPO_CONDICAO_IF esperado (inverso de SUBTYPE_BY_TIPO).
+TIPO_BY_SUBTYPE: dict[str, str] = {v: k for k, v in SUBTYPE_BY_TIPO.items()}
 
 # ---------------------------------------------------------------------------
 # Regras de engorda por coluna.
@@ -207,22 +300,36 @@ TABELAS_RAIZ_FILTRO = frozenset({"INSTRUMENTO_FINANCEIRO"})
 # Regras aplicadas quando a coluna existir na tabela:
 #   DAT_INCLUSAO              -> data/hora da engorda (timestamp)
 #   DAT_ALTERACAO             -> mesma data/hora de DAT_INCLUSAO (timestamp)
-#   DT_EMISSAO                -> data da engorda, sem timestamp
-#   DT_VENCIMENTO             -> data da engorda + prazo, sem timestamp
+#   DAT_INCLUSAO_REGISTRO     -> mesma data/hora de DAT_INCLUSAO (timestamp)
+#   DAT_EMISSAO               -> data da engorda, sem timestamp
+#   DAT_VENCIMENTO            -> data da engorda + prazo, sem timestamp
 #
 # NUM_ID_CERTIFICACAO_CETIP NÃO entra aqui: ela é PK e a geração de PK
 # (compute_pk_maxes + _set_unique_pk_column) já a faz incremental acima do max
 # real da tabela inteira, com a folga do --pk-safety-band. Tratá-la de novo
 # desfazia a folga e relia o max sem necessidade.
 #
-# Para DT_VENCIMENTO, se não for informado um prazo fixo por tabela, o código
-# preserva o prazo original da linha bootstrapada: DT_VENCIMENTO - DT_EMISSAO.
+# Para DAT_VENCIMENTO, se não for informado um prazo fixo por tabela, o código
+# preserva o prazo original da linha bootstrapada: DAT_VENCIMENTO - DAT_EMISSAO.
 # Se esse prazo não existir, for inválido ou <= 0, usa 365 dias por segurança.
+#
+# NB (correção): as colunas de emissão/vencimento no schema real são
+# DAT_EMISSAO / DAT_VENCIMENTO (prefixo DAT_). Versões anteriores procuravam
+# DT_EMISSAO / DT_VENCIMENTO, que não casavam com o dado -> a regra virava
+# no-op silencioso (a função é tolerante a coluna ausente).
 # ---------------------------------------------------------------------------
 ENGORDA_COL_DAT_INCLUSAO = "DAT_INCLUSAO"
 ENGORDA_COL_DAT_ALTERACAO = "DAT_ALTERACAO"
-ENGORDA_COL_DT_VENCIMENTO = "DT_VENCIMENTO"
-ENGORDA_COL_DT_EMISSAO = "DT_EMISSAO"
+ENGORDA_COL_DAT_INCLUSAO_REGISTRO = "DAT_INCLUSAO_REGISTRO"
+ENGORDA_COL_DAT_VENCIMENTO = "DAT_VENCIMENTO"
+ENGORDA_COL_DAT_EMISSAO = "DAT_EMISSAO"
+# Colunas que recebem o MESMO timestamp único da engorda. Declarativo: para
+# tratar mais uma coluna de timestamp, basta adicioná-la aqui.
+ENGORDA_COLS_TIMESTAMP = (
+    ENGORDA_COL_DAT_INCLUSAO,
+    ENGORDA_COL_DAT_ALTERACAO,
+    ENGORDA_COL_DAT_INCLUSAO_REGISTRO,
+)
 DEFAULT_DT_VENCIMENTO_PRAZO_DIAS = 30
 MIN_DT_VENCIMENTO_PRAZO_DIAS = 1
 
@@ -351,10 +458,11 @@ def _apply_engorda_business_rules(
     Aplica as regras de DATA do engorda às colunas existentes na tabela.
 
     Regras (aplicadas só quando a coluna existir; tipo físico preservado):
-      DAT_INCLUSAO  -> timestamp da engorda
-      DAT_ALTERACAO -> mesmo timestamp de DAT_INCLUSAO
-      DT_EMISSAO    -> data da engorda, sem hora
-      DT_VENCIMENTO -> data da engorda + prazo, sem hora
+      DAT_INCLUSAO          -> timestamp da engorda
+      DAT_ALTERACAO         -> mesmo timestamp de DAT_INCLUSAO
+      DAT_INCLUSAO_REGISTRO -> mesmo timestamp de DAT_INCLUSAO
+      DAT_EMISSAO           -> data da engorda, sem hora
+      DAT_VENCIMENTO        -> data da engorda + prazo, sem hora
 
     NUM_ID_CERTIFICACAO_CETIP NÃO é tratada aqui: é PK, e a geração de PK
     (compute_pk_maxes + _set_unique_pk_column) já a faz incremental acima do max
@@ -365,21 +473,21 @@ def _apply_engorda_business_rules(
     """
     engorda_dt = _engorda_date(engorda_ts)
 
-    # 1) Calcula prazo de vencimento ANTES de sobrescrever DT_EMISSAO.
+    # 1) Calcula prazo de vencimento ANTES de sobrescrever DAT_EMISSAO.
     tmp_prazo_col = "__engorda_prazo_dias"
     while tmp_prazo_col in work.columns:
         tmp_prazo_col = f"_{tmp_prazo_col}"
 
-    has_vencimento = ENGORDA_COL_DT_VENCIMENTO in work.columns
-    has_emissao = ENGORDA_COL_DT_EMISSAO in work.columns
+    has_vencimento = ENGORDA_COL_DAT_VENCIMENTO in work.columns
+    has_emissao = ENGORDA_COL_DAT_EMISSAO in work.columns
 
     if has_vencimento:
         if dt_vencimento_prazo_dias is not None:
             prazo_expr = F.lit(int(dt_vencimento_prazo_dias)).cast("int")
         elif has_emissao:
             prazo_expr = F.datediff(
-                F.to_date(F.col(ENGORDA_COL_DT_VENCIMENTO)),
-                F.to_date(F.col(ENGORDA_COL_DT_EMISSAO)),
+                F.to_date(F.col(ENGORDA_COL_DAT_VENCIMENTO)),
+                F.to_date(F.col(ENGORDA_COL_DAT_EMISSAO)),
             ).cast("int")
         else:
             prazo_expr = F.lit(int(default_dt_vencimento_prazo_dias)).cast("int")
@@ -395,8 +503,9 @@ def _apply_engorda_business_rules(
 
         work = work.withColumn(tmp_prazo_col, prazo_expr)
 
-    # 2) DAT_INCLUSAO e DAT_ALTERACAO usam exatamente o mesmo timestamp.
-    for col_name in (ENGORDA_COL_DAT_INCLUSAO, ENGORDA_COL_DAT_ALTERACAO):
+    # 2) DAT_INCLUSAO, DAT_ALTERACAO e DAT_INCLUSAO_REGISTRO usam exatamente o
+    #    mesmo timestamp único da engorda (ENGORDA_COLS_TIMESTAMP).
+    for col_name in ENGORDA_COLS_TIMESTAMP:
         if col_name in work.columns:
             work = work.withColumn(
                 col_name,
@@ -406,26 +515,26 @@ def _apply_engorda_business_rules(
                 ),
             )
 
-    # 3) DT_EMISSAO = data da engorda sem timestamp.
+    # 3) DAT_EMISSAO = data da engorda sem timestamp.
     if has_emissao:
         work = work.withColumn(
-            ENGORDA_COL_DT_EMISSAO,
+            ENGORDA_COL_DAT_EMISSAO,
             _date_literal_for_type(
                 engorda_dt,
-                _get_field_type(work, ENGORDA_COL_DT_EMISSAO),
+                _get_field_type(work, ENGORDA_COL_DAT_EMISSAO),
             ),
         )
 
-    # 4) DT_VENCIMENTO = data da engorda + prazo, sem timestamp.
+    # 4) DAT_VENCIMENTO = data da engorda + prazo, sem timestamp.
     if has_vencimento:
         venc_expr = F.expr(
             f"date_add(DATE '{engorda_dt.isoformat()}', CAST({tmp_prazo_col} AS INT))"
         )
         work = work.withColumn(
-            ENGORDA_COL_DT_VENCIMENTO,
+            ENGORDA_COL_DAT_VENCIMENTO,
             _date_expression_for_type(
                 venc_expr,
-                _get_field_type(work, ENGORDA_COL_DT_VENCIMENTO),
+                _get_field_type(work, ENGORDA_COL_DAT_VENCIMENTO),
             ),
         ).drop(tmp_prazo_col)
 
@@ -2920,6 +3029,41 @@ def _not_null_cols(cfg: dict) -> set[str]:
     return {str(c) for c in raw if isinstance(c, str)}
 
 
+def _warn_filtros_fonte_sem_not_null(specs: dict) -> None:
+    """Alerta quando os filtros do produto podem gerar ORA-01400 silencioso.
+
+    Os predicados de FILTROS_FONTE podem remover uma linha-PAI que uma filha
+    referencia (ex.: CONDICAO_IF com DAT_EXCLUSAO não-nula, referida por um
+    RESGATE válido). Como o fecho de pais lê a fonte JÁ FILTRADA, o pai não é
+    re-injetado e a filha vira órfã. A neutralização então DROPA a linha se a
+    FK for NOT NULL — MAS só sabe que é NOT NULL se `not_null_cols` estiver no
+    spec (gerado com cols_real.csv). Sem essa lista, a FK órfã é ANULADA e, se
+    a coluna for NOT NULL no Oracle, o append falha com ORA-01400 sem que
+    assert_not_null_ok consiga barrar (ele também depende de not_null_cols).
+
+    Portanto: quando há tabela de FILTROS_FONTE no run mas alguma tabela que a
+    referencia não tem `not_null_cols`, emite um WARNING claro de que
+    cols_real.csv passou a ser efetivamente obrigatório para este produto.
+    """
+    filtradas = {t for t in FILTROS_FONTE if t in specs}
+    if not filtradas:
+        return
+    afetadas = []
+    for table, cfg in specs.items():
+        parents = {fk.get("parent_table") for fk in _fk_list(cfg)}
+        if parents & filtradas and not _not_null_cols(cfg):
+            afetadas.append(table)
+    if afetadas:
+        logger.warning(
+            "FILTROS_FONTE ativos em %s, mas estas tabelas que as referenciam "
+            "NÃO têm not_null_cols no spec: %s. Um pai removido pelo filtro "
+            "torna a filha órfã; sem not_null_cols a FK órfã é ANULADA (não "
+            "dropada) e pode violar NOT NULL no append (ORA-01400) sem ser "
+            "barrada por assert_not_null_ok. Gere o spec COM cols_real.csv "
+            "(ver gera_spec_config.py) para este produto.",
+            sorted(filtradas), sorted(afetadas))
+
+
 def _fk_is_whole_pk(pk_cols: list[str], fk: dict) -> bool:
     """True when a FK's columns are exactly the child's primary key.
 
@@ -2932,18 +3076,37 @@ def _fk_is_whole_pk(pk_cols: list[str], fk: dict) -> bool:
     return bool(pk_cols) and bool(cols) and sorted(cols) == sorted(pk_cols)
 
 
+# FKs de AUDITORIA (quem incluiu/alterou o registro) apontam quase o schema
+# inteiro para USUARIO, e USUARIO -> ENTIDADE -> USUARIO fecha ciclo: o SCC
+# resultante engoliu ~metade das tabelas do CDB e forçava
+# _toposort_break_cycles a quebrar arestas ESTRUTURAIS arbitrariamente —
+# fecho/neutralização/null_orphan processavam filha ANTES do pai (caso real:
+# CONTA_PARTICIPANTE neutralizada às 18:12:22, PARTICIPANTE dropada às
+# 18:12:38 -> 9.751 órfãs re-criadas). As arestas para estes pais continuam
+# NEUTRALIZADAS normalmente (anula/dropa/rebind); só não participam da
+# ORDENAÇÃO topológica.
+PARENTS_FORA_DA_ORDENACAO: frozenset = frozenset({"USUARIO"})
+
+
 def topo_order_tables(comp_specs: dict) -> list[str]:
     """Order a component's tables so every parent comes before its children.
 
     Used by referential sampling (sample parents first, then keep only children
     whose FK lands in the sampled parents). Self-references are ignored; cycles
     are broken arbitrarily so the function always returns every table once.
+
+    Arestas cujo pai está em PARENTS_FORA_DA_ORDENACAO (FKs de auditoria) não
+    entram no grafo de dependências: elas criavam um SCC gigante e a quebra
+    arbitrária de ciclo invalidava a garantia pai-antes-da-filha justamente
+    nas arestas estruturais. Órfãos nessas arestas seguem tratados pelos
+    passes de neutralização (que agora rodam a ponto fixo).
     """
     deps: dict[str, set[str]] = {t: set() for t in comp_specs}
     for table, cfg in comp_specs.items():
         for fk in _fk_list(cfg):
             parent = fk.get("parent_table")
-            if parent in comp_specs and parent != table:
+            if (parent in comp_specs and parent != table
+                    and parent not in PARENTS_FORA_DA_ORDENACAO):
                 deps[table].add(parent)
 
     return _toposort_break_cycles(deps)
@@ -3010,7 +3173,7 @@ def parse_arguments() -> argparse.Namespace:
                              "grow between the max read and the load without colliding. Default: "
                              "no gap (start right after true_max).")
     parser.add_argument("--dt-vencimento-prazo-dias", type=positive_int, default=None,
-                        help="Prazo fixo em dias para DT_VENCIMENTO = data da engorda + X. "
+                        help="Prazo fixo em dias para DAT_VENCIMENTO = data da engorda + X. "
                              "Se omitido, preserva o prazo original da linha quando possível; "
                              "se o prazo original for inválido, usa 365 dias.")
     parser.add_argument("--specs", default=None,
@@ -3031,28 +3194,196 @@ def read_parquet(spark: SparkSession, path: str, limit: int | None = None) -> Da
     return df.limit(limit) if limit is not None else df
 
 
-def _aplica_filtro_tipo_if(df: DataFrame, table: str) -> DataFrame:
-    """Filtra a fonte de síntese para o CDB simplificado (NUM_TIPO_IF == 49).
+def _aplica_filtros_fonte(df: DataFrame, table: str) -> DataFrame:
+    """Aplica os predicados de fonte do CDB simplificado (FILTROS_FONTE[table]).
 
-    O filtro por coluna é aplicado APENAS nas tabelas-raiz do universo
-    (TABELAS_RAIZ_FILTRO). Todas as demais tabelas — inclusive as que possuem
-    uma cópia denormalizada de NUM_TIPO_IF — passam intactas aqui e entram no
-    universo exclusivamente pela propagação referencial de chave em
-    referential_sample. Isso garante que o pertencimento ao universo é
-    decidido UMA única vez (pela chave), eliminando as filhas órfãs criadas
-    quando a coluna denormalizada discordava do pai filtrado.
+    PRIMEIRA etapa do pipeline: recorta a fonte de cada tabela para o produto
+    ANTES de amostragem/propagação/síntese. Os predicados de uma tabela são
+    combinados em AND. Um predicado cuja coluna não exista no schema é
+    ignorado (defensivo): o produto é definido pelas colunas presentes, e uma
+    coluna ausente não deve zerar a tabela nem quebrar a leitura.
 
-    Na raiz, linhas com NUM_TIPO_IF NULL são descartadas (não casam com
-    == 49), o que é o comportamento desejado.
+    Operadores suportados (ver FILTROS_FONTE):
+      "=="     -> col == valor              (igualdade exata, tipada)
+      ">"      -> col > valor               (maior que; linha com col NULL sai)
+      "ieq"    -> upper(trim(col)) == valor (string case/space-insensitive)
+      "isnull" -> col IS NULL
 
-    Usado somente na leitura da FONTE de síntese (referential_sample). A
-    leitura de max(pk) em compute_pk_maxes é intencionalmente NÃO filtrada:
-    ela precisa do max real da tabela inteira para evitar colisão das PKs
-    sintéticas com linhas de outros NUM_TIPO_IF.
+    NÃO é usado por compute_pk_maxes: o max(pk) precisa da tabela inteira para
+    que as PKs sintéticas não colidam com linhas de produção de OUTROS
+    registros (fora do produto). Ver comentário no topo do arquivo.
     """
-    if table in TABELAS_RAIZ_FILTRO and FILTRO_TIPO_IF_COLUMN in df.columns:
-        return df.where(F.col(FILTRO_TIPO_IF_COLUMN) == F.lit(FILTRO_TIPO_IF_VALUE))
+    preds = FILTROS_FONTE.get(table)
+    if not preds:
+        return df
+    cols = set(df.columns)
+    for col, op, valor in preds:
+        if col not in cols:
+            logger.warning(
+                "_aplica_filtros_fonte: coluna %s ausente em %s; predicado "
+                "(%s %s %r) ignorado", col, table, col, op, valor)
+            continue
+        if op == "isnull":
+            df = df.where(F.col(col).isNull())
+        elif op == "ieq":
+            df = df.where(F.upper(F.trim(F.col(col))) == F.lit(valor))
+        elif op == "==":
+            df = df.where(F.col(col) == F.lit(valor))
+        elif op == ">":
+            # NULL > valor é NULL (não TRUE) -> linha com col NULL é descartada,
+            # que é a semântica desejada de "maior que zero".
+            df = df.where(F.col(col) > F.lit(valor))
+        else:
+            raise ValueError(
+                f"_aplica_filtros_fonte: operador desconhecido {op!r} "
+                f"para {table}.{col}")
+    if _dbg():
+        # Só a contagem PÓS-filtro (um único scan, com pushdown). Confere o
+        # efeito de cada predicado — em especial o match de string 'SEM
+        # TABELA' em RESGATE: se vier 0, suspeite de caixa/espaço no dado.
+        # NÃO contamos o total PRÉ-filtro de propósito: seria um segundo scan
+        # da tabela INTEIRA sem pushdown, caro em tabelas de 50M-1B linhas e
+        # repetido a cada chamada de _read_source (inclusive dentro do loop de
+        # fecho de pais em completa_pais_referenciados).
+        logger.debug(
+            "[DEBUG filtros_fonte] %s: %d linha(s) após predicados %s",
+            table, df.count(),
+            [(c, o, v) for c, o, v in preds])
     return df
+
+
+def _read_source(spark, config, table: str, limit: int | None = None) -> DataFrame:
+    """Leitura ÚNICA e canônica da fonte de uma tabela, já filtrada pelo produto.
+
+    Todo ponto que consome dados de produção como FONTE de síntese
+    (referential_sample e o fecho de pais em completa_pais_referenciados) deve
+    ler por aqui — nunca por read_parquet direto — para que os predicados de
+    FILTROS_FONTE valham em TODAS as etapas e nenhum passo consiga re-injetar
+    uma linha fora do produto. A única exceção deliberada é compute_pk_maxes,
+    que precisa do max(pk) da tabela inteira (ver topo do arquivo).
+    """
+    return _aplica_filtros_fonte(
+        read_parquet(spark, raw_path(config, table), limit), table)
+
+
+def _remove_linhas_pk_nula(df: DataFrame, cfg: dict, table: str) -> DataFrame:
+    """Remove linhas com coluna de PK nula/vazia — artefato de extração.
+
+    No Oracle uma PK é NOT NULL por definição, então linha sem PK completa
+    não existe na origem real: é lixo do processo de extração (ex.: linha em
+    branco de um CSV->Parquet). Ela não é apendável (ORA-01400), não é
+    referenciável por FK e, numa tabela static, seria copiada como está para
+    a saída (caso real: VEICULO_GARANTIDOR com 2 linhas na fonte, uma delas
+    toda nula/vazia, reprovada no pre-append check). Para coluna string vale
+    a semântica do Oracle: '' também conta como NULL.
+    """
+    pk_cols = [c for c in (cfg.get("pk_cols") or []) if _has_column(df, c)]
+    if not pk_cols:
+        return df
+    preds = []
+    for c in pk_cols:
+        ok = F.col(c).isNotNull()
+        if _is_string_type(_get_field_type(df, c)):
+            ok = ok & (F.trim(F.col(c)) != F.lit(""))
+        preds.append(ok)
+    filtrado = df.where(reduce(lambda a, b: a & b, preds))
+    if _dbg():
+        antes, depois = df.count(), filtrado.count()
+        if antes != depois:
+            logger.debug(
+                "[DEBUG pk_nula] %s: %d linha(s) com PK nula/vazia removida(s) "
+                "na leitura da fonte.", table, antes - depois)
+    return filtrado
+
+
+def _repara_not_null_origem(df: DataFrame, cfg: dict, table: str) -> DataFrame:
+    """Preenche, na leitura da fonte, colunas NOT NULL não-FK efetivamente nulas.
+
+    Caso real: lookups static trazem da extração uma linha com PK VÁLIDA mas
+    NULL/'' numa coluna que o Oracle declara NOT NULL (DETENTOR_IF.
+    NOM_DETENTOR_IF, MOTIVO_SITUACAO_IF.COD/DES_MOTIVO_SITUACAO_IF,
+    UNIDADE_MEDIDA.COD_UNIDADE_MEDIDA). Essa combinação não existe na origem
+    real (o Oracle guarda '' como NULL e a coluna é NOT NULL): é artefato de
+    extração, primo da linha de PK nula de _remove_linhas_pk_nula. Sem
+    conserto, a linha atravessa o pipeline intacta (nenhum passe de FK a toca)
+    e assert_not_null_ok aborta o componente — rodar de novo falha igual.
+
+    DROPAR a linha (como se faz com PK nula) seria PIOR que preencher: a PK é
+    válida e pode ser referenciada por FK NOT NULL de tabela-alvo (ex.:
+    INSTRUMENTO_FINANCEIRO.NUM_ID_MOTIVO_SITUACAO_IF -> MOTIVO_SITUACAO_IF);
+    o pai dropado tornaria essas filhas órfãs e a neutralização as DROPARIA em
+    cascata (linhas VÁLIDAS do domínio perdidas). Preencher preserva a linha,
+    a identidade da PK e toda a integridade referencial.
+
+    Escopo deliberado (só o que nenhum outro passe cobre):
+      - PK fica fora — linha de PK nula é dropada por _remove_linhas_pk_nula;
+      - coluna de FK fica fora — NULL em FK é assunto dos passes de órfão
+        (fecho/neutralização/rebind); inventar uma referência aqui criaria
+        órfão novo;
+      - só colunas declaradas em not_null_cols (spec gerado com cols_real.csv)
+        e presentes no DataFrame.
+
+    Valor de preenchimento: o MENOR valor válido do tipo, porque o spec não
+    conhece a largura física da coluna no Oracle — string vira "0" (1 char:
+    cabe em qualquer CHAR/VARCHAR2, inclusive indicadores CHAR(1), sem risco
+    de ORA-12899; exceção: DAT_* fisicamente string recebe data formatada),
+    número vira 0, data/timestamp viram o instante corrente (coerente com a
+    data de engorda). Tipos além desses ficam como estão e
+    assert_not_null_ok continua barrando, apontando para cá.
+
+    Custo: projeção pura (um when/otherwise por coluna reparável), sem scan
+    nem agg extra; contagem de reparos só sob --debug.
+    """
+    pk_set = set(cfg.get("pk_cols") or [])
+    fk_cols = {c for fk in _fk_list(cfg) for c in (fk.get("columns") or [])}
+    alvo = [c for c in sorted(_not_null_cols(cfg))
+            if _has_column(df, c) and c not in pk_set and c not in fk_cols]
+    if not alvo:
+        return df
+    if _dbg():
+        nulos = _null_efetivo_counts(df, alvo)
+        for c, n in nulos.items():
+            if n:
+                logger.debug(
+                    "[DEBUG repara_not_null] %s.%s: %d valor(es) efetivamente "
+                    "nulo(s) (NULL/'') preenchido(s) na leitura da fonte.",
+                    table, c, n)
+    for c in alvo:
+        dt = _get_field_type(df, c)
+        col = F.col(c)
+        if _is_string_type(dt):
+            eff_null = col.isNull() | (F.trim(col) == F.lit(""))
+            if c.startswith("DAT_"):
+                # Coluna de data fisicamente STRING (CSV lido com inferSchema):
+                # "0" quebraria o append com ORA-01858; usa o mesmo formato de
+                # _timestamp_literal_for_type para coluna string.
+                fill = F.date_format(F.current_timestamp(), "yyyy-MM-dd HH:mm:ss")
+            else:
+                fill = F.lit("0")
+        elif _is_numeric_pk_type(dt):
+            eff_null = col.isNull()
+            fill = F.lit(0).cast(dt)
+        elif isinstance(dt, T.DateType):
+            eff_null = col.isNull()
+            fill = F.current_date()
+        elif isinstance(dt, T.TimestampType):
+            eff_null = col.isNull()
+            fill = F.current_timestamp()
+        else:
+            continue  # tipo não reparável -> assert_not_null_ok segue barrando
+        df = df.withColumn(c, F.when(eff_null, fill).otherwise(col))
+    return df
+
+
+def _saneia_fonte(df: DataFrame, cfg: dict, table: str) -> DataFrame:
+    """Saneamento canônico da fonte já filtrada, num único ponto de entrada:
+    (1) remove linhas de PK nula/vazia e (2) preenche colunas NOT NULL não-FK
+    efetivamente nulas — os dois artefatos de extração que tornariam a linha
+    não-apendável (ORA-01400). Todo ponto que consome fonte para amostra/fecho
+    deve ler por aqui, para que síntese, bootstrap e cópia static enxerguem a
+    MESMA fonte saneada."""
+    return _repara_not_null_origem(
+        _remove_linhas_pk_nula(df, cfg, table), cfg, table)
 
 
 def _read_pk_max(spark, path: str, pk_col: str):
@@ -3112,11 +3443,13 @@ def compute_pk_maxes(spark, config, comp_specs, floor: int = 0, band: int = 0,
             continue
         pk_col = pk_cols[-1]  # the synthesizer generates the last PK column
         try:
-            # NB: max(pk) é lido da tabela INTEIRA, sem o filtro NUM_TIPO_IF==46,
-            # de propósito. As PKs sintéticas precisam ficar acima do max real de
-            # TODOS os NUM_TIPO_IF para não colidirem com linhas de produção de
-            # outros tipos de IF (ver validate_collision_producao). Filtrar aqui
-            # reduziria o max e poderia gerar PKs que colidem com dados reais.
+            # NB: max(pk) é lido da tabela INTEIRA (read_parquet direto, NÃO
+            # _read_source), sem NENHUM dos predicados de FILTROS_FONTE, de
+            # propósito. As PKs sintéticas precisam ficar acima do max real de
+            # TODAS as linhas de produção (todos os NUM_TIPO_IF, inclusive
+            # linhas excluídas / fora do produto) para não colidirem com dados
+            # reais (ver validate_collision_producao). Filtrar aqui reduziria o
+            # max e poderia gerar PKs que colidem com produção.
             raw_max = _read_pk_max(spark, raw_path(config, table), pk_col)
             true_max = int(raw_max) if raw_max is not None else None
             cap = _pk_capacity(spark, raw_path(config, table), pk_col)
@@ -3183,32 +3516,36 @@ def _dominio_spine(comp_specs: Mapping[str, Any]) -> frozenset:
 def referential_sample(spark, config, comp_specs, limit: int | None) -> dict:
     """Subset referencial pais-antes-de-filhos, mantendo a FK consistente.
 
-    Percorre o componente pais-antes-de-filhos: lê cada tabela, aplica o
-    filtro de domínio CDB simplificado (NUM_TIPO_IF == 49) SOMENTE nas
-    tabelas-raiz (TABELAS_RAIZ_FILTRO), e mantém só as linhas-filhas cuja FK
-    DE DOMÍNIO (parent_table em `_dominio_spine`) cai num pai já subsetado
-    (ou é NULL). FKs LATERAIS (para tabelas fora do espinhaço de domínio,
-    ex.: CONTA_PARTICIPANTE, PARTICIPANTE, tabelas de lookup) NÃO podam
-    nada nesta etapa — podar por elas aqui zerava artificialmente linhas
-    válidas do domínio sempre que a amostra independente do pai lateral não
-    intersectava a filha, e a linha descartada não podia mais ser
-    recuperada pelo fecho ascendente. Essas FKs continuam sendo resolvidas
-    (pai completado ou órfão neutralizado) pelos passos seguintes.
+    Percorre o componente pais-antes-de-filhos: lê cada tabela JÁ FILTRADA
+    pelos predicados de fonte do CDB simplificado (`_read_source` /
+    FILTROS_FONTE) e mantém só as linhas-filhas cuja FK DE DOMÍNIO
+    (parent_table em `_dominio_spine`) cai num pai já subsetado (ou é NULL).
+    FKs LATERAIS (para tabelas fora do espinhaço de domínio, ex.:
+    CONTA_PARTICIPANTE, PARTICIPANTE, tabelas de lookup) NÃO podam nada nesta
+    etapa — podar por elas aqui zerava artificialmente linhas válidas do
+    domínio sempre que a amostra independente do pai lateral não intersectava
+    a filha, e a linha descartada não podia mais ser recuperada pelo fecho
+    ascendente. Essas FKs continuam sendo resolvidas (pai completado ou órfão
+    neutralizado) pelos passos seguintes.
 
-    O universo é definido por CHAVE: o filtro por coluna acontece uma única
-    vez, na raiz, e desce a árvore por semi-join. Filhas COM cópia
-    denormalizada de NUM_TIPO_IF não são filtradas pela própria coluna —
-    filtrá-las criava uma segunda definição do universo e, quando a coluna
-    discordava do pai (denormalização inconsistente), a filha virava órfã e
-    null_orphan_fks zerava a FK inteira.
+    Duas camadas de recorte combinam aqui:
+      (a) predicados de fonte (FILTROS_FONTE), aplicados na leitura de CADA
+          tabela — a primeira etapa do pipeline; e
+      (b) propagação por CHAVE a partir da raiz (TABELAS_RAIZ_FILTRO),
+          descendo a árvore por semi-join sobre `_dominio_spine`.
+    Como a fonte já vem filtrada em TODO ponto de leitura, pai e filha não
+    podem divergir por re-injeção: um pai fora do produto simplesmente não
+    existe para ninguém.
 
     Ao final, `completa_pais_referenciados` fecha o universo PARA CIMA: os
     valores de FK que sobraram em filhas mantidas mas cujo pai não sobreviveu
     ao filtro/poda (FKs ausentes no spec, arestas quebradas por ciclo, FKs
-    laterais não usadas na poda) são completados puxando as linhas de pai do
-    Parquet completo. O resultado é FK-fechado por construção; os únicos
-    órfãos restantes são os que já eram órfãos na produção (tratados por
-    neutraliza_orfaos_na_fonte / null_orphan_fks).
+    laterais não usadas na poda) são completados puxando as linhas de pai da
+    FONTE JÁ FILTRADA (`_read_source`). O resultado é FK-fechado por
+    construção; os únicos órfãos restantes são os que já eram órfãos na
+    produção OU cujo pai foi removido pelos predicados de fonte — ambos
+    tratados por neutraliza_orfaos_na_fonte / null_orphan_fks (anula FK
+    nullable; dropa linha quando a FK é NOT NULL).
 
     limit:
         int  -> também limita cada tabela a `limit` linhas (teste rápido). Os
@@ -3224,11 +3561,15 @@ def referential_sample(spark, config, comp_specs, limit: int | None) -> dict:
     sampled: dict = {}
     broadcast_keys = limit is not None
     for table in order:
-        # Filtra para o CDB simplificado (NUM_TIPO_IF == 49) APENAS na raiz;
-        # a propagação referencial abaixo restringe as demais tabelas por
-        # chave, e a consistência de FK é calculada sobre o subconjunto 49.
-        df = _aplica_filtro_tipo_if(read_parquet(spark, raw_path(config, table)), table)
-        # Baseline BRUTO (pós-filtro de domínio, PRÉ-poda por semi-join): nulos
+        # Fonte JÁ FILTRADA pelos predicados do CDB simplificado
+        # (FILTROS_FONTE), a primeira etapa. A propagação referencial abaixo
+        # restringe adicionalmente por chave a partir da raiz, e a
+        # consistência de FK é calculada sobre esse subconjunto. Linhas com
+        # PK nula/vazia saem já na leitura e colunas NOT NULL não-FK
+        # efetivamente nulas são preenchidas (artefatos de extração).
+        df = _saneia_fonte(
+            _read_source(spark, config, table), comp_specs[table], table)
+        # Baseline BRUTO (pós-filtros de fonte, PRÉ-poda por semi-join): nulos
         # das colunas de FK direto da origem. Comparar com o estágio
         # "1.after_descending_sample" isola o que já vinha nulo na origem vs. o
         # que a poda tornou órfão. Só custa um agg de contagem de nulos.
@@ -3242,7 +3583,7 @@ def referential_sample(spark, config, comp_specs, limit: int | None) -> dict:
                 nulls_raw = _dbg_null_counts(df, fk_cols_raw)
                 logger.debug(
                     "[DEBUG 0.raw_source] %s: nulos por coluna de FK na origem "
-                    "(pós-filtro NUM_TIPO_IF, pré-poda) = %s", table, nulls_raw)
+                    "(pós-filtros de fonte, pré-poda) = %s", table, nulls_raw)
         for fk in _fk_list(comp_specs[table]):
             parent = fk.get("parent_table")
             cols = list(fk.get("columns") or [])
@@ -3275,28 +3616,33 @@ def referential_sample(spark, config, comp_specs, limit: int | None) -> dict:
         # substitui por uma folha RDD rasa.
         sampled[table] = df.localCheckpoint(eager=True)
 
-    # Estado logo após a descida (filtro na raiz + poda por semi-join),
+    # Estado logo após a descida (filtros de fonte + poda por semi-join),
     # ANTES de qualquer fecho/neutralização: mostra os órfãos "estruturais"
-    # herdados do subset (pais podados) vs. os que sobrarão como órfãos de
-    # produção depois do fecho.
+    # herdados do subset (pais podados) vs. os que sobrarão como órfãos após
+    # o fecho.
     debug_fk_integrity_report("1.after_descending_sample", sampled, comp_specs)
 
     # Passo ascendente: garante que toda chave de FK presente numa filha
-    # mantida exista no pai amostrado, puxando do Parquet completo as linhas
-    # de pai que o filtro/poda removeu mas que continuam referenciadas.
+    # mantida exista no pai amostrado, puxando da FONTE JÁ FILTRADA
+    # (`_read_source`) as linhas de pai referenciadas que a poda removeu.
+    # Um pai que os predicados de FILTROS_FONTE excluíram NÃO é puxado.
     sampled = completa_pais_referenciados(
         spark, config, comp_specs, sampled, broadcast_missing=broadcast_keys
     )
-    # Após o fecho ascendente: os órfãos que RESTAREM aqui são órfãos de
-    # PRODUÇÃO (chave inexistente até no Parquet completo do pai). Se uma
-    # coluna do pre-append check ainda mostra órfãos NESTE ponto, o problema
-    # é dado de origem, não a amostragem.
+    # Após o fecho ascendente, os órfãos que RESTAREM têm DUAS origens
+    # possíveis (ambas esperadas, não falha de amostragem):
+    #   (a) órfão de PRODUÇÃO — a chave não existe nem na tabela completa; e
+    #   (b) pai REMOVIDO pelos predicados de FILTROS_FONTE — a chave existe no
+    #       Parquet completo, mas o pai não pertence ao produto CDB
+    #       simplificado (ex.: CONDICAO_IF/INSTRUMENTO_FINANCEIRO com
+    #       DAT_EXCLUSAO não-nula), então o fecho não o re-injeta.
+    # Ao investigar um órfão aqui, distinga (a) de (b) antes de concluir que é
+    # dado de origem: (b) é consequência intencional do filtro do produto.
     debug_fk_integrity_report("2.after_completa_pais", sampled, comp_specs)
-    # O que resta de órfão após o fecho é órfão DE PRODUÇÃO (a chave não
-    # existe nem no Parquet completo do pai). Neutraliza na fonte para que
-    # _fk_has_data_problem encontre zero órfãos e a FK seja PRESERVADA na
-    # síntese — antes, um único órfão descartava a FK inteira e
-    # null_orphan_fks anulava a coluna toda.
+    # Os órfãos remanescentes (produção OU pai fora do produto) são
+    # neutralizados na fonte para que _fk_has_data_problem encontre zero
+    # órfãos e a FK seja PRESERVADA na síntese — antes, um único órfão
+    # descartava a FK inteira e null_orphan_fks anulava a coluna toda.
     sampled = neutraliza_orfaos_na_fonte(comp_specs, sampled)
     # Fonte final entregue à síntese. Aqui a contagem de órfãos DEVE ser 0
     # para toda FK do domínio; nulos são esperados (FK opcional / órfão de
@@ -3329,10 +3675,14 @@ def neutraliza_orfaos_na_fonte(comp_specs, sampled: dict) -> dict:
         desligar a checagem composta, então anulamos essas;
       - se NENHUMA coluna da FK for anulável (todas PK e/ou NOT NULL), não dá
         para desligar a checagem sem violar NOT NULL: a linha órfã é DROPADA,
-        com warning. O drop é seguro para os descendentes porque o passe corre
-        em ordem topológica (pais antes de filhas): filhas que referenciem a
-        linha dropada são vistas DEPOIS, contra o pai já encolhido, e
-        neutralizadas do mesmo jeito.
+        com warning. O drop cascateia para os descendentes porque o passe
+        corre em ordem topológica (pais antes de filhas) E repete a PONTO
+        FIXO: em ciclo de FK a ordem é quebrada arbitrariamente e um pai pode
+        ser encolhido DEPOIS de a filha já ter sido vista (caso real:
+        PARTICIPANTE dropada após CONTA_PARTICIPANTE -> 9.751 órfãs chegavam
+        à síntese e derrubavam a FK inteira via _fk_has_data_problem); a
+        rodada seguinte revisita a filha contra o pai já encolhido. Rodada
+        sem órfã custa só o anti-join da guarda por FK.
 
     NOT NULL vem de `not_null_cols` (spec gerado com cols_real.csv). Sem essa
     lista, cai no critério antigo (só PK bloqueia a anulação) — que pode anular
@@ -3357,78 +3707,93 @@ def neutraliza_orfaos_na_fonte(comp_specs, sampled: dict) -> dict:
     novo localCheckpoint só acontecem quando há órfão de fato.
     """
     MAX_ITER_SELF_DROP = 10
+    MAX_RODADAS_NEUTRALIZA = 10
     order = topo_order_tables(comp_specs)
-    for table in order:
-        df = sampled.get(table)
-        if df is None:
-            continue
-        cfg = comp_specs[table]
-        pk_set = set(cfg.get("pk_cols") or [])
-        nn_set = _not_null_cols(cfg)
-        changed = False
-        for fk in _fk_list(cfg):
-            parent = fk.get("parent_table")
-            cols = list(fk.get("columns") or [])
-            pcols = list(fk.get("parent_columns") or [])
-            eh_self = parent == table
-            if (parent not in sampled or not cols or len(cols) != len(pcols)
-                    or (eh_self and set(cols) & set(pcols))):
-                continue  # fora do componente / malformada / self degenerada
-            # Anulável = não-PK E não NOT NULL. Anular uma coluna NOT NULL
-            # trocaria ORA-02291 (FK órfã) por ORA-01400 (NOT NULL); nesse
-            # caso a linha é dropada (nullable_cols vazio -> ramo do drop).
-            nullable_cols = [c for c in cols if c not in pk_set and c not in nn_set]
-            # self + drop pode encadear (linha dropada era pai de outra);
-            # nos demais casos uma rodada basta.
-            rodadas = MAX_ITER_SELF_DROP if (eh_self and not nullable_cols) else 1
-            for _ in range(rodadas):
-                base_pai = df if eh_self else sampled[parent]
-                parent_keys = (base_pai
-                               .select(*[F.col(p).alias(c)
-                                         for c, p in zip(cols, pcols)])
-                               .distinct())
-                orfas = (df.select(*cols).dropna().distinct()
-                         .join(parent_keys, on=cols, how="left_anti"))
-                if orfas.isEmpty():
+    for rodada_global in range(1, MAX_RODADAS_NEUTRALIZA + 1):
+        mudou_algo = False
+        for table in order:
+            df = sampled.get(table)
+            if df is None:
+                continue
+            cfg = comp_specs[table]
+            pk_set = set(cfg.get("pk_cols") or [])
+            nn_set = _not_null_cols(cfg)
+            changed = False
+            for fk in _fk_list(cfg):
+                parent = fk.get("parent_table")
+                cols = list(fk.get("columns") or [])
+                pcols = list(fk.get("parent_columns") or [])
+                eh_self = parent == table
+                if (parent not in sampled or not cols or len(cols) != len(pcols)
+                        or (eh_self and set(cols) & set(pcols))):
+                    continue  # fora do componente / malformada / self degenerada
+                # Anulável = não-PK E não NOT NULL. Anular uma coluna NOT NULL
+                # trocaria ORA-02291 (FK órfã) por ORA-01400 (NOT NULL); nesse
+                # caso a linha é dropada (nullable_cols vazio -> ramo do drop).
+                nullable_cols = [c for c in cols if c not in pk_set and c not in nn_set]
+                # self + drop pode encadear (linha dropada era pai de outra);
+                # nos demais casos uma rodada basta.
+                rodadas = MAX_ITER_SELF_DROP if (eh_self and not nullable_cols) else 1
+                for _ in range(rodadas):
+                    base_pai = df if eh_self else sampled[parent]
+                    parent_keys = (base_pai
+                                   .select(*[F.col(p).alias(c)
+                                             for c, p in zip(cols, pcols)])
+                                   .distinct())
+                    orfas = (df.select(*cols).dropna().distinct()
+                             .join(parent_keys, on=cols, how="left_anti"))
+                    if orfas.isEmpty():
+                        break
+                    # Join por igualdade nas colunas da FK: linhas com FK nula
+                    # nunca casam com `orfas` (null != null) -> ficam intactas.
+                    joined = df.join(orfas.withColumn("__orf", F.lit(True)),
+                                     on=cols, how="left")
+                    if nullable_cols:
+                        logger.warning(
+                            "neutraliza_orfaos_na_fonte: %s.%s -> %s%s: anulando "
+                            "FK de linhas órfãs de produção (chave inexistente "
+                            "no Parquet completo do pai).",
+                            table, ",".join(cols), parent,
+                            " (self)" if eh_self else "")
+                        for c in nullable_cols:
+                            joined = joined.withColumn(
+                                c, F.when(F.col("__orf"),
+                                          F.lit(None).cast(df.schema[c].dataType))
+                                    .otherwise(F.col(c)))
+                        df = joined.drop("__orf")
+                    else:
+                        # FK inteira dentro da PK: NOT NULL impede anular -> dropa.
+                        logger.warning(
+                            "neutraliza_orfaos_na_fonte: %s.%s -> %s%s: FK é "
+                            "parte da PK (NOT NULL); DROPANDO linhas órfãs de "
+                            "produção.",
+                            table, ",".join(cols), parent,
+                            " (self)" if eh_self else "")
+                        df = joined.where(F.col("__orf").isNull()).drop("__orf")
+                    changed = True
+                    if eh_self and not nullable_cols:
+                        # o drop mudou o conjunto de PKs: reavalia contra o df
+                        # corrente na próxima rodada (plano raso via checkpoint).
+                        df = df.localCheckpoint(eager=True)
+                        continue
                     break
-                # Join por igualdade nas colunas da FK: linhas com FK nula
-                # nunca casam com `orfas` (null != null) -> ficam intactas.
-                joined = df.join(orfas.withColumn("__orf", F.lit(True)),
-                                 on=cols, how="left")
-                if nullable_cols:
-                    logger.warning(
-                        "neutraliza_orfaos_na_fonte: %s.%s -> %s%s: anulando "
-                        "FK de linhas órfãs de produção (chave inexistente "
-                        "no Parquet completo do pai).",
-                        table, ",".join(cols), parent,
-                        " (self)" if eh_self else "")
-                    for c in nullable_cols:
-                        joined = joined.withColumn(
-                            c, F.when(F.col("__orf"),
-                                      F.lit(None).cast(df.schema[c].dataType))
-                                .otherwise(F.col(c)))
-                    df = joined.drop("__orf")
-                else:
-                    # FK inteira dentro da PK: NOT NULL impede anular -> dropa.
-                    logger.warning(
-                        "neutraliza_orfaos_na_fonte: %s.%s -> %s%s: FK é "
-                        "parte da PK (NOT NULL); DROPANDO linhas órfãs de "
-                        "produção.",
-                        table, ",".join(cols), parent,
-                        " (self)" if eh_self else "")
-                    df = joined.where(F.col("__orf").isNull()).drop("__orf")
-                changed = True
-                if eh_self and not nullable_cols:
-                    # o drop mudou o conjunto de PKs: reavalia contra o df
-                    # corrente na próxima rodada (plano raso via checkpoint).
-                    df = df.localCheckpoint(eager=True)
-                    continue
-                break
-        if changed:
-            # Checkpoint por tabela alterada: filhas mais abaixo na ordem
-            # topológica leem sampled[table] já neutralizado (necessário para
-            # o cascateamento do caso de drop) sem reanálise de plano fundo.
-            sampled[table] = df.localCheckpoint(eager=True)
+            if changed:
+                # Checkpoint por tabela alterada: filhas mais abaixo na ordem
+                # topológica leem sampled[table] já neutralizado (necessário para
+                # o cascateamento do caso de drop) sem reanálise de plano fundo.
+                sampled[table] = df.localCheckpoint(eager=True)
+                mudou_algo = True
+        if not mudou_algo:
+            if rodada_global > 1:
+                logger.info(
+                    "neutraliza_orfaos_na_fonte: convergiu na rodada %d.",
+                    rodada_global)
+            break
+    else:
+        logger.warning(
+            "neutraliza_orfaos_na_fonte: NÃO convergiu em %d rodadas — ainda "
+            "havia mudança na última. Órfãos residuais ficam para "
+            "null_orphan_fks (rede final).", MAX_RODADAS_NEUTRALIZA)
     return sampled
 
 
@@ -3440,9 +3805,14 @@ def completa_pais_referenciados(
 
     Percorre o componente em ordem topológica REVERSA (filhas -> pais): para
     cada FK de uma filha mantida, calcula as chaves referenciadas que NÃO
-    estão no pai amostrado e puxa essas linhas do Parquet COMPLETO do pai —
-    sem o filtro de tipo, de propósito: a linha é necessária para a
-    integridade referencial mesmo que pertença a outro NUM_TIPO_IF.
+    estão no pai amostrado e puxa essas linhas da FONTE JÁ FILTRADA do pai
+    (`_read_source` / FILTROS_FONTE), NÃO do Parquet completo. Um pai que não
+    pertence ao produto CDB simplificado (ex.: CONDICAO_IF com DAT_EXCLUSAO
+    não-nula) portanto NÃO é re-injetado aqui: a chave permanece faltante, a
+    filha que a referenciava vira órfã e é neutralizada depois
+    (null_orphan_fks anula FK nullable; drop_orphan_rows dropa quando NOT
+    NULL). Assim os predicados de fonte valem também no fecho ascendente —
+    nenhuma etapa consegue trazer de volta uma linha fora do produto.
 
     A ordem reversa resolve necessidades transitivas em UMA passada num DAG:
     as linhas adicionadas a um pai ainda terão as PRÓPRIAS FKs completadas
@@ -3454,7 +3824,7 @@ def completa_pais_referenciados(
     Auto-referências (parent == child) são fechadas DENTRO da própria tabela,
     por iteração a ponto fixo ANTES das FKs normais da mesma tabela: uma
     linha mantida cuja self-FK aponte para uma linha podada puxa-a de volta
-    do Parquet completo; a linha puxada pode referenciar outra, e assim por
+    da fonte JÁ FILTRADA; a linha puxada pode referenciar outra, e assim por
     diante — a iteração converge em ~profundidade-da-hierarquia passos
     (limitada por MAX_ITER_FECHO_SELF; hierarquias reais são rasas). O
     critério de parada por CONTAGEM estagnada (e não só por vazio) evita
@@ -3503,13 +3873,16 @@ def completa_pais_referenciados(
                     on=pcols, how="left_anti")
                 n_faltantes = faltantes.count()
                 if n_faltantes == 0 or n_faltantes == n_anterior:
-                    # convergiu, ou só restam chaves inexistentes no Parquet
-                    # completo (órfãs de produção -> neutralização cuida).
+                    # convergiu, ou só restam chaves inexistentes na fonte
+                    # JÁ FILTRADA — órfãs de produção OU pais removidos pelos
+                    # predicados de fonte; ambos ficam para a neutralização.
                     break
                 n_anterior = n_faltantes
                 faltantes_side = (F.broadcast(faltantes)
                                   if broadcast_missing else faltantes)
-                extra = (read_parquet(spark, raw_path(config, child))
+                extra = (_saneia_fonte(
+                             _read_source(spark, config, child),
+                             comp_specs[child], child)
                          .join(faltantes_side, on=pcols, how="left_semi"))
                 logger.info(
                     "completa_pais_referenciados: %s.%s -> %s (self): "
@@ -3537,15 +3910,19 @@ def completa_pais_referenciados(
             faltantes = ref_keys.join(
                 sampled[parent].select(*pcols).distinct(),
                 on=pcols, how="left_anti")
-            # Ação barata (limit 1) que evita, no caso comum de zero
-            # faltantes, a leitura do Parquet completo do pai, o union e um
-            # novo localCheckpoint.
+            # Ação barata (isEmpty) que evita, no caso comum de zero
+            # faltantes, a leitura da fonte do pai, o union e um novo
+            # localCheckpoint.
             if faltantes.isEmpty():
                 continue
-            # Puxa do Parquet COMPLETO, SEM filtro de tipo: a linha é
-            # necessária para a integridade, mesmo que seja de outro tipo.
+            # Puxa da FONTE JÁ FILTRADA do pai (`_read_source` / FILTROS_FONTE),
+            # NÃO do Parquet completo: um pai fora do produto CDB simplificado
+            # não é re-injetado; a chave faltante remanescente torna a filha
+            # órfã e a neutralização (null_orphan_fks / drop_orphan_rows) cuida.
             faltantes_side = F.broadcast(faltantes) if broadcast_missing else faltantes
-            extra = (read_parquet(spark, raw_path(config, parent))
+            extra = (_saneia_fonte(
+                         _read_source(spark, config, parent),
+                         comp_specs[parent], parent)
                      .join(faltantes_side, on=pcols, how="left_semi"))
             logger.info(
                 "completa_pais_referenciados: %s.%s -> %s: completando pai com "
@@ -3560,6 +3937,43 @@ def completa_pais_referenciados(
     return sampled
 
 
+def _is_condicao_if_subtype(child: str, parent: str, cols: list[str]) -> bool:
+    """True se (child, parent, FK) é uma tabela-subtipo de CONDICAO_IF conhecida.
+
+    Ou seja: o pai é CONDICAO_IF, a FK shared-key é sobre NUM_CONDICAO_IF, e o
+    filho é uma das tabelas-subtipo mapeadas em SUBTYPE_BY_TIPO. Só nesse caso o
+    bind precisa particionar as chaves do pai por COD_TIPO_CONDICAO_IF.
+    """
+    return (parent == CONDICAO_IF_TABLE
+            and child in TIPO_BY_SUBTYPE
+            and [c.upper() for c in cols] == [CONDICAO_IF_PK])
+
+
+def _condicao_if_keys_for_subtype(
+    parent_df: DataFrame, pcols: list[str], subtype_table: str
+) -> Optional[DataFrame]:
+    """Chaves do CONDICAO_IF pai cujo COD_TIPO_CONDICAO_IF casa com `subtype_table`.
+
+    Retorna o DF de chaves (aliased __np{i}) restrito ao tipo do subtipo, ou None
+    se o pai não tiver a coluna de tipo (aí o caller cai no comportamento antigo:
+    usar todas as chaves). Particionar por tipo garante fatias DISJUNTAS entre
+    subtipos -> nenhum NUM_CONDICAO_IF cai em dois subtipos (ambíguo), cada linha
+    fica no subtipo do tipo certo (mismatch), e o 1:1 por fatia mantém unicidade.
+    """
+    if not _has_column(parent_df, CONDICAO_IF_TIPO_COL):
+        return None
+    expected_tipo = TIPO_BY_SUBTYPE.get(subtype_table)
+    if expected_tipo is None:
+        return None
+    # Normaliza o código do pai a string trimada sem ".0" (IDs numéricos lidos
+    # como double/decimal viram "2.0"); compara com o código esperado do mapa.
+    filtered = parent_df.where(
+        _condicao_if_tipo_norm_expr() == F.lit(expected_tipo))
+    return (filtered
+            .select(*[F.col(pc).alias(f"__np{i}") for i, pc in enumerate(pcols)])
+            .dropna().distinct())
+
+
 def bind_shared_key_children(synthetic: dict, comp_specs: dict) -> dict:
     """Rebind 1:1 shared-key children (PK == FK) to distinct synthetic parent keys.
 
@@ -3569,11 +3983,51 @@ def bind_shared_key_children(synthetic: dict, comp_specs: dict) -> dict:
     Here we overwrite those columns with a distinct slice of the parent's
     synthetic keys, guaranteeing valid, unique, non-null keys. Child rows beyond
     the number of parent keys are dropped (1:1 cardinality).
+
+    SUBTYPE-AWARE (correção do polimorfismo CONDICAO_IF): quando o par
+    (child, parent) é uma tabela-subtipo de CONDICAO_IF (ver
+    _is_condicao_if_subtype), a fatia de chaves do pai NÃO é "todas as chaves
+    0..N", e sim APENAS as chaves cujo COD_TIPO_CONDICAO_IF corresponde àquele
+    subtipo (ex.: JUROS_FIXO recebe só as chaves de tipo 2). Como cada subtipo
+    consome uma fatia DISJUNTA do espaço de chaves do pai, garante-se de uma vez:
+      (a) 1:1 por fatia -> chaves únicas (sem shared_key_dup);
+      (b) exatamente uma tabela por chave -> sem ambiguidade (o
+          ClassCastException) e sem "subtype_mismatch".
+    Resíduos possíveis e quem os resolve:
+      * subtipo NO run mas com MENOS linhas que as chaves do pai daquele tipo
+        (inclusive ZERO linhas — domínio/amostra sem o subtipo, caso típico do
+        CDB simplificado com AMORTIZACAO/PARTICIPACAO_LUCROS/RESET/
+        DESDOBRAMENTO): as chaves de pai não cobertas ficariam dangling; são
+        REMOVIDAS do CONDICAO_IF por alinha_condicao_if_aos_subtipos logo após
+        este bind, e as filhas que as referenciavam são neutralizadas por
+        null_orphan_fks (ordem topológica).
+      * subtipo que NÃO está no run com linhas de pai daquele tipo: continua
+        sendo erro de spec — resolvido incluindo o subtipo em TABELAS_ALVO
+        (gera_spec_config.py) e barrado por assert_polymorphism_ok antes da
+        gravação.
+    FKs shared-key que não são subtipos de CONDICAO_IF mantêm o
+    comportamento antigo (todas as chaves do pai).
+
+    DUAS REGRAS DE SEGURANÇA (correção das duplicidades/órfãos em
+    PARTICIPANTE/CONTA_PARTICIPANTE):
+      * tabela STATIC nunca é rebindada — é referência copiada da fonte, com
+        chaves já consistentes; reescrevê-las embaralha a identidade das
+        linhas e torna órfã toda FK externa que aponta para ela. Órfã
+        residual em static (cascata de drops da neutralização) é dropada por
+        null_orphan_fks, preservando o pareamento original.
+      * iteração em ORDEM TOPOLÓGICA (pais antes de filhas), não em ordem de
+        dict: numa cadeia shared-key (ex.: ENTIDADE <- PESSOA_JURIDICA <-
+        PARTICIPANTE), vincular a filha ANTES de o pai ter as próprias chaves
+        reescritas invalidava o bind da filha (era a ordem alfabética que
+        fazia PARTICIPANTE receber chaves antigas de PESSOA_JURIDICA).
     """
-    for child, cfg in comp_specs.items():
+    for child in topo_order_tables(comp_specs):
+        cfg = comp_specs[child]
         child_df = synthetic.get(child)
         if child_df is None:
             continue
+        if cfg.get("static"):
+            continue  # referência copiada da fonte: chaves intocáveis
         pk_cols = list(cfg.get("pk_cols") or [])
         for fk in _fk_list(cfg):
             cols = list(fk.get("columns") or [])
@@ -3584,18 +4038,30 @@ def bind_shared_key_children(synthetic: dict, comp_specs: dict) -> dict:
                     or not _fk_is_whole_pk(pk_cols, fk)):
                 continue
 
-            # Numbering em PARALELO via _with_contiguous_row_id em vez de
-            # row_number() sobre Window sem partitionBy. O padrão antigo virava
-            # Exchange SinglePartition (sort serial numa única task) e estourava
-            # num pai grande tipo CONDICAO_IF; o lado do filho, com
-            # orderBy(monotonically_increasing_id()), ainda era NÃO-determinístico
-            # (mid é reavaliado por estágio), variando o pareamento entre runs.
-            # _with_contiguous_row_id dá id contíguo 0..N-1 bijetivo dos dois
-            # lados; o inner join pareia 1:1 e descarta filhos acima do nº de
-            # chaves do pai (mesma cardinalidade documentada), sem sort global.
-            keys = (parent_df
-                    .select(*[F.col(pc).alias(f"__np{i}") for i, pc in enumerate(pcols)])
-                    .dropna().distinct())
+            # Fatia de chaves do pai. Para subtipos de CONDICAO_IF, restringe ao
+            # COD_TIPO_CONDICAO_IF do subtipo (fatias disjuntas por tipo). Para
+            # os demais shared-key, todas as chaves do pai (comportamento antigo).
+            keys = None
+            if _is_condicao_if_subtype(child, parent, cols):
+                keys = _condicao_if_keys_for_subtype(parent_df, pcols, child)
+                if keys is not None:
+                    logger.info(
+                        "bind_shared_key_children: %s é subtipo de CONDICAO_IF "
+                        "(tipo=%s); vinculando SÓ às chaves desse tipo.",
+                        child, TIPO_BY_SUBTYPE.get(child))
+            if keys is None:
+                # Numbering em PARALELO via _with_contiguous_row_id em vez de
+                # row_number() sobre Window sem partitionBy. O padrão antigo virava
+                # Exchange SinglePartition (sort serial numa única task) e estourava
+                # num pai grande tipo CONDICAO_IF; o lado do filho, com
+                # orderBy(monotonically_increasing_id()), ainda era NÃO-determinístico
+                # (mid é reavaliado por estágio), variando o pareamento entre runs.
+                # _with_contiguous_row_id dá id contíguo 0..N-1 bijetivo dos dois
+                # lados; o inner join pareia 1:1 e descarta filhos acima do nº de
+                # chaves do pai (mesma cardinalidade documentada), sem sort global.
+                keys = (parent_df
+                        .select(*[F.col(pc).alias(f"__np{i}") for i, pc in enumerate(pcols)])
+                        .dropna().distinct())
             # MATERIALIZA cada lado após numerar. _with_contiguous_row_id usa
             # monotonically_increasing_id() — não-determinístico entre
             # avaliações. Sem congelar, o inner join por __bind_rn reavalia cada
@@ -3614,16 +4080,143 @@ def bind_shared_key_children(synthetic: dict, comp_specs: dict) -> dict:
     return synthetic
 
 
+def _condicao_if_tipo_norm_expr():
+    """COD_TIPO_CONDICAO_IF normalizado a string trimada sem ".0" (IDs lidos
+    como double/decimal viram "2.0"); mesma normalização usada no bind e nos
+    asserts, para as comparações de tipo serem consistentes entre os passes."""
+    return F.regexp_replace(
+        F.trim(F.col(CONDICAO_IF_TIPO_COL).cast("string")), r"\.0$", "")
+
+
+def _subtipo_vazio_e_legitimo(synthetic: dict, table: str) -> bool:
+    """True se `table` é subtipo de CONDICAO_IF e o pai sintético NÃO tem
+    nenhuma linha do COD_TIPO correspondente.
+
+    Nesse caso a tabela-subtipo vazia é o resultado CORRETO — a invariante do
+    polimorfismo (exatamente uma linha-subtipo por pai de tipo concreto) vale
+    trivialmente: zero pais do tipo -> zero linhas no subtipo. É o que acontece
+    no domínio CDB simplificado com tipos que não se aplicam a CDB (ex.:
+    AMORTIZACAO/PARTICIPACAO_LUCROS/RESET/DESDOBRAMENTO), onde a fonte
+    filtrada/amostrada simplesmente não tem linhas do subtipo. Abortar o run
+    por isso (como o vazias_alvo fazia) transforma um dado VÁLIDO em falha.
+    """
+    tipo = TIPO_BY_SUBTYPE.get(table)
+    if tipo is None:
+        return False
+    cond = synthetic.get(CONDICAO_IF_TABLE)
+    if cond is None or not _has_column(cond, CONDICAO_IF_TIPO_COL):
+        return False
+    return cond.where(_condicao_if_tipo_norm_expr() == F.lit(tipo)).isEmpty()
+
+
+def alinha_condicao_if_aos_subtipos(synthetic: dict, comp_specs: dict) -> dict:
+    """Remove do CONDICAO_IF sintético as linhas de tipo concreto que ficaram
+    SEM linha-subtipo (dangling) após bind_shared_key_children.
+
+    Por que existe: o bind vincula cada subtipo APENAS às chaves do pai com o
+    seu COD_TIPO_CONDICAO_IF, num pareamento 1:1 por posição. Quando o subtipo
+    tem MENOS linhas que as chaves do pai daquele tipo — inclusive ZERO linhas,
+    caso típico do CDB simplificado, cujo domínio não tem AMORTIZACAO/
+    PARTICIPACAO_LUCROS/RESET/DESDOBRAMENTO — as chaves excedentes do pai ficam
+    sem linha-subtipo. O Hibernate não conseguiria tipá-las (dangling), o
+    assert_polymorphism_ok abortaria e, no caso de subtipo 100% vazio, o
+    vazias_alvo do assert_not_null_ok abortava antes. Como não dá para FABRICAR
+    linhas-subtipo (não há linha de fonte para bootstrapar), a única saída
+    consistente é encolher o pai para as chaves efetivamente cobertas.
+
+    O que faz, para cada tabela-subtipo PRESENTE no run (em synthetic):
+      1. coleta as chaves NUM_CONDICAO_IF cobertas pelo subtipo (pós-bind);
+      2. mantém no pai apenas linhas cujo (chave, tipo) está coberto;
+      3. linhas de tipo NULL, de tipo fora do mapa curado ou de subtipo que
+         NÃO está no run passam intactas — para subtipo fora do run a política
+         continua sendo a do assert_polymorphism_ok (erro de spec: inclua a
+         tabela em TABELAS_ALVO).
+
+    DEVE rodar ANTES de null_orphan_fks: as filhas de CONDICAO_IF que
+    referenciavam chaves removidas são então neutralizadas pela rede de
+    segurança existente (anulação/rebind em ordem topológica).
+    """
+    cfg = comp_specs.get(CONDICAO_IF_TABLE)
+    cond = synthetic.get(CONDICAO_IF_TABLE)
+    if (cfg is None or cfg.get("static") or cond is None
+            or not _has_column(cond, CONDICAO_IF_PK)
+            or not _has_column(cond, CONDICAO_IF_TIPO_COL)):
+        return synthetic
+
+    covered = None
+    aligned_tipos: list[str] = []
+    for subtype, tipo in TIPO_BY_SUBTYPE.items():
+        sdf = synthetic.get(subtype)
+        if sdf is None or not _has_column(sdf, CONDICAO_IF_PK):
+            continue
+        aligned_tipos.append(tipo)
+        piece = (sdf.select(F.col(CONDICAO_IF_PK).cast("string").alias("__al_key"))
+                    .dropna().distinct()
+                    .withColumn("__al_tipo", F.lit(tipo)))
+        covered = piece if covered is None else covered.unionByName(piece)
+
+    if covered is None:
+        return synthetic
+
+    work = (cond
+            .withColumn("__al_key", F.col(CONDICAO_IF_PK).cast("string"))
+            .withColumn("__al_tipo", _condicao_if_tipo_norm_expr()))
+    hit = covered.withColumn("__al_hit", F.lit(True))
+    # `covered` é distinct por (chave, tipo) -> o left join não multiplica
+    # linhas do pai.
+    joined = work.join(hit, ["__al_key", "__al_tipo"], "left")
+    # keep nunca é NULL: os dois primeiros disjuntos são is[Not]Null (sempre
+    # booleanos) e ~isin só é NULL com tipo NULL, caso já coberto pelo isNull.
+    keep = (
+        F.col("__al_hit").isNotNull()
+        | F.col("__al_tipo").isNull()
+        | ~F.col("__al_tipo").isin(aligned_tipos)
+    )
+
+    stats = (joined.where(~keep)
+             .groupBy("__al_tipo")
+             .agg(F.count(F.lit(1)).alias("__al_n"))
+             .collect())
+    if not stats:
+        return synthetic
+
+    total = sum(int(r["__al_n"]) for r in stats)
+    detalhe = ", ".join(
+        f"tipo={r['__al_tipo']} ({SUBTYPE_BY_TIPO.get(str(r['__al_tipo']), '?')}): "
+        f"{r['__al_n']}"
+        for r in sorted(stats, key=lambda r: str(r["__al_tipo"])))
+    logger.warning(
+        "alinha_condicao_if_aos_subtipos: removendo %d linha(s) de CONDICAO_IF "
+        "sem linha-subtipo correspondente (dangling apos o bind): %s. Filhas "
+        "que referenciavam essas chaves serao neutralizadas por "
+        "null_orphan_fks.", total, detalhe)
+
+    synthetic[CONDICAO_IF_TABLE] = (
+        joined.where(keep).drop("__al_key", "__al_tipo", "__al_hit"))
+    return synthetic
+
+
 def _rebind_orphan_fk_to_valid_parent(
     child_df: DataFrame, parent_df: DataFrame,
-    cols: list[str], pcols: list[str], *, seed: int) -> DataFrame:
+    cols: list[str], pcols: list[str], *, seed: int,
+    allow_reuse: bool = True) -> DataFrame:
     """Reaponta linhas órfãs de uma FK NOT NULL para chaves VÁLIDAS do pai.
 
     Preserva a linha (não dropa, não anula): a FK órfã recebe uma chave que
     existe no pai sintético, escolhida de forma determinística. Cada linha órfã
-    é pareada por posição contígua (0..N-1) com uma chave do pai; se há mais
-    órfãs que chaves distintas, as chaves são recicladas por módulo — o que é
-    aceitável para dado sintético (o vínculo original já não existia).
+    é pareada por posição contígua (0..N-1) com uma chave do pai.
+
+    allow_reuse:
+        True  (FK comum, N:1) -> se há mais órfãs que chaves distintas, as
+              chaves são recicladas por módulo — aceitável para dado sintético
+              (o vínculo original já não existia).
+        False (FK que participa da PK da filha, ex.: shared-key 1:1) ->
+              reciclar chave criaria PK DUPLICADA (a chave reciclada colide
+              com linha não-órfã; caso real: PARTICIPANTE.NUM_ID_ENTIDADE com
+              5.952 duplicidades). Cada órfã recebe uma chave do pai que
+              NINGUÉM usa (chaves do pai MENOS as já usadas pelas linhas
+              não-órfãs); órfãs além do estoque de chaves livres são DROPADAS
+              — não há como preservá-las sem violar a unicidade da PK.
 
     Só é chamado quando o pai TEM ao menos uma chave; o caller trata o caso de
     pai sem chave nenhuma (drop inevitável).
@@ -3667,16 +4260,48 @@ def _rebind_orphan_fk_to_valid_parent(
         return j.drop(*drop_tmp)
 
     orf = _with_contiguous_row_id(orf, "__rb_rn")
-    # chave do pai = (rn + seed) % k. O seed (estável por (child,parent,cols) via
-    # _stable_seed no caller) desloca o início do ciclo, então a distribuição das
-    # órfãs entre as chaves do pai não é sempre "as primeiras k órfãs -> chaves
-    # 0..k-1". NB: isto NÃO torna o rebind reprodutível ENTRE runs — a numeração
-    # __rb_rn vem de monotonically_increasing_id, instável entre execuções; o
-    # determinismo é garantido só DENTRO do run (após o localCheckpoint acima).
-    seed_off = int(seed) % k if k else 0
-    orf = orf.withColumn(
-        "__rb_pick", ((F.col("__rb_rn") + F.lit(seed_off)) % F.lit(k)).cast("long"))
-    picks = pkeys  # tem __rb_k (0..k-1) e __rb_np{i}
+    if allow_reuse:
+        # chave do pai = (rn + seed) % k. O seed (estável por (child,parent,cols) via
+        # _stable_seed no caller) desloca o início do ciclo, então a distribuição das
+        # órfãs entre as chaves do pai não é sempre "as primeiras k órfãs -> chaves
+        # 0..k-1". NB: isto NÃO torna o rebind reprodutível ENTRE runs — a numeração
+        # __rb_rn vem de monotonically_increasing_id, instável entre execuções; o
+        # determinismo é garantido só DENTRO do run (após o localCheckpoint acima).
+        seed_off = int(seed) % k if k else 0
+        orf = orf.withColumn(
+            "__rb_pick", ((F.col("__rb_rn") + F.lit(seed_off)) % F.lit(k)).cast("long"))
+        picks = pkeys  # tem __rb_k (0..k-1) e __rb_np{i}
+    else:
+        # Sem reciclagem: destino = chaves do pai que NENHUMA linha não-órfã
+        # usa. Congela a numeração das órfãs (o count/where/join abaixo fazem
+        # múltiplas leituras e __rb_rn vem de monotonically_increasing_id).
+        orf = orf.localCheckpoint(eager=True)
+        usadas = (nonorf
+                  .select(*[F.col(c).alias(f"__rb_np{i}") for i, c in enumerate(cols)])
+                  .dropna().distinct())
+        livres = (pkeys.drop("__rb_k")
+                  .join(usadas, on=[f"__rb_np{i}" for i in range(n)], how="left_anti"))
+        livres = _with_contiguous_row_id(livres, "__rb_k").localCheckpoint(eager=True)
+        m = livres.count()
+        drop_tmp = ["__rb_hit", "__rb_isorf"] + [f"__rb_m{i}" for i in range(n)]
+        if m == 0:
+            logger.warning(
+                "_rebind_orphan_fk_to_valid_parent: FK %s participa da PK e o "
+                "pai não tem NENHUMA chave livre; DROPANDO todas as órfãs "
+                "(reciclar chave duplicaria a PK).", ",".join(cols))
+            return nonorf.drop(*drop_tmp)
+        n_orf = orf.count()
+        if n_orf > m:
+            logger.warning(
+                "_rebind_orphan_fk_to_valid_parent: FK %s participa da PK; "
+                "%d órfã(s) para %d chave(s) livre(s) do pai — DROPANDO %d "
+                "órfã(s) excedente(s) (preservá-las duplicaria a PK).",
+                ",".join(cols), n_orf, m, n_orf - m)
+            orf = orf.where(F.col("__rb_rn") < F.lit(m))
+        seed_off = int(seed) % m
+        orf = orf.withColumn(
+            "__rb_pick", ((F.col("__rb_rn") + F.lit(seed_off)) % F.lit(m)).cast("long"))
+        picks = livres  # tem __rb_k (0..m-1) e __rb_np{i}
     orf = orf.join(F.broadcast(picks), orf["__rb_pick"] == picks["__rb_k"], "left")
     for i, c in enumerate(cols):
         ctype = _get_field_type(orf, c)
@@ -3690,110 +4315,198 @@ def _rebind_orphan_fk_to_valid_parent(
     return nonorf.unionByName(orf)
 
 
+def _tem_orfa(child_df: DataFrame, parent_df: DataFrame,
+              cols: list[str], pcols: list[str]) -> bool:
+    """Guarda barata: existe órfã sob MATCH SIMPLE? Anti-join de chaves
+    DISTINTAS com TODAS as colunas da FK preenchidas + isEmpty — não
+    materializa nada e é idempotente (linha anulada/dropada sai do conjunto na
+    rodada seguinte), o que torna a detecção de mudança do ponto fixo exata."""
+    ck = child_df.select(*cols).dropna().distinct()
+    pk = (parent_df
+          .select(*[F.col(p).alias(c) for c, p in zip(cols, pcols)])
+          .dropna().distinct())
+    return not ck.join(pk, on=cols, how="left_anti").isEmpty()
+
+
+def _drop_orphan_rows(child_df: DataFrame, parent_df: DataFrame,
+                      cols: list[str], pcols: list[str]) -> DataFrame:
+    """Remove as linhas órfãs de uma FK. MATCH SIMPLE: só é órfã a linha com
+    TODAS as colunas da FK preenchidas e sem correspondência no pai — FK
+    parcialmente nula não é checada pelo banco e fica intacta."""
+    keys = (parent_df
+            .select(*[F.col(pc).alias(f"__pk{i}") for i, pc in enumerate(pcols)])
+            .dropna().distinct().withColumn("__match", F.lit(True)))
+    cond = reduce(lambda a, b: a & b,
+                  [child_df[cols[i]] == keys[f"__pk{i}"] for i in range(len(cols))])
+    joined = child_df.join(keys, cond, "left")
+    all_fk_set = reduce(lambda a, b: a & b, [F.col(c).isNotNull() for c in cols])
+    is_orphan = F.col("__match").isNull() & all_fk_set
+    return (joined.where(~is_orphan)
+            .drop("__match", *[f"__pk{i}" for i in range(len(pcols))]))
+
+
 def null_orphan_fks(synthetic: dict, comp_specs: dict) -> dict:
-    """Neutraliza FK órfã pós-síntese, em ordem topológica, SEM esvaziar tabela.
+    """Neutraliza FK órfã pós-síntese, a PONTO FIXO, SEM esvaziar tabela.
 
     Rede de segurança final para referências que o sintetizador não conseguiu
     remapear — self-refs, relações ignoradas (órfão de fonte / pai ausente),
     órfãos residuais de amostragem — para o load não bater em ORA-02291.
 
-    Decisão por FK:
+    Decisão por FK (todas sob MATCH SIMPLE: linha com QUALQUER coluna da FK
+    nula não é checada pelo banco e não é tocada):
       - colunas ANULÁVEIS (não-PK E não NOT NULL) -> anuladas nas linhas órfãs
-        (sob MATCH SIMPLE uma coluna nula desliga a checagem composta);
-      - FK sem coluna anulável (toda PK e/ou NOT NULL) -> REBIND determinístico
-        das linhas órfãs para uma chave VÁLIDA do pai sintético (preserva a
-        linha; ver _rebind_orphan_fk_to_valid_parent). Só quando o pai não tem
-        NENHUMA chave é que as órfãs são dropadas (inevitável) — com warning.
+        (uma coluna nula desliga a checagem composta);
+      - tabela STATIC com FK NOT NULL órfã -> DROP da linha. Static é
+        referência copiada da fonte: rebindar reescreveria chaves reais e
+        embaralharia a identidade das linhas (foi a origem das duplicidades de
+        PARTICIPANTE e dos órfãos de CONTA_PARTICIPANTE);
+      - FK NOT NULL de tabela sintetizada -> REBIND determinístico das linhas
+        órfãs para uma chave VÁLIDA do pai (preserva a linha). Se a FK
+        participa da PK, o rebind NÃO recicla chave (allow_reuse=False:
+        reciclar duplicaria a PK — só usa chaves livres, dropando excedentes).
+        Só quando o pai não tem NENHUMA chave é que as órfãs são dropadas
+        (inevitável) — com warning.
 
-    Por que rebind e não drop: o drop puro (a) esvaziava tabelas-alvo quando a
-    FK ficava 100% órfã na amostra (--limit) e (b) rodando sem cascata deixava
-    órfãos RESIDUAIS nas filhas (ex.: CARTEIRA_*.NUM_CONTA_PARTICIPANTE -> 12/26
-    órfãs), porque encolher CONTA_PARTICIPANTE aqui não rechecava as filhas já
-    processadas. O rebind não encolhe pai nenhum, então nenhuma filha vira órfã
-    por causa deste passe.
-
-    ORDEM TOPOLÓGICA (pais antes de filhas): garante que, ao rebindar/anular uma
-    filha, o pai já está no seu estado final — a chave escolhida é válida no
-    frame que será gravado. Whole-PK FKs seguem sob bind_shared_key_children;
-    se restarem órfãs aqui, também são rebindadas.
+    PONTO FIXO em vez de passada única: a garantia "pai antes da filha" da
+    ordem topológica NÃO existe em ciclo de FK (quebrado arbitrariamente), e
+    um pai alterado DEPOIS da filha re-cria órfãs que a passada única não
+    revisitava (caso real: REBIND de CONTA_PARTICIPANTE às 18:24:16 invalidado
+    pelo REBIND de PARTICIPANTE às 18:24:22 -> 29.880 órfãs na saída). O passe
+    repete até nenhuma tabela mudar; cada aresta custa só o anti-join da
+    guarda quando já está sã, então rodadas extras são baratas. Tabela
+    alterada é congelada (localCheckpoint) ANTES de ser lida como pai — regra
+    do arquivo: resultado de _with_contiguous_row_id/mono_id deve ser
+    materializado antes de múltiplas leituras.
     """
+    MAX_RODADAS = 10
     order = topo_order_tables(comp_specs)
-    for child in order:
-        cfg = comp_specs.get(child)
-        if cfg is None:
-            continue
-        child_df = synthetic.get(child)
-        if child_df is None:
-            continue
-        pk_set = set(cfg.get("pk_cols") or [])
-        nn_set = _not_null_cols(cfg)
-        for fk in _fk_list(cfg):
-            parent = fk.get("parent_table")
-            parent_df = synthetic.get(parent)
-            cols = list(fk.get("columns") or [])
-            pcols = list(fk.get("parent_columns") or [])
-            if parent_df is None or not cols or len(cols) != len(pcols):
+    for rodada in range(1, MAX_RODADAS + 1):
+        mudou_algo = False
+        for child in order:
+            cfg = comp_specs.get(child)
+            if cfg is None:
                 continue
+            child_df = synthetic.get(child)
+            if child_df is None:
+                continue
+            pk_set = set(cfg.get("pk_cols") or [])
+            nn_set = _not_null_cols(cfg)
+            estatica = bool(cfg.get("static"))
+            mudou_tabela = False
+            for fk in _fk_list(cfg):
+                parent = fk.get("parent_table")
+                parent_df = child_df if parent == child else synthetic.get(parent)
+                cols = list(fk.get("columns") or [])
+                pcols = list(fk.get("parent_columns") or [])
+                if parent_df is None or not cols or len(cols) != len(pcols):
+                    continue
+                if not _tem_orfa(child_df, parent_df, cols, pcols):
+                    continue  # aresta sã -> nada a fazer (e nada muda)
 
-            nullable_cols = [c for c in cols if c not in pk_set and c not in nn_set]
+                nullable_cols = [c for c in cols
+                                 if c not in pk_set and c not in nn_set]
 
-            if nullable_cols:
-                # Anula só as colunas anuláveis nas linhas órfãs.
-                keys = (parent_df
-                        .select(*[F.col(pc).alias(f"__pk{i}") for i, pc in enumerate(pcols)])
-                        .dropna().distinct()
-                        .withColumn("__match", F.lit(True)))
-                cond = reduce(lambda a, b: a & b,
-                              [child_df[cols[i]] == keys[f"__pk{i}"] for i in range(len(cols))])
-                joined = child_df.join(keys, cond, "left")
-                any_fk_set = reduce(lambda a, b: a | b, [F.col(c).isNotNull() for c in cols])
-                is_orphan = F.col("__match").isNull() & any_fk_set
-                for c in nullable_cols:
-                    joined = joined.withColumn(
-                        c, F.when(is_orphan, F.lit(None).cast(child_df.schema[c].dataType))
-                            .otherwise(F.col(c)))
-                child_df = joined.drop("__match", *[f"__pk{i}" for i in range(len(pcols))])
-            else:
-                # FK NOT NULL órfã: rebind para chave válida do pai (preserva
-                # a linha). Se o pai não tem chave nenhuma, dropa (inevitável).
-                parent_has_key = not (
-                    parent_df.select(*pcols).dropna().isEmpty())
-                if parent_has_key:
-                    # Guarda barata: só chama o rebind (que faz localCheckpoint
-                    # do join inteiro — caro numa filha grande) se HOUVER órfã de
-                    # fato. Anti-join de chaves distintas + isEmpty não
-                    # materializa nada; no caso comum (fecho ascendente já
-                    # garantiu a FK) pula o rebind e o checkpoint por completo.
-                    ck = (child_df.select(*cols).dropna().distinct())
-                    pk = (parent_df.select(*[F.col(p).alias(c)
-                                             for c, p in zip(cols, pcols)])
-                          .dropna().distinct())
-                    tem_orfa = not ck.join(pk, on=cols, how="left_anti").isEmpty()
-                    if tem_orfa:
+                if nullable_cols:
+                    # Anula só as colunas anuláveis nas linhas órfãs.
+                    logger.info(
+                        "null_orphan_fks: %s.%s -> %s: anulando FK de "
+                        "linha(s) órfã(s).", child, ",".join(cols), parent)
+                    keys = (parent_df
+                            .select(*[F.col(pc).alias(f"__pk{i}")
+                                      for i, pc in enumerate(pcols)])
+                            .dropna().distinct()
+                            .withColumn("__match", F.lit(True)))
+                    cond = reduce(
+                        lambda a, b: a & b,
+                        [child_df[cols[i]] == keys[f"__pk{i}"]
+                         for i in range(len(cols))])
+                    joined = child_df.join(keys, cond, "left")
+                    all_fk_set = reduce(
+                        lambda a, b: a & b,
+                        [F.col(c).isNotNull() for c in cols])
+                    is_orphan = F.col("__match").isNull() & all_fk_set
+                    for c in nullable_cols:
+                        joined = joined.withColumn(
+                            c, F.when(is_orphan,
+                                      F.lit(None).cast(child_df.schema[c].dataType))
+                                .otherwise(F.col(c)))
+                    child_df = joined.drop(
+                        "__match", *[f"__pk{i}" for i in range(len(pcols))])
+                elif estatica:
+                    # Static: nunca rebindar (ver docstring). Drop preserva o
+                    # pareamento original das linhas que ficam.
+                    logger.warning(
+                        "null_orphan_fks: %s.%s -> %s: FK NOT NULL órfã em "
+                        "tabela STATIC; DROPANDO linha(s) órfã(s) (static não "
+                        "é rebindada).", child, ",".join(cols), parent)
+                    child_df = _drop_orphan_rows(child_df, parent_df, cols, pcols)
+                else:
+                    # FK NOT NULL órfã: rebind para chave válida do pai
+                    # (preserva a linha). Se o pai não tem chave nenhuma,
+                    # dropa (inevitável).
+                    parent_has_key = not (
+                        parent_df.select(*pcols).dropna().isEmpty())
+                    if parent_has_key:
+                        reuse = not (set(cols) & pk_set)
                         logger.info(
                             "null_orphan_fks: %s.%s -> %s: FK NOT NULL órfã; "
-                            "REBIND para chave válida do pai (linha preservada).",
-                            child, ",".join(cols), parent)
+                            "REBIND para chave válida do pai (%s).",
+                            child, ",".join(cols), parent,
+                            "linha preservada" if reuse
+                            else "FK participa da PK: só chaves livres, sem reciclagem")
                         child_df = _rebind_orphan_fk_to_valid_parent(
                             child_df, parent_df, cols, pcols,
-                            seed=_stable_seed(0, child, parent, tuple(cols)))
-                else:
-                    logger.warning(
-                        "null_orphan_fks: %s.%s -> %s: FK NOT NULL órfã e pai "
-                        "SEM chave sintética; DROPANDO linha(s) órfã(s) "
-                        "(inevitável).", child, ",".join(cols), parent)
-                    keys = (parent_df
-                            .select(*[F.col(pc).alias(f"__pk{i}") for i, pc in enumerate(pcols)])
-                            .dropna().distinct().withColumn("__match", F.lit(True)))
-                    cond = reduce(lambda a, b: a & b,
-                                  [child_df[cols[i]] == keys[f"__pk{i}"] for i in range(len(cols))])
-                    joined = child_df.join(keys, cond, "left")
-                    any_fk_set = reduce(lambda a, b: a | b, [F.col(c).isNotNull() for c in cols])
-                    is_orphan = F.col("__match").isNull() & any_fk_set
-                    child_df = (joined.where(~is_orphan)
-                                .drop("__match", *[f"__pk{i}" for i in range(len(pcols))]))
-        synthetic[child] = child_df
+                            seed=_stable_seed(0, child, parent, tuple(cols)),
+                            allow_reuse=reuse)
+                    else:
+                        logger.warning(
+                            "null_orphan_fks: %s.%s -> %s: FK NOT NULL órfã e pai "
+                            "SEM chave sintética; DROPANDO linha(s) órfã(s) "
+                            "(inevitável).", child, ",".join(cols), parent)
+                        child_df = _drop_orphan_rows(child_df, parent_df, cols, pcols)
+                mudou_tabela = True
+            if mudou_tabela:
+                # Congela ANTES de qualquer filha ler esta tabela como pai (e
+                # antes do write): rebind/anula embutem joins sobre numeração
+                # instável; sem materializar, leituras subsequentes poderiam
+                # reavaliar o plano e ver dado diferente do que será gravado.
+                synthetic[child] = child_df.localCheckpoint(eager=True)
+                mudou_algo = True
+        if not mudou_algo:
+            if rodada > 1:
+                logger.info(
+                    "null_orphan_fks: convergiu na rodada %d.", rodada)
+            break
+    else:
+        logger.warning(
+            "null_orphan_fks: NÃO convergiu em %d rodadas — ainda havia "
+            "mudança na última. Órfãos residuais possíveis; verifique ciclos "
+            "de FK whole-PK entre as tabelas alteradas.", MAX_RODADAS)
     return synthetic
+
+
+def _null_efetivo_counts(df: DataFrame, cols: list[str]) -> dict[str, int]:
+    """Contagem de nulos EFETIVOS por coluna, numa única passada (um agg).
+
+    Nulo efetivo = NULL do Spark e, para coluna STRING, também string vazia /
+    só espaços: o Oracle armazena '' como NULL, então uma coluna NOT NULL
+    string com '' passa no isNull() do Spark mas quebra o append com
+    ORA-01400 (caso real: linha "vazia" vinda da origem em lookups static —
+    DETENTOR_IF.NOM_DETENTOR_IF, UNIDADE_MEDIDA.COD_UNIDADE_MEDIDA etc. — que
+    o assert com isNull() puro deixava passar e o validador pós-escrita
+    acusava como "NULL/empty"; hoje essas linhas são consertadas na leitura
+    da fonte por _repara_not_null_origem)."""
+    present = [c for c in cols if c in df.columns]
+    if not present:
+        return {}
+    aggs = []
+    for c in present:
+        eff = F.col(c).isNull()
+        if _is_string_type(_get_field_type(df, c)):
+            eff = eff | (F.trim(F.col(c)) == F.lit(""))
+        aggs.append(F.count(F.when(eff, F.lit(1))).alias(c))
+    row = df.agg(*aggs).first()
+    return {c: int(row[c]) for c in present}
 
 
 def assert_not_null_ok(synthetic: dict, comp_specs: dict) -> None:
@@ -3830,15 +4543,27 @@ def assert_not_null_ok(synthetic: dict, comp_specs: dict) -> None:
         # Tabela ALVO (não-static) que ficou VAZIA após os passes = sinal de que
         # um drop apagou tudo (FK NOT NULL 100% órfã). Melhor abortar com log do
         # que gravar tabela vazia silenciosamente (o rebind deve evitar isso;
-        # esta é a rede de segurança).
+        # esta é a rede de segurança). EXCEÇÃO legítima: subtipo de CONDICAO_IF
+        # cujo tipo não tem NENHUMA linha no pai sintético — aí vazio é o
+        # resultado correto (domínio/amostra sem o subtipo; ver
+        # _subtipo_vazio_e_legitimo), não um drop acidental.
         if not cfg.get("static") and df.isEmpty():
-            vazias_alvo.append(table)
+            if _subtipo_vazio_e_legitimo(synthetic, table):
+                logger.warning(
+                    "assert_not_null_ok: %s vazia e LEGITIMA — subtipo de "
+                    "CONDICAO_IF (tipo=%s) sem nenhuma linha do pai desse "
+                    "tipo no dominio/amostra; tabela sera gravada vazia.",
+                    table, TIPO_BY_SUBTYPE.get(table))
+            else:
+                vazias_alvo.append(table)
         nn = [c for c in _not_null_cols(cfg) if c in df.columns]
         if not nn:
             continue
         # Conjunto das colunas que participam de ALGUMA FK desta tabela.
         fk_cols = {c for fk in _fk_list(cfg) for c in (fk.get("columns") or [])}
-        counts = _dbg_null_counts(df, nn)
+        # Nulo EFETIVO (NULL ou '' em coluna string): é o que o Oracle grava
+        # como NULL no append — isNull() puro deixava '' passar.
+        counts = _null_efetivo_counts(df, nn)
         for col, n in counts.items():
             if n > 0:
                 if col in fk_cols:
@@ -3848,18 +4573,21 @@ def assert_not_null_ok(synthetic: dict, comp_specs: dict) -> None:
     msgs: list[str] = []
     if problemas_fk:
         msgs.append(
-            "Colunas NOT NULL de FK ficaram nulas após os passes (o append "
-            "quebraria com ORA-01400): " + "; ".join(sorted(problemas_fk))
+            "Colunas NOT NULL de FK ficaram nulas (NULL ou '' string) após os "
+            "passes (o append quebraria com ORA-01400): "
+            + "; ".join(sorted(problemas_fk))
             + ". CONSERTO: verifique rebind/fecho dessas FKs (pai sem chave "
             "sintética? aresta de ciclo?), não a origem.")
     if problemas_naofk:
         msgs.append(
-            "Colunas NOT NULL que NÃO são FK ficaram nulas (o append quebraria "
-            "com ORA-01400): " + "; ".join(sorted(problemas_naofk))
-            + ". CONSERTO: NENHUM passe deste pipeline gera essas colunas — elas "
-            "nasceram nulas na síntese/postprocess ou já vinham nulas da origem. "
-            "Rodar de novo sem mudar nada falha igual; corrija a geração da "
-            "coluna ou o dado de entrada (ou reveja not_null_cols do spec).")
+            "Colunas NOT NULL que NÃO são FK ficaram nulas (NULL ou '' string; "
+            "o append quebraria com ORA-01400): "
+            + "; ".join(sorted(problemas_naofk))
+            + ". CONSERTO: _repara_not_null_origem preenche essas colunas na "
+            "leitura da fonte (string->'0', número->0, data->hoje); se ainda "
+            "assim ficou nulo, ou o tipo físico da coluna não é reparável, ou "
+            "o nulo foi introduzido DEPOIS da leitura (síntese/postprocess/"
+            "bind) — investigue esse passe (ou reveja not_null_cols do spec).")
     if vazias_alvo:
         msgs.append(
             "Tabela(s)-alvo ficaram VAZIAS após a síntese (provável drop de FK "
@@ -3868,6 +4596,150 @@ def assert_not_null_ok(synthetic: dict, comp_specs: dict) -> None:
             "verifique o fecho/rebind dessas FKs.")
     if msgs:
         raise ValueError(" | ".join(msgs))
+
+
+def assert_polymorphism_ok(synthetic: dict, comp_specs: dict) -> None:
+    """Barra a escrita se o polimorfismo de CONDICAO_IF ficou inconsistente.
+
+    Rede de segurança final contra o ClassCastException do batch da NoMe
+    (JurosFlutuanteDO cannot be cast to JurosFixoDO). Após bind_shared_key_children,
+    verifica as três invariantes que a aplicação assume para cada NUM_CONDICAO_IF
+    (o subtipo é resolvido pela tabela física que contém a linha):
+
+      1a.dangling  — CONDICAO_IF sem NENHUMA linha em tabela-subtipo alguma:
+                     tipo CONHECIDO (SUBTYPE_BY_TIPO) sem linha na tabela do
+                     seu tipo (some ao incluir o subtipo em TABELAS_ALVO,
+                     gera_spec_config.py) e também tipo FORA do mapa curado
+                     (paridade com o validador pós-escrita, que não filtra
+                     por tipo conhecido — nesse caso o conserto é curar
+                     SUBTYPE_BY_TIPO nos dois lados).
+      1a.ambiguous — mesmo NUM_CONDICAO_IF presente em MAIS DE UMA tabela-subtipo.
+      1b.mismatch  — subtipo presente numa tabela que NÃO corresponde ao
+                     COD_TIPO_CONDICAO_IF do pai.
+
+    Só roda quando CONDICAO_IF está no componente. Tabelas-subtipo ausentes do
+    run não geram dangling para os tipos que elas representam SE nenhuma linha
+    do pai tiver aquele COD_TIPO — mas se houver, é dangling e abortamos, porque
+    o append passaria e o batch quebraria depois (falha silenciosa pior).
+    """
+    cond = synthetic.get(CONDICAO_IF_TABLE)
+    if cond is None or not _has_column(cond, CONDICAO_IF_PK):
+        return
+    if not _has_column(cond, CONDICAO_IF_TIPO_COL):
+        logger.warning(
+            "assert_polymorphism_ok: CONDICAO_IF sem %s; checagem de "
+            "polimorfismo pulada.", CONDICAO_IF_TIPO_COL)
+        return
+
+    cond_norm = cond.select(
+        F.col(CONDICAO_IF_PK).cast("string").alias("__cnci"),
+        _condicao_if_tipo_norm_expr().alias("__ctipo"),
+    )
+
+    # Membership de cada NUM_CONDICAO_IF nas tabelas-subtipo presentes no run.
+    memb = None
+    for subtype in TIPO_BY_SUBTYPE:  # só tabelas-subtipo conhecidas
+        sdf = synthetic.get(subtype)
+        if sdf is None or not _has_column(sdf, CONDICAO_IF_PK):
+            continue
+        piece = (sdf.select(F.col(CONDICAO_IF_PK).cast("string").alias("__nci"))
+                    .withColumn("__tbl", F.lit(subtype)))
+        memb = piece if memb is None else memb.unionByName(piece)
+
+    problemas: list[str] = []
+
+    # Tipos concretos conhecidos presentes no pai mas SEM subtipo no run:
+    # dangling garantido para essas linhas. Tipos FORA do mapa curado são
+    # tratados adiante por membership (nenhuma tabela do run pode contê-los
+    # -> dangling também; o validador pós-escrita reprova igual).
+    tipos_presentes = {str(r["__ctipo"]) for r in
+                       cond_norm.select("__ctipo").distinct().collect()
+                       if r["__ctipo"] is not None}
+    tipos_desconhecidos = sorted(
+        t for t in tipos_presentes if t not in SUBTYPE_BY_TIPO)
+    for tipo in sorted(tipos_presentes):
+        subtype = SUBTYPE_BY_TIPO.get(tipo)
+        if subtype is None:
+            continue  # fora do mapa curado -> checado por membership abaixo
+        if synthetic.get(subtype) is None:
+            n = cond_norm.where(F.col("__ctipo") == F.lit(tipo)).count()
+            if n:
+                problemas.append(
+                    f"1a.dangling: {n} CONDICAO_IF com COD_TIPO={tipo} "
+                    f"({subtype}) mas a tabela {subtype} não está no run")
+
+    if memb is None and tipos_desconhecidos:
+        # Sem NENHUMA tabela-subtipo no run, toda linha de tipo desconhecido é
+        # dangling por definição (as de tipo conhecido já foram acusadas acima).
+        n = cond_norm.where(F.col("__ctipo").isin(tipos_desconhecidos)).count()
+        if n:
+            problemas.append(
+                f"1a.dangling: {n} CONDICAO_IF com COD_TIPO fora do mapa "
+                f"curado ({tipos_desconhecidos}) e nenhuma tabela-subtipo no "
+                "run — o Hibernate não consegue tipá-las e o validador "
+                "pós-escrita reprova (1a.dangling); se o tipo tem tabela "
+                "física, adicione-a a SUBTYPE_BY_TIPO (aqui e no validador) "
+                "e a TABELAS_ALVO")
+
+    if memb is not None:
+        agg = memb.groupBy("__nci").agg(F.collect_set("__tbl").alias("__tbls"))
+        joined = cond_norm.join(agg, cond_norm["__cnci"] == agg["__nci"], "left")
+        joined = joined.withColumn(
+            "__n_tbls",
+            F.when(F.col("__tbls").isNull(), F.lit(0)).otherwise(F.size(F.col("__tbls"))))
+
+        # 1a.dangling: pai de tipo concreto conhecido sem subtipo algum.
+        map_pairs: list = []
+        for k, v in SUBTYPE_BY_TIPO.items():
+            map_pairs += [F.lit(k), F.lit(v)]
+        expected = F.create_map(*map_pairs)[F.col("__ctipo")]
+        joined = joined.withColumn("__expected", expected)
+
+        n_dangling = joined.where(
+            (F.col("__n_tbls") == 0) & F.col("__expected").isNotNull()).count()
+        if n_dangling:
+            problemas.append(
+                f"1a.dangling: {n_dangling} CONDICAO_IF de tipo concreto sem "
+                "nenhuma linha-subtipo (Hibernate não consegue tipá-los)")
+
+        # PARIDADE com o validador pós-escrita: lá o 1a.dangling NÃO filtra
+        # por tipo conhecido — linha de COD_TIPO fora do mapa curado sem
+        # linha-subtipo em NENHUMA tabela do run também é ERROR. Sem este
+        # check o engorda gravava e o validador reprovava depois.
+        n_unk = joined.where(
+            (F.col("__n_tbls") == 0) & F.col("__expected").isNull()).count()
+        if n_unk:
+            problemas.append(
+                f"1a.dangling: {n_unk} CONDICAO_IF com COD_TIPO fora do mapa "
+                f"curado ({tipos_desconhecidos}) e sem linha em nenhuma "
+                "tabela-subtipo do run; se o tipo tem tabela física, "
+                "adicione-a a SUBTYPE_BY_TIPO (aqui e no validador) e a "
+                "TABELAS_ALVO")
+
+        # 1a.ambiguous: presente em mais de uma tabela-subtipo.
+        n_amb = joined.where(F.col("__n_tbls") > 1).count()
+        if n_amb:
+            problemas.append(
+                f"1a.ambiguous: {n_amb} NUM_CONDICAO_IF em MAIS DE UMA "
+                "tabela-subtipo (causa direta do ClassCastException)")
+
+        # 1b.mismatch: subtipo único, mas não o que COD_TIPO indica.
+        n_mismatch = joined.where(
+            (F.col("__n_tbls") == 1)
+            & F.col("__expected").isNotNull()
+            & (F.col("__tbls")[0] != F.col("__expected"))).count()
+        if n_mismatch:
+            problemas.append(
+                f"1b.mismatch: {n_mismatch} CONDICAO_IF cuja tabela-subtipo não "
+                "corresponde ao COD_TIPO_CONDICAO_IF")
+
+    if problemas:
+        raise ValueError(
+            "Polimorfismo de CONDICAO_IF inconsistente (o batch da NoMe "
+            "quebraria com ClassCastException): " + " | ".join(problemas)
+            + ". CONSERTO: garanta que todo subtipo de CDB está em TABELAS_ALVO "
+            "(gera_spec_config.py) e que bind_shared_key_children vinculou cada "
+            "subtipo só às chaves do seu COD_TIPO_CONDICAO_IF.")
 
 
 def release(*dataframes) -> None:
@@ -4052,6 +4924,7 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
     if pk_safety_band is not None:
         logger.info("PK safety band active: synthetic PKs start at true_max + %d", pk_safety_band)
     logger.info("Loaded %d table(s) in %d component(s)", len(specs), total)
+    _warn_filtros_fonte_sem_not_null(specs)
     run_started = time.perf_counter()
     failures: list[str] = []
     engorda_ts = _normalize_engorda_ts(None)
@@ -4070,15 +4943,15 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
                 comp_tables = referential_sample(spark, config, comp_specs, limit)
             else:
                 # Run COMPLETO: MESMA propagação referencial do filtro de
-                # domínio, agora sem cap de linhas. O filtro NUM_TIPO_IF==49 é
-                # aplicado APENAS na raiz (TABELAS_RAIZ_FILTRO) e o universo
-                # desce pela árvore de FK por chave, de modo que TODAS as
-                # demais tabelas (com ou sem cópia denormalizada da coluna)
-                # fiquem restritas ao tipo 49 via NUM_IF. Ao final, o fecho
-                # ascendente (completa_pais_referenciados) puxa do Parquet
-                # completo as linhas de pai referenciadas por filhas mantidas
-                # que o filtro/poda tenha removido -> o subset sai FK-fechado
-                # e null_orphan_fks deixa de anular FKs por órfão estrutural.
+                # domínio, agora sem cap de linhas. Os predicados de fonte do
+                # CDB simplificado (FILTROS_FONTE) são aplicados na leitura de
+                # CADA tabela (primeira etapa) e a raiz (TABELAS_RAIZ_FILTRO)
+                # ancora a descida por chave pela árvore de FK. Ao final, o
+                # fecho ascendente (completa_pais_referenciados) puxa da FONTE
+                # JÁ FILTRADA as linhas de pai referenciadas por filhas
+                # mantidas -> um pai fora do produto NÃO volta; o subset sai
+                # FK-fechado dentro do produto e os órfãos remanescentes
+                # (pai fora do produto ou órfão de produção) são neutralizados.
                 comp_tables = referential_sample(spark, config, comp_specs, None)
             counts = {t: comp_tables[t].count() for t in comp}
             for t in comp:
@@ -4124,6 +4997,15 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
             synthetic = bind_shared_key_children(synthetic, comp_specs)
             debug_fk_integrity_report("5.after_bind_shared_key", synthetic,
                                       comp_specs, label=label)
+            # Alinha o pai aos subtipos: remove de CONDICAO_IF as linhas de
+            # tipo concreto que ficaram sem linha-subtipo após o bind (subtipo
+            # com menos linhas que chaves do pai — inclusive zero, caso do CDB
+            # simplificado sem AMORTIZACAO/PARTICIPACAO_LUCROS/RESET/
+            # DESDOBRAMENTO). Precisa vir ANTES de null_orphan_fks, que então
+            # neutraliza as filhas que referenciavam as chaves removidas.
+            synthetic = alinha_condicao_if_aos_subtipos(synthetic, comp_specs)
+            debug_fk_integrity_report("5b.after_align_condicao_if", synthetic,
+                                      comp_specs, label=label)
             # Self-FKs genuínas são remapeadas DENTRO da síntese (mapping
             # old->new da própria tabela), preservando estrutura e
             # auto-loops; null_orphan_fks segue como rede de segurança.
@@ -4162,6 +5044,10 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
             # coluna NOT NULL ficou nula (evita ORA-01400 no append). Só valida
             # tabelas cujo spec tem not_null_cols (gerado com cols_real.csv).
             assert_not_null_ok(synthetic, comp_specs)
+            # Rede de segurança do polimorfismo: aborta ANTES de gravar se
+            # CONDICAO_IF ficou com subtipo dangling/ambíguo/mismatch (evita o
+            # ClassCastException do batch da NoMe, que o append NÃO detecta).
+            assert_polymorphism_ok(synthetic, comp_specs)
             for name, df in synthetic.items():
                 out_path = f"{save_base}/{name}"
                 logger.info("[%d/%d] writing %s -> %s", index, total, name, out_path)
