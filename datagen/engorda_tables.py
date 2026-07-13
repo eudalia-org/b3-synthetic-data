@@ -159,8 +159,7 @@ DEFAULT_SEED = 42
 #
 # Regras do CDB simplificado (imagem do produto):
 #   INSTRUMENTO_FINANCEIRO : NUM_TIPO_IF = 49 E DAT_EXCLUSAO IS NULL
-#   RESGATE                : COD_COND_RESGATE = 'SEM TABELA' E DAT_EXCLUSAO IS NULL
-#   TITULO                 : COD_TIPO_ESCALONAMENTO IS NULL
+#   RESGATE                : DAT_EXCLUSAO IS NULL
 #   CONDICAO_IF            : DAT_EXCLUSAO IS NULL
 #
 # Propagação por chave (inalterada): a raiz do universo continua sendo
