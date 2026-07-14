@@ -4485,6 +4485,112 @@ def null_orphan_fks(synthetic: dict, comp_specs: dict) -> dict:
     return synthetic
 
 
+def harmoniza_tipos_fk_com_pai(synthetic: dict, comp_specs: dict) -> dict:
+    """Casta cada coluna de FK numérica para o TIPO FÍSICO da coluna do pai.
+
+    Motivação (falsos órfãos no pre-append check): filha e pai podem chegar
+    da extração com tipos físicos DIFERENTES para a mesma chave (ex.:
+    COMITENTE.NUM_ID_PAIS_NACIONALIDADE decimal(38,10) vs PAIS.NUM_ID_PAIS
+    int/long). Os joins deste pipeline comparam por igualdade NUMÉRICA (o
+    Spark coage os tipos), então 206 == 206.0000000000 e nenhum passe de
+    órfão (fecho/neutraliza/null_orphan) vê problema. Mas o validador
+    pré-append (validate_cdb_simplificado.py, check_referential) compara as
+    chaves por cast("string"): '206.0000000000' != '206' -> TODAS as chaves
+    distintas da aresta são reportadas como órfãs (3.fk_orphan) mesmo com a
+    FK íntegra. Casos reais: COMITENTE.NUM_ID_PAIS_NACIONALIDADE -> PAIS,
+    PESSOA_JURIDICA.NUM_ID_PAIS -> PAIS, LOTE.NUM_TIPO_IF -> TIPO_IF (filha
+    decimal, pai inteiro) e CONTEXTO_MENSAGEM.NUM_ID_TP_ESTADO ->
+    TIPO_ESTADO (filha inteira, pai decimal).
+
+    O conserto é na SAÍDA: alinhar o tipo físico da coluna da filha ao do
+    pai — o pai (tipicamente lookup static) é o lado autoritativo da chave.
+
+    Escopo deliberado (para o cast ser LOSSLESS por construção):
+      - só FK de UMA coluna: este passe roda DEPOIS de null_orphan_fks, então
+        em FK simples todo valor não-nulo é numericamente igual a uma chave
+        EXISTENTE do pai — logo cabe no tipo físico do pai, sempre. Em FK
+        composta o MATCH SIMPLE deixa linhas parcialmente nulas sem checar,
+        e um valor não-casado poderia estourar o tipo do pai (cast -> NULL
+        silencioso em coluna possivelmente NOT NULL);
+      - numérico -> numérico: cast direto (garantia acima);
+      - filha STRING -> pai numérico (extração via CSV sem schema): casta SÓ
+        se nenhum valor não-nulo virar NULL no cast (guarda com um scan da
+        coluna; barato via pushdown, e só roda quando os tipos divergem);
+      - filha numérica -> pai STRING, ou string -> string divergente: NÃO há
+        cast seguro (formato textual do pai é desconhecido: zeros à
+        esquerda, espaços de CHAR). Loga WARNING para aparecer no início do
+        run, e o validador continuará acusando a aresta — conserta-se na
+        extração.
+
+    Não cria erro NOVO no validador em nenhuma aresta que hoje passa: se a
+    aresta tem dado não-nulo e passou no check por string, as representações
+    já coincidem — então ou os tipos são iguais (no-op) ou o cast preserva a
+    representação (ex.: int->long, long->decimal(38,0) rendem o mesmo texto).
+
+    Ordem topológica (pais antes de filhas): se a coluna castada for também
+    PK compartilhada referenciada por netas (PK==FK), as netas são
+    harmonizadas depois, já contra o tipo novo.
+
+    Custo: projeção pura (withColumn + cast); a única action extra é a guarda
+    do caso string->numérico, que só dispara em aresta divergente.
+    """
+    order = topo_order_tables(comp_specs)
+    for child in order:
+        cfg = comp_specs.get(child)
+        df = synthetic.get(child)
+        if cfg is None or df is None:
+            continue
+        mudou = False
+        for fk in _fk_list(cfg):
+            parent = fk.get("parent_table")
+            parent_df = df if parent == child else synthetic.get(parent)
+            cols = list(fk.get("columns") or [])
+            pcols = list(fk.get("parent_columns") or [])
+            if parent_df is None or not cols or len(cols) != len(pcols):
+                continue
+            if len(cols) != 1:
+                continue  # FK composta: cast lossless não garantido (ver docstring)
+            c, p = cols[0], pcols[0]
+            if not _has_column(df, c) or not _has_column(parent_df, p):
+                continue
+            tipo_filha = _get_field_type(df, c)
+            tipo_pai = _get_field_type(parent_df, p)
+            if tipo_filha == tipo_pai:
+                continue
+            filha_num = _is_numeric_pk_type(tipo_filha)
+            pai_num = _is_numeric_pk_type(tipo_pai)
+            if filha_num and pai_num:
+                pass  # cast direto: valor não-nulo == chave existente do pai
+            elif _is_string_type(tipo_filha) and pai_num:
+                inventa_nulo = not df.where(
+                    F.col(c).isNotNull() & F.col(c).cast(tipo_pai).isNull()
+                ).isEmpty()
+                if inventa_nulo:
+                    logger.warning(
+                        "harmoniza_tipos_fk: %s.%s (string) -> %s.%s (%s): "
+                        "há valor não-numérico; cast inventaria NULL. Coluna "
+                        "mantida como está (validador pode acusar fk_orphan).",
+                        child, c, parent, p, tipo_pai.simpleString())
+                    continue
+            else:
+                logger.warning(
+                    "harmoniza_tipos_fk: %s.%s (%s) -> %s.%s (%s): par de "
+                    "tipos sem cast seguro; coluna mantida como está "
+                    "(validador pode acusar fk_orphan nesta aresta).",
+                    child, c, tipo_filha.simpleString(),
+                    parent, p, tipo_pai.simpleString())
+                continue
+            logger.info(
+                "harmoniza_tipos_fk: %s.%s: %s -> %s (tipo do pai %s.%s)",
+                child, c, tipo_filha.simpleString(),
+                tipo_pai.simpleString(), parent, p)
+            df = df.withColumn(c, F.col(c).cast(tipo_pai))
+            mudou = True
+        if mudou:
+            synthetic[child] = df
+    return synthetic
+
+
 def _null_efetivo_counts(df: DataFrame, cols: list[str]) -> dict[str, int]:
     """Contagem de nulos EFETIVOS por coluna, numa única passada (um agg).
 
@@ -5010,6 +5116,14 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error,
             # old->new da própria tabela), preservando estrutura e
             # auto-loops; null_orphan_fks segue como rede de segurança.
             synthetic = null_orphan_fks(synthetic, comp_specs)
+            # Alinha o TIPO FÍSICO das colunas de FK ao tipo da coluna do pai
+            # (ex.: decimal(38,10) vs int para a mesma chave). A integridade
+            # numérica já está garantida pelos passes acima; sem isso o
+            # pre-append check, que compara chaves por cast("string"),
+            # reporta falso órfão ('206.0000000000' != '206'). Precisa vir
+            # ANTES do localCheckpoint abaixo para o write congelar o tipo
+            # harmonizado.
+            synthetic = harmoniza_tipos_fk_com_pai(synthetic, comp_specs)
             # MATERIALIZA o resultado do rebind ANTES de qualquer leitura.
             # null_orphan_fks/_rebind usam _with_contiguous_row_id, que depende
             # de monotonically_increasing_id() — NÃO-determinístico entre
