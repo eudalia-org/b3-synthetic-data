@@ -23,16 +23,22 @@ simplificado) and matches docs/query.sql:
     1 CARTEIRA_PARTICIPANTE
 
 Run it on the RAW production Parquet to learn the true population shape
-distribution, then on the engorda synthetic output, and diff the two:
+distribution (run 1), again with --apply-filtros-fonte to get the ENGORDA-INPUT
+image (run 2 — engorda only ever saw the filtered rows, so this is the fair
+baseline), then on the synthetic output diffing against that baseline (run 3):
 
     spark-submit profile_cdb_shapes.py \
         --base-uri oci://bucket@ns/raw --label raw \
-        --report-path profile_raw.json
+        --report-path oci://bucket@ns/reports/profile_raw.json
+
+    spark-submit profile_cdb_shapes.py \
+        --base-uri oci://bucket@ns/raw --label raw_filtered --apply-filtros-fonte \
+        --report-path oci://bucket@ns/reports/profile_raw_filtered.json
 
     spark-submit profile_cdb_shapes.py \
         --base-uri oci://bucket@ns/synthetic --label synthetic \
-        --report-path profile_synthetic.json \
-        --compare-with profile_raw.json
+        --report-path oci://bucket@ns/reports/profile_synthetic.json \
+        --compare-with oci://bucket@ns/reports/profile_raw_filtered.json
 
 Purely offline: reads only Parquet, no Oracle/JDBC required. Fully
 self-contained: no imports from the rest of the repo, and it carries its own
@@ -123,6 +129,21 @@ REFERENCE_SHAPE: Dict[str, int] = {
 
 # Tables the profiler needs beyond the metric tables.
 EXTRA_TABLES = ["COMITENTE"]
+
+# Engorda's FILTROS_FONTE row predicates (image of engorda_tables.py), minus the
+# parts the profiler always applies anyway (the IF root filter and the
+# DAT_EXCLUSAO IS NULL active-row rule). With --apply-filtros-fonte these are
+# applied to the source tables before profiling, so the resulting profile is the
+# ENGORDA-INPUT image of the data — the right baseline to diff the synthetic
+# output against. Without the flag the profile is the unfiltered product truth.
+# A predicate whose column is missing is ignored with a note (engorda does the
+# same, defensively against schema variation).
+FILTROS_FONTE = {
+    "RESGATE": [("COD_COND_RESGATE", "ieq", "SEM TABELA")],
+    "TITULO": [("COD_TIPO_ESCALONAMENTO", "isnull", None)],
+    "CARTEIRA_COMITENTE": [("QTD_CARTEIRA_COMITENTE", ">", 0)],
+    "CARTEIRA_PARTICIPANTE": [("QTD_CARTEIRA_PARTICIPANTE", ">", 0)],
+}
 
 # Attribute audits: value distributions (within the universe) of the columns
 # engorda's FILTROS_FONTE filters on — measured, not assumed.
@@ -486,12 +507,44 @@ def attribute_audits(
     return out
 
 
+def apply_filtros_fonte(
+    tables: Dict[str, DataFrame], notes: List[str]
+) -> Dict[str, DataFrame]:
+    out = dict(tables)
+    for table, preds in FILTROS_FONTE.items():
+        df = out.get(table)
+        if df is None:
+            continue
+        for column, op, value in preds:
+            col = _ci(df, column)
+            if not col:
+                notes.append(
+                    f"FILTROS_FONTE: {table}.{column} missing; predicate ignored"
+                )
+                continue
+            c = F.col(col)
+            if op == "ieq":
+                cond = F.upper(F.trim(c.cast("string"))) == value
+            elif op == ">":
+                cond = c > value
+            elif op == "isnull":
+                cond = c.isNull()
+            else:
+                raise ValueError(f"Unknown FILTROS_FONTE op: {op}")
+            df = df.where(cond)
+            notes.append(f"FILTROS_FONTE applied: {table}.{column} {op} {value!r}")
+        out[table] = df
+    return out
+
+
 def build_profile(
-    tables: Dict[str, DataFrame], sample_size: int = 10
+    tables: Dict[str, DataFrame], sample_size: int = 10, apply_filtros: bool = False
 ) -> dict:
     """Full profile over an in-memory dict of DataFrames. Pure of IO."""
     notes: List[str] = []
     metric_names = [m.name for m in METRICS]
+    if apply_filtros:
+        tables = apply_filtros_fonte(tables, notes)
 
     universe = build_universe(tables, notes)
     counts, skipped = build_counts(universe, tables, notes)
@@ -500,6 +553,7 @@ def build_profile(
 
     profile = {
         "universe_size": counts.count(),
+        "filtros_fonte_applied": apply_filtros,
         "metrics_skipped": skipped,
         "notes": sorted(set(notes)),
         "reference_match": reference_match(counts, metric_names),
@@ -562,6 +616,8 @@ def print_report(profile: dict, label: str, top: int) -> None:
     print(f"CDB-SIMPLIFICADO SHAPE PROFILE — {label}")
     print("=" * 78)
     print(f"Universe (NUM_TIPO_IF={CDB_TIPO_IF}, active): {profile['universe_size']} IFs")
+    if profile.get("filtros_fonte_applied"):
+        print("FILTROS_FONTE row predicates APPLIED — this is the engorda-input image.")
     if profile["metrics_skipped"]:
         print(f"Metrics skipped (table/columns unavailable): {profile['metrics_skipped']}")
 
@@ -645,7 +701,7 @@ def _selftest_tables(spark: SparkSession) -> Dict[str, DataFrame]:
             ["NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO"],
         ),
         "TITULO": df(
-            [(1001, None), (1002, None), (1004, None), (2001, None)],
+            [(1001, None), (1002, "EMISSAO"), (1004, None), (2001, None)],
             ["NUM_IF", "COD_TIPO_ESCALONAMENTO"],
         ),
         "CREDITO": df([(1001,), (2001,)], ["NUM_IF"]),
@@ -654,7 +710,7 @@ def _selftest_tables(spark: SparkSession) -> Dict[str, DataFrame]:
              (14, 1002, "1", None), (15, 1002, "5", None), (16, 1004, "3", None)],
             ["NUM_CONDICAO_IF", "NUM_IF", "COD_TIPO_CONDICAO_IF", "DAT_EXCLUSAO"],
         ),
-        "RESGATE": df([(11, "SEM TABELA", None)],
+        "RESGATE": df([(11, "SEM TABELA", None), (14, "COM TABELA", None)],
                       ["NUM_CONDICAO_IF", "COD_COND_RESGATE", "DAT_EXCLUSAO"]),
         "JUROS_FLUTUANTE": df([(12,)], ["NUM_CONDICAO_IF"]),
         "JUROS_FIXO": df([(13,)], ["NUM_CONDICAO_IF"]),
@@ -699,6 +755,7 @@ def run_selftest(spark: SparkSession) -> None:
     assert s1002["CREDITO"] == 0 and s1002["CONDICAO_IF"] == 3, s1002
     assert s1002["JUROS_FIXO"] == 1 and s1002["JUROS_FLUTUANTE"] == 0, s1002
     assert s1002["EVENTO"] == 1, s1002
+    assert s1002["RESGATE"] == 1 and s1002["TITULO"] == 1, s1002
 
     s1003 = shape_of(profile, 1003)["counts"]
     assert all(v == 0 for v in s1003.values()), s1003
@@ -715,10 +772,25 @@ def run_selftest(spark: SparkSession) -> None:
     assert xc["sample"][0] == {"num_if_direct": 1002, "num_if_via_condicao": 1001}
 
     audit = profile["attribute_audits"]
-    assert audit["RESGATE.COD_COND_RESGATE"] == {"SEM TABELA": 1}, audit
+    assert audit["RESGATE.COD_COND_RESGATE"] == {"SEM TABELA": 1, "COM TABELA": 1}, audit
+    assert audit["TITULO.COD_TIPO_ESCALONAMENTO"] == {"<NULL>": 1, "EMISSAO": 1}, audit
     assert audit["CONDICAO_IF.COD_TIPO_CONDICAO_IF"] == {
         "20": 1, "3": 1, "2": 1, "1": 1, "5": 1
     }, audit
+
+    # --apply-filtros-fonte: 1002's COM TABELA resgate row and EMISSAO titulo row
+    # are dropped; 1001 (SEM TABELA, escalonamento NULL) is untouched. The
+    # CARTEIRA_* QTD predicates hit missing columns and must be ignored with a note.
+    filtered = build_profile(_selftest_tables(spark), sample_size=10, apply_filtros=True)
+    assert filtered["filtros_fonte_applied"] is True
+    assert filtered["universe_size"] == 3, filtered["universe_size"]
+    assert shape_of(filtered, 1001)["counts"] == REFERENCE_SHAPE
+    f1002 = shape_of(filtered, 1002)["counts"]
+    assert f1002["RESGATE"] == 0 and f1002["TITULO"] == 0, f1002
+    assert filtered["attribute_audits"]["RESGATE.COD_COND_RESGATE"] == {"SEM TABELA": 1}
+    assert any("QTD_CARTEIRA_COMITENTE missing" in n for n in filtered["notes"]), (
+        filtered["notes"]
+    )
 
     print("SELF-TEST PASSED: profiler verified against the built-in fixture.")
 
@@ -732,6 +804,10 @@ def parse_args() -> argparse.Namespace:
                    help="Parquet base URI holding one folder per table (raw or synthetic).")
     p.add_argument("--self-test", action="store_true",
                    help="Verify the profiler against a built-in in-memory fixture and exit.")
+    p.add_argument("--apply-filtros-fonte", action="store_true",
+                   help="Pre-filter the source tables with engorda's FILTROS_FONTE row "
+                        "predicates, so the profile is the engorda-input image (use as "
+                        "the --compare-with baseline for the synthetic run).")
     p.add_argument("--prefix", default="", help="Optional sub-prefix under the base URI.")
     p.add_argument("--label", default="dataset", help="Label for the report (e.g. raw/synthetic).")
     p.add_argument("--report-path", default=None, help="Write the JSON profile here.")
@@ -770,7 +846,7 @@ def main() -> None:
     tables = read_tables(spark, base, needed)
     logger.info("Read %d/%d tables from %s", len(tables), len(needed), base)
 
-    profile = build_profile(tables, args.sample_size)
+    profile = build_profile(tables, args.sample_size, args.apply_filtros_fonte)
     profile["label"] = args.label
     profile["base_uri"] = base
     profile["generated_at"] = datetime.now().isoformat(timespec="seconds")
