@@ -27,6 +27,19 @@ batch validation log:
   Cat 4  NOT NULL (incl. '')       -> ORA-01400 (e.g. TCTPDETALHE_TRAN_SEM_FINA.COD_MOTIVO)
   Cat 5  Date coherence            -> bad revaluation input
   Cat 6  Lookup combinations       -> "SEM MODALIDADE / servico_ft nao encontrado"
+  Cat 7  Shape conformance         -> per-IF cardinalities vs the production profile
+                                      (see docs/cdb-shapes-findings.md)
+
+Category 7 compares the per-instrument cardinality distribution ("shapes") of
+the synthetic output against a baseline profile produced by
+scripts/profile_cdb_shapes.py on the FILTERED raw data:
+
+  spark-submit profile_cdb_shapes.py --base-uri <raw> --apply-filtros-fonte \
+      --label raw_filtered --report-path oci://.../profile_raw_filtered.json
+
+Pass that JSON via --shape-baseline. Without it, only the baseline-free hard
+invariants run (OPERACAO:DADO_OPERACAO:LANCAMENTO = 1:2:1, RESGATE <= 1 per IF)
+and the distribution checks are skipped with a WARN.
 
 Environment variables
 ---------------------
@@ -376,6 +389,44 @@ def _pk_cols_for(meta: Metadata, table: str, df: DataFrame) -> List[str]:
     pk = meta.pk.get(table) or []
     resolved = [resolve(df, c) for c in pk]
     return [c for c in resolved if c] or df.columns[:1]
+
+
+def _is_uri(path: str) -> bool:
+    return "://" in path
+
+
+def write_text(spark: SparkSession, path: str, content: str) -> None:
+    """Write a small text file locally or to any Spark-readable URI (oci://...).
+    Plain open() would land on the Data Flow driver's ephemeral disk."""
+    if not _is_uri(path):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        return
+    jvm = spark._jvm
+    hpath = jvm.org.apache.hadoop.fs.Path(path)
+    fs = hpath.getFileSystem(spark._jsc.hadoopConfiguration())
+    stream = fs.create(hpath, True)
+    try:
+        stream.write(bytearray(content.encode("utf-8")))
+    finally:
+        stream.close()
+
+
+def read_text(spark: SparkSession, path: str) -> str:
+    """Read a small text file locally or from any Spark-readable URI (oci://...)."""
+    if not _is_uri(path):
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    jvm = spark._jvm
+    hpath = jvm.org.apache.hadoop.fs.Path(path)
+    fs = hpath.getFileSystem(spark._jsc.hadoopConfiguration())
+    stream = fs.open(hpath)
+    try:
+        return jvm.org.apache.commons.io.IOUtils.toString(
+            stream, jvm.java.nio.charset.StandardCharsets.UTF_8
+        )
+    finally:
+        stream.close()
 
 
 # ---------------------------------------------------------------------------
@@ -844,9 +895,252 @@ def check_lookup_combos(
 
 
 # ---------------------------------------------------------------------------
+# Category 7 - Shape conformance (per-IF cardinalities)
+# ---------------------------------------------------------------------------
+# Counting core kept in sync with scripts/profile_cdb_shapes.py: same universe
+# (NUM_TIPO_IF=49, DAT_EXCLUSAO IS NULL), same active-row rule, same shape
+# signature format ("TABLE=n|TABLE=n|..."). The metric list and its ORDER are
+# parsed from the baseline JSON's own signatures, so the two scripts cannot
+# silently drift apart: an incompatible baseline simply fails to match.
+SHAPE_ROOT_TABLE = "INSTRUMENTO_FINANCEIRO"
+SHAPE_ROOT_KEY = "NUM_IF"
+SHAPE_TIPO_IF = 49
+# metric/table -> (bridge table, bridge key) for children not keyed by NUM_IF.
+SHAPE_VIA: Dict[str, Tuple[str, str]] = {
+    "RESGATE": ("CONDICAO_IF", "NUM_CONDICAO_IF"),
+    "JUROS_FLUTUANTE": ("CONDICAO_IF", "NUM_CONDICAO_IF"),
+    "JUROS_FIXO": ("CONDICAO_IF", "NUM_CONDICAO_IF"),
+    "DADO_OPERACAO": ("OPERACAO", "NUM_ID_OPERACAO"),
+    "LANCAMENTO": ("OPERACAO", "NUM_ID_OPERACAO"),
+}
+DEFAULT_SHAPE_METRICS: List[str] = [
+    "TITULO", "CREDITO", "CONDICAO_IF", "RESGATE", "JUROS_FLUTUANTE", "JUROS_FIXO",
+    "EVENTO", "OPERACAO", "DADO_OPERACAO", "LANCAMENTO", "DEPOSITO_AUTOMATICO_IF",
+    "CARTEIRA_COMITENTE", "CARTEIRA_PARTICIPANTE",
+]
+
+
+def _shape_active(df: DataFrame) -> DataFrame:
+    col = resolve(df, "DAT_EXCLUSAO")
+    return df.where(F.col(col).isNull()) if col else df
+
+
+def _shape_universe(tables: Dict[str, DataFrame]) -> Optional[DataFrame]:
+    root = tables.get(SHAPE_ROOT_TABLE)
+    if root is None:
+        return None
+    tipo, key = resolve(root, "NUM_TIPO_IF"), resolve(root, SHAPE_ROOT_KEY)
+    if not tipo or not key:
+        return None
+    df = _shape_active(root.where(F.col(tipo).cast("long") == SHAPE_TIPO_IF))
+    return df.select(F.col(key).cast("long").alias(SHAPE_ROOT_KEY)).dropDuplicates()
+
+
+def _shape_counts(
+    universe: DataFrame, tables: Dict[str, DataFrame], metric_names: List[str]
+) -> Tuple[DataFrame, List[str]]:
+    """Left-join per-metric row counts onto the universe; returns (df, skipped)."""
+    result, skipped = universe, []
+    for name in metric_names:
+        df = tables.get(name)
+        keyed = None
+        if df is not None:
+            df = _shape_active(df)
+            if name in SHAPE_VIA:
+                bridge_table, bridge_key = SHAPE_VIA[name]
+                bridge = tables.get(bridge_table)
+                ck = resolve(df, bridge_key)
+                if bridge is not None and ck:
+                    bk = resolve(bridge, bridge_key)
+                    bif = resolve(bridge, SHAPE_ROOT_KEY)
+                    if bk and bif:
+                        bridge = _shape_active(bridge).select(
+                            F.col(bk).cast("long").alias("bk"),
+                            F.col(bif).cast("long").alias(SHAPE_ROOT_KEY),
+                        )
+                        keyed = (df.select(F.col(ck).cast("long").alias("bk"))
+                                 .join(bridge, "bk", "inner").select(SHAPE_ROOT_KEY))
+            else:
+                key = resolve(df, SHAPE_ROOT_KEY)
+                if key:
+                    keyed = df.select(F.col(key).cast("long").alias(SHAPE_ROOT_KEY))
+        if keyed is None:
+            skipped.append(name)
+            result = result.withColumn(name, F.lit(0).cast("long"))
+            continue
+        counts = keyed.groupBy(SHAPE_ROOT_KEY).agg(F.count(F.lit(1)).alias(name))
+        result = result.join(counts, SHAPE_ROOT_KEY, "left")
+        result = result.withColumn(name, F.coalesce(F.col(name), F.lit(0)))
+    return result, skipped
+
+
+def _load_shape_baseline(spark: SparkSession, path: str) -> Tuple[dict, List[str]]:
+    """Return ({signature: pct}, ordered metric names parsed from the signatures)."""
+    baseline = json.loads(read_text(spark, path))
+    shapes = baseline.get("shapes") or []
+    if not shapes:
+        raise ValueError(f"Baseline {path} has no 'shapes' section.")
+    if not baseline.get("filtros_fonte_applied"):
+        logger.warning(
+            "Shape baseline %s was built WITHOUT --apply-filtros-fonte; the comparison "
+            "conflates filter effects with generation distortions.", path)
+    metric_names = [part.split("=", 1)[0] for part in shapes[0]["shape"].split("|")]
+    return {s["shape"]: float(s["pct"]) for s in shapes}, metric_names
+
+
+def check_shapes(
+    spark: SparkSession,
+    tables: Dict[str, DataFrame],
+    baseline_path: Optional[str],
+    sample: int,
+    unseen_tol_pct: float,
+    drift_tol: float,
+    op_ratio_tol_pct: float,
+) -> List[Finding]:
+    out: List[Finding] = []
+    cat = "Shape conformance"
+    universe = _shape_universe(tables)
+    if universe is None:
+        return [Finding("7.shapes", cat, SEV_INFO, SHAPE_ROOT_TABLE, True,
+                        message="INSTRUMENTO_FINANCEIRO not in output; shape checks skipped.")]
+
+    baseline_pct: Optional[dict] = None
+    metric_names = DEFAULT_SHAPE_METRICS
+    if baseline_path:
+        try:
+            baseline_pct, metric_names = _load_shape_baseline(spark, baseline_path)
+        except Exception as exc:  # noqa: BLE001
+            out.append(Finding("7.baseline", cat, SEV_WARN, SHAPE_ROOT_TABLE, False,
+                               hint="Regenerate it with profile_cdb_shapes.py "
+                                    "--apply-filtros-fonte on the raw data.",
+                               message=f"Could not load shape baseline {baseline_path}: {exc}"))
+
+    counts, skipped = _shape_counts(universe, tables, metric_names)
+    if skipped:
+        out.append(Finding("7.metrics_skipped", cat, SEV_WARN, ",".join(skipped), False,
+                           hint="Missing tables count as 0 rows per IF, which distorts the "
+                                "shape comparison. Include them in the output/tables list.",
+                           message=f"Shape metrics counted as 0 (table/columns unavailable): "
+                                   f"{skipped}"))
+    counts = counts.cache()
+    total = counts.count()
+    if total == 0:
+        counts.unpersist()
+        out.append(Finding("7.shapes", cat, SEV_WARN, SHAPE_ROOT_TABLE, False,
+                           message="No active CDB IFs (NUM_TIPO_IF=49) in the output."))
+        return out
+
+    # 7c - operation ratio invariant: DADO_OPERACAO = 2*OPERACAO, LANCAMENTO = OPERACAO.
+    # Holds for ~99% of production IFs that have operations; a synthetic output that
+    # binds these tables independently violates it almost everywhere.
+    if all(name in metric_names for name in ("OPERACAO", "DADO_OPERACAO", "LANCAMENTO")):
+        with_ops = counts.where(F.col("OPERACAO") > 0)
+        n_ops = with_ops.count()
+        if n_ops:
+            bad = with_ops.where(
+                (F.col("DADO_OPERACAO") != 2 * F.col("OPERACAO"))
+                | (F.col("LANCAMENTO") != F.col("OPERACAO"))
+            )
+            c = bad.count()
+            pct = 100.0 * c / n_ops
+            out.append(Finding(
+                "7c.op_ratio", cat,
+                SEV_ERROR if pct > op_ratio_tol_pct else SEV_INFO,
+                "OPERACAO", pct <= op_ratio_tol_pct, count=c, column="OPERACAO,DADO_OPERACAO,LANCAMENTO",
+                sample=_sample_keys(bad.select(SHAPE_ROOT_KEY), [SHAPE_ROOT_KEY], sample),
+                hint="Every production operação carries exactly 2 DADO_OPERACAO and "
+                     "1 LANCAMENTO. Generate/bind the three tables as one unit per operação.",
+                message=f"IFs violating OPERACAO:DADO_OPERACAO:LANCAMENTO = 1:2:1 "
+                        f"({pct:.1f}% of {n_ops} IFs with operações; tolerance "
+                        f"{op_ratio_tol_pct}%).",
+            ))
+
+    # 7d - RESGATE multiplicity: production has no IF with more than one resgate
+    # condition (0 exceptions in 67.2M IFs profiled).
+    if "RESGATE" in metric_names:
+        multi = counts.where(F.col("RESGATE") > 1)
+        c = multi.count()
+        out.append(Finding(
+            "7d.resgate_multiplicity", cat,
+            SEV_ERROR if c else SEV_INFO, "RESGATE", c == 0, count=c, column="RESGATE",
+            sample=_sample_keys(multi.select(SHAPE_ROOT_KEY), [SHAPE_ROOT_KEY], sample),
+            hint="Production CDBs never have more than one RESGATE condition; bind at "
+                 "most one resgate-condição per IF.",
+            message="IFs with more than one RESGATE row.",
+        ))
+
+    # 7a/7b - distribution checks against the baseline profile.
+    if baseline_pct is None:
+        out.append(Finding(
+            "7.baseline", cat, SEV_WARN, SHAPE_ROOT_TABLE, False,
+            hint="Produce it once with: spark-submit profile_cdb_shapes.py "
+                 "--base-uri <raw> --apply-filtros-fonte --report-path <json> "
+                 "and pass it via --shape-baseline.",
+            message="No --shape-baseline given; shape distribution checks skipped.",
+        ))
+        counts.unpersist()
+        return out
+
+    sig = F.concat_ws("|", *[
+        F.concat(F.lit(f"{name}="), F.col(name).cast("string")) for name in metric_names
+    ])
+    dist_rows = (counts.withColumn("shape", sig).groupBy("shape")
+                 .agg(F.count(F.lit(1)).alias("n"),
+                      F.slice(F.collect_list(F.col(SHAPE_ROOT_KEY)), 1, sample).alias("ids"))
+                 .collect())
+    syn_pct = {r["shape"]: 100.0 * r["n"] / total for r in dist_rows}
+    syn_ids = {r["shape"]: [int(x) for x in (r["ids"] or [])] for r in dist_rows}
+
+    unseen = sorted(
+        ((s, p) for s, p in syn_pct.items() if s not in baseline_pct),
+        key=lambda kv: -kv[1],
+    )
+    unseen_mass = sum(p for _, p in unseen)
+    out.append(Finding(
+        "7a.unseen_shapes", cat,
+        SEV_ERROR if unseen_mass > unseen_tol_pct else SEV_INFO,
+        SHAPE_ROOT_TABLE, unseen_mass <= unseen_tol_pct,
+        count=len(unseen), column="shape",
+        sample=[{"shape": s, "pct": round(p, 3), "sample_num_if": syn_ids[s][:5]}
+                for s, p in unseen[:sample]],
+        hint="These per-IF cardinality combinations never occur in the (filtered) "
+             "production data — the generator invented them. Per-IF cluster sampling "
+             "eliminates this class by construction.",
+        message=f"{unseen_mass:.1f}% of synthetic IFs have a shape absent from the "
+                f"baseline (tolerance {unseen_tol_pct}%).",
+    ))
+
+    tvd = 0.5 * sum(
+        abs(syn_pct.get(s, 0.0) - baseline_pct.get(s, 0.0))
+        for s in set(syn_pct) | set(baseline_pct)
+    ) / 100.0
+    drifted = sorted(
+        set(syn_pct) | set(baseline_pct),
+        key=lambda s: -abs(syn_pct.get(s, 0.0) - baseline_pct.get(s, 0.0)),
+    )
+    out.append(Finding(
+        "7b.distribution_drift", cat,
+        SEV_ERROR if tvd > drift_tol else SEV_INFO,
+        SHAPE_ROOT_TABLE, tvd <= drift_tol, column="shape",
+        sample=[{"shape": s,
+                 "synthetic_pct": round(syn_pct.get(s, 0.0), 3),
+                 "baseline_pct": round(baseline_pct.get(s, 0.0), 3)}
+                for s in drifted[:sample]],
+        hint="The synthetic shape distribution should converge to the filtered-raw "
+             "baseline. See docs/cdb-shapes-findings.md for the full analysis.",
+        message=f"Total variation distance between synthetic and baseline shape "
+                f"distributions = {tvd:.3f} (tolerance {drift_tol}).",
+    ))
+
+    counts.unpersist()
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
-def emit_report(findings: List[Finding], report_path: Optional[str], fail_severity: str) -> int:
+def emit_report(spark: SparkSession, findings: List[Finding],
+                report_path: Optional[str], fail_severity: str) -> int:
     fail_level = _SEV_ORDER[fail_severity.upper()]
     failing = [f for f in findings if (not f.passed) and _SEV_ORDER[f.severity] >= fail_level]
 
@@ -890,8 +1184,8 @@ def emit_report(findings: List[Finding], report_path: Optional[str], fail_severi
             "findings": [f.to_dict() for f in findings],
         }
         try:
-            with open(report_path, "w", encoding="utf-8") as fh:
-                json.dump(payload, fh, ensure_ascii=False, indent=2, default=str)
+            write_text(spark, report_path,
+                       json.dumps(payload, ensure_ascii=False, indent=2, default=str))
             logger.info("JSON report written to %s", report_path)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not write report to %s: %s", report_path, exc)
@@ -906,7 +1200,20 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Validate the CDB-simplificado synthetic output.")
     p.add_argument("--tables", default=None,
                    help="Comma-separated table list. Default: auto-discover under the base URI.")
-    p.add_argument("--report-path", default=None, help="Write a JSON report to this path.")
+    p.add_argument("--report-path", default=None,
+                   help="Write a JSON report to this path (local or oci:// URI).")
+    p.add_argument("--shape-baseline", default=None,
+                   help="Shape-profile JSON from profile_cdb_shapes.py --apply-filtros-fonte "
+                        "(local or oci:// URI). Enables the Cat 7 distribution checks.")
+    p.add_argument("--shape-unseen-tol", type=float, default=1.0,
+                   help="Cat 7a: max %% of synthetic IFs whose shape is absent from the "
+                        "baseline (default 1.0).")
+    p.add_argument("--shape-drift-tol", type=float, default=0.15,
+                   help="Cat 7b: max total variation distance between synthetic and "
+                        "baseline shape distributions, 0-1 (default 0.15).")
+    p.add_argument("--shape-op-ratio-tol", type=float, default=5.0,
+                   help="Cat 7c: max %% of operation-bearing IFs violating "
+                        "OPERACAO:DADO_OPERACAO:LANCAMENTO = 1:2:1 (default 5.0).")
     p.add_argument("--fail-severity", default="error", choices=["error", "warn"],
                    help="Minimum severity that makes the run exit non-zero.")
     p.add_argument("--sample-size", type=int, default=20, help="Offending keys sampled per check.")
@@ -954,12 +1261,15 @@ def main() -> None:
     findings += check_not_null(tables, meta, args.sample_size)
     findings += check_dates(tables, meta, args.sample_size)
     findings += check_lookup_combos(spark, cfg, tables, meta, args.sample_size)
+    findings += check_shapes(spark, tables, args.shape_baseline, args.sample_size,
+                             args.shape_unseen_tol, args.shape_drift_tol,
+                             args.shape_op_ratio_tol)
 
     if args.skip_check:
         findings = [f for f in findings
                     if not any(f.check_id.startswith(s) for s in args.skip_check)]
 
-    code = emit_report(findings, args.report_path, args.fail_severity)
+    code = emit_report(spark, findings, args.report_path, args.fail_severity)
     spark.stop()
     sys.exit(code)
 
