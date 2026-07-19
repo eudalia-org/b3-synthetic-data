@@ -741,7 +741,7 @@ def _monta_mapeamento_pk(clones: DataFrame, plano: PlanoTabela,
             else:
                 proj.append(out[f"new_{c}"].alias(f"new_{c}"))
         out = joined.select(
-            *[out[f"old_{c}"].alias(f"old_{c}") for c in cols_base],
+            *[out[f"old_{cb}"].alias(f"old_{cb}") for cb in cols_base],
             out[K_COL].alias(K_COL), *proj)
     mapa = out.select(*[F.col(f"old_{c}").alias(f"old_{c}") for c in pk],
                       F.col(K_COL).alias(K_COL),
@@ -837,6 +837,62 @@ def clona_tabela(spark, plano: PlanoTabela, lote: DataFrame, fator_k: int,
 
 
 # ---------------------------------------------------------------------------
+# Relatório de conferência no log: chaves original -> nova de 1 instrumento.
+# ---------------------------------------------------------------------------
+def loga_chaves_amostra(ordem: List[str], planos: Dict[str, PlanoTabela],
+                        lotes: Dict[str, DataFrame],
+                        mapeamentos: Dict[str, DataFrame],
+                        num_if_amostra, fator_k: int,
+                        limite_por_tabela: int = 30) -> None:
+    """Loga, por tabela, as chaves ORIGINAIS -> NOVAS (todas as cópias k) das
+    linhas de UM instrumento do lote, para conferência manual contra o banco
+    de origem: use os valores originais no DBeaver
+    (SELECT * FROM CETIP.<TABELA> WHERE <PK> IN (...)) e compare com as
+    linhas de chave nova após a carga dos clones. Tabela sem coluna NUM_IF
+    (ex.: subtipos de CONDICAO_IF) mostra as chaves do lote inteiro, até o
+    limite — num lote de 1 instrumento é a mesma coisa."""
+    logger.info("=" * 78)
+    logger.info("CHAVES DE CONFERÊNCIA — instrumento de amostra NUM_IF=%s × K=%d "
+                "(mapa completo em %s)", num_if_amostra, fator_k, MAPA_NUM_IF_TABLE)
+    logger.info("=" * 78)
+    for t in ordem:
+        plano = planos.get(t)
+        mapa = mapeamentos.get(t)
+        if plano is None or mapa is None:
+            continue  # lote vazio: sem clones, nada a conferir
+        lote = lotes[t]
+        pk = list(plano.pk_cols)
+        tem_num_if = COL_NUM_IF in lote.columns
+        restrito = (lote.where(F.col(COL_NUM_IF) == F.lit(num_if_amostra))
+                    if tem_num_if else lote)
+        chaves = (restrito
+                  .select(*[F.col(c).alias(f"old_{c}") for c in pk])
+                  .dropDuplicates())
+        cols_old = [f"old_{c}" for c in pk]
+        amostra = (chaves.join(F.broadcast(_copia_independente(mapa)),
+                               on=cols_old, how="inner")
+                   .orderBy(*cols_old, K_COL)
+                   .limit(limite_por_tabela + 1)
+                   .collect())
+        origem = ("linhas do instrumento de amostra" if tem_num_if
+                  else "lote inteiro (tabela sem coluna NUM_IF)")
+        logger.info("[%s] PK=(%s) — %s:", t, "+".join(pk), origem)
+        for r in amostra[:limite_por_tabela]:
+            olds = tuple(r[f"old_{c}"] for c in pk)
+            news = tuple(r[f"new_{c}"] for c in pk)
+            logger.info("    k=%s  %s -> %s", r[K_COL],
+                        olds[0] if len(olds) == 1 else olds,
+                        news[0] if len(news) == 1 else news)
+        if len(amostra) > limite_por_tabela:
+            logger.info("    ... truncado em %d chave(s); mapa completo desta "
+                        "tabela sai só no log acima do lote.", limite_por_tabela)
+    logger.info("Conferência no banco original: SELECT * FROM <owner>.<TABELA> "
+                "WHERE <PK> IN (valores ORIGINAIS acima); após a carga, as "
+                "mesmas linhas devem existir com as chaves NOVAS.")
+    logger.info("=" * 78)
+
+
+# ---------------------------------------------------------------------------
 # Validações pré-escrita.
 # ---------------------------------------------------------------------------
 def valida_tabela(spec_cfg: dict, plano: PlanoTabela, clones: DataFrame,
@@ -893,31 +949,57 @@ def escreve_tabela(spark: SparkSession, df: DataFrame, out_path: str) -> None:
     df.write.mode("append").parquet(out_path)
 
 
+def _area(base: str, prefix: Optional[str]) -> str:
+    """Caminho completo de uma área = base + prefixo (quando houver). O
+    ambiente real usa UM bucket só, separado por prefixos (raw em
+    onprem-export, sintético/clones em prefixos próprios) — por isso as
+    comparações de segurança precisam considerar o PREFIXO, nunca só a base."""
+    base = base.rstrip("/")
+    prefix = (prefix or "").strip("/")
+    return f"{base}/{prefix}" if prefix else base
+
+
+def _mesmo_ou_ancestral(a: str, b: str) -> bool:
+    """True se `a` == `b` ou `a` é ancestral de `b` (comparação por segmento:
+    bucket/raw NÃO é ancestral de bucket/raw2)."""
+    a, b = a.rstrip("/"), b.rstrip("/")
+    return a == b or b.startswith(a + "/")
+
+
 def _valida_destino(config: dict) -> str:
     """O prefixo de clones é EXCLUSIVO deste job e é apagado POR INTEIRO a
     cada execução (senão tabela com lote 0 num run novo deixaria clones do
     run anterior misturados, e o processo de carga os aplicaria de novo).
-    Por isso ele NÃO pode ser vazio nem coincidir com a área do engorda ou
-    com a área raw."""
+    Por isso o destino NÃO pode ser vazio, nem conter/estar contido na área
+    raw, nem conter a área de saída do engorda."""
     prefix = (config.get("DATAGEN_CLONE_PREFIX") or "").strip("/")
     if not prefix:
         raise ValueError(
             "DATAGEN_CLONE_PREFIX vazio: o destino seria a RAIZ de "
             "DATAGEN_SYNTHETIC_BASE_URI, que é apagada por inteiro a cada run. "
-            "Defina um prefixo dedicado (default: "
-            f"{DEFAULT_CLONE_PREFIX}).")
-    if prefix == (config.get("DATAGEN_SYNTHETIC_PREFIX") or "").strip("/"):
-        raise ValueError(
-            "DATAGEN_CLONE_PREFIX igual a DATAGEN_SYNTHETIC_PREFIX: apagaria a "
-            "saída do engorda_tables. Use um prefixo dedicado aos clones.")
+            f"Defina um prefixo dedicado (default: {DEFAULT_CLONE_PREFIX}).")
+
     save_base = clone_base_path(config)
-    raw_base = config["DATAGEN_RAW_BASE_URI"].rstrip("/")
-    if save_base.rstrip("/").startswith(raw_base) and (
-            save_base.rstrip("/") == raw_base
-            or save_base.rstrip("/")[len(raw_base)] == "/"):
+    raw_area = _area(config["DATAGEN_RAW_BASE_URI"],
+                     config.get("DATAGEN_RAW_PREFIX"))
+    engorda_area = _area(config["DATAGEN_SYNTHETIC_BASE_URI"],
+                         config.get("DATAGEN_SYNTHETIC_PREFIX"))
+
+    # Área raw: nem apagar por cima (save_base ancestral) nem escrever dentro
+    # (misturar clones com snapshots que o engorda lê por nome de tabela).
+    if _mesmo_ou_ancestral(save_base, raw_area) or _mesmo_ou_ancestral(raw_area, save_base):
         raise ValueError(
-            f"Destino dos clones ({save_base}) está DENTRO da área raw "
-            f"({raw_base}); apagá-lo destruiria snapshots de produção.")
+            f"Destino dos clones ({save_base}) sobrepõe a área raw "
+            f"({raw_area}). Ajuste DATAGEN_CLONE_PREFIX/DATAGEN_RAW_PREFIX "
+            "para áreas disjuntas.")
+    # Área do engorda: só é problema se apagar save_base LEVAR JUNTO a área
+    # do engorda (igual ou descendente). O contrário — clones DENTRO da base
+    # sintética, em prefixo próprio — é o layout esperado.
+    if _mesmo_ou_ancestral(save_base, engorda_area):
+        raise ValueError(
+            f"Destino dos clones ({save_base}) é igual/ancestral da área de "
+            f"saída do engorda ({engorda_area}); apagá-lo destruiria a saída "
+            "do engorda_tables. Use um prefixo dedicado aos clones.")
     return save_base
 
 
@@ -991,6 +1073,11 @@ def executa_clonagem(spark, config, spec: dict, *,
     if erros_globais:
         raise ValueError("Validação pré-escrita FALHOU (nada foi gravado):\n  - "
                          + "\n  - ".join(erros_globais))
+
+    # Relatório de conferência (sai também no --dry-run): chaves original ->
+    # nova de 1 instrumento do lote, por tabela, para checagem manual no
+    # banco de origem via DBeaver.
+    loga_chaves_amostra(ordem, planos, lotes, mapeamentos, valores[0], fator_k)
 
     save_base = clone_base_path(config)
     if dry_run:
@@ -1155,8 +1242,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-# --num-ifs 12345,67890 --fator-k 3 --dry-run        # teste controlado, nada gravado
-# --n-instrumentos 5 --seed 42 --fator-k 2           # sorteio no domínio tipo 49
-# --num-ifs <um NUM_IF conhecido> --fator-k 1 --dry-run
