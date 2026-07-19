@@ -5,7 +5,8 @@ clona_instrumentos.py — Etapa 2: clonagem por entidade (clone-and-remap).
 Em vez de sintetizar tabela a tabela (bootstrap do engorda_tables.py, que
 perde o fan-out por instrumento e recombina colunas em combinações de negócio
 inválidas), este job clona INSTRUMENTOS INTEIROS: seleciona N valores de
-NUM_IF do domínio (NUM_TIPO_IF = 49), copia todas as linhas do fecho
+NUM_IF do domínio do produto (query de validação do notebook — ver
+_dominio_num_if_produto), copia todas as linhas do fecho
 referencial que pertencem a esses instrumentos e reescreve APENAS chaves:
 
   1. NUM_IF (PK de INSTRUMENTO_FINANCEIRO) -> NUM_IF novo, acima do max real;
@@ -66,7 +67,7 @@ USO (OCI Data Flow — mesmas envs do engorda_tables.py):
            DATAGEN_CLONE_PREFIX — default "clones_instrumentos")
     argumentos:
       --num-ifs 12345,67890         # lista explícita (aceita 1 só), OU
-      --n-instrumentos 5 --seed 42  # amostra aleatória do domínio tipo 49
+      --n-instrumentos 5 --seed 42  # amostra do domínio do produto (query)
       --fator-k 3                   # clones por instrumento (default 1)
       --dry-run                     # valida e loga, não grava
       --pk-safety-band 100000       # folga acima do max real (default 0)
@@ -552,16 +553,101 @@ def ordem_topologica(planos: Dict[str, PlanoTabela]) -> List[str]:
 # ---------------------------------------------------------------------------
 # Seleção do lote de instrumentos.
 # ---------------------------------------------------------------------------
+def _dominio_num_if_produto(spark, config) -> DataFrame:
+    """Domínio de NUM_IF elegível à amostragem/validação do lote — reprodução
+    FIEL da query de validação do produto (notebook), que é a FONTE DA VERDADE
+    do que é o CDB simplificado. Query de referência (manter em sincronia):
+
+        SELECT DISTINCT ife.NUM_IF
+        FROM INSTRUMENTO_FINANCEIRO ife
+        INNER JOIN TITULO tit          ON ife.NUM_IF = tit.NUM_IF
+        INNER JOIN CREDITO cre         ON ife.NUM_IF = cre.NUM_IF
+        INNER JOIN CONDICAO_IF cif     ON ife.NUM_IF = cif.NUM_IF
+        INNER JOIN EVENTO eve          ON ife.NUM_IF = eve.NUM_IF
+        LEFT JOIN RESGATE res          ON cif.NUM_CONDICAO_IF = res.NUM_CONDICAO_IF
+        LEFT JOIN JUROS_FLUTUANTE jfl  ON cif.NUM_CONDICAO_IF = jfl.NUM_CONDICAO_IF
+        WHERE ife.NUM_TIPO_IF = 49
+          AND ife.DAT_EXCLUSAO IS NULL
+          AND (res.COD_COND_RESGATE = 'SEM TABELA' OR res.COD_COND_RESGATE IS NULL)
+          AND tit.COD_TIPO_ESCALONAMENTO IS NULL
+          AND cif.DAT_EXCLUSAO IS NULL
+          AND eve.DAT_EXCLUSAO IS NULL
+
+    Implementação: cadeia de LEFT SEMI joins sobre o raw — resultado IDÊNTICO
+    ao da query. Cada predicado do WHERE toca um único alias, então "existe
+    combinação de linhas satisfazendo tudo" fatoriza em um EXISTS independente
+    por tabela; o semi join É esse EXISTS, e dispensa o DISTINCT sobre o
+    fan-out multiplicativo tit×cre×cif×eve×res do join literal.
+
+    Notas de fidelidade (decisões conscientes, não simplificações):
+      * RESGATE é condição POR CONDICAO_IF: left join + (cod = 'SEM TABELA'
+        OR cod IS NULL). Condição sem resgate passa (NULL do left join);
+        condição com >= 1 resgate de código 'SEM TABELA' ou NULL passa.
+        Comparação EXATA e SEM filtro de DAT_EXCLUSAO, como na query — de
+        propósito DIFERENTE de FILTROS_FONTE["RESGATE"] (ieq + DAT_EXCLUSAO
+        nulo), que decide quais linhas de RESGATE entram no CLONE, não quem
+        pertence ao domínio de amostragem.
+      * JUROS_FLUTUANTE: LEFT JOIN sem predicado no WHERE não restringe o
+        conjunto DISTINCT de NUM_IF — omitido. Se a query ganhar predicado
+        de jfl, replique aqui.
+      * Coluna/tabela ausente no raw ABORTA (erro do Spark): o domínio do
+        produto não pode ser aproximado em silêncio.
+    """
+    # ife: NUM_TIPO_IF = 49 AND DAT_EXCLUSAO IS NULL
+    dom = (read_parquet(spark, raw_path(config, TABELA_RAIZ))
+           .where((F.col(FILTRO_TIPO_IF_COLUMN) == F.lit(FILTRO_TIPO_IF_VALUE))
+                  & F.col("DAT_EXCLUSAO").isNull())
+           .select(COL_NUM_IF))
+
+    # INNER JOIN TITULO ... AND tit.COD_TIPO_ESCALONAMENTO IS NULL
+    tit = (read_parquet(spark, raw_path(config, "TITULO"))
+           .where(F.col("COD_TIPO_ESCALONAMENTO").isNull())
+           .select(COL_NUM_IF))
+    dom = dom.join(tit, on=COL_NUM_IF, how="left_semi")
+
+    # INNER JOIN CREDITO (sem predicado adicional no WHERE)
+    cre = read_parquet(spark, raw_path(config, "CREDITO")).select(COL_NUM_IF)
+    dom = dom.join(cre, on=COL_NUM_IF, how="left_semi")
+
+    # INNER JOIN EVENTO ... AND eve.DAT_EXCLUSAO IS NULL
+    eve = (read_parquet(spark, raw_path(config, "EVENTO"))
+           .where(F.col("DAT_EXCLUSAO").isNull())
+           .select(COL_NUM_IF))
+    dom = dom.join(eve, on=COL_NUM_IF, how="left_semi")
+
+    # INNER JOIN CONDICAO_IF (cif.DAT_EXCLUSAO IS NULL)
+    # LEFT JOIN RESGATE ON cif.NUM_CONDICAO_IF = res.NUM_CONDICAO_IF
+    # WHERE (res.COD_COND_RESGATE = 'SEM TABELA' OR res.COD_COND_RESGATE IS NULL)
+    cif = (read_parquet(spark, raw_path(config, "CONDICAO_IF"))
+           .where(F.col("DAT_EXCLUSAO").isNull())
+           .select(COL_NUM_IF, "NUM_CONDICAO_IF"))
+    res = (read_parquet(spark, raw_path(config, "RESGATE"))
+           .select("NUM_CONDICAO_IF", "COD_COND_RESGATE"))
+    cif_ok = (cif.join(res, on="NUM_CONDICAO_IF", how="left")
+              .where((F.col("COD_COND_RESGATE") == F.lit("SEM TABELA"))
+                     | F.col("COD_COND_RESGATE").isNull())
+              .select(COL_NUM_IF))
+    dom = dom.join(cif_ok, on=COL_NUM_IF, how="left_semi")
+
+    # SELECT DISTINCT ife.NUM_IF — os semi joins preservam as linhas de ife
+    # (PK NUM_IF já única); o dropDuplicates é cinto e suspensório.
+    return dom.dropDuplicates([COL_NUM_IF])
+
+
 def seleciona_instrumentos(spark, config, num_ifs: Optional[List[int]],
                            n_instrumentos: Optional[int], seed: int) -> List:
     """Devolve a lista de valores de NUM_IF do lote (coletada no driver — o
-    lote é pequeno por definição). Aborta se algum NUM_IF pedido não existir
-    no domínio filtrado (tipo 49, não excluído)."""
+    lote é pequeno por definição). Tanto o SORTEIO quanto a VALIDAÇÃO de
+    lista explícita rodam contra o domínio do produto — a query de validação
+    do notebook (ver _dominio_num_if_produto), não só a raiz filtrada.
+    Aborta se algum NUM_IF pedido estiver fora desse domínio."""
     if num_ifs is not None and not num_ifs:
         # Defensivo (o argparse já barra): lista vazia NÃO pode virar sorteio.
         raise ValueError("Lista de NUM_IF vazia; informe valores ou use "
                          "--n-instrumentos.")
-    fonte = _read_source(spark, config, TABELA_RAIZ).select(COL_NUM_IF)
+    fonte = _dominio_num_if_produto(spark, config)
+    logger.info("Domínio de amostragem/validação de NUM_IF: query do produto "
+                "(fecho TITULO+CREDITO+CONDICAO_IF+EVENTO + regra de RESGATE).")
     if num_ifs:
         pedidos = spark.createDataFrame([(v,) for v in num_ifs], [COL_NUM_IF])
         achados = {r[0] for r in fonte.join(
@@ -571,8 +657,8 @@ def seleciona_instrumentos(spark, config, num_ifs: Optional[List[int]],
         faltando = [v for v in num_ifs if v not in {int(a) for a in achados}]
         if faltando:
             raise ValueError(
-                f"NUM_IF(s) fora do domínio (tipo {FILTRO_TIPO_IF_VALUE}, não "
-                f"excluído): {faltando}")
+                "NUM_IF(s) fora do domínio do produto (query de validação — "
+                f"ver _dominio_num_if_produto): {faltando}")
         valores = sorted(achados)
     else:
         n = int(n_instrumentos or 1)
@@ -1192,7 +1278,8 @@ def parse_arguments() -> argparse.Namespace:
     grupo.add_argument("--num-ifs", type=_parse_num_ifs, default=None,
                        help="Lista explícita de NUM_IF (ex.: 123,456). Aceita 1 só.")
     grupo.add_argument("--n-instrumentos", type=positive_int, default=None,
-                       help="Sorteia N instrumentos do domínio tipo 49 (com --seed).")
+                       help="Sorteia N instrumentos do domínio do produto "
+                            "(query de validação; com --seed).")
     parser.add_argument("--fator-k", type=positive_int, default=1,
                         help="Clones por instrumento (default 1).")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
