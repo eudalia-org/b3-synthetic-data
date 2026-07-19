@@ -16,9 +16,12 @@ referencial que pertencem a esses instrumentos e reescreve APENAS chaves:
      o mapeamento do pai;
   4. FKs para tabelas clonadas -> reescritas pelo mapeamento do pai.
 
-TODAS as demais colunas ficam intocadas — é isso que preserva as combinações
-de negócio e o polimorfismo Hibernate de CONDICAO_IF (a linha-subtipo é
-copiada junto, na tabela certa, por construção; nada é recombinado).
+Além das chaves, um conjunto FECHADO de colunas de DATA recebe a data do run
+(regras de engorda — ver ENGORDA_COL_*): DAT_INCLUSAO, DAT_ALTERACAO,
+DAT_INCLUSAO_REGISTRO, DAT_EMISSAO e DAT_VENCIMENTO. TODAS as demais colunas
+ficam intocadas — é isso que preserva as combinações de negócio e o
+polimorfismo Hibernate de CONDICAO_IF (a linha-subtipo é copiada junto, na
+tabela certa, por construção; nada é recombinado).
 
 DIRIGIDO SÓ PELO spec_config.json (o mesmo do engorda_tables.py, gerado por
 gera_spec_config.py). Não usa arquivo de decisões nem conexão Oracle.
@@ -71,7 +74,10 @@ USO (OCI Data Flow — mesmas envs do engorda_tables.py):
       --fator-k 3                   # clones por instrumento (default 1)
       --dry-run                     # valida e loga, não grava
       --pk-safety-band 100000       # folga acima do max real (default 0)
+      --pk-passo 10                 # folga ENTRE PKs novas consecutivas (default 1)
       --offset-num-if 900000000     # início explícito p/ NUM_IF novo (opcional)
+      --data-engorda 2026-07-19     # data/hora do run (default: agora)
+      --prazo-vencimento-dias 30    # DAT_VENCIMENTO = data + N (default: prazo original)
       --tratar-como-static TAB1,TAB2  # excluir tabela(s) da clonagem
       --specs oci://.../spec_config.json  # override de DATAGEN_SPECS_URI
 
@@ -92,6 +98,7 @@ import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from pyspark import StorageLevel
@@ -142,6 +149,57 @@ FILTROS_FONTE: dict[str, list[tuple[str, str, object]]] = {
         ("QTD_CARTEIRA_PARTICIPANTE", ">", 0),
     ],
 }
+
+# ---------------------------------------------------------------------------
+# Regras de engorda por coluna.
+#
+# Data de engorda = instante em que este script começa a executar. A mesma data
+# é reutilizada para todas as tabelas do run, evitando pequenas diferenças de
+# timestamp entre componentes ou ações Spark.
+#
+# Regras aplicadas quando a coluna existir na tabela:
+#   DAT_INCLUSAO              -> data/hora da engorda (timestamp)
+#   DAT_ALTERACAO             -> mesma data/hora de DAT_INCLUSAO (timestamp)
+#   DAT_INCLUSAO_REGISTRO     -> mesma data/hora de DAT_INCLUSAO (timestamp)
+#   DAT_EMISSAO               -> data da engorda, sem timestamp
+#   DAT_VENCIMENTO            -> data da engorda + prazo, sem timestamp
+#
+# As PKs NÃO entram aqui (nem NUM_ID_CERTIFICACAO_CETIP): quem as reescreve é o
+# plano de clonagem (monta_plano + _monta_mapeamento_pk), incremental acima do
+# max real da tabela INTEIRA, com a folga do --pk-safety-band e o passo do
+# --pk-passo. Tratá-las de novo aqui desfazia a folga e relia o max sem
+# necessidade.
+#
+# Para DAT_VENCIMENTO, se não for informado um prazo fixo (por tabela em
+# ENGORDA_PRAZO_DIAS_POR_TABELA, ou global via --prazo-vencimento-dias), o
+# código preserva o prazo original da linha clonada:
+# DAT_VENCIMENTO - DAT_EMISSAO. Se esse prazo não existir, for inválido ou
+# < MIN_DT_VENCIMENTO_PRAZO_DIAS, usa DEFAULT_DT_VENCIMENTO_PRAZO_DIAS.
+#
+# NB: as colunas de emissão/vencimento no schema real são DAT_EMISSAO /
+# DAT_VENCIMENTO (prefixo DAT_) — não DT_. A aplicação é tolerante a coluna
+# ausente (no-op), então um nome errado aqui vira regra silenciosamente morta.
+# ---------------------------------------------------------------------------
+ENGORDA_COL_DAT_INCLUSAO = "DAT_INCLUSAO"
+ENGORDA_COL_DAT_ALTERACAO = "DAT_ALTERACAO"
+ENGORDA_COL_DAT_INCLUSAO_REGISTRO = "DAT_INCLUSAO_REGISTRO"
+ENGORDA_COL_DAT_VENCIMENTO = "DAT_VENCIMENTO"
+ENGORDA_COL_DAT_EMISSAO = "DAT_EMISSAO"
+# Colunas que recebem o MESMO timestamp único da engorda. Declarativo: para
+# tratar mais uma coluna de timestamp, basta adicioná-la aqui.
+ENGORDA_COLS_TIMESTAMP = (
+    ENGORDA_COL_DAT_INCLUSAO,
+    ENGORDA_COL_DAT_ALTERACAO,
+    ENGORDA_COL_DAT_INCLUSAO_REGISTRO,
+)
+DEFAULT_DT_VENCIMENTO_PRAZO_DIAS = 30
+MIN_DT_VENCIMENTO_PRAZO_DIAS = 1
+# Prazo FIXO de DAT_VENCIMENTO por tabela (dias). Vazio por padrão: sem entrada
+# aqui, vale o --prazo-vencimento-dias e, na falta dele, o prazo original da
+# linha clonada. Entrada aqui tem precedência sobre a CLI.
+ENGORDA_PRAZO_DIAS_POR_TABELA: dict[str, int] = {}
+# Coluna temporária do prazo calculado (checada contra colisão em tempo de execução).
+ENGORDA_PRAZO_TMP_COL = "__engorda_prazo_dias"
 
 REQUIRED_ENV_VARS = (
     "DATAGEN_RAW_BASE_URI",
@@ -392,6 +450,132 @@ def _null_efetivo_pred(df: DataFrame, col: str):
 
 
 # ---------------------------------------------------------------------------
+# Regras de engorda (datas) — ver bloco de constantes ENGORDA_COL_* no topo.
+# ---------------------------------------------------------------------------
+def _normalize_engorda_ts(value: Optional[datetime]) -> datetime:
+    """Timestamp único do run. Microssegundos zerados: o Oracle guarda DATE com
+    precisão de segundo e um resíduo de microssegundo só criaria diferença
+    entre o Parquet e o que a carga grava."""
+    if value is None:
+        return datetime.now().replace(microsecond=0)
+    if isinstance(value, datetime):
+        return value.replace(microsecond=0)
+    raise TypeError("engorda_ts deve ser datetime ou None.")
+
+
+def _tipo_data_engordavel(dt: T.DataType) -> bool:
+    """Só data/hora/string recebem literal de data. Um DAT_* numérico (schema
+    inesperado) seria NULADO pelo cast — melhor pular com aviso."""
+    return isinstance(dt, (T.DateType, T.TimestampType, T.StringType))
+
+
+def _timestamp_literal_for_type(value: datetime, dt: T.DataType):
+    """Literal de timestamp respeitando o tipo físico da coluna."""
+    if isinstance(dt, T.StringType):
+        return F.date_format(F.lit(value).cast("timestamp"), "yyyy-MM-dd HH:mm:ss")
+    return F.lit(value).cast(dt)
+
+
+def _date_literal_for_type(value: date, dt: T.DataType):
+    """Literal de data SEM hora respeitando o tipo físico da coluna."""
+    if isinstance(dt, T.StringType):
+        return F.date_format(F.lit(value).cast("date"), "yyyy-MM-dd")
+    if isinstance(dt, T.TimestampType):
+        # Coluna física é timestamp: grava a data à meia-noite (sem hora útil).
+        return F.lit(value).cast("date").cast(dt)
+    return F.lit(value).cast(dt)
+
+
+def _date_expression_for_type(expr, dt: T.DataType):
+    """Expressão de data SEM hora respeitando o tipo físico da coluna."""
+    if isinstance(dt, T.StringType):
+        return F.date_format(expr.cast("date"), "yyyy-MM-dd")
+    if isinstance(dt, T.TimestampType):
+        return expr.cast("date").cast(dt)
+    return expr.cast(dt)
+
+
+def aplica_regras_engorda(df: DataFrame, tabela: str, *, engorda_ts: datetime,
+                          prazo_vencimento_dias: Optional[int] = None,
+                          ) -> Tuple[DataFrame, List[str]]:
+    """Aplica as regras de DATA do engorda aos clones de UMA tabela.
+
+    Devolve (df, colunas efetivamente reescritas). Tolerante por construção: a
+    regra de uma coluna ausente no schema é no-op — as tabelas do fecho têm
+    subconjuntos bem diferentes dessas colunas.
+
+    O prazo de DAT_VENCIMENTO é calculado ANTES de DAT_EMISSAO ser
+    sobrescrita; senão o "prazo original da linha clonada" viraria
+    (vencimento_original - data_do_run), que é outro número.
+    """
+    engorda_dt = engorda_ts.date()
+    tipos = {f.name: f.dataType for f in df.schema.fields}
+    aplicadas: List[str] = []
+
+    def _tipo_ok(col: str) -> bool:
+        if _tipo_data_engordavel(tipos[col]):
+            return True
+        logger.warning("%s.%s: tipo %s não é data/hora/string; regra de engorda "
+                       "IGNORADA (a coluna mantém o valor clonado).",
+                       tabela, col, tipos[col].simpleString())
+        return False
+
+    tem_venc = ENGORDA_COL_DAT_VENCIMENTO in tipos and _tipo_ok(ENGORDA_COL_DAT_VENCIMENTO)
+    tem_emissao = ENGORDA_COL_DAT_EMISSAO in tipos and _tipo_ok(ENGORDA_COL_DAT_EMISSAO)
+
+    # 1) Prazo de vencimento (dias), ainda com os valores ORIGINAIS na mão.
+    if tem_venc:
+        if ENGORDA_PRAZO_TMP_COL in df.columns:
+            raise ValueError(
+                f"{tabela}: colisão de coluna temporária {ENGORDA_PRAZO_TMP_COL}.")
+        padrao = F.lit(int(DEFAULT_DT_VENCIMENTO_PRAZO_DIAS)).cast("int")
+        prazo_fixo = ENGORDA_PRAZO_DIAS_POR_TABELA.get(tabela, prazo_vencimento_dias)
+        if prazo_fixo is not None:
+            prazo_expr = F.lit(int(prazo_fixo)).cast("int")
+        elif tem_emissao:
+            prazo_expr = F.datediff(
+                F.to_date(F.col(ENGORDA_COL_DAT_VENCIMENTO)),
+                F.to_date(F.col(ENGORDA_COL_DAT_EMISSAO)),
+            ).cast("int")
+        else:
+            prazo_expr = padrao
+        # Prazo nulo (data ilegível/ausente) ou não-positivo cai no default: um
+        # vencimento anterior à emissão quebraria a regra de negócio na NoMe.
+        prazo_expr = F.coalesce(prazo_expr, padrao)
+        prazo_expr = F.when(
+            prazo_expr < F.lit(MIN_DT_VENCIMENTO_PRAZO_DIAS), padrao
+        ).otherwise(prazo_expr)
+        df = df.withColumn(ENGORDA_PRAZO_TMP_COL, prazo_expr)
+
+    # 2) Colunas de timestamp: TODAS com o mesmo instante do run.
+    for col in ENGORDA_COLS_TIMESTAMP:
+        if col not in tipos or not _tipo_ok(col):
+            continue
+        df = df.withColumn(col, _timestamp_literal_for_type(engorda_ts, tipos[col]))
+        aplicadas.append(col)
+
+    # 3) DAT_EMISSAO = data do run, sem hora.
+    if tem_emissao:
+        df = df.withColumn(
+            ENGORDA_COL_DAT_EMISSAO,
+            _date_literal_for_type(engorda_dt, tipos[ENGORDA_COL_DAT_EMISSAO]))
+        aplicadas.append(ENGORDA_COL_DAT_EMISSAO)
+
+    # 4) DAT_VENCIMENTO = data do run + prazo, sem hora.
+    if tem_venc:
+        venc_expr = F.expr(
+            f"date_add(DATE '{engorda_dt.isoformat()}', "
+            f"CAST({ENGORDA_PRAZO_TMP_COL} AS INT))")
+        df = df.withColumn(
+            ENGORDA_COL_DAT_VENCIMENTO,
+            _date_expression_for_type(venc_expr, tipos[ENGORDA_COL_DAT_VENCIMENTO]),
+        ).drop(ENGORDA_PRAZO_TMP_COL)
+        aplicadas.append(ENGORDA_COL_DAT_VENCIMENTO)
+
+    return df, aplicadas
+
+
+# ---------------------------------------------------------------------------
 # Plano de clonagem: classificação de tabelas/PKs/FKs a partir do spec + dos
 # schemas Parquet. Nenhuma decisão implícita: o que não tem regra ABORTA.
 # ---------------------------------------------------------------------------
@@ -412,6 +596,7 @@ class PlanoTabela:
     fks_remap: List[FkRemap] = field(default_factory=list)
     pk_regra: str = ""              # OFFSET_PROPRIO | VIA_PAI
     pk_start: Optional[int] = None  # início da PK nova (só OFFSET_PROPRIO)
+    pk_passo: int = 1               # folga ENTRE PKs novas consecutivas
 
 
 def _fks_para_pais_clonados(spec: dict, tabela: str,
@@ -438,9 +623,20 @@ def _fks_para_pais_clonados(spec: dict, tabela: str,
 
 def monta_plano(spark, config, spec: dict, estaticas_extra: Set[str],
                 pk_floor: int, pk_band: int, offset_num_if: Optional[int],
-                n_clones_estimado: int) -> Dict[str, PlanoTabela]:
+                n_clones_estimado: int,
+                pk_passo: int = 1) -> Dict[str, PlanoTabela]:
     """Classifica cada tabela clonável e define a regra de PK. Aborta (com
-    lista completa) se alguma tabela ficar sem regra — nada de chute."""
+    lista completa) se alguma tabela ficar sem regra — nada de chute.
+
+    Duas folgas independentes na PK nova (ambas só valem para OFFSET_PROPRIO;
+    VIA_PAI apenas segue o mapeamento do pai):
+      pk_band  -> distância entre o max REAL da tabela e a primeira PK nova;
+      pk_passo -> distância entre duas PKs novas consecutivas (default 1,
+                  contíguo). Serve para deixar buracos reserváveis entre os
+                  registros clonados.
+    """
+    if pk_passo < 1:
+        raise ValueError("pk_passo deve ser >= 1.")
     estaticas = {t for t, cfg in spec.items() if cfg.get("static")} | estaticas_extra
     clonaveis = {t for t in spec if t not in estaticas}
     if TABELA_RAIZ not in clonaveis:
@@ -504,6 +700,7 @@ def monta_plano(spark, config, spec: dict, estaticas_extra: Set[str],
     for t, plano in sorted(planos.items()):
         if plano.pk_regra != "OFFSET_PROPRIO":
             continue
+        plano.pk_passo = pk_passo
         pk_col = plano.pk_cols[0]
         raw_max = _read_pk_max(spark, raw_path(config, t), pk_col)
         if raw_max is None:
@@ -522,14 +719,18 @@ def monta_plano(spark, config, spec: dict, estaticas_extra: Set[str],
             plano.pk_start = max(true_max + pk_band, pk_floor) + 1
         dt = read_parquet(spark, raw_path(config, t)).schema[pk_col].dataType
         cap = _pk_capacity_of(dt)
-        if cap is not None and plano.pk_start + n_clones_estimado > cap:
+        # O passo multiplica o alcance: a última PK nova é
+        # pk_start + (n_clones - 1) * pk_passo.
+        alcance = n_clones_estimado * pk_passo
+        if cap is not None and plano.pk_start + alcance > cap:
             logger.warning(
-                "%s: início %d + ~%d clone(s) pode estourar o domínio da PK "
-                "(cap %d). Reduza o lote/K ou trate a tabela como static.",
-                t, plano.pk_start, n_clones_estimado, cap)
+                "%s: início %d + ~%d clone(s) × passo %d pode estourar o "
+                "domínio da PK (cap %d). Reduza o lote/K/passo ou trate a "
+                "tabela como static.",
+                t, plano.pk_start, n_clones_estimado, pk_passo, cap)
         logger.info("Plano %s: PK %s OFFSET_PROPRIO a partir de %d "
-                    "(max real %d, band %d)", t, pk_col, plano.pk_start,
-                    true_max, pk_band)
+                    "(max real %d, band %d, passo %d)", t, pk_col,
+                    plano.pk_start, true_max, pk_band, pk_passo)
     for t, plano in sorted(planos.items()):
         if plano.pk_regra == "VIA_PAI":
             logger.info("Plano %s: PK %s VIA_PAI (segue o mapeamento do pai)",
@@ -774,9 +975,10 @@ def _copia_independente(df: DataFrame) -> DataFrame:
 def _monta_mapeamento_pk(clones: DataFrame, plano: PlanoTabela,
                          mapeamentos: Dict[str, DataFrame]) -> DataFrame:
     """DataFrame de mapeamento da PK desta tabela: colunas old_<pk_i>, K_COL,
-    new_<pk_i>. OFFSET_PROPRIO gera valores contíguos acima do max real;
-    VIA_PAI deriva do mapeamento do(s) pai(s) — componentes não cobertos por
-    FK remapeada ficam com o valor original (new == old).
+    new_<pk_i>. OFFSET_PROPRIO gera valores acima do max real, espaçados de
+    plano.pk_passo (1 = contíguo); VIA_PAI deriva do mapeamento do(s) pai(s) —
+    componentes não cobertos por FK remapeada ficam com o valor original
+    (new == old).
 
     A saída passa por _copia_independente: os exprIds não podem coincidir com
     os de `clones`, senão os joins seguintes viram self-join ambíguo."""
@@ -787,9 +989,11 @@ def _monta_mapeamento_pk(clones: DataFrame, plano: PlanoTabela,
         pk_col = pk[0]
         dt = clones.schema[pk_col].dataType
         com_id = _with_contiguous_row_id(base, "__pk_rid")
+        passo = max(1, int(plano.pk_passo))
         mapa = (com_id
                 .withColumn(f"new_{pk_col}",
-                            (F.lit(int(plano.pk_start)) + F.col("__pk_rid"))
+                            (F.lit(int(plano.pk_start))
+                             + F.col("__pk_rid") * F.lit(passo))
                             .cast(dt))
                 .drop("__pk_rid")
                 .select(*[F.col(c).alias(f"old_{c}") for c in pk],
@@ -1099,13 +1303,24 @@ def executa_clonagem(spark, config, spec: dict, *,
                      seed: int = DEFAULT_SEED,
                      pk_offset: int = 0,
                      pk_safety_band: int = 0,
+                     pk_passo: int = 1,
                      offset_num_if: Optional[int] = None,
                      tratar_como_static: Optional[Set[str]] = None,
                      max_passadas: int = 6,
+                     engorda_ts: Optional[datetime] = None,
+                     prazo_vencimento_dias: Optional[int] = None,
                      dry_run: bool = False) -> Dict[str, dict]:
     """Roda a clonagem fim a fim; devolve {tabela: estatísticas} (para uso em
     notebook). Aborta sem gravar NADA se qualquer validação falhar."""
     inicio = time.perf_counter()
+    # UM instante para o run inteiro: tabelas diferentes não podem divergir no
+    # timestamp só porque foram materializadas em ações Spark diferentes.
+    engorda_ts = _normalize_engorda_ts(engorda_ts)
+    logger.info("Data de engorda do run: %s (prazo de %s: %s)",
+                engorda_ts.isoformat(sep=" "), ENGORDA_COL_DAT_VENCIMENTO,
+                f"{prazo_vencimento_dias} dia(s) fixos"
+                if prazo_vencimento_dias is not None
+                else "preserva o prazo original da linha clonada")
     spec = normalize_specs(spec)
     estaticas_extra = {table_path_name(t.strip().upper())
                        for t in (tratar_como_static or set()) if t.strip()}
@@ -1121,7 +1336,8 @@ def executa_clonagem(spark, config, spec: dict, *,
     # chute conservador — não afeta o cálculo do offset, apenas o warning).
     planos = monta_plano(spark, config, spec, estaticas_extra,
                          pk_offset, pk_safety_band, offset_num_if,
-                         n_clones_estimado=len(valores) * fator_k * 1000)
+                         n_clones_estimado=len(valores) * fator_k * 1000,
+                         pk_passo=pk_passo)
     ordem = ordem_topologica(planos)
     logger.info("Ordem de clonagem (%d tabela(s)): %s", len(ordem), ordem)
 
@@ -1137,10 +1353,16 @@ def executa_clonagem(spark, config, spec: dict, *,
         n_lote = lotes[t].count()
         if n_lote == 0:
             logger.info("[%s] lote vazio — nada a clonar.", t)
-            stats[t] = {"lote": 0, "clones": 0, "colunas_remapeadas": []}
+            stats[t] = {"lote": 0, "clones": 0, "colunas_remapeadas": [],
+                        "colunas_data": []}
             continue
         clones, mapa_pk = clona_tabela(spark, plano, lotes[t], fator_k, mapeamentos)
         mapeamentos[t] = mapa_pk
+        # Regras de data ANTES do checkpoint/validação: o NOT NULL precisa ser
+        # conferido no valor que vai ser gravado, não no valor clonado.
+        clones, cols_data = aplica_regras_engorda(
+            clones, t, engorda_ts=engorda_ts,
+            prazo_vencimento_dias=prazo_vencimento_dias)
         clones = clones.localCheckpoint(eager=True)  # congela p/ validar e gravar
 
         cols_remap = sorted({*plano.pk_cols,
@@ -1148,9 +1370,10 @@ def executa_clonagem(spark, config, spec: dict, *,
                             & set(clones.columns))
         erros = valida_tabela(spec[t], plano, clones, n_lote, fator_k)
         stats[t] = {"lote": n_lote, "clones": n_lote * fator_k,
-                    "colunas_remapeadas": cols_remap, "erros": erros}
-        logger.info("[%s] lote=%d clones=%d remapeadas=%s %s",
-                    t, n_lote, n_lote * fator_k, cols_remap,
+                    "colunas_remapeadas": cols_remap,
+                    "colunas_data": cols_data, "erros": erros}
+        logger.info("[%s] lote=%d clones=%d remapeadas=%s datas=%s %s",
+                    t, n_lote, n_lote * fator_k, cols_remap, cols_data or "-",
                     "ERROS: " + "; ".join(erros) if erros else "OK")
         if erros:
             erros_globais.extend(f"{t}: {e}" for e in erros)
@@ -1192,14 +1415,17 @@ def executa_clonagem(spark, config, spec: dict, *,
         logger.info("Mapa de NUM_IF gravado em %s/%s.", save_base, MAPA_NUM_IF_TABLE)
 
     logger.info("=" * 78)
-    logger.info("RESUMO DA CLONAGEM (%.1fs) — %d instrumento(s) × K=%d, %s",
+    logger.info("RESUMO DA CLONAGEM (%.1fs) — %d instrumento(s) × K=%d, "
+                "data de engorda %s, %s",
                 time.perf_counter() - inicio, len(valores), fator_k,
+                engorda_ts.isoformat(sep=" "),
                 "DRY-RUN (nada gravado)" if dry_run else f"gravado em {save_base}")
     for t in ordem:
         s = stats.get(t, {})
-        logger.info("  %-32s lote=%-8s clones=%-8s remap=%s",
+        logger.info("  %-32s lote=%-8s clones=%-8s remap=%s datas=%s",
                     t, s.get("lote", "-"), s.get("clones", "-"),
-                    ",".join(s.get("colunas_remapeadas", [])) or "-")
+                    ",".join(s.get("colunas_remapeadas", [])) or "-",
+                    ",".join(s.get("colunas_data", [])) or "-")
     logger.info("=" * 78)
     return stats
 
@@ -1270,6 +1496,20 @@ def nonneg_int(value: str) -> int:
     return parsed
 
 
+def _parse_data_engorda(txt: str) -> datetime:
+    """Data/hora do run: 'YYYY-MM-DD' (meia-noite) ou 'YYYY-MM-DD HH:MM:SS'.
+    Existe para tornar o run REPRODUZÍVEL (rodar de novo e obter exatamente as
+    mesmas datas); sem a flag, vale o instante de início do script."""
+    txt = txt.strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(txt, fmt)
+        except ValueError:
+            continue
+    raise argparse.ArgumentTypeError(
+        "--data-engorda deve ser 'YYYY-MM-DD' ou 'YYYY-MM-DD HH:MM:SS'")
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Clonagem por entidade (clone-and-remap) do CDB simplificado. "
@@ -1288,9 +1528,24 @@ def parse_arguments() -> argparse.Namespace:
                         help="Piso absoluto para as PKs novas (como no engorda). "
                              "Default 0 (sem piso).")
     parser.add_argument("--pk-safety-band", type=nonneg_int, default=0,
-                        help="Folga acima do max real de cada PK. Default 0.")
+                        help="Folga acima do max real de cada PK: distância "
+                             "entre o max real e a PRIMEIRA PK nova. Default 0.")
+    parser.add_argument("--pk-passo", type=positive_int, default=1,
+                        help="Folga ENTRE PKs novas consecutivas (incremento). "
+                             "1 = contíguo (default); 10 deixa 9 valores livres "
+                             "entre cada clone. Só vale para PK OFFSET_PROPRIO.")
     parser.add_argument("--offset-num-if", type=positive_int, default=None,
                         help="Início explícito do NUM_IF novo (> max real).")
+    parser.add_argument("--data-engorda", type=_parse_data_engorda, default=None,
+                        help="Data/hora do run usada nas colunas DAT_* "
+                             "('YYYY-MM-DD' ou 'YYYY-MM-DD HH:MM:SS'). "
+                             "Default: instante de início do script.")
+    parser.add_argument("--prazo-vencimento-dias", type=positive_int, default=None,
+                        help=f"{ENGORDA_COL_DAT_VENCIMENTO} = data da engorda + N "
+                             "dias. Default: preserva o prazo original da linha "
+                             f"clonada ({ENGORDA_COL_DAT_VENCIMENTO} - "
+                             f"{ENGORDA_COL_DAT_EMISSAO}); prazo inválido cai em "
+                             f"{DEFAULT_DT_VENCIMENTO_PRAZO_DIAS} dias.")
     parser.add_argument("--tratar-como-static", default="",
                         help="Tabelas a excluir da clonagem (vírgula).")
     parser.add_argument("--max-passadas", type=positive_int, default=6,
@@ -1318,9 +1573,12 @@ def main() -> None:
             seed=args.seed,
             pk_offset=args.pk_offset,
             pk_safety_band=args.pk_safety_band,
+            pk_passo=args.pk_passo,
             offset_num_if=args.offset_num_if,
             tratar_como_static={t for t in args.tratar_como_static.split(",") if t.strip()},
             max_passadas=args.max_passadas,
+            engorda_ts=args.data_engorda,
+            prazo_vencimento_dias=args.prazo_vencimento_dias,
             dry_run=args.dry_run,
         )
     finally:
