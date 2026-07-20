@@ -756,83 +756,107 @@ def ordem_topologica(planos: Dict[str, PlanoTabela]) -> List[str]:
 # ---------------------------------------------------------------------------
 def _dominio_num_if_produto(spark, config) -> DataFrame:
     """Domínio de NUM_IF elegível à amostragem/validação do lote — reprodução
-    FIEL da query de validação do produto (notebook), que é a FONTE DA VERDADE
-    do que é o CDB simplificado. Query de referência (manter em sincronia):
+    FIEL da query OFICIAL de validação do produto (CDB simplificado), a FONTE
+    DA VERDADE do domínio. Roda via spark.sql lendo os Parquet RAW diretamente
+    (parquet.`<path>`), com os paths montados por raw_path a partir das envs —
+    de propósito SEM FILTROS_FONTE (a query tem os próprios predicados).
 
-        SELECT DISTINCT ife.NUM_IF
-        FROM INSTRUMENTO_FINANCEIRO ife
-        INNER JOIN TITULO tit          ON ife.NUM_IF = tit.NUM_IF
-        INNER JOIN CREDITO cre         ON ife.NUM_IF = cre.NUM_IF
-        INNER JOIN CONDICAO_IF cif     ON ife.NUM_IF = cif.NUM_IF
-        INNER JOIN EVENTO eve          ON ife.NUM_IF = eve.NUM_IF
-        LEFT JOIN RESGATE res          ON cif.NUM_CONDICAO_IF = res.NUM_CONDICAO_IF
-        LEFT JOIN JUROS_FLUTUANTE jfl  ON cif.NUM_CONDICAO_IF = jfl.NUM_CONDICAO_IF
-        WHERE ife.NUM_TIPO_IF = 49
-          AND ife.DAT_EXCLUSAO IS NULL
-          AND (res.COD_COND_RESGATE = 'SEM TABELA' OR res.COD_COND_RESGATE IS NULL)
-          AND tit.COD_TIPO_ESCALONAMENTO IS NULL
-          AND cif.DAT_EXCLUSAO IS NULL
-          AND eve.DAT_EXCLUSAO IS NULL
+    Query oficial (manter em sincronia com nova1/nova2/nova3):
 
-    Implementação: cadeia de LEFT SEMI joins sobre o raw — resultado IDÊNTICO
-    ao da query. Cada predicado do WHERE toca um único alias, então "existe
-    combinação de linhas satisfazendo tudo" fatoriza em um EXISTS independente
-    por tabela; o semi join É esse EXISTS, e dispensa o DISTINCT sobre o
-    fan-out multiplicativo tit×cre×cif×eve×res do join literal.
+        WITH FILTRO_BASE AS (
+            SELECT DISTINCT IFE.NUM_IF
+            FROM INSTRUMENTO_FINANCEIRO IFE
+                INNER JOIN TITULO      TIT ON TIT.NUM_IF = IFE.NUM_IF
+                INNER JOIN CONDICAO_IF CIF ON CIF.NUM_IF = IFE.NUM_IF
+                INNER JOIN RESGATE     RES ON RES.NUM_CONDICAO_IF = CIF.NUM_CONDICAO_IF
+            WHERE IFE.NUM_TIPO_IF = 49
+              AND TIT.COD_TIPO_ESCALONAMENTO IS NULL
+              AND RES.COD_COND_RESGATE = 'SEM TABELA'
+              AND IFE.DAT_EXCLUSAO IS NULL
+              AND CIF.DAT_EXCLUSAO IS NULL
+              AND RES.DAT_EXCLUSAO IS NULL
+        ),
+        EVENTOS_IF AS (
+            SELECT E.NUM_IF,
+                   MAX(CASE WHEN E.NUM_TIPO_EVENTO_LEGADO = 83 THEN 1 ELSE 0 END) QE83,
+                   MAX(CASE WHEN E.NUM_TIPO_EVENTO_LEGADO = 85 THEN 1 ELSE 0 END) QE85
+            FROM EVENTO E INNER JOIN FILTRO_BASE FB ON FB.NUM_IF = E.NUM_IF
+            GROUP BY E.NUM_IF
+        ),
+        FLAGS_IF AS (
+            SELECT C.NUM_IF,
+                   MAX(CASE WHEN C.COD_TIPO_CONDICAO_IF =  1 THEN 1 ELSE 0 END) QC01,
+                   MAX(CASE WHEN C.COD_TIPO_CONDICAO_IF =  2 THEN 1 ELSE 0 END) QC02,
+                   MAX(CASE WHEN C.COD_TIPO_CONDICAO_IF =  3 THEN 1 ELSE 0 END) QC03,
+                   MAX(CASE WHEN C.COD_TIPO_CONDICAO_IF =  4 THEN 1 ELSE 0 END) QC04,
+                   MAX(CASE WHEN C.COD_TIPO_CONDICAO_IF =  5 THEN 1 ELSE 0 END) QC05,
+                   MAX(CASE WHEN C.COD_TIPO_CONDICAO_IF = 14 THEN 1 ELSE 0 END) QC14,
+                   MAX(CASE WHEN JFL.NUM_CONDICAO_IF IS NOT NULL THEN 1 ELSE 0 END) QJFL,
+                   MAX(CASE WHEN JFI.NUM_CONDICAO_IF IS NOT NULL THEN 1 ELSE 0 END) QJFI
+            FROM CONDICAO_IF C
+                INNER JOIN FILTRO_BASE FB ON FB.NUM_IF = C.NUM_IF
+                LEFT JOIN JUROS_FLUTUANTE JFL ON JFL.NUM_CONDICAO_IF = C.NUM_CONDICAO_IF
+                LEFT JOIN JUROS_FIXO      JFI ON JFI.NUM_CONDICAO_IF = C.NUM_CONDICAO_IF
+            WHERE C.DAT_EXCLUSAO IS NULL AND C.COD_TIPO_CONDICAO_IF <> 20
+            GROUP BY C.NUM_IF
+        )
+        SELECT DISTINCT NUM_IF FROM FLAGS_IF
 
-    Notas de fidelidade (decisões conscientes, não simplificações):
-      * RESGATE é condição POR CONDICAO_IF: left join + (cod = 'SEM TABELA'
-        OR cod IS NULL). Condição sem resgate passa (NULL do left join);
-        condição com >= 1 resgate de código 'SEM TABELA' ou NULL passa.
-        Comparação EXATA e SEM filtro de DAT_EXCLUSAO, como na query — de
-        propósito DIFERENTE de FILTROS_FONTE["RESGATE"] (ieq + DAT_EXCLUSAO
-        nulo), que decide quais linhas de RESGATE entram no CLONE, não quem
-        pertence ao domínio de amostragem.
-      * JUROS_FLUTUANTE: LEFT JOIN sem predicado no WHERE não restringe o
-        conjunto DISTINCT de NUM_IF — omitido. Se a query ganhar predicado
-        de jfl, replique aqui.
-      * Coluna/tabela ausente no raw ABORTA (erro do Spark): o domínio do
-        produto não pode ser aproximado em silêncio.
+    Nota: EVENTOS_IF é declarada na query oficial mas NÃO é referenciada pelo
+    SELECT final — o Spark não materializa CTE não referenciada. Mantida idêntica
+    à oficial. O domínio efetivo = FILTRO_BASE ∩ instrumentos com CONDICAO_IF
+    ativa de tipo <> 20.
     """
-    # ife: NUM_TIPO_IF = 49 AND DAT_EXCLUSAO IS NULL
-    dom = (read_parquet(spark, raw_path(config, TABELA_RAIZ))
-           .where((F.col(FILTRO_TIPO_IF_COLUMN) == F.lit(FILTRO_TIPO_IF_VALUE))
-                  & F.col("DAT_EXCLUSAO").isNull())
-           .select(COL_NUM_IF))
-
-    # INNER JOIN TITULO ... AND tit.COD_TIPO_ESCALONAMENTO IS NULL
-    tit = (read_parquet(spark, raw_path(config, "TITULO"))
-           .where(F.col("COD_TIPO_ESCALONAMENTO").isNull())
-           .select(COL_NUM_IF))
-    dom = dom.join(tit, on=COL_NUM_IF, how="left_semi")
-
-    # INNER JOIN CREDITO (sem predicado adicional no WHERE)
-    cre = read_parquet(spark, raw_path(config, "CREDITO")).select(COL_NUM_IF)
-    dom = dom.join(cre, on=COL_NUM_IF, how="left_semi")
-
-    # INNER JOIN EVENTO ... AND eve.DAT_EXCLUSAO IS NULL
-    eve = (read_parquet(spark, raw_path(config, "EVENTO"))
-           .where(F.col("DAT_EXCLUSAO").isNull())
-           .select(COL_NUM_IF))
-    dom = dom.join(eve, on=COL_NUM_IF, how="left_semi")
-
-    # INNER JOIN CONDICAO_IF (cif.DAT_EXCLUSAO IS NULL)
-    # LEFT JOIN RESGATE ON cif.NUM_CONDICAO_IF = res.NUM_CONDICAO_IF
-    # WHERE (res.COD_COND_RESGATE = 'SEM TABELA' OR res.COD_COND_RESGATE IS NULL)
-    cif = (read_parquet(spark, raw_path(config, "CONDICAO_IF"))
-           .where(F.col("DAT_EXCLUSAO").isNull())
-           .select(COL_NUM_IF, "NUM_CONDICAO_IF"))
-    res = (read_parquet(spark, raw_path(config, "RESGATE"))
-           .select("NUM_CONDICAO_IF", "COD_COND_RESGATE"))
-    cif_ok = (cif.join(res, on="NUM_CONDICAO_IF", how="left")
-              .where((F.col("COD_COND_RESGATE") == F.lit("SEM TABELA"))
-                     | F.col("COD_COND_RESGATE").isNull())
-              .select(COL_NUM_IF))
-    dom = dom.join(cif_ok, on=COL_NUM_IF, how="left_semi")
-
-    # SELECT DISTINCT ife.NUM_IF — os semi joins preservam as linhas de ife
-    # (PK NUM_IF já única); o dropDuplicates é cinto e suspensório.
-    return dom.dropDuplicates([COL_NUM_IF])
+    p_ife = raw_path(config, TABELA_RAIZ)
+    p_tit = raw_path(config, "TITULO")
+    p_cif = raw_path(config, "CONDICAO_IF")
+    p_res = raw_path(config, "RESGATE")
+    p_eve = raw_path(config, "EVENTO")
+    p_jfl = raw_path(config, "JUROS_FLUTUANTE")
+    p_jfi = raw_path(config, "JUROS_FIXO")
+    sql = f"""
+    WITH FILTRO_BASE AS (
+        SELECT DISTINCT IFE.NUM_IF
+        FROM parquet.`{p_ife}` IFE
+            INNER JOIN parquet.`{p_tit}` TIT ON TIT.NUM_IF = IFE.NUM_IF
+            INNER JOIN parquet.`{p_cif}` CIF ON CIF.NUM_IF = IFE.NUM_IF
+            INNER JOIN parquet.`{p_res}` RES ON RES.NUM_CONDICAO_IF = CIF.NUM_CONDICAO_IF
+        WHERE IFE.NUM_TIPO_IF = 49
+            AND TIT.COD_TIPO_ESCALONAMENTO IS NULL
+            AND RES.COD_COND_RESGATE = 'SEM TABELA'
+            AND IFE.DAT_EXCLUSAO IS NULL
+            AND CIF.DAT_EXCLUSAO IS NULL
+            AND RES.DAT_EXCLUSAO IS NULL
+    ),
+    EVENTOS_IF AS (
+        SELECT E.NUM_IF,
+               MAX(CASE WHEN E.NUM_TIPO_EVENTO_LEGADO = 83 THEN 1 ELSE 0 END) QE83,
+               MAX(CASE WHEN E.NUM_TIPO_EVENTO_LEGADO = 85 THEN 1 ELSE 0 END) QE85
+        FROM parquet.`{p_eve}` E
+            INNER JOIN FILTRO_BASE FB ON FB.NUM_IF = E.NUM_IF
+        GROUP BY E.NUM_IF
+    ),
+    FLAGS_IF AS (
+        SELECT C.NUM_IF,
+               MAX(CASE WHEN C.COD_TIPO_CONDICAO_IF =  1 THEN 1 ELSE 0 END) QC01,
+               MAX(CASE WHEN C.COD_TIPO_CONDICAO_IF =  2 THEN 1 ELSE 0 END) QC02,
+               MAX(CASE WHEN C.COD_TIPO_CONDICAO_IF =  3 THEN 1 ELSE 0 END) QC03,
+               MAX(CASE WHEN C.COD_TIPO_CONDICAO_IF =  4 THEN 1 ELSE 0 END) QC04,
+               MAX(CASE WHEN C.COD_TIPO_CONDICAO_IF =  5 THEN 1 ELSE 0 END) QC05,
+               MAX(CASE WHEN C.COD_TIPO_CONDICAO_IF = 14 THEN 1 ELSE 0 END) QC14,
+               MAX(CASE WHEN JFL.NUM_CONDICAO_IF IS NOT NULL THEN 1 ELSE 0 END) QJFL,
+               MAX(CASE WHEN JFI.NUM_CONDICAO_IF IS NOT NULL THEN 1 ELSE 0 END) QJFI
+        FROM parquet.`{p_cif}` C
+            INNER JOIN FILTRO_BASE FB ON FB.NUM_IF = C.NUM_IF
+            LEFT JOIN parquet.`{p_jfl}` JFL ON JFL.NUM_CONDICAO_IF = C.NUM_CONDICAO_IF
+            LEFT JOIN parquet.`{p_jfi}` JFI ON JFI.NUM_CONDICAO_IF = C.NUM_CONDICAO_IF
+        WHERE C.DAT_EXCLUSAO IS NULL
+            AND C.COD_TIPO_CONDICAO_IF <> 20
+        GROUP BY C.NUM_IF
+    )
+    SELECT DISTINCT NUM_IF FROM FLAGS_IF
+    """
+    return spark.sql(sql)
 
 
 def seleciona_instrumentos(spark, config, num_ifs: Optional[List[int]],
