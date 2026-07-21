@@ -646,77 +646,141 @@ def check_domain(tables: Dict[str, DataFrame], meta: Metadata, sample: int) -> L
 # ---------------------------------------------------------------------------
 # Category 3 - Referential integrity
 # ---------------------------------------------------------------------------
-def _parent_keys(
-    spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame],
-    fk: ForeignKey, validate_against: str, max_parent_keys: int,
-) -> Tuple[Optional[DataFrame], Optional[str]]:
-    """Return (distinct parent-key DF aliased k0..kn, note). None DF => cannot resolve."""
-    pdf = tables.get(fk.parent_table)
-    if pdf is not None:
-        sel = []
-        for i, pc in enumerate(fk.parent_cols):
-            actual = resolve(pdf, pc)
-            if not actual:
-                return None, f"parent col {pc} missing in synthetic {fk.parent_table}"
-            sel.append(F.col(actual).cast("string").alias(f"k{i}"))
-        return pdf.select(*sel).dropna().dropDuplicates(), None
+# Union strategy is INVERTED relative to earlier versions: instead of pulling
+# the parent's (possibly 100M+) distinct keys out of Oracle, we resolve what we
+# can against the synthetic output and push only the RESIDUAL orphan candidates
+# into Oracle as IN-list lookups. A clone-sized output has few distinct FK
+# values, so this is minutes instead of an hour, never trips a parent-size cap,
+# and correctly accepts FKs that point at production rows outside the cloned
+# set (e.g. a clone's NUM_IF_ORIGEM referencing a real production instrument).
+def _canon_key(value) -> str:
+    """Canonical string for a key value on either side of the comparison:
+    numeric-looking values lose trailing fractional zeros ('123.0000' -> '123')."""
+    import re
+    s = str(value).strip()
+    if re.fullmatch(r"-?\d+\.\d*0*", s):
+        s = s.rstrip("0").rstrip(".")
+    return s
 
-    if validate_against != "union" or not cfg.jdbc_url:
-        return None, f"parent {fk.parent_table} not in output (use --validate-against union)"
 
+def _sql_literal(value: str) -> str:
+    import re
+    if re.fullmatch(r"-?\d+(\.\d+)?", value):
+        return value
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _residual_in_oracle(
+    spark: SparkSession, cfg: Config, fk: ForeignKey, residual: List[tuple],
+    batch_size: int = 500,
+) -> set:
+    """Return the subset of residual key-tuples that DO exist in the Oracle parent."""
+    exists: set = set()
     cols = ", ".join(fk.parent_cols)
-    try:
-        cnt = _jdbc(spark, cfg,
-                    f"SELECT COUNT(*) n FROM (SELECT DISTINCT {cols} "
-                    f"FROM {cfg.schema}.{fk.parent_table})").collect()[0]["N"]
-        if cnt and int(cnt) > max_parent_keys:
-            return None, f"parent {fk.parent_table} has {cnt} distinct keys > --max-parent-keys"
-        q = f"SELECT DISTINCT {cols} FROM {cfg.schema}.{fk.parent_table}"
-        pk_df = _jdbc(spark, cfg, q)
-        sel = [F.col(pc).cast("string").alias(f"k{i}") for i, pc in enumerate(fk.parent_cols)]
-        return pk_df.select(*sel).dropna().dropDuplicates(), None
-    except Exception as exc:  # noqa: BLE001
-        return None, f"could not read parent {fk.parent_table} from Oracle: {exc}"
+    for i in range(0, len(residual), batch_size):
+        batch = residual[i:i + batch_size]
+        if len(fk.parent_cols) == 1:
+            lits = ", ".join(_sql_literal(t[0]) for t in batch)
+            pred = f"{fk.parent_cols[0]} IN ({lits})"
+        else:
+            tuples = ", ".join(
+                "(" + ", ".join(_sql_literal(v) for v in t) + ")" for t in batch
+            )
+            pred = f"({cols}) IN ({tuples})"
+        q = f"SELECT DISTINCT {cols} FROM {cfg.schema}.{fk.parent_table} WHERE {pred}"
+        for r in _jdbc(spark, cfg, q).collect():
+            exists.add(tuple(_canon_key(r[pc]) for pc in fk.parent_cols))
+    return exists
 
 
 def check_referential(
     spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame], meta: Metadata,
-    sample: int, validate_against: str, max_parent_keys: int,
+    sample: int, validate_against: str, max_residual_keys: int,
 ) -> List[Finding]:
+    def canon(col):
+        # Native-function version of _canon_key: numeric-looking values lose
+        # trailing fractional zeros; anything else passes through unchanged.
+        stripped = F.regexp_replace(
+            F.regexp_replace(col, r"(\.\d*?)0+$", "$1"), r"\.$", "")
+        return F.when(col.rlike(r"^-?\d+\.\d*0*$"), stripped).otherwise(col)
+
     out: List[Finding] = []
     for table, df in tables.items():
         for fk in meta.fks.get(table, []):
             child_actual = [resolve(df, c) for c in fk.child_cols]
             if any(a is None for a in child_actual):
                 continue  # FK columns not all present in the output
-            pkeys, note = _parent_keys(spark, cfg, tables, fk, validate_against, max_parent_keys)
-            if pkeys is None:
-                out.append(Finding(
-                    "3.fk_unresolved", "Referential integrity", SEV_WARN, table, False,
-                    column=",".join(fk.child_cols),
-                    hint="Parent key set unavailable; cannot verify this FK.",
-                    message=f"FK {table}.{list(fk.child_cols)} -> {fk.parent_table}: {note}",
-                ))
-                continue
 
             not_null_all = reduce(lambda a, b: a & b,
                                   [F.col(a).isNotNull() for a in child_actual])
             child_keys = df.where(not_null_all).select(
-                *[F.col(a).cast("string").alias(f"k{i}") for i, a in enumerate(child_actual)]
+                *[canon(F.col(a).cast("string")).alias(f"k{i}")
+                  for i, a in enumerate(child_actual)]
             ).dropDuplicates()
-            orphans = child_keys.join(
-                pkeys, [f"k{i}" for i in range(len(child_actual))], "left_anti")
-            c = orphans.count()
+
+            # Stage 1: resolve against the synthetic parent, when present.
+            pdf = tables.get(fk.parent_table)
+            residual_df = child_keys
+            if pdf is not None:
+                parent_actual = [resolve(pdf, pc) for pc in fk.parent_cols]
+                if all(parent_actual):
+                    pkeys = pdf.select(
+                        *[canon(F.col(a).cast("string")).alias(f"k{i}")
+                          for i, a in enumerate(parent_actual)]
+                    ).dropna().dropDuplicates()
+                    residual_df = child_keys.join(
+                        pkeys, [f"k{i}" for i in range(len(child_actual))], "left_anti")
+
+            residual = [tuple(r[f"k{i}"] for i in range(len(child_actual)))
+                        for r in residual_df.limit(max_residual_keys + 1).collect()]
+
+            # Stage 2: push the residual into Oracle (union mode).
+            note = ""
+            if residual and validate_against == "union" and cfg.jdbc_url:
+                if len(residual) > max_residual_keys:
+                    out.append(Finding(
+                        "3.fk_unresolved", "Referential integrity", SEV_WARN, table,
+                        False, column=",".join(fk.child_cols),
+                        hint="Raise --max-residual-keys or check this FK offline.",
+                        message=f"FK {table}.{list(fk.child_cols)} -> {fk.parent_table}: "
+                                f"more than {max_residual_keys} keys unresolved against "
+                                f"the synthetic output; Oracle lookup skipped.",
+                    ))
+                    continue
+                try:
+                    found = _residual_in_oracle(spark, cfg, fk, residual)
+                    residual = [t for t in residual if t not in found]
+                    note = " (checked against synthetic ∪ Oracle)"
+                except Exception as exc:  # noqa: BLE001
+                    out.append(Finding(
+                        "3.fk_unresolved", "Referential integrity", SEV_WARN, table,
+                        False, column=",".join(fk.child_cols),
+                        hint="Oracle residual lookup failed; FK not fully verified.",
+                        message=f"FK {table}.{list(fk.child_cols)} -> {fk.parent_table}: "
+                                f"{exc}",
+                    ))
+                    continue
+            elif residual and pdf is None:
+                out.append(Finding(
+                    "3.fk_unresolved", "Referential integrity", SEV_WARN, table, False,
+                    column=",".join(fk.child_cols),
+                    hint="Parent absent from output and no Oracle connection "
+                         "(use --validate-against union).",
+                    message=f"FK {table}.{list(fk.child_cols)} -> {fk.parent_table}: "
+                            f"{len(residual)} key(s) unverifiable.",
+                ))
+                continue
+
+            c = len(residual)
             out.append(Finding(
                 "3.fk_orphan", "Referential integrity",
                 SEV_ERROR if c else SEV_INFO, table, c == 0, count=c,
                 column=",".join(fk.child_cols),
-                sample=_sample_keys(
-                    orphans, [f"k{i}" for i in range(len(child_actual))], sample),
-                hint="Orphan FK: child value not present in parent. Check FK remap / fecho / "
-                     "null_orphan_fks for this edge.",
+                sample=[t[0] if len(t) == 1 else list(t) for t in residual[:sample]],
+                hint="Orphan FK: child value not present in the synthetic output nor in "
+                     "the target Oracle. Check FK remap / fecho / null_orphan_fks.",
                 message=f"FK {table}.{list(fk.child_cols)} -> "
-                        f"{fk.parent_table}.{list(fk.parent_cols)}",
+                        f"{fk.parent_table}.{list(fk.parent_cols)}{note}",
             ))
 
             # Shared-key 1:1 cardinality (PK == FK).
@@ -1240,9 +1304,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--validate-against", default="union", choices=["synthetic", "union"],
                    help="Resolve FK parents only within the synthetic output, "
                         "or also against Oracle.")
-    p.add_argument("--max-parent-keys", type=int, default=5_000_000,
-                   help="Skip a union FK check if the Oracle parent has more distinct "
-                        "keys than this.")
+    p.add_argument("--max-residual-keys", type=int, default=100_000,
+                   help="Max distinct child keys left unresolved by the synthetic output "
+                        "that will be looked up in Oracle via IN-lists; above this the "
+                        "FK is reported unresolved (WARN).")
+    p.add_argument("--max-parent-keys", type=int, default=None,
+                   help="Deprecated (parent key sets are no longer downloaded); ignored.")
     p.add_argument("--skip-check", action="append", default=[],
                    help="Check-id prefix(es) to skip (repeatable), e.g. 6.combo.")
     p.add_argument("--no-oracle", action="store_true",
@@ -1276,8 +1343,11 @@ def main() -> None:
     if not args.no_oracle:
         findings += verify_subtype_map_against_production(spark, cfg)
     findings += check_domain(tables, meta, args.sample_size)
+    if args.max_parent_keys is not None:
+        logger.warning("--max-parent-keys is deprecated and ignored; "
+                       "see --max-residual-keys.")
     findings += check_referential(spark, cfg, tables, meta, args.sample_size,
-                                  args.validate_against, args.max_parent_keys)
+                                  args.validate_against, args.max_residual_keys)
     findings += check_not_null(tables, meta, args.sample_size)
     findings += check_dates(tables, meta, args.sample_size)
     findings += check_lookup_combos(spark, cfg, tables, meta, args.sample_size)
