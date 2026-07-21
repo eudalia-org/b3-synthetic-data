@@ -345,7 +345,11 @@ def read_synthetic_tables(
     for name in names:
         path = f"{base}/{name}"
         try:
-            tables[name.upper()] = spark.read.parquet(path)
+            # The run fires hundreds of independent actions over these tables
+            # (one count per NOT NULL column, per FK, per shape metric); caching
+            # them (memory+disk) avoids re-reading the Parquet from Object
+            # Storage on every action.
+            tables[name.upper()] = spark.read.parquet(path).cache()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Skipping %s (cannot read %s): %s", name, path, exc)
     logger.info("Read %d synthetic table(s): %s", len(tables), ", ".join(sorted(tables)))
