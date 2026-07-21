@@ -85,15 +85,18 @@ class Metric:
                           the (active) CONDICAO_IF rows of the universe;
          "OPERACAO"    -> table keys on NUM_ID_OPERACAO, resolve through the
                           OPERACAO rows of the universe.
+    where: optional (column, normalized value) equality filter applied to the
+         table's rows before counting (e.g. EVENTO by NUM_TIPO_EVENTO_LEGADO).
     """
 
     name: str
     table: str
     via: Optional[str] = None
+    where: Optional[tuple] = None
 
 
-# Order defines the shape-signature order. Names are the table names so the
-# report needs no legend.
+# Order defines the shape-signature order. Names are the table names (or
+# TABLE_QUALIFIER for filtered metrics) so the report needs no legend.
 METRICS: List[Metric] = [
     Metric("TITULO", "TITULO"),
     Metric("CREDITO", "CREDITO"),
@@ -101,7 +104,16 @@ METRICS: List[Metric] = [
     Metric("RESGATE", "RESGATE", via="CONDICAO_IF"),
     Metric("JUROS_FLUTUANTE", "JUROS_FLUTUANTE", via="CONDICAO_IF"),
     Metric("JUROS_FIXO", "JUROS_FIXO", via="CONDICAO_IF"),
+    Metric("ATUALIZACAO_POS", "ATUALIZACAO_POS", via="CONDICAO_IF"),
+    Metric("ATUALIZACAO_PRE", "ATUALIZACAO_PRE", via="CONDICAO_IF"),
+    Metric("SPREAD", "SPREAD", via="CONDICAO_IF"),
     Metric("EVENTO", "EVENTO"),
+    # Every domain IF has an evento tipo 85 and ~96% also a tipo 83 (team
+    # proportions query, 2026-07-21); the cetip.out registration inserts
+    # exactly one of each. Counted separately so a generator emitting two
+    # same-tipo eventos cannot pass as "EVENTO=2".
+    Metric("EVENTO_TIPO83", "EVENTO", where=("NUM_TIPO_EVENTO_LEGADO", "83")),
+    Metric("EVENTO_TIPO85", "EVENTO", where=("NUM_TIPO_EVENTO_LEGADO", "85")),
     Metric("OPERACAO", "OPERACAO"),
     Metric("DADO_OPERACAO", "DADO_OPERACAO", via="OPERACAO"),
     Metric("LANCAMENTO", "LANCAMENTO", via="OPERACAO"),
@@ -118,7 +130,12 @@ REFERENCE_SHAPE: Dict[str, int] = {
     "RESGATE": 1,
     "JUROS_FLUTUANTE": 1,
     "JUROS_FIXO": 0,
+    "ATUALIZACAO_POS": 0,
+    "ATUALIZACAO_PRE": 0,
+    "SPREAD": 0,
     "EVENTO": 2,
+    "EVENTO_TIPO83": 1,
+    "EVENTO_TIPO85": 1,
     "OPERACAO": 1,
     "DADO_OPERACAO": 2,
     "LANCAMENTO": 1,
@@ -151,6 +168,7 @@ AUDITS = [
     ("RESGATE", "COD_COND_RESGATE", "upper_trim"),
     ("TITULO", "COD_TIPO_ESCALONAMENTO", "raw"),
     ("CONDICAO_IF", "COD_TIPO_CONDICAO_IF", "code"),
+    ("EVENTO", "NUM_TIPO_EVENTO_LEGADO", "code"),
 ]
 
 MARGINAL_CAP = 5  # per-IF counts above this are bucketed as "5+"
@@ -229,7 +247,46 @@ def _norm_code(col):
 # ---------------------------------------------------------------------------
 # Profile construction (pure DataFrame logic; testable without IO)
 # ---------------------------------------------------------------------------
-def build_universe(tables: Dict[str, DataFrame], notes: List[str]) -> DataFrame:
+def build_domain_keys(tables: Dict[str, DataFrame], notes: List[str]) -> DataFrame:
+    """IF-level product domain (team FILTRO_BASE query, 2026-07-21): IFs whose
+    TITULO has no escalonamento AND that have >=1 active CONDICAO_IF with an
+    active RESGATE 'SEM TABELA'. Root predicates (tipo 49, active) are applied
+    by build_universe; this adds the exists-semi-joins."""
+    for t in ("TITULO", "CONDICAO_IF", "RESGATE"):
+        if t not in tables:
+            raise SystemExit(f"--universe domain requires table {t} in the input.")
+    tit = tables["TITULO"]
+    esc = _ci(tit, "COD_TIPO_ESCALONAMENTO")
+    tit_ok = tit.where(F.col(esc).isNull()) if esc else tit
+    tit_keys = tit_ok.select(F.col(_ci(tit, ROOT_KEY)).cast("long").alias(ROOT_KEY))
+
+    cif = active_rows(tables["CONDICAO_IF"], notes, "CONDICAO_IF")
+    res = active_rows(tables["RESGATE"], notes, "RESGATE")
+    res_col = _ci(res, "COD_COND_RESGATE")
+    res_ok = res.where(F.upper(F.trim(F.col(res_col).cast("string"))) == "SEM TABELA")
+    res_keys = res_ok.select(
+        F.col(_ci(res, CONDICAO_IF_KEY)).cast("long").alias(CONDICAO_IF_KEY)
+    )
+    cif_with_res = (
+        cif.select(
+            F.col(_ci(cif, CONDICAO_IF_KEY)).cast("long").alias(CONDICAO_IF_KEY),
+            F.col(_ci(cif, ROOT_KEY)).cast("long").alias(ROOT_KEY),
+        )
+        .join(res_keys, CONDICAO_IF_KEY, "leftsemi")
+        .select(ROOT_KEY)
+    )
+    notes.append(
+        "universe=domain: exists(active CONDICAO_IF with active RESGATE 'SEM TABELA') "
+        "AND TITULO.COD_TIPO_ESCALONAMENTO IS NULL"
+    )
+    return tit_keys.join(cif_with_res, ROOT_KEY, "leftsemi").dropDuplicates()
+
+
+def build_universe(
+    tables: Dict[str, DataFrame],
+    notes: List[str],
+    universe_keys: Optional[DataFrame] = None,
+) -> DataFrame:
     root = tables.get(ROOT_TABLE)
     if root is None:
         raise SystemExit(f"{ROOT_TABLE} is required and was not readable.")
@@ -239,7 +296,11 @@ def build_universe(tables: Dict[str, DataFrame], notes: List[str]) -> DataFrame:
         raise SystemExit(f"{ROOT_TABLE} lacks NUM_TIPO_IF/{ROOT_KEY}.")
     df = root.where(F.col(tipo).cast("long") == CDB_TIPO_IF)
     df = active_rows(df, notes, ROOT_TABLE)
-    return df.select(F.col(key).cast("long").alias(ROOT_KEY)).dropDuplicates()
+    universe = df.select(F.col(key).cast("long").alias(ROOT_KEY)).dropDuplicates()
+    if universe_keys is not None:
+        universe = universe.join(universe_keys, ROOT_KEY, "leftsemi")
+        notes.append("universe restricted to --universe-keys")
+    return universe
 
 
 def _keyed_by_num_if(
@@ -250,6 +311,13 @@ def _keyed_by_num_if(
     if df is None:
         return None
     df = active_rows(df, notes, metric.table)
+
+    if metric.where is not None:
+        wcol_name, wval = metric.where
+        wcol = _ci(df, wcol_name)
+        if not wcol:
+            return None  # filter column absent -> metric skipped, not miscounted
+        df = df.where(_norm_code(F.col(wcol)) == wval)
 
     if metric.via is None:
         key = _ci(df, ROOT_KEY)
@@ -538,7 +606,11 @@ def apply_filtros_fonte(
 
 
 def build_profile(
-    tables: Dict[str, DataFrame], sample_size: int = 10, apply_filtros: bool = False
+    tables: Dict[str, DataFrame],
+    sample_size: int = 10,
+    apply_filtros: bool = False,
+    universe_keys: Optional[DataFrame] = None,
+    universe_mode: str = "all",
 ) -> dict:
     """Full profile over an in-memory dict of DataFrames. Pure of IO."""
     notes: List[str] = []
@@ -546,7 +618,13 @@ def build_profile(
     if apply_filtros:
         tables = apply_filtros_fonte(tables, notes)
 
-    universe = build_universe(tables, notes)
+    if universe_mode == "domain":
+        domain = build_domain_keys(tables, notes)
+        universe_keys = (
+            domain if universe_keys is None
+            else universe_keys.join(domain, ROOT_KEY, "leftsemi")
+        )
+    universe = build_universe(tables, notes, universe_keys)
     counts, skipped = build_counts(universe, tables, notes)
     counts = add_simplificado_flag(counts, tables, notes)
     counts = counts.cache()
@@ -714,10 +792,16 @@ def _selftest_tables(spark: SparkSession) -> Dict[str, DataFrame]:
                       ["NUM_CONDICAO_IF", "COD_COND_RESGATE", "DAT_EXCLUSAO"]),
         "JUROS_FLUTUANTE": df([(12,)], ["NUM_CONDICAO_IF"]),
         "JUROS_FIXO": df([(13,)], ["NUM_CONDICAO_IF"]),
-        # 1002's event carries a NUM_CONDICAO_IF belonging to 1001 -> path mismatch.
+        "ATUALIZACAO_POS": spark.createDataFrame([], "NUM_CONDICAO_IF long"),
+        "ATUALIZACAO_PRE": spark.createDataFrame([], "NUM_CONDICAO_IF long"),
+        "SPREAD": df([(15,)], ["NUM_CONDICAO_IF"]),
+        # 1001: one tipo-83 + one tipo-85 event (as in the cetip.out registration).
+        # 1002's tipo-85 event carries a NUM_CONDICAO_IF belonging to 1001 -> path mismatch.
         "EVENTO": df(
-            [(91, 1001, 11, None), (92, 1001, 12, None), (93, 1002, 11, None)],
-            ["NUM_EVENTO", "NUM_IF", "NUM_CONDICAO_IF", "DAT_EXCLUSAO"],
+            [(91, 1001, 11, 83, None), (92, 1001, 12, 85, None),
+             (93, 1002, 11, 85, None)],
+            ["NUM_EVENTO", "NUM_IF", "NUM_CONDICAO_IF",
+             "NUM_TIPO_EVENTO_LEGADO", "DAT_EXCLUSAO"],
         ),
         "OPERACAO": df([(501, 1001)], ["NUM_ID_OPERACAO", "NUM_IF"]),
         "DADO_OPERACAO": df([(1, 501), (2, 501)],
@@ -755,6 +839,8 @@ def run_selftest(spark: SparkSession) -> None:
     assert s1002["CREDITO"] == 0 and s1002["CONDICAO_IF"] == 3, s1002
     assert s1002["JUROS_FIXO"] == 1 and s1002["JUROS_FLUTUANTE"] == 0, s1002
     assert s1002["EVENTO"] == 1, s1002
+    assert s1002["EVENTO_TIPO83"] == 0 and s1002["EVENTO_TIPO85"] == 1, s1002
+    assert s1002["SPREAD"] == 1 and s1002["ATUALIZACAO_POS"] == 0, s1002
     assert s1002["RESGATE"] == 1 and s1002["TITULO"] == 1, s1002
 
     s1003 = shape_of(profile, 1003)["counts"]
@@ -792,6 +878,22 @@ def run_selftest(spark: SparkSession) -> None:
         filtered["notes"]
     )
 
+    assert audit["EVENTO.NUM_TIPO_EVENTO_LEGADO"] == {"83": 1, "85": 2}, audit
+
+    # --universe-keys: restricting to 1001 keeps only the reference IF.
+    keys = spark.createDataFrame([(1001,)], "NUM_IF long")
+    restricted = build_profile(_selftest_tables(spark), sample_size=10, universe_keys=keys)
+    assert restricted["universe_size"] == 1, restricted["universe_size"]
+    assert restricted["reference_match"]["matching_ifs"] == 1
+    assert any("universe restricted" in n for n in restricted["notes"])
+
+    # --universe domain (FILTRO_BASE): only 1001 qualifies — 1002 has no
+    # 'SEM TABELA' resgate (and an escalonado titulo), 1003 has no condição.
+    domain = build_profile(_selftest_tables(spark), sample_size=10, universe_mode="domain")
+    assert domain["universe_size"] == 1, domain["universe_size"]
+    assert domain["reference_match"]["matching_ifs"] == 1
+    assert any("universe=domain" in n for n in domain["notes"])
+
     print("SELF-TEST PASSED: profiler verified against the built-in fixture.")
 
 
@@ -808,6 +910,18 @@ def parse_args() -> argparse.Namespace:
                    help="Pre-filter the source tables with engorda's FILTROS_FONTE row "
                         "predicates, so the profile is the engorda-input image (use as "
                         "the --compare-with baseline for the synthetic run).")
+    p.add_argument("--universe-keys", default=None,
+                   help="Parquet path/URI with the NUM_IFs to restrict the universe to "
+                        "(e.g. a clone run's MAPA_CLONE_NUM_IF) — builds a baseline over "
+                        "exactly the sampled source instruments.")
+    p.add_argument("--universe-keys-column", default="NUM_IF",
+                   help="Column holding the NUM_IF in --universe-keys "
+                        "(e.g. NUM_IF_ORIG for MAPA_CLONE_NUM_IF).")
+    p.add_argument("--universe", default="all", choices=["all", "domain"],
+                   help="'all' = every active CDB (NUM_TIPO_IF=49). 'domain' = the "
+                        "IF-level product domain: non-escalonado TITULO and >=1 active "
+                        "CONDICAO_IF with an active RESGATE 'SEM TABELA' (team "
+                        "FILTRO_BASE query). Composes with --universe-keys (intersection).")
     p.add_argument("--prefix", default="", help="Optional sub-prefix under the base URI.")
     p.add_argument("--label", default="dataset", help="Label for the report (e.g. raw/synthetic).")
     p.add_argument("--report-path", default=None, help="Write the JSON profile here.")
@@ -846,8 +960,31 @@ def main() -> None:
     tables = read_tables(spark, base, needed)
     logger.info("Read %d/%d tables from %s", len(tables), len(needed), base)
 
-    profile = build_profile(tables, args.sample_size, args.apply_filtros_fonte)
+    universe_keys = None
+    if args.universe_keys:
+        kdf = spark.read.parquet(args.universe_keys)
+        kcol = _ci(kdf, args.universe_keys_column)
+        if not kcol:
+            raise SystemExit(
+                f"--universe-keys {args.universe_keys} lacks column "
+                f"{args.universe_keys_column}"
+            )
+        universe_keys = (
+            kdf.select(F.col(kcol).cast("long").alias(ROOT_KEY)).dropDuplicates()
+        )
+        logger.info(
+            "Universe restricted to %d NUM_IF(s) from %s",
+            universe_keys.count(), args.universe_keys,
+        )
+
+    profile = build_profile(
+        tables, args.sample_size, args.apply_filtros_fonte, universe_keys,
+        args.universe,
+    )
     profile["label"] = args.label
+    profile["universe_mode"] = args.universe
+    if args.universe_keys:
+        profile["universe_keys_source"] = args.universe_keys
     profile["base_uri"] = base
     profile["generated_at"] = datetime.now().isoformat(timespec="seconds")
 

@@ -910,12 +910,25 @@ SHAPE_VIA: Dict[str, Tuple[str, str]] = {
     "RESGATE": ("CONDICAO_IF", "NUM_CONDICAO_IF"),
     "JUROS_FLUTUANTE": ("CONDICAO_IF", "NUM_CONDICAO_IF"),
     "JUROS_FIXO": ("CONDICAO_IF", "NUM_CONDICAO_IF"),
+    "ATUALIZACAO_POS": ("CONDICAO_IF", "NUM_CONDICAO_IF"),
+    "ATUALIZACAO_PRE": ("CONDICAO_IF", "NUM_CONDICAO_IF"),
+    "SPREAD": ("CONDICAO_IF", "NUM_CONDICAO_IF"),
     "DADO_OPERACAO": ("OPERACAO", "NUM_ID_OPERACAO"),
     "LANCAMENTO": ("OPERACAO", "NUM_ID_OPERACAO"),
 }
+# Filtered metrics: metric name -> (source table, filter column, normalized value).
+# Mirrors profile_cdb_shapes.py METRICS entries with a `where`; every domain IF
+# has an evento tipo 85 and ~96% a tipo 83, so counting them separately stops a
+# generator from passing "EVENTO=2" with two same-tipo eventos.
+SHAPE_FILTERED: Dict[str, Tuple[str, str, str]] = {
+    "EVENTO_TIPO83": ("EVENTO", "NUM_TIPO_EVENTO_LEGADO", "83"),
+    "EVENTO_TIPO85": ("EVENTO", "NUM_TIPO_EVENTO_LEGADO", "85"),
+}
 DEFAULT_SHAPE_METRICS: List[str] = [
     "TITULO", "CREDITO", "CONDICAO_IF", "RESGATE", "JUROS_FLUTUANTE", "JUROS_FIXO",
-    "EVENTO", "OPERACAO", "DADO_OPERACAO", "LANCAMENTO", "DEPOSITO_AUTOMATICO_IF",
+    "ATUALIZACAO_POS", "ATUALIZACAO_PRE", "SPREAD",
+    "EVENTO", "EVENTO_TIPO83", "EVENTO_TIPO85",
+    "OPERACAO", "DADO_OPERACAO", "LANCAMENTO", "DEPOSITO_AUTOMATICO_IF",
     "CARTEIRA_COMITENTE", "CARTEIRA_PARTICIPANTE",
 ]
 
@@ -942,10 +955,17 @@ def _shape_counts(
     """Left-join per-metric row counts onto the universe; returns (df, skipped)."""
     result, skipped = universe, []
     for name in metric_names:
-        df = tables.get(name)
+        source_table, wcol_name, wval = name, None, None
+        if name in SHAPE_FILTERED:
+            source_table, wcol_name, wval = SHAPE_FILTERED[name]
+        df = tables.get(source_table)
         keyed = None
         if df is not None:
             df = _shape_active(df)
+            if wcol_name is not None:
+                wcol = resolve(df, wcol_name)
+                df = df.where(_norm_code(F.col(wcol)) == wval) if wcol else None
+        if df is not None:
             if name in SHAPE_VIA:
                 bridge_table, bridge_key = SHAPE_VIA[name]
                 bridge = tables.get(bridge_table)
