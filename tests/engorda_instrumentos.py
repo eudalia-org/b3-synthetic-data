@@ -79,7 +79,21 @@ USO (OCI Data Flow — mesmas envs do engorda_tables.py):
       --data-engorda 2026-07-19     # data/hora do run (default: agora)
       --prazo-vencimento-dias 30    # DAT_VENCIMENTO = data + N (default: prazo original)
       --tratar-como-static TAB1,TAB2  # excluir tabela(s) da clonagem
+      --sem-poda-subtipo            # DESLIGA a poda do item 1 (dangling CONDICAO_IF)
+      --faltantes-arg 'CARTEIRA_COMITENTE.NUM_ID_ENTIDADE=343..;...'
+                                    # itens 3/4: poda NUM_IF que referenciam chave
+                                    #   inexistente no destino (QAB), sem Oracle
+      --faltantes-parquet oci://.../faltantes  # idem, TABELA/COLUNA/VALOR (listas grandes)
+      --anular-cols 'TAB.COL,COL2;...'  # item 2 (extra): colunas nullable a anular
       --specs oci://.../spec_config.json  # override de DATAGEN_SPECS_URI
+
+CORREÇÕES DE CARGA (saída carregável por construção — ver executa_clonagem):
+  1. CONDICAO_IF dangling (Cat 1): poda do domínio os NUM_IF cujo subtipo não
+     existe na origem; a amostragem repõe até fechar N (--sem-poda-subtipo desliga).
+  2. NUM_ID_TRANSF_ARQ_P1/P2 órfãos: anulados nos clones de OPERACAO (nullable) —
+     ver NULIFICA_COLS_POR_TABELA / --anular-cols.
+  3/4. Comitente/conta inexistentes no destino: poda do domínio os NUM_IF que os
+     referenciam, via --faltantes-arg/--faltantes-parquet (sem conexão Oracle).
 
 Em notebook: from clona_instrumentos import executa_clonagem (ver main()).
 
@@ -148,6 +162,44 @@ FILTROS_FONTE: dict[str, list[tuple[str, str, object]]] = {
     "CARTEIRA_PARTICIPANTE": [
         ("QTD_CARTEIRA_PARTICIPANTE", ">", 0),
     ],
+}
+
+# ---------------------------------------------------------------------------
+# Poda de domínio (itens 1, 3 e 4) — instrumentos que o clone NÃO conseguiria
+# deixar carregável são removidos do domínio ANTES da amostragem. A amostragem
+# de N sorteia do domínio JÁ PODADO, então a contagem final continua N (cada
+# instrumento podado é reposto por outra amostra válida — não sobra "buraco").
+#
+# Item 1 — polimorfismo CONDICAO_IF. COD_TIPO_CONDICAO_IF -> tabela-subtipo
+# física (joined-subclass do Hibernate), igual ao SUBTYPE_BY_TIPO do
+# validate_cdb_simplificado.py. Uma CONDICAO_IF ativa SEM a linha na sua
+# tabela-subtipo fica "dangling": o Hibernate não consegue tipar a classe e o
+# batch estoura ClassCastException (Cat 1 do validador). Como NUM_CONDICAO_IF é
+# a PK de CONDICAO_IF (globalmente única), uma chave só pode viver na
+# tabela-subtipo do seu próprio tipo — basta checar presença na UNIÃO das
+# fontes-subtipo clonáveis (lidas com o MESMO _read_source do clone, então a
+# checagem enxerga exatamente o que o clone produziria: p.ex. RESGATE só conta
+# com COD_COND_RESGATE='SEM TABELA').
+# ---------------------------------------------------------------------------
+CONDICAO_IF_TABLE = "CONDICAO_IF"
+CONDICAO_IF_PK = "NUM_CONDICAO_IF"
+CONDICAO_IF_TIPO_COL = "COD_TIPO_CONDICAO_IF"
+SUBTYPE_BY_TIPO: dict[str, str] = {
+    "1": "AMORTIZACAO", "2": "JUROS_FIXO", "3": "JUROS_FLUTUANTE",
+    "4": "ATUALIZACAO_POS", "5": "SPREAD", "6": "PARTICIPACAO_LUCROS",
+    "7": "PREMIO", "14": "ATUALIZACAO_PRE", "15": "PREMIO_OPCAO",
+    "16": "TERMO", "17": "PARAMETRO_LIMITE", "20": "RESGATE",
+    "21": "PREMIO_CONTRATO", "22": "OPCAO", "23": "RESET", "24": "DESDOBRAMENTO",
+}
+
+# Item 2 — colunas nullable ANULADAS nos clones por serem drift entre o snapshot
+# de origem e o destino (QAB): NUM_ID_TRANSF_ARQ_P1/P2 de OPERACAO apontam para
+# TRANSFERENCIA_ARQUIVO inexistentes no destino. Como são nullable (não estão em
+# not_null_cols), anular remove o órfão de FK sem perder a operação — a maioria
+# das operações já as tem nulas. Declarativo {TABELA: (col, ...)}; --anular-cols
+# acrescenta entradas em tempo de execução.
+NULIFICA_COLS_POR_TABELA: dict[str, tuple[str, ...]] = {
+    "OPERACAO": ("NUM_ID_TRANSF_ARQ_P1", "NUM_ID_TRANSF_ARQ_P2"),
 }
 
 # ---------------------------------------------------------------------------
@@ -765,10 +817,10 @@ def _dominio_num_if_produto(spark, config) -> DataFrame:
 
         WITH FILTRO_BASE AS (
             SELECT DISTINCT IFE.NUM_IF
-            FROM INSTRUMENTO_FINANCEIRO IFE
-                INNER JOIN TITULO      TIT ON TIT.NUM_IF = IFE.NUM_IF
-                INNER JOIN CONDICAO_IF CIF ON CIF.NUM_IF = IFE.NUM_IF
-                INNER JOIN RESGATE     RES ON RES.NUM_CONDICAO_IF = CIF.NUM_CONDICAO_IF
+            FROM CETIP.INSTRUMENTO_FINANCEIRO IFE
+                INNER JOIN CETIP.TITULO      TIT ON TIT.NUM_IF = IFE.NUM_IF
+                INNER JOIN CETIP.CONDICAO_IF CIF ON CIF.NUM_IF = IFE.NUM_IF
+                INNER JOIN CETIP.RESGATE     RES ON RES.NUM_CONDICAO_IF = CIF.NUM_CONDICAO_IF
             WHERE IFE.NUM_TIPO_IF = 49
               AND TIT.COD_TIPO_ESCALONAMENTO IS NULL
               AND RES.COD_COND_RESGATE = 'SEM TABELA'
@@ -780,7 +832,7 @@ def _dominio_num_if_produto(spark, config) -> DataFrame:
             SELECT E.NUM_IF,
                    MAX(CASE WHEN E.NUM_TIPO_EVENTO_LEGADO = 83 THEN 1 ELSE 0 END) QE83,
                    MAX(CASE WHEN E.NUM_TIPO_EVENTO_LEGADO = 85 THEN 1 ELSE 0 END) QE85
-            FROM EVENTO E INNER JOIN FILTRO_BASE FB ON FB.NUM_IF = E.NUM_IF
+            FROM CETIP.EVENTO E INNER JOIN FILTRO_BASE FB ON FB.NUM_IF = E.NUM_IF
             GROUP BY E.NUM_IF
         ),
         FLAGS_IF AS (
@@ -793,19 +845,50 @@ def _dominio_num_if_produto(spark, config) -> DataFrame:
                    MAX(CASE WHEN C.COD_TIPO_CONDICAO_IF = 14 THEN 1 ELSE 0 END) QC14,
                    MAX(CASE WHEN JFL.NUM_CONDICAO_IF IS NOT NULL THEN 1 ELSE 0 END) QJFL,
                    MAX(CASE WHEN JFI.NUM_CONDICAO_IF IS NOT NULL THEN 1 ELSE 0 END) QJFI
-            FROM CONDICAO_IF C
+            FROM CETIP.CONDICAO_IF C
                 INNER JOIN FILTRO_BASE FB ON FB.NUM_IF = C.NUM_IF
-                LEFT JOIN JUROS_FLUTUANTE JFL ON JFL.NUM_CONDICAO_IF = C.NUM_CONDICAO_IF
-                LEFT JOIN JUROS_FIXO      JFI ON JFI.NUM_CONDICAO_IF = C.NUM_CONDICAO_IF
+                LEFT JOIN CETIP.JUROS_FLUTUANTE JFL ON JFL.NUM_CONDICAO_IF = C.NUM_CONDICAO_IF
+                LEFT JOIN CETIP.JUROS_FIXO      JFI ON JFI.NUM_CONDICAO_IF = C.NUM_CONDICAO_IF
             WHERE C.DAT_EXCLUSAO IS NULL AND C.COD_TIPO_CONDICAO_IF <> 20
             GROUP BY C.NUM_IF
+        ),
+        AGREGADO_BASE AS (
+            SELECT COUNT(*) QTDE_BASE FROM FILTRO_BASE
+        ),
+        AGREGADO_FLAGS AS (
+            SELECT SUM(NVL(F.QC01,0)) QC01, SUM(NVL(F.QC02,0)) QC02,
+                   SUM(NVL(F.QC03,0)) QC03, SUM(NVL(F.QC04,0)) QC04,
+                   SUM(NVL(F.QC05,0)) QC05, SUM(NVL(F.QC14,0)) QC14,
+                   SUM(NVL(F.QJFL,0)) QJFL, SUM(NVL(F.QJFI,0)) QJFI,
+                   SUM(NVL(E.QE83,0)) QE83, SUM(NVL(E.QE85,0)) QE85
+            FROM FILTRO_BASE FB
+                LEFT JOIN FLAGS_IF   F ON F.NUM_IF = FB.NUM_IF
+                LEFT JOIN EVENTOS_IF E ON E.NUM_IF = FB.NUM_IF
+        ),
+        DEP_IF AS (
+            SELECT COUNT(DISTINCT DP.NUM_IF) QDEP
+            FROM CETIP.DEPOSITO_AUTOMATICO_IF DP
+                JOIN FILTRO_BASE FB ON FB.NUM_IF = DP.NUM_IF
+        ),
+        COM_IF AS (
+            SELECT COUNT(DISTINCT CM.NUM_IF) QCOM
+            FROM CETIP.CARTEIRA_COMITENTE CM
+                JOIN FILTRO_BASE FB ON FB.NUM_IF = CM.NUM_IF
+            WHERE CM.QTD_CARTEIRA_COMITENTE > 0
+        ),
+        CPA_IF AS (
+            SELECT COUNT(DISTINCT CP.NUM_IF) QCPA
+            FROM CETIP.CARTEIRA_PARTICIPANTE CP
+                JOIN FILTRO_BASE FB ON FB.NUM_IF = CP.NUM_IF
+            WHERE CP.QTD_CARTEIRA_PARTICIPANTE > 0
         )
         SELECT DISTINCT NUM_IF FROM FLAGS_IF
 
-    Nota: EVENTOS_IF é declarada na query oficial mas NÃO é referenciada pelo
-    SELECT final — o Spark não materializa CTE não referenciada. Mantida idêntica
-    à oficial. O domínio efetivo = FILTRO_BASE ∩ instrumentos com CONDICAO_IF
-    ativa de tipo <> 20.
+    Nota: EVENTOS_IF, AGREGADO_BASE, AGREGADO_FLAGS, DEP_IF, COM_IF e CPA_IF são
+    declaradas na query oficial mas NÃO são referenciadas pelo SELECT final — o
+    Spark não materializa CTE não referenciada. Mantidas idênticas à oficial (só
+    CETIP.<TAB> vira parquet.`<path>`). O domínio efetivo permanece
+    FILTRO_BASE ∩ instrumentos com CONDICAO_IF ativa de tipo <> 20.
     """
     p_ife = raw_path(config, TABELA_RAIZ)
     p_tit = raw_path(config, "TITULO")
@@ -814,6 +897,9 @@ def _dominio_num_if_produto(spark, config) -> DataFrame:
     p_eve = raw_path(config, "EVENTO")
     p_jfl = raw_path(config, "JUROS_FLUTUANTE")
     p_jfi = raw_path(config, "JUROS_FIXO")
+    p_dep = raw_path(config, "DEPOSITO_AUTOMATICO_IF")
+    p_com = raw_path(config, "CARTEIRA_COMITENTE")
+    p_cpa = raw_path(config, "CARTEIRA_PARTICIPANTE")
     sql = f"""
     WITH FILTRO_BASE AS (
         SELECT DISTINCT IFE.NUM_IF
@@ -853,45 +939,290 @@ def _dominio_num_if_produto(spark, config) -> DataFrame:
         WHERE C.DAT_EXCLUSAO IS NULL
             AND C.COD_TIPO_CONDICAO_IF <> 20
         GROUP BY C.NUM_IF
+    ),
+    AGREGADO_BASE AS (
+        SELECT COUNT(*) QTDE_BASE FROM FILTRO_BASE
+    ),
+    AGREGADO_FLAGS AS (
+        SELECT SUM(NVL(F.QC01,0)) QC01, SUM(NVL(F.QC02,0)) QC02,
+               SUM(NVL(F.QC03,0)) QC03, SUM(NVL(F.QC04,0)) QC04,
+               SUM(NVL(F.QC05,0)) QC05, SUM(NVL(F.QC14,0)) QC14,
+               SUM(NVL(F.QJFL,0)) QJFL, SUM(NVL(F.QJFI,0)) QJFI,
+               SUM(NVL(E.QE83,0)) QE83, SUM(NVL(E.QE85,0)) QE85
+        FROM FILTRO_BASE FB
+            LEFT JOIN FLAGS_IF   F ON F.NUM_IF = FB.NUM_IF
+            LEFT JOIN EVENTOS_IF E ON E.NUM_IF = FB.NUM_IF
+    ),
+    DEP_IF AS (
+        SELECT COUNT(DISTINCT DP.NUM_IF) QDEP
+        FROM parquet.`{p_dep}` DP
+            JOIN FILTRO_BASE FB ON FB.NUM_IF = DP.NUM_IF
+    ),
+    COM_IF AS (
+        SELECT COUNT(DISTINCT CM.NUM_IF) QCOM
+        FROM parquet.`{p_com}` CM
+            JOIN FILTRO_BASE FB ON FB.NUM_IF = CM.NUM_IF
+        WHERE CM.QTD_CARTEIRA_COMITENTE > 0
+    ),
+    CPA_IF AS (
+        SELECT COUNT(DISTINCT CP.NUM_IF) QCPA
+        FROM parquet.`{p_cpa}` CP
+            JOIN FILTRO_BASE FB ON FB.NUM_IF = CP.NUM_IF
+        WHERE CP.QTD_CARTEIRA_PARTICIPANTE > 0
     )
     SELECT DISTINCT NUM_IF FROM FLAGS_IF
     """
     return spark.sql(sql)
 
 
-def seleciona_instrumentos(spark, config, num_ifs: Optional[List[int]],
-                           n_instrumentos: Optional[int], seed: int) -> List:
-    """Devolve a lista de valores de NUM_IF do lote (coletada no driver — o
-    lote é pequeno por definição). Tanto o SORTEIO quanto a VALIDAÇÃO de
-    lista explícita rodam contra o domínio do produto — a query de validação
-    do notebook (ver _dominio_num_if_produto), não só a raiz filtrada.
-    Aborta se algum NUM_IF pedido estiver fora desse domínio."""
+# ---------------------------------------------------------------------------
+# Poda de domínio (itens 1, 3 e 4) e anulação de colunas de drift (item 2).
+# ---------------------------------------------------------------------------
+def _norm_key_col(col):
+    """Normaliza uma chave para string comparável: valor numérico perde o '.0'
+    final (a mesma chave pode chegar como decimal numa fonte e int noutra — ver
+    harmoniza_tipos_fk_com_pai / os falsos fk_orphan por tipo físico)."""
+    return F.regexp_replace(F.trim(col.cast("string")), r"\.0+$", "")
+
+
+def _subtipos_clonaveis(spec: dict) -> List[str]:
+    """Tabelas-subtipo de CONDICAO_IF que o clone realmente produz: presentes no
+    spec e não-static. Uma condição de tipo concreto sem linha aqui vira dangling
+    (Cat 1). Ordem estável, sem repetição."""
+    return [s for s in dict.fromkeys(SUBTYPE_BY_TIPO.values())
+            if s in spec and not spec[s].get("static")]
+
+
+def _num_if_inconsistentes_subtipo(spark, config, spec, dominio: DataFrame) -> DataFrame:
+    """NUM_IF do domínio cujo clone teria ao menos UMA CONDICAO_IF ativa sem a
+    respectiva linha-subtipo clonável — os dangling da Cat 1 (item 1). Base da
+    poda: excluídos do sorteio, o lote nasce sem ClassCastException.
+
+    NUM_CONDICAO_IF é a PK de CONDICAO_IF (única): uma chave só pode viver na
+    tabela-subtipo do seu próprio tipo, então "presente na UNIÃO das
+    fontes-subtipo clonáveis" == "presente no subtipo esperado". As fontes são
+    lidas com o MESMO _read_source do clone (FILTROS_FONTE incluso), de modo que
+    a checagem enxerga exatamente o que o clone gravaria (ex.: RESGATE só entra
+    com COD_COND_RESGATE='SEM TABELA')."""
+    cond = (_read_source(spark, config, CONDICAO_IF_TABLE)
+            .select(F.col(COL_NUM_IF).alias(COL_NUM_IF),
+                    _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__nci"))
+            .join(dominio.select(COL_NUM_IF), on=COL_NUM_IF, how="left_semi"))
+    presente = None
+    for s in _subtipos_clonaveis(spec):
+        try:
+            sdf = _read_source(spark, config, s)
+        except Exception as exc:  # fonte ausente: trata como sem chaves (conservador)
+            logger.warning("poda subtipo: não li a fonte de %s (%s); condições "
+                           "desse tipo entram como dangling.", s, exc)
+            continue
+        if CONDICAO_IF_PK not in sdf.columns:
+            logger.warning("poda subtipo: %s sem coluna %s; ignorada.",
+                           s, CONDICAO_IF_PK)
+            continue
+        piece = sdf.select(_norm_key_col(F.col(CONDICAO_IF_PK)).alias("__nci"))
+        presente = piece if presente is None else presente.unionByName(piece)
+    if presente is None:
+        # Nenhuma tabela-subtipo clonável: toda condição concreta seria dangling.
+        return cond.select(COL_NUM_IF).dropDuplicates()
+    dangling = cond.join(presente.dropDuplicates(), on="__nci", how="left_anti")
+    return dangling.select(COL_NUM_IF).dropDuplicates()
+
+
+def _parse_faltantes_arg(txt: str) -> List[Tuple[str, str, List[str]]]:
+    """'TABELA.COLUNA=v1,v2;TAB2.COL2=v3' -> [(TAB, COL, [v1, v2]), ...]."""
+    out: List[Tuple[str, str, List[str]]] = []
+    for grupo in txt.split(";"):
+        grupo = grupo.strip()
+        if not grupo:
+            continue
+        chave, sep, vals = grupo.partition("=")
+        if not sep or "." not in chave:
+            raise ValueError(f"--faltantes-arg: entrada inválida {grupo!r} "
+                             "(use TABELA.COLUNA=v1,v2;...).")
+        tab, _, col = chave.partition(".")
+        valores = [v.strip() for v in vals.split(",") if v.strip()]
+        if valores:
+            out.append((table_path_name(tab.strip().upper()),
+                        col.strip().upper(), valores))
+    return out
+
+
+def _carrega_faltantes(spark, config, faltantes_arg: Optional[str],
+                       faltantes_parquet: Optional[str]) -> Optional[DataFrame]:
+    """DataFrame [TABELA, COLUNA, VALOR] das chaves de referência que NÃO existem
+    no destino (QAB) — itens 3/4, sem conexão Oracle. Vem de --faltantes-arg
+    (inline) e/ou --faltantes-parquet (colunas TABELA/COLUNA/VALOR). VALOR é
+    normalizado para string comparável. Sem nenhuma fonte -> None (sem poda 3/4)."""
+    df: Optional[DataFrame] = None
+    linhas: List[Tuple[str, str, str]] = []
+    if faltantes_arg:
+        for tab, col, valores in _parse_faltantes_arg(faltantes_arg):
+            linhas.extend((tab, col, v) for v in valores)
+    if linhas:
+        df = spark.createDataFrame(linhas, ["TABELA", "COLUNA", "VALOR"])
+    if faltantes_parquet:
+        pq = read_parquet(spark, faltantes_parquet)
+        cm = {c.upper(): c for c in pq.columns}
+        need = ["TABELA", "COLUNA", "VALOR"]
+        faltam = [n for n in need if n not in cm]
+        if faltam:
+            raise ValueError(f"--faltantes-parquet precisa das colunas {need}; "
+                             f"faltam {faltam} (achei {pq.columns}).")
+        pqn = pq.select(
+            F.element_at(F.split(F.upper(F.trim(F.col(cm["TABELA"]))), r"\."), -1)
+             .alias("TABELA"),
+            F.upper(F.trim(F.col(cm["COLUNA"]))).alias("COLUNA"),
+            F.col(cm["VALOR"]).cast("string").alias("VALOR"))
+        df = pqn if df is None else df.unionByName(pqn)
+    if df is None:
+        return None
+    return df.select(F.col("TABELA"), F.col("COLUNA"),
+                     _norm_key_col(F.col("VALOR")).alias("VALOR")).dropDuplicates()
+
+
+def _num_if_excluidos_por_faltantes(spark, config, spec, faltantes: DataFrame,
+                                    dominio: DataFrame) -> DataFrame:
+    """NUM_IF do domínio a podar (itens 3/4): instrumentos cujo cluster referencia
+    uma chave inexistente no destino. Só tabelas COM coluna NUM_IF (o instrumento
+    é alcançável direto) — ex.: CARTEIRA_COMITENTE carrega NUM_ID_ENTIDADE
+    (comitente) e NUM_CONTA (conta) por NUM_IF. Tabela sem NUM_IF (ex.:
+    ESPECIFICACAO_COMITENTE) é coberta transitivamente: o mesmo comitente sai do
+    lote quando o instrumento é podado via CARTEIRA_COMITENTE."""
+    pares = [(r["TABELA"], r["COLUNA"]) for r in
+             faltantes.select("TABELA", "COLUNA").dropDuplicates().collect()]
+    excl: Optional[DataFrame] = None
+    for tab, col in pares:
+        if tab not in spec:
+            logger.warning("faltantes: tabela %s fora do spec; ignorada.", tab)
+            continue
+        try:
+            src = _read_source(spark, config, tab)
+        except Exception as exc:
+            logger.warning("faltantes: não li a fonte de %s (%s); ignorada.", tab, exc)
+            continue
+        if COL_NUM_IF not in src.columns:
+            logger.warning("faltantes: %s não tem %s — não dá p/ alcançar o "
+                           "instrumento; use uma tabela com NUM_IF (ex.: "
+                           "CARTEIRA_COMITENTE). Ignorada.", tab, COL_NUM_IF)
+            continue
+        if col not in src.columns:
+            logger.warning("faltantes: %s sem coluna %s; ignorada.", tab, col)
+            continue
+        miss = (faltantes.where((F.col("TABELA") == F.lit(tab))
+                                & (F.col("COLUNA") == F.lit(col)))
+                .select(F.col("VALOR").alias("__v")).dropDuplicates())
+        hit = (src.select(F.col(COL_NUM_IF).alias(COL_NUM_IF),
+                          _norm_key_col(F.col(col)).alias("__v"))
+               .join(F.broadcast(miss), on="__v", how="left_semi")
+               .select(COL_NUM_IF).dropDuplicates())
+        n = hit.count()
+        logger.info("faltantes: %s.%s -> %d instrumento(s) do domínio a podar.",
+                    tab, col, n)
+        excl = hit if excl is None else excl.unionByName(hit)
+    if excl is None:
+        return dominio.select(COL_NUM_IF).limit(0)
+    return (excl.join(dominio.select(COL_NUM_IF), on=COL_NUM_IF, how="left_semi")
+            .dropDuplicates())
+
+
+def aplica_nulificacao(df: DataFrame, tabela: str,
+                       cols_por_tabela: Mapping[str, Sequence[str]],
+                       not_null_cols: Optional[Set[str]] = None,
+                       ) -> Tuple[DataFrame, List[str]]:
+    """Anula (seta NULL) colunas nullable marcadas como drift de destino (item 2:
+    NUM_ID_TRANSF_ARQ_P1/P2 de OPERACAO -> TRANSFERENCIA_ARQUIVO inexistente no
+    QAB). Só atua em coluna existente e NÃO NOT NULL: anular uma NOT NULL apenas
+    trocaria o fk_orphan por um ORA-01400, então essas são puladas com aviso (a
+    validação pré-escrita pegaria de qualquer forma). Devolve (df, anuladas)."""
+    nn = not_null_cols or set()
+    anuladas: List[str] = []
+    for c in (cols_por_tabela.get(tabela) or []):
+        if c not in df.columns:
+            continue
+        if c in nn:
+            logger.warning("%s.%s é NOT NULL no spec; anulação IGNORADA (anular "
+                           "trocaria fk_orphan por ORA-01400).", tabela, c)
+            continue
+        df = df.withColumn(c, F.lit(None).cast(df.schema[c].dataType))
+        anuladas.append(c)
+    return df, anuladas
+
+
+def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
+                           n_instrumentos: Optional[int], seed: int,
+                           faltantes: Optional[DataFrame] = None,
+                           poda_subtipo: bool = True) -> List:
+    """Devolve a lista de valores de NUM_IF do lote (coletada no driver — o lote
+    é pequeno por definição). O SORTEIO e a VALIDAÇÃO de lista explícita rodam
+    contra o domínio do produto (ver _dominio_num_if_produto), JÁ PODADO:
+
+      * item 1 (poda_subtipo): remove instrumentos que gerariam CONDICAO_IF
+        dangling (subtipo sem linha na origem — Cat 1);
+      * itens 3/4 (faltantes): remove instrumentos que referenciam comitente/
+        conta/etc. inexistentes no destino (Cat 3/4, sem Oracle).
+
+    A amostragem de N sorteia do domínio PODADO, então a contagem final continua
+    N (cada instrumento podado é reposto por outra amostra válida — o que atende
+    "no final tem que vir N NUM_IF"). Lista explícita NÃO é reposta: se algum
+    pedido cair na poda, ABORTA dizendo qual e por quê (não troca em silêncio)."""
     if num_ifs is not None and not num_ifs:
         # Defensivo (o argparse já barra): lista vazia NÃO pode virar sorteio.
         raise ValueError("Lista de NUM_IF vazia; informe valores ou use "
                          "--n-instrumentos.")
-    fonte = _dominio_num_if_produto(spark, config)
+    fonte = _dominio_num_if_produto(spark, config).select(COL_NUM_IF).dropDuplicates()
     logger.info("Domínio de amostragem/validação de NUM_IF: query do produto "
-                "(fecho TITULO+CREDITO+CONDICAO_IF+EVENTO + regra de RESGATE).")
+                "(fecho TITULO+CONDICAO_IF+EVENTO + regra de RESGATE).")
+
+    # Poda de domínio: junta as exclusões dos itens 1/3/4 e tira do domínio.
+    exclusoes: List[Tuple[str, DataFrame]] = []
+    if poda_subtipo:
+        exclusoes.append(("subtipo dangling (Cat 1)",
+                          _num_if_inconsistentes_subtipo(spark, config, spec, fonte)))
+    if faltantes is not None:
+        exclusoes.append(("chave inexistente no destino (Cat 3/4)",
+                          _num_if_excluidos_por_faltantes(spark, config, spec,
+                                                          faltantes, fonte)))
+    excluir: Optional[DataFrame] = None
+    for rotulo, df in exclusoes:
+        df = df.select(COL_NUM_IF).dropDuplicates().localCheckpoint(eager=True)
+        logger.info("Poda de domínio [%s]: %d instrumento(s) removido(s).",
+                    rotulo, df.count())
+        excluir = df if excluir is None else excluir.unionByName(df)
+    if excluir is not None:
+        excluir = excluir.dropDuplicates().localCheckpoint(eager=True)
+        valido = fonte.join(excluir, on=COL_NUM_IF, how="left_anti")
+    else:
+        valido = fonte
+    valido = valido.localCheckpoint(eager=True)
+
     if num_ifs:
-        pedidos = spark.createDataFrame([(v,) for v in num_ifs], [COL_NUM_IF])
-        achados = {r[0] for r in fonte.join(
-            F.broadcast(pedidos.select(F.col(COL_NUM_IF).cast(
-                fonte.schema[COL_NUM_IF].dataType))),
-            on=COL_NUM_IF, how="left_semi").collect()}
-        faltando = [v for v in num_ifs if v not in {int(a) for a in achados}]
-        if faltando:
-            raise ValueError(
-                "NUM_IF(s) fora do domínio do produto (query de validação — "
-                f"ver _dominio_num_if_produto): {faltando}")
-        valores = sorted(achados)
+        pedidos = F.broadcast(
+            spark.createDataFrame([(v,) for v in num_ifs], [COL_NUM_IF])
+            .select(F.col(COL_NUM_IF).cast(fonte.schema[COL_NUM_IF].dataType)))
+        no_dominio = {int(r[0]) for r in
+                      fonte.join(pedidos, on=COL_NUM_IF, how="left_semi").collect()}
+        validos = {int(r[0]) for r in
+                   valido.join(pedidos, on=COL_NUM_IF, how="left_semi").collect()}
+        fora = [v for v in num_ifs if v not in no_dominio]
+        podados = [v for v in num_ifs if v in no_dominio and v not in validos]
+        if fora or podados:
+            partes = []
+            if fora:
+                partes.append(f"fora do domínio do produto: {fora}")
+            if podados:
+                partes.append("no domínio mas PODADOS (subtipo dangling e/ou "
+                              f"chave inexistente no destino): {podados}")
+            raise ValueError("NUM_IF(s) não clonáveis — " + "; ".join(partes))
+        valores = sorted(validos)
     else:
         n = int(n_instrumentos or 1)
-        valores = [r[0] for r in
-                   fonte.orderBy(F.rand(seed)).limit(n).collect()]
+        valores = [r[0] for r in valido.orderBy(F.rand(seed)).limit(n).collect()]
         if len(valores) < n:
             raise ValueError(
-                f"Domínio tem só {len(valores)} instrumento(s); pedi {n}.")
+                f"Domínio VÁLIDO após a poda (subtipo/destino) tem só "
+                f"{len(valores)} instrumento(s); pedi {n}. Afrouxe os filtros "
+                "(--sem-poda-subtipo / menos faltantes) ou reduza --n-instrumentos.")
         valores = sorted(valores)
     logger.info("Lote: %d instrumento(s) NUM_IF=%s", len(valores),
                 valores if len(valores) <= 20 else f"{valores[:20]}... (+{len(valores)-20})")
@@ -1333,10 +1664,23 @@ def executa_clonagem(spark, config, spec: dict, *,
                      max_passadas: int = 6,
                      engorda_ts: Optional[datetime] = None,
                      prazo_vencimento_dias: Optional[int] = None,
+                     faltantes_arg: Optional[str] = None,
+                     faltantes_parquet: Optional[str] = None,
+                     poda_subtipo: bool = True,
+                     anular_cols: Optional[Mapping[str, Sequence[str]]] = None,
                      dry_run: bool = False) -> Dict[str, dict]:
     """Roda a clonagem fim a fim; devolve {tabela: estatísticas} (para uso em
-    notebook). Aborta sem gravar NADA se qualquer validação falhar."""
+    notebook). Aborta sem gravar NADA se qualquer validação falhar.
+
+    Poda de domínio ANTES da amostragem (saída carregável por construção):
+      * poda_subtipo (item 1): tira do domínio os NUM_IF que gerariam CONDICAO_IF
+        dangling; a amostragem repõe até fechar N;
+      * faltantes_arg/parquet (itens 3/4): tira os NUM_IF que referenciam chaves
+        inexistentes no destino (QAB), sem conexão Oracle.
+    Anulação de colunas de drift (item 2): anular_cols (default
+    NULIFICA_COLS_POR_TABELA) seta NULL nas colunas nullable listadas por tabela."""
     inicio = time.perf_counter()
+    anular_cols = NULIFICA_COLS_POR_TABELA if anular_cols is None else anular_cols
     # UM instante para o run inteiro: tabelas diferentes não podem divergir no
     # timestamp só porque foram materializadas em ações Spark diferentes.
     engorda_ts = _normalize_engorda_ts(engorda_ts)
@@ -1351,7 +1695,16 @@ def executa_clonagem(spark, config, spec: dict, *,
     if estaticas_extra:
         logger.info("Tratando como static por parâmetro: %s", sorted(estaticas_extra))
 
-    valores = seleciona_instrumentos(spark, config, num_ifs, n_instrumentos, seed)
+    faltantes = _carrega_faltantes(spark, config, faltantes_arg, faltantes_parquet)
+    if faltantes is not None:
+        logger.info("Filtro de faltantes (itens 3/4) ativo: %d chave(s) de "
+                    "referência inexistentes no destino.", faltantes.count())
+    if not poda_subtipo:
+        logger.warning("Poda de subtipo (item 1) DESLIGADA (--sem-poda-subtipo): "
+                       "clones podem ter CONDICAO_IF dangling (Cat 1).")
+    valores = seleciona_instrumentos(spark, config, spec, num_ifs, n_instrumentos,
+                                     seed, faltantes=faltantes,
+                                     poda_subtipo=poda_subtipo)
     if fator_k < 1:
         raise ValueError("--fator-k deve ser >= 1.")
 
@@ -1387,6 +1740,10 @@ def executa_clonagem(spark, config, spec: dict, *,
         clones, cols_data = aplica_regras_engorda(
             clones, t, engorda_ts=engorda_ts,
             prazo_vencimento_dias=prazo_vencimento_dias)
+        # Anulação de colunas de drift (item 2) ANTES do checkpoint/validação:
+        # o NOT NULL e a gravação precisam enxergar o valor já nulo.
+        clones, cols_anuladas = aplica_nulificacao(
+            clones, t, anular_cols, _not_null_cols(spec[t]))
         clones = clones.localCheckpoint(eager=True)  # congela p/ validar e gravar
 
         cols_remap = sorted({*plano.pk_cols,
@@ -1395,9 +1752,11 @@ def executa_clonagem(spark, config, spec: dict, *,
         erros = valida_tabela(spec[t], plano, clones, n_lote, fator_k)
         stats[t] = {"lote": n_lote, "clones": n_lote * fator_k,
                     "colunas_remapeadas": cols_remap,
-                    "colunas_data": cols_data, "erros": erros}
-        logger.info("[%s] lote=%d clones=%d remapeadas=%s datas=%s %s",
+                    "colunas_data": cols_data, "colunas_anuladas": cols_anuladas,
+                    "erros": erros}
+        logger.info("[%s] lote=%d clones=%d remapeadas=%s datas=%s anuladas=%s %s",
                     t, n_lote, n_lote * fator_k, cols_remap, cols_data or "-",
+                    cols_anuladas or "-",
                     "ERROS: " + "; ".join(erros) if erros else "OK")
         if erros:
             erros_globais.extend(f"{t}: {e}" for e in erros)
@@ -1446,10 +1805,11 @@ def executa_clonagem(spark, config, spec: dict, *,
                 "DRY-RUN (nada gravado)" if dry_run else f"gravado em {save_base}")
     for t in ordem:
         s = stats.get(t, {})
-        logger.info("  %-32s lote=%-8s clones=%-8s remap=%s datas=%s",
+        logger.info("  %-32s lote=%-8s clones=%-8s remap=%s datas=%s anuladas=%s",
                     t, s.get("lote", "-"), s.get("clones", "-"),
                     ",".join(s.get("colunas_remapeadas", [])) or "-",
-                    ",".join(s.get("colunas_data", [])) or "-")
+                    ",".join(s.get("colunas_data", [])) or "-",
+                    ",".join(s.get("colunas_anuladas", [])) or "-")
     logger.info("=" * 78)
     return stats
 
@@ -1575,11 +1935,53 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--max-passadas", type=positive_int, default=6,
                         help="Passadas máximas do pertencimento (ciclos de FK). "
                              "Não estabilizou -> aborta pedindo aumento. Default 6.")
+    parser.add_argument("--sem-poda-subtipo", action="store_true",
+                        help="DESLIGA a poda de domínio do item 1 (por padrão os "
+                             "NUM_IF que gerariam CONDICAO_IF dangling são tirados "
+                             "do domínio e repostos por outra amostra). Use só p/ "
+                             "depurar — o clone pode sair com dangling (Cat 1).")
+    parser.add_argument("--faltantes-arg", default=None,
+                        help="Itens 3/4: chaves de referência inexistentes no "
+                             "destino (QAB), inline: "
+                             "'TABELA.COLUNA=v1,v2;TAB2.COL2=v3'. Os NUM_IF que "
+                             "as referenciam são podados do domínio. Ex.: "
+                             "'CARTEIRA_COMITENTE.NUM_ID_ENTIDADE=343..;"
+                             "CARTEIRA_COMITENTE.NUM_CONTA=95..'.")
+    parser.add_argument("--faltantes-parquet", default=None,
+                        help="Itens 3/4: Parquet com colunas TABELA/COLUNA/VALOR "
+                             "das chaves inexistentes no destino (mesma poda do "
+                             "--faltantes-arg, p/ listas grandes).")
+    parser.add_argument("--anular-cols", default=None,
+                        help="Item 2 (override/extra): colunas nullable a ANULAR "
+                             "nos clones, formato 'TABELA.COL,COL2;TAB2.COL3'. "
+                             f"Somam-se ao default {NULIFICA_COLS_POR_TABELA}.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Valida e loga; não grava nada.")
     parser.add_argument("--specs", default=None,
                         help="Override de DATAGEN_SPECS_URI (specs.json único).")
     return parser.parse_args()
+
+
+def _merge_anular_cols(base: Mapping[str, Sequence[str]],
+                       txt: Optional[str]) -> Dict[str, Tuple[str, ...]]:
+    """Funde o default de anulação com o --anular-cols ('TAB.COL,COL2;TAB2.COL3'),
+    preservando ordem e sem duplicar coluna por tabela."""
+    merged: Dict[str, List[str]] = {t: list(cols) for t, cols in base.items()}
+    for grupo in (txt or "").split(";"):
+        grupo = grupo.strip()
+        if not grupo:
+            continue
+        tab, sep, cols = grupo.partition(".")
+        if not sep or not cols.strip():
+            raise argparse.ArgumentTypeError(
+                f"--anular-cols: entrada inválida {grupo!r} (use TABELA.COL,COL2;...).")
+        tab = table_path_name(tab.strip().upper())
+        alvo = merged.setdefault(tab, [])
+        for c in cols.split(","):
+            c = c.strip().upper()
+            if c and c not in alvo:
+                alvo.append(c)
+    return {t: tuple(cols) for t, cols in merged.items()}
 
 
 def main() -> None:
@@ -1603,6 +2005,10 @@ def main() -> None:
             max_passadas=args.max_passadas,
             engorda_ts=args.data_engorda,
             prazo_vencimento_dias=args.prazo_vencimento_dias,
+            faltantes_arg=args.faltantes_arg,
+            faltantes_parquet=args.faltantes_parquet,
+            poda_subtipo=not args.sem_poda_subtipo,
+            anular_cols=_merge_anular_cols(NULIFICA_COLS_POR_TABELA, args.anular_cols),
             dry_run=args.dry_run,
         )
     finally:
