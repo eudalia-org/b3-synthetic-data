@@ -700,7 +700,12 @@ def _residual_in_oracle(
 def check_referential(
     spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame], meta: Metadata,
     sample: int, validate_against: str, max_residual_keys: int,
-) -> List[Finding]:
+) -> Tuple[List[Finding], List[Tuple[str, str, str]]]:
+    """Returns (findings, faltantes): faltantes is one (child_table, fk_column,
+    missing_value) row per Oracle-verified single-column orphan — the exact
+    input format of engorda_instrumentos.py --faltantes-parquet (TABELA/COLUNA/
+    VALOR), so the generator can prune the sampling domain of instruments whose
+    cluster references keys absent from the target."""
     def canon(col):
         # Native-function version of _canon_key: numeric-looking values lose
         # trailing fractional zeros; anything else passes through unchanged.
@@ -709,6 +714,7 @@ def check_referential(
         return F.when(col.rlike(r"^-?\d+\.\d*0*$"), stripped).otherwise(col)
 
     out: List[Finding] = []
+    faltantes: List[Tuple[str, str, str]] = []
     for table, df in tables.items():
         for fk in meta.fks.get(table, []):
             child_actual = [resolve(df, c) for c in fk.child_cols]
@@ -755,6 +761,11 @@ def check_referential(
                     found = _residual_in_oracle(spark, cfg, fk, residual)
                     residual = [t for t in residual if t not in found]
                     note = " (checked against synthetic ∪ Oracle)"
+                    # Oracle-verified misses on a single-column FK feed the
+                    # generator's domain pruning (--faltantes-parquet).
+                    if residual and len(fk.child_cols) == 1:
+                        faltantes.extend(
+                            (table, fk.child_cols[0], t[0]) for t in residual)
                 except Exception as exc:  # noqa: BLE001
                     out.append(Finding(
                         "3.fk_unresolved", "Referential integrity", SEV_WARN, table,
@@ -800,7 +811,21 @@ def check_referential(
                          "bind_shared_key_children should pair 1:1 with distinct parent keys.",
                     message=f"Duplicate shared-key values in {table}.",
                 ))
-    return out
+    return out, faltantes
+
+
+def emit_faltantes(spark: SparkSession, path: str,
+                   faltantes: List[Tuple[str, str, str]]) -> None:
+    """Write the Oracle-verified orphan keys as a TABELA/COLUNA/VALOR Parquet —
+    the input of engorda_instrumentos.py --faltantes-parquet, which prunes the
+    sampling domain of instruments whose cluster references these keys."""
+    if not faltantes:
+        logger.info("No Oracle-verified orphan keys; faltantes parquet not written.")
+        return
+    df = spark.createDataFrame(faltantes, ["TABELA", "COLUNA", "VALOR"]).dropDuplicates()
+    df.coalesce(1).write.mode("overwrite").parquet(path)
+    logger.info("Faltantes parquet written to %s (%d key(s)); rerun the generator "
+                "with --faltantes-parquet %s", path, df.count(), path)
 
 
 # ---------------------------------------------------------------------------
@@ -1316,6 +1341,11 @@ def parse_args() -> argparse.Namespace:
                         "child value (~1 per cloned IF).")
     p.add_argument("--max-parent-keys", type=int, default=None,
                    help="Deprecated (parent key sets are no longer downloaded); ignored.")
+    p.add_argument("--emit-faltantes", default=None,
+                   help="Write the Oracle-verified orphan keys (Cat 3) as a "
+                        "TABELA/COLUNA/VALOR Parquet at this path/URI — feed it to "
+                        "engorda_instrumentos.py --faltantes-parquet to prune the "
+                        "sampling domain on the next generation run.")
     p.add_argument("--skip-check", action="append", default=[],
                    help="Check-id prefix(es) to skip (repeatable), e.g. 6.combo.")
     p.add_argument("--no-oracle", action="store_true",
@@ -1352,8 +1382,12 @@ def main() -> None:
     if args.max_parent_keys is not None:
         logger.warning("--max-parent-keys is deprecated and ignored; "
                        "see --max-residual-keys.")
-    findings += check_referential(spark, cfg, tables, meta, args.sample_size,
-                                  args.validate_against, args.max_residual_keys)
+    ref_findings, faltantes = check_referential(
+        spark, cfg, tables, meta, args.sample_size,
+        args.validate_against, args.max_residual_keys)
+    findings += ref_findings
+    if args.emit_faltantes:
+        emit_faltantes(spark, args.emit_faltantes, faltantes)
     findings += check_not_null(tables, meta, args.sample_size)
     findings += check_dates(tables, meta, args.sample_size)
     findings += check_lookup_combos(spark, cfg, tables, meta, args.sample_size)
