@@ -676,7 +676,7 @@ def _sql_literal(value: str) -> str:
 
 def _residual_in_oracle(
     spark: SparkSession, cfg: Config, fk: ForeignKey, residual: List[tuple],
-    batch_size: int = 500,
+    batch_size: int = 1000,
 ) -> set:
     """Return the subset of residual key-tuples that DO exist in the Oracle parent."""
     exists: set = set()
@@ -1308,10 +1308,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--validate-against", default="union", choices=["synthetic", "union"],
                    help="Resolve FK parents only within the synthetic output, "
                         "or also against Oracle.")
-    p.add_argument("--max-residual-keys", type=int, default=100_000,
+    p.add_argument("--max-residual-keys", type=int, default=1_000_000,
                    help="Max distinct child keys left unresolved by the synthetic output "
                         "that will be looked up in Oracle via IN-lists; above this the "
-                        "FK is reported unresolved (WARN).")
+                        "FK is reported unresolved (WARN). Sized for large clone runs: "
+                        "reference FKs like COMITENTE have one residual per distinct "
+                        "child value (~1 per cloned IF).")
     p.add_argument("--max-parent-keys", type=int, default=None,
                    help="Deprecated (parent key sets are no longer downloaded); ignored.")
     p.add_argument("--skip-check", action="append", default=[],
