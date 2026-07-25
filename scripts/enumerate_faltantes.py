@@ -469,6 +469,21 @@ def run_explain(spark: SparkSession, cfg: Config, args) -> None:
             logger.warning("explain: could not read faltantes at %s (%s)",
                            args.output, exc)
 
+    root = tables[ROOT_TABLE]
+    rk = _ci(root, ROOT_KEY)
+    rt = _ci(root, "NUM_TIPO_IF")
+    rx = _ci(root, "DAT_EXCLUSAO")
+    rs = _ci(root, "COD_SITUACAO_IF")
+
+    def raw_if_rows(ifs) -> list:
+        sel = [F.col(rk).cast("long").alias("NUM_IF"),
+               F.col(rt).cast("string").alias("TIPO"),
+               F.col(rx).cast("string").alias("EXCLUSAO")]
+        if rs:
+            sel.append(F.col(rs).cast("string").alias("SITUACAO"))
+        return (root.where(F.col(rk).cast("long").isin([int(v) for v in ifs]))
+                .select(*sel).collect())
+
     num_if = _ci(child, ROOT_KEY)
     for col_name, keys in groups:
         if col_name not in parent_by_col:
@@ -513,6 +528,15 @@ def run_explain(spark: SparkSession, cfg: Config, args) -> None:
                     line += f" | NUM_IF in batch (mapa): {batch.get(k, 0)}"
                 print(line)
                 print(f"  sample NUM_IF: {[int(v) for v in a['sample_ifs']]}")
+                if_rows = raw_if_rows(a["sample_ifs"])
+                if not if_rows:
+                    print("  raw INSTRUMENTO_FINANCEIRO row(s): NONE — these NUM_IFs "
+                          "have NO row in the raw IF table (export inconsistency: "
+                          "child rows without their instrument).")
+                for r in if_rows:
+                    print(f"  raw IF row: NUM_IF={r['NUM_IF']} NUM_TIPO_IF={r['TIPO']} "
+                          f"DAT_EXCLUSAO={r['EXCLUSAO']}"
+                          + (f" COD_SITUACAO_IF={r['SITUACAO']}" if rs else ""))
                 if uni.get(k, 0) == 0:
                     print("  <-- rows exist but NONE of their IFs pass the universe "
                           "filter: enumeration blind spot (semi-join/universe).")
