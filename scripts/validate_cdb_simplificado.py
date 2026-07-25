@@ -818,14 +818,48 @@ def emit_faltantes(spark: SparkSession, path: str,
                    faltantes: List[Tuple[str, str, str]]) -> None:
     """Write the Oracle-verified orphan keys as a TABELA/COLUNA/VALOR Parquet —
     the input of engorda_instrumentos.py --faltantes-parquet, which prunes the
-    sampling domain of instruments whose cluster references these keys."""
+    sampling domain of instruments whose cluster references these keys.
+
+    ACCUMULATES across runs: keys already at `path` stay and only new keys are
+    appended. A key that leaves the list lets the instruments referencing it
+    re-enter the generator's sampling domain, which made the prune/regenerate
+    loop non-convergent (2026-07-25). Existing keys are never collected to the
+    driver, so a large pre-enumerated file (scripts/enumerate_faltantes.py) at
+    `path` is fine."""
     if not faltantes:
-        logger.info("No Oracle-verified orphan keys; faltantes parquet not written.")
+        logger.info("No new Oracle-verified orphan keys; faltantes parquet at %s "
+                    "left untouched.", path)
         return
-    df = spark.createDataFrame(faltantes, ["TABELA", "COLUNA", "VALOR"]).dropDuplicates()
-    df.coalesce(1).write.mode("overwrite").parquet(path)
-    logger.info("Faltantes parquet written to %s (%d key(s)); rerun the generator "
-                "with --faltantes-parquet %s", path, df.count(), path)
+    new_df = spark.createDataFrame(faltantes, ["TABELA", "COLUNA", "VALOR"]).dropDuplicates()
+    prev = None
+    try:
+        prev = spark.read.parquet(path).select(
+            F.col("TABELA").cast("string").alias("TABELA"),
+            F.col("COLUNA").cast("string").alias("COLUNA"),
+            F.col("VALOR").cast("string").alias("VALOR"),
+        )
+        n_prev = prev.count()
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
+        if not any(s in msg for s in ("Path does not exist", "PATH_NOT_FOUND",
+                                      "Unable to infer schema", "FileNotFound")):
+            raise
+        n_prev = 0
+    if prev is not None:
+        # Keep only truly-new keys, materialized on the driver BEFORE writing:
+        # appending output of a plan that reads `path` to `path` itself is unsafe.
+        rows = [tuple(r) for r in
+                new_df.join(prev, ["TABELA", "COLUNA", "VALOR"], "left_anti").collect()]
+        if not rows:
+            logger.info("All orphan key(s) already present in %s (%d total); "
+                        "nothing to append.", path, n_prev)
+            return
+        new_df = spark.createDataFrame(rows, ["TABELA", "COLUNA", "VALOR"])
+    n_new = new_df.count()
+    new_df.coalesce(1).write.mode("append" if prev is not None else "overwrite").parquet(path)
+    logger.info("Faltantes parquet at %s: %d new key(s) appended (%d total); rerun "
+                "the generator with --faltantes-parquet %s",
+                path, n_new, n_prev + n_new, path)
 
 
 # ---------------------------------------------------------------------------
@@ -1345,7 +1379,9 @@ def parse_args() -> argparse.Namespace:
                    help="Write the Oracle-verified orphan keys (Cat 3) as a "
                         "TABELA/COLUNA/VALOR Parquet at this path/URI — feed it to "
                         "engorda_instrumentos.py --faltantes-parquet to prune the "
-                        "sampling domain on the next generation run.")
+                        "sampling domain on the next generation run. ACCUMULATES: "
+                        "keys already at the path are kept; only new keys are "
+                        "appended (a shrinking list made the loop non-convergent).")
     p.add_argument("--skip-check", action="append", default=[],
                    help="Check-id prefix(es) to skip (repeatable), e.g. 6.combo.")
     p.add_argument("--no-oracle", action="store_true",
