@@ -1390,9 +1390,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def create_spark() -> SparkSession:
-    return (SparkSession.builder
-            .appName("validate_cdb_simplificado")
-            .getOrCreate())
+    spark = (SparkSession.builder
+             .appName("validate_cdb_simplificado")
+             .getOrCreate())
+    # Spark 3.5.0 (OCI Data Flow) + AQE + cached DataFrames silently LOSES JOIN
+    # ROWS (SPARK-45282, fixed in 3.5.1). This validator caches every synthetic
+    # table and joins over them — with AQE on, a check can false-PASS by losing
+    # the very rows it should flag. Keep AQE off until the apps run >= 3.5.1.
+    spark.conf.set("spark.sql.adaptive.enabled", "false")
+    return spark
 
 
 def main() -> None:

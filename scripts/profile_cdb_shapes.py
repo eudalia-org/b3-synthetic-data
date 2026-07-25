@@ -936,6 +936,10 @@ def main() -> None:
     args = parse_args()
 
     spark = SparkSession.builder.appName("profile_cdb_shapes").getOrCreate()
+    # Spark 3.5.0 (OCI Data Flow) + AQE + cached DataFrames silently LOSES JOIN
+    # ROWS (SPARK-45282, fixed in 3.5.1). Baselines built with AQE on may drop
+    # rows from joins. Keep AQE off until the apps run >= 3.5.1.
+    spark.conf.set("spark.sql.adaptive.enabled", "false")
     spark.sparkContext.setLogLevel("WARN")
 
     if args.self_test:

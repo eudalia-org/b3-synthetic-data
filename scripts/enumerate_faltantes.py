@@ -603,6 +603,11 @@ def main() -> None:
     args = p.parse_args()
 
     spark = SparkSession.builder.appName("enumerate_faltantes").getOrCreate()
+    # Spark 3.5.0 (OCI Data Flow) + AQE + cached DataFrames silently LOSES JOIN
+    # ROWS (SPARK-45282, fixed in 3.5.1): the universe semi-join dropped rows a
+    # direct probe on the same cached DF could see (2026-07-25). Keep AQE off
+    # until the apps run >= 3.5.1.
+    spark.conf.set("spark.sql.adaptive.enabled", "false")
     if args.self_test:
         run_selftest(spark)
         return

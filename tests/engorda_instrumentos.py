@@ -1847,6 +1847,10 @@ def create_spark_session(app_name: str) -> SparkSession:
     spark = builder.getOrCreate()
     for key, value in _RUNTIME_SPARK_CONF.items():
         spark.conf.set(key, value)
+    # Spark 3.5.0 (OCI Data Flow) + AQE + dados em cache PERDE LINHAS DE JOIN
+    # silenciosamente (SPARK-45282, corrigido no 3.5.1). Manter AQE desligado
+    # enquanto os apps rodarem < 3.5.1.
+    spark.conf.set("spark.sql.adaptive.enabled", "false")
     return spark
 
 
