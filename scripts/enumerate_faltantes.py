@@ -475,10 +475,20 @@ def run_explain(spark: SparkSession, cfg: Config, args) -> None:
     rx = _ci(root, "DAT_EXCLUSAO")
     rs = _ci(root, "COD_SITUACAO_IF")
 
+    dtypes = dict(root.dtypes)
+    logger.info("explain: root dtypes NUM_IF=%s NUM_TIPO_IF=%s DAT_EXCLUSAO=%s",
+                dtypes.get(rk), dtypes.get(rt), dtypes.get(rx))
+
     def raw_if_rows(ifs) -> list:
+        # Evaluated predicates, not just printed values: a literal string "None"
+        # in DAT_EXCLUSAO prints exactly like a real NULL but fails isNull().
         sel = [F.col(rk).cast("long").alias("NUM_IF"),
                F.col(rt).cast("string").alias("TIPO"),
-               F.col(rx).cast("string").alias("EXCLUSAO")]
+               (F.col(rt).cast("long") == CDB_TIPO_IF).alias("TIPO_OK"),
+               F.col(rx).cast("string").alias("EXCLUSAO"),
+               F.col(rx).isNull().alias("EXCL_ISNULL"),
+               F.length(F.col(rx).cast("string")).alias("EXCL_LEN"),
+               F.input_file_name().alias("FILE")]
         if rs:
             sel.append(F.col(rs).cast("string").alias("SITUACAO"))
         return (root.where(F.col(rk).cast("long").isin([int(v) for v in ifs]))
@@ -534,9 +544,15 @@ def run_explain(spark: SparkSession, cfg: Config, args) -> None:
                           "have NO row in the raw IF table (export inconsistency: "
                           "child rows without their instrument).")
                 for r in if_rows:
-                    print(f"  raw IF row: NUM_IF={r['NUM_IF']} NUM_TIPO_IF={r['TIPO']} "
-                          f"DAT_EXCLUSAO={r['EXCLUSAO']}"
-                          + (f" COD_SITUACAO_IF={r['SITUACAO']}" if rs else ""))
+                    print(f"  raw IF row: NUM_IF={r['NUM_IF']} NUM_TIPO_IF={r['TIPO']!r} "
+                          f"TIPO_OK={r['TIPO_OK']} DAT_EXCLUSAO={r['EXCLUSAO']!r} "
+                          f"EXCL_ISNULL={r['EXCL_ISNULL']} EXCL_LEN={r['EXCL_LEN']}"
+                          + (f" COD_SITUACAO_IF={r['SITUACAO']!r}" if rs else ""))
+                    print(f"    file: .../{(r['FILE'] or '').rsplit('/', 2)[-2]}/"
+                          f"{(r['FILE'] or '').rsplit('/', 1)[-1]}")
+                probe = (universe.where(F.col(ROOT_KEY).isin(
+                    [int(v) for v in a["sample_ifs"]])).count())
+                print(f"  direct universe probe for these NUM_IFs: {probe}")
                 if uni.get(k, 0) == 0:
                     print("  <-- rows exist but NONE of their IFs pass the universe "
                           "filter: enumeration blind spot (semi-join/universe).")
