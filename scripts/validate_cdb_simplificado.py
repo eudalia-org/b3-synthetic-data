@@ -137,10 +137,14 @@ DATE_RULES: List[Tuple[str, str, str, str]] = [
     ("CONDICAO_IF", "DAT_INICIO_CONDICAO_IF", "<=", "DAT_FIM_CONDICAO_IF"),
 ]
 
-# Candidate reference tables for the operation/service combo check (Cat 6).
 OPERACAO_TABLE = "OPERACAO"
 DADO_OPERACAO_TABLE = "DADO_OPERACAO"
-COMBO_TABLE_PATTERNS = ["%OBJETO_SERV%", "%TIPO_OPER_OBJETO%", "%TIPO_OPER_OBJ_SERV%"]
+TIPO_OPER_OBJETO_SERV_TABLE = "TIPO_OPER_OBJETO_SERV"
+V_PARAMETRO_SIC_TABLE = "V_PARAMETRO_SIC"
+TIPO_OPERACAO_TABLE = "TIPO_OPERACAO"
+CDB_TIPO_IF = 49
+CDB_OBJETO_SERVICO = 44
+SEM_MODALIDADE_IDS = (6, 16)
 
 
 # ---------------------------------------------------------------------------
@@ -941,84 +945,275 @@ def check_dates(tables: Dict[str, DataFrame], meta: Metadata, sample: int) -> Li
 
 
 # ---------------------------------------------------------------------------
-# Category 6 - Lookup combinations (SEM MODALIDADE) - best effort
+# Category 6 - Lookup combinations (SEM MODALIDADE)
 # ---------------------------------------------------------------------------
+def check_lookup_combo_frames(
+    op_df: DataFrame,
+    tos_df: Optional[DataFrame],
+    sic_df: Optional[DataFrame],
+    tipo_operacao_df: Optional[DataFrame],
+    sample: int,
+    lookup_errors: Optional[Dict[str, str]] = None,
+) -> List[Finding]:
+    """Compare synthetic operations with already-loaded Oracle lookup rows."""
+    cat = "Lookup combinations"
+    errors = dict(lookup_errors or {})
+    tos_col = resolve(op_df, "NUM_ID_TIPO_OPER_OBJETO_SERV")
+    mod_col = resolve(op_df, "NUM_ID_MODALIDADE_LIQUIDACAO")
+    op_id_col = resolve(op_df, "NUM_ID_OPERACAO")
+    missing_op_cols = [
+        name
+        for name, actual in (
+            ("NUM_ID_TIPO_OPER_OBJETO_SERV", tos_col),
+            ("NUM_ID_MODALIDADE_LIQUIDACAO", mod_col),
+        )
+        if not actual
+    ]
+    if missing_op_cols:
+        return [Finding(
+            "6.combo.required_columns", cat, SEV_WARN, OPERACAO_TABLE, False,
+            column=",".join(missing_op_cols),
+            hint="Regenerate/export OPERACAO with its physical "
+                 "NUM_ID_TIPO_OPER_OBJETO_SERV and NUM_ID_MODALIDADE_LIQUIDACAO columns; "
+                 "do not invent NUM_ID_TIPO_OPERACAO on OPERACAO.",
+            message="OPERACAO lacks required Category 6 lookup column(s): "
+                    f"{', '.join(missing_op_cols)}.",
+        )]
+
+    select_cols = [
+        _norm_code(F.col(tos_col)).alias("tos_id"),
+        _norm_code(F.col(mod_col)).alias("modalidade_id"),
+    ]
+    if op_id_col:
+        select_cols.insert(0, _norm_code(F.col(op_id_col)).alias("operation_id"))
+    operations = op_df.select(*select_cols).where(
+        F.col("tos_id").isNotNull() & (F.col("tos_id") != "")
+    )
+    sample_cols = ["operation_id"] if op_id_col else ["tos_id", "modalidade_id"]
+
+    def target_columns(
+        df: Optional[DataFrame], table: str, required: List[str]
+    ) -> Optional[Dict[str, str]]:
+        if df is None:
+            errors.setdefault(table, "lookup was not loaded")
+            return None
+        resolved = {name: resolve(df, name) for name in required}
+        missing = [name for name, actual in resolved.items() if not actual]
+        if missing:
+            errors[table] = f"missing column(s): {', '.join(missing)}"
+            return None
+        return {name: actual for name, actual in resolved.items() if actual}
+
+    tos_cols = target_columns(
+        tos_df,
+        TIPO_OPER_OBJETO_SERV_TABLE,
+        [
+            "NUM_ID_TIPO_OPER_OBJETO_SERV",
+            "NUM_ID_TIPO_OPERACAO",
+            "NUM_ID_OBJETO_SERVICO",
+            "IND_DISPONIVEL_IDENTIFICACAO",
+        ],
+    )
+    sic_cols = target_columns(
+        sic_df,
+        V_PARAMETRO_SIC_TABLE,
+        ["NUM_ID_TIPO_OPER_OBJETO_SERV", "NUM_TIPO_IF", "NUM_ID_OBJETO_SERVICO"],
+    )
+    tipo_cols = target_columns(
+        tipo_operacao_df,
+        TIPO_OPERACAO_TABLE,
+        ["NUM_ID_TIPO_OPERACAO", "IND_SEM_MODALIDADE_INFOHUB"],
+    )
+
+    if tos_cols is None:
+        reason = errors[TIPO_OPER_OBJETO_SERV_TABLE]
+        lookup_hint = (
+            "Check Oracle JDBC credentials/schema, SELECT grants, and target view/table "
+            "availability, then rerun against QAB."
+        )
+        return [
+            Finding(
+                check_id, cat, SEV_WARN, OPERACAO_TABLE, False,
+                hint=lookup_hint,
+                message=f"{message} unavailable: {TIPO_OPER_OBJETO_SERV_TABLE} {reason}.",
+            )
+            for check_id, message in (
+                ("6.combo.tos_fk", "TOS structural check"),
+                ("6.combo.cdb_compatibility", "CDB compatibility check"),
+                ("6.combo.sem_modalidade", "Sem-modalidade check"),
+                ("6.combo.identification_availability", "Identification availability check"),
+            )
+        ]
+
+    tos = tos_df.select(
+        _norm_code(F.col(tos_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias("tos_id"),
+        _norm_code(F.col(tos_cols["NUM_ID_TIPO_OPERACAO"])).alias("tipo_operacao_id"),
+        _norm_code(F.col(tos_cols["NUM_ID_OBJETO_SERVICO"])).alias("objeto_servico_id"),
+        F.trim(F.col(tos_cols["IND_DISPONIVEL_IDENTIFICACAO"]).cast("string"))
+        .alias("identificacao_flag"),
+    ).where(F.col("tos_id").isNotNull()).dropDuplicates(["tos_id"])
+
+    missing_tos = operations.join(F.broadcast(tos.select("tos_id")), "tos_id", "left_anti")
+    missing_tos_count = missing_tos.count()
+    out = [Finding(
+        "6.combo.tos_fk", cat, SEV_ERROR if missing_tos_count else SEV_INFO,
+        OPERACAO_TABLE, missing_tos_count == 0, count=missing_tos_count,
+        column="NUM_ID_TIPO_OPER_OBJETO_SERV",
+        sample=_sample_keys(missing_tos, sample_cols, sample),
+        hint="Preserve or recover the transaction's exact static TOS FK, or prune source "
+             "operations unsupported by the target; otherwise ask the QAB configuration "
+             "owner to seed that exact mapping. Do not bind to an arbitrary valid TOS row.",
+        message=f"Synthetic non-null TOS IDs absent from target {TIPO_OPER_OBJETO_SERV_TABLE}.",
+    )]
+
+    resolved_ops = operations.join(F.broadcast(tos), "tos_id", "inner")
+
+    if sic_cols is None:
+        out.append(Finding(
+            "6.combo.cdb_compatibility", cat, SEV_WARN, OPERACAO_TABLE, False,
+            hint="Check Oracle JDBC credentials/schema, SELECT grants, and target view/table "
+                 "availability, then rerun against QAB.",
+            message=f"CDB compatibility check unavailable: {V_PARAMETRO_SIC_TABLE} "
+                    f"{errors[V_PARAMETRO_SIC_TABLE]}.",
+        ))
+    else:
+        valid_cdb_tos = (
+            sic_df.select(
+                _norm_code(F.col(sic_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
+                .alias("tos_id"),
+                _norm_code(F.col(sic_cols["NUM_TIPO_IF"])).alias("tipo_if"),
+                _norm_code(F.col(sic_cols["NUM_ID_OBJETO_SERVICO"]))
+                .alias("objeto_servico_id"),
+            )
+            .where(
+                (F.col("tipo_if") == str(CDB_TIPO_IF))
+                & (F.col("objeto_servico_id") == str(CDB_OBJETO_SERVICO))
+            )
+            .select("tos_id")
+            .where(F.col("tos_id").isNotNull())
+            .dropDuplicates()
+        )
+        incompatible = resolved_ops.join(F.broadcast(valid_cdb_tos), "tos_id", "left_anti")
+        incompatible_count = incompatible.count()
+        out.append(Finding(
+            "6.combo.cdb_compatibility", cat,
+            SEV_WARN if incompatible_count else SEV_INFO,
+            OPERACAO_TABLE, incompatible_count == 0, count=incompatible_count,
+            column="NUM_ID_TIPO_OPER_OBJETO_SERV",
+            sample=_sample_keys(incompatible, sample_cols, sample),
+            hint=f"Use or preserve a TOS mapping exposed by target {V_PARAMETRO_SIC_TABLE} "
+                 f"for NUM_TIPO_IF={CDB_TIPO_IF} and "
+                 f"NUM_ID_OBJETO_SERVICO={CDB_OBJETO_SERVICO}, or prune unsupported source "
+                 "operations. Otherwise align the underlying QAB configuration; "
+                 f"{V_PARAMETRO_SIC_TABLE} is a view and must not be updated directly.",
+            message="Resolved operation TOS mappings incompatible with CDB service configuration.",
+        ))
+
+    if tipo_cols is None:
+        out.append(Finding(
+            "6.combo.sem_modalidade", cat, SEV_WARN, OPERACAO_TABLE, False,
+            hint="Check Oracle JDBC credentials/schema, SELECT grants, and target view/table "
+                 "availability, then rerun against QAB.",
+            message=f"Sem-modalidade check unavailable: {TIPO_OPERACAO_TABLE} "
+                    f"{errors[TIPO_OPERACAO_TABLE]}.",
+        ))
+    else:
+        tipo_operacao = tipo_operacao_df.select(
+            _norm_code(F.col(tipo_cols["NUM_ID_TIPO_OPERACAO"]))
+            .alias("tipo_operacao_id"),
+            F.trim(F.col(tipo_cols["IND_SEM_MODALIDADE_INFOHUB"]).cast("string"))
+            .alias("sem_modalidade_flag"),
+        ).dropDuplicates(["tipo_operacao_id"])
+        sem_modalidade = resolved_ops.where(
+            F.col("modalidade_id").isin(*[str(value) for value in SEM_MODALIDADE_IDS])
+        ).join(F.broadcast(tipo_operacao), "tipo_operacao_id", "left")
+        invalid_sem_modalidade = sem_modalidade.where(
+            F.coalesce(F.col("sem_modalidade_flag"), F.lit("")) != "S"
+        )
+        invalid_sem_count = invalid_sem_modalidade.count()
+        out.append(Finding(
+            "6.combo.sem_modalidade", cat,
+            SEV_WARN if invalid_sem_count else SEV_INFO,
+            OPERACAO_TABLE, invalid_sem_count == 0, count=invalid_sem_count,
+            column="NUM_ID_MODALIDADE_LIQUIDACAO,IND_SEM_MODALIDADE_INFOHUB",
+            sample=_sample_keys(invalid_sem_modalidade, sample_cols, sample),
+            hint=f"Do not renumber fixed modalidade IDs {SEM_MODALIDADE_IDS}. Preserve a "
+                 "source-compatible modalidade/type pair, or ask the QAB configuration owner "
+                 "to correct TIPO_OPERACAO.IND_SEM_MODALIDADE_INFOHUB only when valid.",
+            message="Sem-modalidade operation types are not enabled in TIPO_OPERACAO.",
+        ))
+
+    unavailable = resolved_ops.where(
+        F.coalesce(F.col("identificacao_flag"), F.lit("")) != "S"
+    )
+    unavailable_count = unavailable.count()
+    out.append(Finding(
+        "6.combo.identification_availability", cat,
+        SEV_WARN if unavailable_count else SEV_INFO,
+        OPERACAO_TABLE, unavailable_count == 0, count=unavailable_count,
+        column="IND_DISPONIVEL_IDENTIFICACAO",
+        sample=_sample_keys(unavailable, sample_cols, sample),
+        hint="Use or preserve a target CDB TOS row with "
+             "IND_DISPONIVEL_IDENTIFICACAO='S', or ask the QAB configuration owner to align "
+             "target static configuration; do not arbitrarily rewrite transaction FKs.",
+        message="Resolved TOS mappings are unavailable for identification.",
+    ))
+    return out
+
+
 def check_lookup_combos(
     spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame], meta: Metadata, sample: int,
 ) -> List[Finding]:
-    out: List[Finding] = []
     op_df = tables.get(OPERACAO_TABLE)
     if op_df is None:
         return [Finding("6.combo", "Lookup combinations", SEV_INFO, OPERACAO_TABLE, True,
                         message="OPERACAO not in output; combo check skipped.")]
     if not cfg.jdbc_url:
-        return [Finding("6.combo", "Lookup combinations", SEV_WARN, OPERACAO_TABLE, False,
-                        message="No Oracle connection; cannot resolve valid "
-                                "(tipo_operacao, modalidade, servico) combinations for CDB.")]
+        return [Finding(
+            "6.combo.no_jdbc", "Lookup combinations", SEV_WARN, OPERACAO_TABLE, False,
+            hint="Configure and verify Oracle JDBC credentials/schema, SELECT grants, and "
+                 "target view/table availability, then rerun against QAB.",
+            message="No Oracle connection; cannot resolve valid "
+                    "(tipo_operacao, modalidade, servico) combinations for CDB.",
+        )]
 
-    # Discover a candidate service-mapping table.
-    combo_table = None
-    for pat in COMBO_TABLE_PATTERNS:
+    queries = {
+        TIPO_OPER_OBJETO_SERV_TABLE: (
+            "SELECT NUM_ID_TIPO_OPER_OBJETO_SERV, NUM_ID_TIPO_OPERACAO, "
+            "NUM_ID_OBJETO_SERVICO, IND_DISPONIVEL_IDENTIFICACAO "
+            f"FROM {cfg.schema}.{TIPO_OPER_OBJETO_SERV_TABLE}"
+        ),
+        V_PARAMETRO_SIC_TABLE: (
+            "SELECT DISTINCT NUM_ID_TIPO_OPER_OBJETO_SERV, NUM_TIPO_IF, "
+            f"NUM_ID_OBJETO_SERVICO FROM {cfg.schema}.{V_PARAMETRO_SIC_TABLE} "
+            f"WHERE NUM_TIPO_IF = {CDB_TIPO_IF} "
+            f"AND NUM_ID_OBJETO_SERVICO = {CDB_OBJETO_SERVICO}"
+        ),
+        TIPO_OPERACAO_TABLE: (
+            "SELECT NUM_ID_TIPO_OPERACAO, IND_SEM_MODALIDADE_INFOHUB "
+            f"FROM {cfg.schema}.{TIPO_OPERACAO_TABLE}"
+        ),
+    }
+    lookups: Dict[str, DataFrame] = {}
+    errors: Dict[str, str] = {}
+    for table, query in queries.items():
         try:
-            rows = _jdbc(spark, cfg,
-                         f"SELECT table_name FROM all_tables WHERE owner='{cfg.schema}' "
-                         f"AND table_name LIKE '{pat}'").collect()
-            if rows:
-                combo_table = rows[0]["TABLE_NAME"].upper()
-                break
+            remote = _jdbc(spark, cfg, query)
+            # Detach small config lookups so later actions cannot lazily re-read JDBC.
+            rows = remote.collect()
+            lookups[table] = spark.createDataFrame(rows, remote.schema)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("combo table discovery failed for %s: %s", pat, exc)
+            logger.warning("Category 6 lookup load failed for %s: %s", table, exc)
+            errors[table] = str(exc)
 
-    if not combo_table:
-        return [Finding("6.combo", "Lookup combinations", SEV_WARN, OPERACAO_TABLE, False,
-                        hint="Identify the tipo_operacao x modalidade x servico mapping table "
-                             "and add it to COMBO_TABLE_PATTERNS to enable a full combo "
-                             "anti-join.",
-                        message="Could not resolve the operation/service mapping table; "
-                                "SEM MODALIDADE risk not fully validated. Verify "
-                                "TIPO_OPERACAO/MODALIDADE_LIQUIDACAO refs "
-                                "are seeded for CDB operations.")]
-
-    to_col = resolve(op_df, "NUM_ID_TIPO_OPERACAO")
-    mod_col = resolve(op_df, "NUM_ID_MODALIDADE_LIQUIDACAO")
-    if not to_col or not mod_col:
-        return [Finding("6.combo", "Lookup combinations", SEV_INFO, OPERACAO_TABLE, True,
-                        message=f"OPERACAO lacks tipo_operacao/modalidade columns; "
-                                f"using {combo_table} not possible. Skipped.")]
-
-    try:
-        combo_cols = meta.col_type.get(combo_table, {})
-        c_to = "NUM_ID_TIPO_OPERACAO" if "NUM_ID_TIPO_OPERACAO" in combo_cols else None
-        c_mod = ("NUM_ID_MODALIDADE_LIQUIDACAO"
-                 if "NUM_ID_MODALIDADE_LIQUIDACAO" in combo_cols else None)
-        if not c_to or not c_mod:
-            return [Finding("6.combo", "Lookup combinations", SEV_WARN, OPERACAO_TABLE, False,
-                            message=f"Mapping table {combo_table} lacks the expected combo "
-                                    "columns; SEM MODALIDADE risk not validated.")]
-        valid = _jdbc(spark, cfg,
-                      f"SELECT DISTINCT {c_to} t, {c_mod} m FROM {cfg.schema}.{combo_table}")
-        valid = valid.select(F.col("T").cast("string").alias("t"),
-                             F.col("M").cast("string").alias("m"))
-        used = op_df.select(
-            F.col(to_col).cast("string").alias("t"),
-            F.col(mod_col).cast("string").alias("m"),
-        ).dropna().dropDuplicates()
-        missing = used.join(valid, ["t", "m"], "left_anti")
-        c = missing.count()
-        out.append(Finding(
-            "6.combo", "Lookup combinations",
-            SEV_ERROR if c else SEV_INFO, OPERACAO_TABLE, c == 0, count=c,
-            column="NUM_ID_TIPO_OPERACAO,NUM_ID_MODALIDADE_LIQUIDACAO",
-            sample=_sample_keys(missing, ["t", "m"], sample),
-            hint=f"Operation uses a (tipo_operacao, modalidade) with no mapping in "
-                 f"{combo_table} for CDB -> 'SEM MODALIDADE / servico_ft nao encontrado'. "
-                 "Seed/verify the mapping.",
-            message=f"OPERACAO (tipo_operacao, modalidade) pairs absent from {combo_table}.",
-        ))
-    except Exception as exc:  # noqa: BLE001
-        out.append(Finding("6.combo", "Lookup combinations", SEV_WARN, OPERACAO_TABLE, False,
-                           message=f"Combo check errored: {exc}"))
-    return out
+    return check_lookup_combo_frames(
+        op_df,
+        lookups.get(TIPO_OPER_OBJETO_SERV_TABLE),
+        lookups.get(V_PARAMETRO_SIC_TABLE),
+        lookups.get(TIPO_OPERACAO_TABLE),
+        sample,
+        errors,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1193,7 +1388,8 @@ def check_shapes(
             out.append(Finding(
                 "7c.op_ratio", cat,
                 SEV_ERROR if pct > op_ratio_tol_pct else SEV_INFO,
-                "OPERACAO", pct <= op_ratio_tol_pct, count=c, column="OPERACAO,DADO_OPERACAO,LANCAMENTO",
+                "OPERACAO", pct <= op_ratio_tol_pct, count=c,
+                column="OPERACAO,DADO_OPERACAO,LANCAMENTO",
                 sample=_sample_keys(bad.select(SHAPE_ROOT_KEY), [SHAPE_ROOT_KEY], sample),
                 hint="Every production operação carries exactly 2 DADO_OPERACAO and "
                      "1 LANCAMENTO. Generate/bind the three tables as one unit per operação.",
