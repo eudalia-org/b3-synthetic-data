@@ -882,13 +882,23 @@ def _dominio_num_if_produto(spark, config) -> DataFrame:
                 JOIN FILTRO_BASE FB ON FB.NUM_IF = CP.NUM_IF
             WHERE CP.QTD_CARTEIRA_PARTICIPANTE > 0
         )
-        SELECT DISTINCT NUM_IF FROM FLAGS_IF
+        SELECT DISTINCT f.NUM_IF
+        FROM FLAGS_IF f
+            INNER JOIN CETIP.OPERACAO             o  ON o.NUM_IF = f.NUM_IF
+            INNER JOIN CETIP.DADO_OPERACAO        do ON do.NUM_ID_OPERACAO = o.NUM_ID_OPERACAO
+            INNER JOIN CETIP.LANCAMENTO           l  ON l.NUM_ID_OPERACAO = o.NUM_ID_OPERACAO
+            INNER JOIN CETIP.ESPECIFICACAO        e2 ON e2.NUM_ID_OPERACAO = o.NUM_ID_OPERACAO
+            INNER JOIN CETIP.ESPECIFICACAO_COMITENTE ec
+                       ON ec.NUM_ID_ESPECIFICACAO = e2.NUM_ID_ESPECIFICACAO
 
     Nota: EVENTOS_IF, AGREGADO_BASE, AGREGADO_FLAGS, DEP_IF, COM_IF e CPA_IF são
     declaradas na query oficial mas NÃO são referenciadas pelo SELECT final — o
     Spark não materializa CTE não referenciada. Mantidas idênticas à oficial (só
-    CETIP.<TAB> vira parquet.`<path>`). O domínio efetivo permanece
-    FILTRO_BASE ∩ instrumentos com CONDICAO_IF ativa de tipo <> 20.
+    CETIP.<TAB> vira parquet.`<path>`). O SELECT final agora faz INNER JOIN com a
+    cadeia OPERACAO -> DADO_OPERACAO / LANCAMENTO / ESPECIFICACAO ->
+    ESPECIFICACAO_COMITENTE, então o domínio efetivo é FILTRO_BASE ∩ instrumentos
+    com CONDICAO_IF ativa de tipo <> 20 ∩ instrumentos que têm essa cadeia de
+    operação/especificação completa (cada INNER JOIN restringe o domínio).
     """
     p_ife = raw_path(config, TABELA_RAIZ)
     p_tit = raw_path(config, "TITULO")
@@ -900,6 +910,11 @@ def _dominio_num_if_produto(spark, config) -> DataFrame:
     p_dep = raw_path(config, "DEPOSITO_AUTOMATICO_IF")
     p_com = raw_path(config, "CARTEIRA_COMITENTE")
     p_cpa = raw_path(config, "CARTEIRA_PARTICIPANTE")
+    p_ope = raw_path(config, "OPERACAO")
+    p_dop = raw_path(config, "DADO_OPERACAO")
+    p_lan = raw_path(config, "LANCAMENTO")
+    p_esp = raw_path(config, "ESPECIFICACAO")
+    p_epc = raw_path(config, "ESPECIFICACAO_COMITENTE")
     sql = f"""
     WITH FILTRO_BASE AS (
         SELECT DISTINCT IFE.NUM_IF
@@ -970,7 +985,13 @@ def _dominio_num_if_produto(spark, config) -> DataFrame:
             JOIN FILTRO_BASE FB ON FB.NUM_IF = CP.NUM_IF
         WHERE CP.QTD_CARTEIRA_PARTICIPANTE > 0
     )
-    SELECT DISTINCT NUM_IF FROM FLAGS_IF
+    SELECT DISTINCT f.NUM_IF
+    FROM FLAGS_IF f
+        INNER JOIN parquet.`{p_ope}` o  ON o.NUM_IF = f.NUM_IF
+        INNER JOIN parquet.`{p_dop}` do ON do.NUM_ID_OPERACAO = o.NUM_ID_OPERACAO
+        INNER JOIN parquet.`{p_lan}` l  ON l.NUM_ID_OPERACAO = o.NUM_ID_OPERACAO
+        INNER JOIN parquet.`{p_esp}` e2 ON e2.NUM_ID_OPERACAO = o.NUM_ID_OPERACAO
+        INNER JOIN parquet.`{p_epc}` ec ON ec.NUM_ID_ESPECIFICACAO = e2.NUM_ID_ESPECIFICACAO
     """
     return spark.sql(sql)
 
