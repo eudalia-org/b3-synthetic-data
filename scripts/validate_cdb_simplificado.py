@@ -12,8 +12,9 @@ Oracle append and before the daily/operational batch runs on top of the data.
 
 It is fully self-contained: it does NOT import from `engorda_tables.py`.
 
-Authoritative rules (PK / FK graph / NOT NULL / column types) are read from the
-Oracle data dictionary (ALL_* views) over JDBC. A few semantic rules that are
+Authoritative rules (PK / FK graph / NOT NULL / column types and capacities) are read from the
+Oracle data dictionary (ALL_* views) over JDBC. An optional application-capacity
+contract supplies global code-level limits. A few semantic rules that are
 NOT expressible in schema metadata (the CONDICAO_IF polymorphic subtype map and
 the CDB-simplificado product predicates) are curated below and, where possible,
 verified against production data.
@@ -24,7 +25,8 @@ batch validation log:
   Cat 1  CONDICAO_IF polymorphism  -> ClassCastException JurosFlutuanteDO -> JurosFixoDO
   Cat 2  Domain conformance        -> out-of-product rows (FILTROS_FONTE image)
   Cat 3  Referential integrity     -> FK orphans / broken remap
-  Cat 4  NOT NULL (incl. '')       -> ORA-01400 (e.g. TCTPDETALHE_TRAN_SEM_FINA.COD_MOTIVO)
+  Cat 4  NOT NULL / capacity       -> ORA-01400, ORA-06502, ORA-12899 and ORA-01438
+                                      (e.g. TCTPDETALHE_TRAN_SEM_FINA.COD_MOTIVO)
   Cat 5  Date coherence            -> bad revaluation input
   Cat 6  Lookup combinations       -> "SEM MODALIDADE / servico_ft nao encontrado"
   Cat 7  Shape conformance         -> per-IF cardinalities vs the production profile
@@ -62,13 +64,15 @@ import json
 import logging
 import os
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from functools import reduce
 from typing import Dict, List, Optional, Tuple
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql.types import NumericType
 
 logging.basicConfig(
     level=logging.INFO,
@@ -218,6 +222,11 @@ class Metadata:
     not_null: Dict[str, set]
     col_type: Dict[str, Dict[str, str]]
     fks: Dict[str, List[ForeignKey]]
+    # These fields deliberately follow the original five positional fields.
+    # Existing Metadata(set(), {}, {}, {}, {}) callers remain compatible.
+    column_capacity: Dict[str, Dict[str, Dict[str, object]]] = field(default_factory=dict)
+    nls_character_set: Optional[str] = None
+    nls_nchar_character_set: Optional[str] = None
 
     def is_shared_key_fk(self, fk: ForeignKey) -> bool:
         pk_cols = self.pk.get(fk.child_table) or []
@@ -240,7 +249,8 @@ def load_oracle_metadata(spark: SparkSession, cfg: Config) -> Metadata:
     owner = cfg.schema
 
     q_cols = (
-        f"SELECT table_name, column_name, data_type, nullable "
+        f"SELECT table_name, column_name, data_type, nullable, data_length, char_length, "
+        f"char_used, data_precision, data_scale "
         f"FROM all_tab_columns WHERE owner = '{owner}'"
     )
     q_pk = (
@@ -260,6 +270,10 @@ def load_oracle_metadata(spark: SparkSession, cfg: Config) -> Metadata:
         f"                          AND pcc.position=ccc.position "
         f"WHERE c.owner='{owner}' AND c.constraint_type='R'"
     )
+    q_nls = (
+        "SELECT parameter, value FROM nls_database_parameters "
+        "WHERE parameter IN ('NLS_CHARACTERSET', 'NLS_NCHAR_CHARACTERSET')"
+    )
 
     logger.info("Loading Oracle metadata (owner=%s) ...", owner)
     cols_rows = _jdbc(spark, cfg, q_cols).collect()
@@ -269,11 +283,21 @@ def load_oracle_metadata(spark: SparkSession, cfg: Config) -> Metadata:
     tables: set = set()
     not_null: Dict[str, set] = {}
     col_type: Dict[str, Dict[str, str]] = {}
+    column_capacity: Dict[str, Dict[str, Dict[str, object]]] = {}
     for r in cols_rows:
         t = (r["TABLE_NAME"] or "").upper()
         c = (r["COLUMN_NAME"] or "").upper()
         tables.add(t)
         col_type.setdefault(t, {})[c] = (r["DATA_TYPE"] or "").upper()
+        values = r.asDict(recursive=True) if hasattr(r, "asDict") else {}
+        column_capacity.setdefault(t, {})[c] = {
+            "DATA_TYPE": values.get("DATA_TYPE", r["DATA_TYPE"]),
+            "DATA_LENGTH": values.get("DATA_LENGTH"),
+            "CHAR_LENGTH": values.get("CHAR_LENGTH"),
+            "CHAR_USED": values.get("CHAR_USED"),
+            "DATA_PRECISION": values.get("DATA_PRECISION"),
+            "DATA_SCALE": values.get("DATA_SCALE"),
+        }
         if (r["NULLABLE"] or "").upper() == "N":
             not_null.setdefault(t, set()).add(c)
 
@@ -312,7 +336,20 @@ def load_oracle_metadata(spark: SparkSession, cfg: Config) -> Metadata:
         "Metadata: %d tables, %d with PK, %d with FK(s), %d with NOT NULL col(s).",
         len(tables), len(pk), len(fks), len(not_null),
     )
-    return Metadata(tables, pk, not_null, col_type, fks)
+    nls: Dict[str, str] = {}
+    try:
+        nls = {
+            (r["PARAMETER"] or "").upper(): (r["VALUE"] or "").upper()
+            for r in _jdbc(spark, cfg, q_nls).collect()
+        }
+    except Exception as exc:  # noqa: BLE001
+        # A missing NLS grant must not discard PK/FK/NOT NULL/core capacity metadata.
+        logger.warning("Could not load Oracle NLS character sets: %s", exc)
+
+    return Metadata(
+        tables, pk, not_null, col_type, fks, column_capacity,
+        nls.get("NLS_CHARACTERSET"), nls.get("NLS_NCHAR_CHARACTERSET"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +472,552 @@ def read_text(spark: SparkSession, path: str) -> str:
         )
     finally:
         stream.close()
+
+
+# ---------------------------------------------------------------------------
+# Category 4 - capacity contracts (Oracle and application)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class ApplicationCapacity:
+    table: str
+    column: str
+    kind: str
+    value: Optional[int] = None
+    unit: Optional[str] = None
+    integer_digits: Optional[int] = None
+    decimal_digits: Optional[int] = None
+    automatic: bool = False
+    caller_dependent: bool = False
+    confidence: str = ""
+    ambiguous_sources: Tuple[str, ...] = ()
+
+
+@dataclass
+class _CapacityRule:
+    check_id: str
+    severity: str
+    table: str
+    column: str
+    condition: object
+    hint: str
+    message: str
+
+
+def _contract_error(message: str) -> ValueError:
+    return ValueError(f"Invalid application capacity contract: {message}")
+
+
+def _contract_int(value, field_name: str, key: str, *, allow_zero: bool = True) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or (value < 0 if allow_zero else value <= 0)
+    ):
+        comparator = "a non-negative" if allow_zero else "a positive"
+        raise _contract_error(f"{key}.{field_name} must be {comparator} integer.")
+    return value
+
+
+def _contract_capacity(row: dict, location: str) -> ApplicationCapacity:
+    """Parse one row; duplicate handling belongs to the enclosing contract."""
+    table, column = row.get("table"), row.get("column")
+    if (
+        not isinstance(table, str)
+        or not table.strip()
+        or not isinstance(column, str)
+        or not column.strip()
+    ):
+        raise _contract_error(f"{location} needs non-empty table and column strings.")
+    key = (table.strip().upper(), column.strip().upper())
+    declared, enforcement = row.get("declared_capacity"), row.get("enforcement")
+    if not isinstance(declared, dict) or not isinstance(enforcement, dict):
+        raise _contract_error(f"{key[0]}.{key[1]} needs declared_capacity and enforcement objects.")
+    kind = declared.get("kind")
+    if not isinstance(kind, str):
+        raise _contract_error(f"{key[0]}.{key[1]}.declared_capacity.kind must be a string.")
+    kind = kind.lower()
+    if kind not in {"text", "numeric", "none", "format"}:
+        raise _contract_error(f"{key[0]}.{key[1]} has unsupported capacity kind {kind!r}.")
+    automatic = enforcement.get("automatic")
+    caller_dependent = enforcement.get("caller_dependent")
+    if not isinstance(automatic, bool) or not isinstance(caller_dependent, bool):
+        raise _contract_error(f"{key[0]}.{key[1]}.enforcement flags must be booleans.")
+    confidence = row.get("confidence")
+    if not isinstance(confidence, str) or not confidence.strip():
+        raise _contract_error(f"{key[0]}.{key[1]}.confidence must be a non-empty string.")
+    kwargs = dict(
+        table=key[0],
+        column=key[1],
+        kind=kind,
+        automatic=automatic,
+        caller_dependent=caller_dependent,
+        confidence=confidence.lower(),
+    )
+    if kind == "text":
+        value = _contract_int(
+            declared.get("value"), "value", f"{key[0]}.{key[1]}", allow_zero=False
+        )
+        unit = declared.get("unit")
+        if unit not in {"utf16_code_units", "characters"}:
+            raise _contract_error(f"{key[0]}.{key[1]}.unit must be utf16_code_units or characters.")
+        kwargs.update(value=value, unit=unit)
+    elif kind == "numeric":
+        kwargs.update(
+            integer_digits=_contract_int(
+                declared.get("integer_digits"), "integer_digits", f"{key[0]}.{key[1]}"
+            ),
+            decimal_digits=_contract_int(
+                declared.get("decimal_digits"), "decimal_digits", f"{key[0]}.{key[1]}"
+            ),
+        )
+    return ApplicationCapacity(**kwargs)
+
+
+def _contract_source(row: dict) -> str:
+    """Small diagnostic only; it never participates in capacity enforcement."""
+    return (
+        ".".join(
+            str(row.get(part))
+            for part in ("java_type", "java_property", "mapping_source")
+            if row.get(part)
+        )
+        or "unidentified mapping"
+    )
+
+
+def _same_capacity(left: ApplicationCapacity, right: ApplicationCapacity) -> bool:
+    """Compare definitions without considering diagnostic source tracking."""
+    return replace(left, ambiguous_sources=()) == replace(right, ambiguous_sources=())
+
+
+def parse_application_capacity_contract(
+    payload: object,
+) -> Dict[Tuple[str, str], ApplicationCapacity]:
+    """Parse only global, declared application capacities.
+
+    Serializer routes deliberately are not part of this representation: a route
+    such as ASEL023's six-character truncation is not a table-column invariant.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("rows"), list):
+        raise _contract_error("top-level object must contain a rows list.")
+    capacities: Dict[Tuple[str, str], ApplicationCapacity] = {}
+    for index, row in enumerate(payload["rows"]):
+        location = f"rows[{index}]"
+        if not isinstance(row, dict):
+            raise _contract_error(f"{location} must be an object.")
+        capacity = _contract_capacity(row, location)
+        key = (capacity.table, capacity.column)
+        source = _contract_source(row)
+        if key in capacities:
+            previous = capacities[key]
+            sources = tuple(sorted(set(previous.ambiguous_sources + (source,))))
+            if previous.kind == "ambiguous":
+                capacities[key] = replace(previous, ambiguous_sources=sources)
+            elif _same_capacity(previous, capacity):
+                capacities[key] = replace(previous, ambiguous_sources=sources)
+            else:
+                capacities[key] = ApplicationCapacity(
+                    table=capacity.table,
+                    column=capacity.column,
+                    kind="ambiguous",
+                    ambiguous_sources=sources,
+                )
+        else:
+            capacities[key] = replace(capacity, ambiguous_sources=(source,))
+    return capacities
+
+
+def load_application_capacity_contract(
+    spark: SparkSession, path: Optional[str]
+) -> Dict[Tuple[str, str], ApplicationCapacity]:
+    if not path:
+        return {}
+    try:
+        return parse_application_capacity_contract(json.loads(read_text(spark, path)))
+    except Exception as exc:  # noqa: BLE001
+        raise SystemExit(f"Could not load --application-capacity-contract {path}: {exc}") from exc
+
+
+def _capacity_number_limit(integer_digits: int) -> Decimal:
+    # Avoid Spark/Java floating-point literals for capacity comparisons.
+    return Decimal(10) ** integer_digits
+
+
+def _oracle_charset(name: Optional[str]) -> Optional[str]:
+    return {
+        "WE8ISO8859P1": "ISO-8859-1",
+        "US7ASCII": "US-ASCII",
+        "AL32UTF8": "UTF-8",
+        "AL16UTF16": "UTF-16BE",
+    }.get((name or "").upper())
+
+
+def _as_capacity_int(value) -> Optional[int]:
+    try:
+        if value is None or isinstance(value, bool):
+            return None
+        result = int(value)
+        return result if Decimal(str(value)) == Decimal(result) else None
+    except (ValueError, TypeError, InvalidOperation):
+        return None
+
+
+def _safe_decimal_cast(column_name: str, scale: int):
+    """ANSI-safe numeric conversion; failed/out-of-range casts become NULL."""
+    escaped = column_name.replace("`", "``")
+    return F.expr(f"try_cast(`{escaped}` AS DECIMAL(38,{scale}))")
+
+
+def _application_numeric_condition(
+    column_name: str,
+    capacity: ApplicationCapacity,
+    working_scale: int,
+    source_is_numeric: bool,
+):
+    source = F.col(column_name)
+    # Keep the original precision for Spark numeric columns. Casting them to a
+    # one-extra-decimal working type first would miss values such as 1.2301 for
+    # a two-decimal application contract after the cast rounded it to 1.230.
+    value = source if source_is_numeric else _safe_decimal_cast(column_name, working_scale)
+    invalid = F.lit(False) if source_is_numeric else value.isNull()
+    integer_overflow = F.abs(value) >= F.lit(_capacity_number_limit(capacity.integer_digits))
+    if capacity.decimal_digits == 0:
+        decimal_overflow = value != F.round(value, 0)
+    else:
+        decimal_overflow = value != F.round(value, capacity.decimal_digits)
+    return source.isNotNull() & (invalid | integer_overflow | decimal_overflow)
+
+
+def check_capacity(
+    tables: Dict[str, DataFrame],
+    meta: Metadata,
+    application_capacities: Dict[Tuple[str, str], ApplicationCapacity],
+    sample: int,
+) -> List[Finding]:
+    """Check all deterministic capacity rules with one aggregate action/table."""
+    out: List[Finding] = []
+    category = "Capacity"
+    for table, df in tables.items():
+        rules: List[_CapacityRule] = []
+        capacities = meta.column_capacity.get(table, {})
+        for col_upper, actual in _ci_map(df).items():
+            app = application_capacities.get((table, col_upper))
+            if app and app.kind == "ambiguous":
+                sources = ", ".join(app.ambiguous_sources)
+                ambiguous_hint = (
+                    "Resolve the conflicting Java mappings into one global capacity contract "
+                    "before enforcing this column; route/path-dependent limits are not global "
+                    "rules."
+                )
+                ambiguous_message = (
+                    "Application capacity is ambiguous across alternate Java mappings; no "
+                    f"application capacity rule was enforced. Sources: {sources}."
+                )
+                out.append(
+                    Finding(
+                        "4.capacity.application_ambiguous",
+                        category,
+                        SEV_WARN,
+                        table,
+                        False,
+                        column=col_upper,
+                        hint=ambiguous_hint,
+                        message=ambiguous_message,
+                    )
+                )
+            elif app and app.kind in {"text", "numeric"}:
+                severity = SEV_ERROR if app.automatic and app.confidence == "high" else SEV_WARN
+                condition = None
+                if app.kind == "text":
+                    length = (
+                        F.length(F.encode(F.col(actual).cast("string"), "UTF-16BE")) / F.lit(2)
+                        if app.unit == "utf16_code_units"
+                        else F.length(F.col(actual).cast("string"))
+                    )
+                    condition = F.col(actual).isNotNull() & (length > F.lit(app.value))
+                    detail = f"{app.unit} > {app.value}"
+                    check_id = "4.capacity.application_text"
+                else:
+                    detail = (
+                        f"integer_digits={app.integer_digits}, decimal_digits={app.decimal_digits}"
+                    )
+                    check_id = "4.capacity.application_number"
+                    # Keep every declared integer digit and one extra fractional
+                    # digit. The latter catches a scale overflow without rounding
+                    # it away during the Spark cast.
+                    working_scale = max(app.decimal_digits + 1, 1)
+                    if app.integer_digits + working_scale > 38:
+                        unverified_hint = (
+                            "The declared application numeric capacity exceeds the exact Spark "
+                            "Decimal(38,*) working range. Validate it in the application/runtime "
+                            "instead of accepting a rounded capacity check."
+                        )
+                        unverified_message = (
+                            f"Application numeric capacity ({detail}) is unverifiable without "
+                            "an inexact Decimal cast."
+                        )
+                        out.append(
+                            Finding(
+                                "4.capacity.application_number_unverified",
+                                category,
+                                SEV_WARN,
+                                table,
+                                False,
+                                column=col_upper,
+                                hint=unverified_hint,
+                                message=unverified_message,
+                            )
+                        )
+                        app = None
+                    else:
+                        source_is_numeric = isinstance(df.schema[actual].dataType, NumericType)
+                        condition = _application_numeric_condition(
+                            actual, app, working_scale, source_is_numeric
+                        )
+                if condition is not None:
+                    enforcement = (
+                        "automatic high-confidence"
+                        if severity == SEV_ERROR
+                        else "caller-dependent/uncertain"
+                    )
+                    application_hint = (
+                        "Regenerate or normalize the value to the declared application capacity; "
+                        "serializer route widths are intentionally not global column limits."
+                    )
+                    application_message = f"Application {enforcement} capacity exceeded ({detail})."
+                    rules.append(
+                        _CapacityRule(
+                            check_id,
+                            severity,
+                            table,
+                            col_upper,
+                            condition,
+                            application_hint,
+                            application_message,
+                        )
+                    )
+
+            oracle = capacities.get(col_upper)
+            if not oracle:
+                continue
+            data_type = str(
+                oracle.get("DATA_TYPE") or meta.col_type.get(table, {}).get(col_upper) or ""
+            ).upper()
+            if data_type in {"CHAR", "VARCHAR2", "NCHAR", "NVARCHAR2"}:
+                char_used = str(oracle.get("CHAR_USED") or "").upper()
+                char_length = _as_capacity_int(oracle.get("CHAR_LENGTH"))
+                data_length = _as_capacity_int(oracle.get("DATA_LENGTH"))
+                is_char = char_used == "C" or data_type in {"NCHAR", "NVARCHAR2"}
+                charset_name = (
+                    meta.nls_nchar_character_set
+                    if data_type in {"NCHAR", "NVARCHAR2"}
+                    else meta.nls_character_set
+                )
+                charset = _oracle_charset(charset_name)
+                if is_char and char_length is not None:
+                    value = F.col(actual).cast("string")
+                    condition = value.isNotNull() & (F.length(value) > F.lit(char_length))
+                    if charset:
+                        encoded = F.encode(value, charset)
+                        roundtrip = F.decode(encoded, charset)
+                        condition = condition | (value.isNotNull() & (roundtrip != value))
+                        if data_length is not None:
+                            condition = condition | (
+                                value.isNotNull() & (F.length(encoded) > F.lit(data_length))
+                            )
+                    else:
+                        char_unverified_message = (
+                            f"Oracle {data_type}({char_length} CHAR) character count is checked, "
+                            f"but representability is unverifiable for {charset_name!r}."
+                        )
+                        out.append(
+                            Finding(
+                                "4.capacity.oracle_string_unverified",
+                                category,
+                                SEV_WARN,
+                                table,
+                                False,
+                                column=col_upper,
+                                hint="Grant/read NLS_DATABASE_PARAMETERS or configure a supported "
+                                "Oracle target charset to verify character representability.",
+                                message=char_unverified_message,
+                            )
+                        )
+                    rules.append(
+                        _CapacityRule(
+                            "4.capacity.oracle_string",
+                            SEV_ERROR,
+                            table,
+                            col_upper,
+                            condition,
+                            (
+                                "Shorten the generated text to the Oracle CHAR-semantics limit "
+                                "before load."
+                            ),
+                            (
+                                f"Oracle {data_type}({char_length} CHAR) capacity/charset "
+                                "representability exceeded (ORA-12899/ORA-06502)."
+                            ),
+                        )
+                    )
+                elif not is_char and data_length is not None:
+                    if not charset:
+                        oracle_charset_hint = (
+                            "Grant/read NLS_DATABASE_PARAMETERS or configure a supported "
+                            "Oracle target charset; do not assume UTF-8 bytes for an Oracle BYTE "
+                            "column."
+                        )
+                        oracle_charset_message = (
+                            f"Oracle {data_type} BYTE capacity ({data_length}) is unverifiable: "
+                            f"unsupported/missing target charset {charset_name!r}."
+                        )
+                        out.append(
+                            Finding(
+                                "4.capacity.oracle_string_unverified",
+                                category,
+                                SEV_WARN,
+                                table,
+                                False,
+                                column=col_upper,
+                                hint=oracle_charset_hint,
+                                message=oracle_charset_message,
+                            )
+                        )
+                    else:
+                        value = F.col(actual).cast("string")
+                        encoded = F.encode(value, charset)
+                        roundtrip = F.decode(encoded, charset)
+                        oracle_byte_hint = (
+                            "Use characters representable in the target Oracle charset and "
+                            "keep the "
+                            "encoded byte length within the BYTE limit before load."
+                        )
+                        oracle_byte_message = (
+                            f"Oracle {data_type}({data_length} BYTE) capacity/charset "
+                            f"representability exceeded for {charset_name} (ORA-12899/ORA-06502)."
+                        )
+                        rules.append(
+                            _CapacityRule(
+                                "4.capacity.oracle_string",
+                                SEV_ERROR,
+                                table,
+                                col_upper,
+                                value.isNotNull()
+                                & ((F.length(encoded) > F.lit(data_length)) | (roundtrip != value)),
+                                oracle_byte_hint,
+                                oracle_byte_message,
+                            )
+                        )
+            elif data_type in {"RAW", "BINARY", "VARBINARY"}:
+                data_length = _as_capacity_int(oracle.get("DATA_LENGTH"))
+                if data_length is not None:
+                    rules.append(
+                        _CapacityRule(
+                            "4.capacity.oracle_string",
+                            SEV_ERROR,
+                            table,
+                            col_upper,
+                            F.col(actual).isNotNull()
+                            & (F.length(F.col(actual)) > F.lit(data_length)),
+                            (
+                                "Keep the binary/RAW payload within the Oracle byte capacity "
+                                "before load."
+                            ),
+                            (
+                                f"Oracle {data_type}({data_length}) binary capacity exceeded "
+                                "(ORA-12899)."
+                            ),
+                        )
+                    )
+            elif data_type == "NUMBER":
+                precision = _as_capacity_int(oracle.get("DATA_PRECISION"))
+                scale = _as_capacity_int(oracle.get("DATA_SCALE"))
+                if precision is None:
+                    continue  # unconstrained NUMBER has no precision capacity.
+                scale = 0 if scale is None else scale
+                exponent = precision - scale
+                # 10**38 cannot be represented as Spark Decimal(38,*), so keep
+                # the comparison exact instead of falling back to a float.
+                if not (1 <= precision <= 38 and -38 <= scale <= 38 and -38 <= exponent <= 37):
+                    oracle_number_hint = (
+                        "Validate this NUMBER(p,s) with Oracle directly; its exponent is outside "
+                        "the exact Spark Decimal comparison range used by this validator."
+                    )
+                    oracle_number_message = (
+                        f"Oracle NUMBER({precision},{scale}) capacity is unverifiable without "
+                        "float comparison."
+                    )
+                    out.append(
+                        Finding(
+                            "4.capacity.oracle_number_unverified",
+                            category,
+                            SEV_WARN,
+                            table,
+                            False,
+                            column=col_upper,
+                            hint=oracle_number_hint,
+                            message=oracle_number_message,
+                        )
+                    )
+                else:
+                    source = F.col(actual)
+                    numeric = _safe_decimal_cast(actual, max(scale, 0))
+                    rounded = F.round(numeric, scale)
+                    oracle_number_capacity_hint = (
+                        "Reduce the rounded magnitude to fit Oracle NUMBER(p,s), including its "
+                        "declared scale, before load (ORA-01438)."
+                    )
+                    oracle_number_capacity_message = (
+                        f"Oracle NUMBER({precision},{scale}) rounded magnitude exceeds its "
+                        "precision capacity."
+                    )
+                    rules.append(
+                        _CapacityRule(
+                            "4.capacity.oracle_number",
+                            SEV_ERROR,
+                            table,
+                            col_upper,
+                            source.isNotNull()
+                            & (
+                                numeric.isNull()
+                                | rounded.isNull()
+                                | (F.abs(rounded) >= F.lit(Decimal(10) ** exponent))
+                            ),
+                            oracle_number_capacity_hint,
+                            oracle_number_capacity_message,
+                        )
+                    )
+
+        if not rules:
+            continue
+        aggregate = df.agg(
+            *[
+                F.sum(F.when(rule.condition, F.lit(1)).otherwise(F.lit(0)))
+                .cast("long")
+                .alias(f"capacity_{i}")
+                for i, rule in enumerate(rules)
+            ]
+        ).collect()[0]
+        pk_cols = _pk_cols_for(meta, table, df)
+        for i, rule in enumerate(rules):
+            count = int(aggregate[f"capacity_{i}"] or 0)
+            bad = df.where(rule.condition) if count else None
+            failed = count > 0
+            out.append(
+                Finding(
+                    rule.check_id,
+                    category,
+                    rule.severity if failed else SEV_INFO,
+                    table,
+                    not failed,
+                    count=count,
+                    column=rule.column,
+                    sample=_sample_keys(bad, pk_cols, sample) if bad is not None else [],
+                    hint=rule.hint if failed else "",
+                    message=rule.message,
+                )
+            )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1548,6 +2131,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--shape-baseline", default=None,
                    help="Shape-profile JSON from profile_cdb_shapes.py --apply-filtros-fonte "
                         "(local or oci:// URI). Enables the Cat 7 distribution checks.")
+    p.add_argument("--application-capacity-contract",
+                   default=os.environ.get("DATAGEN_APPLICATION_CAPACITY_CONTRACT") or None,
+                   help="Optional application capacity-contract JSON (local or oci:// URI). "
+                        "Defaults to DATAGEN_APPLICATION_CAPACITY_CONTRACT when set.")
     p.add_argument("--shape-unseen-tol", type=float, default=1.0,
                    help="Cat 7a: max %% of synthetic IFs whose shape is absent from the "
                         "baseline (default 1.0).")
@@ -1603,6 +2190,11 @@ def main() -> None:
     spark = create_spark()
     spark.sparkContext.setLogLevel("WARN")
 
+    # A supplied contract is an input to the validation run, so fail before
+    # expensive synthetic reads if it cannot be read or parsed.
+    application_capacities = load_application_capacity_contract(
+        spark, args.application_capacity_contract)
+
     only = [t.strip().upper() for t in args.tables.split(",")] if args.tables else None
     tables = read_synthetic_tables(spark, cfg.synthetic_base, only)
 
@@ -1627,6 +2219,7 @@ def main() -> None:
     if args.emit_faltantes:
         emit_faltantes(spark, args.emit_faltantes, faltantes)
     findings += check_not_null(tables, meta, args.sample_size)
+    findings += check_capacity(tables, meta, application_capacities, args.sample_size)
     findings += check_dates(tables, meta, args.sample_size)
     findings += check_lookup_combos(spark, cfg, tables, meta, args.sample_size)
     findings += check_shapes(spark, tables, args.shape_baseline, args.sample_size,
