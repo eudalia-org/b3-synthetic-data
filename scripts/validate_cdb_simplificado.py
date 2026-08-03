@@ -19,7 +19,7 @@ NOT expressible in schema metadata (the CONDICAO_IF polymorphic subtype map and
 the CDB-simplificado product predicates) are curated below and, where possible,
 verified against production data.
 
-The six check categories map directly to the three failures observed in the
+The eight check categories map directly to the failures observed in the
 batch validation log:
 
   Cat 1  CONDICAO_IF polymorphism  -> ClassCastException JurosFlutuanteDO -> JurosFixoDO
@@ -31,6 +31,7 @@ batch validation log:
   Cat 6  Lookup combinations       -> "SEM MODALIDADE / servico_ft nao encontrado"
   Cat 7  Shape conformance         -> per-IF cardinalities vs the production profile
                                       (see docs/cdb-shapes-findings.md)
+  Cat 8  Log-derived invariants    -> registration uniqueness and optional persisted profile
 
 Category 7 compares the per-instrument cardinality distribution ("shapes") of
 the synthetic output against a baseline profile produced by
@@ -2063,6 +2064,429 @@ def check_shapes(
 
 
 # ---------------------------------------------------------------------------
+# Category 8 - Log-derived registration invariants
+# ---------------------------------------------------------------------------
+REGISTRATION_CONSTANTS: Dict[str, Dict[str, object]] = {
+    "INSTRUMENTO_FINANCEIRO": {
+        "NUM_SISTEMA": 55,
+        "IND_AGENDA_CONSTANTE": "S",
+        "IND_ESPECIFICA_COMITENTE": "N",
+        "NUM_ID_MOTIVO_SITUACAO_IF": 25,
+        "IND_MANTEM_PREMIO": "N",
+        "IND_EXCLUI_IOF": "N",
+        "IND_ELEGIVEL_IOF": "N",
+    },
+    "TITULO": {"IND_FRACIONAMENTO": "N", "NUM_ID_TIPO_REGIME_TITULO": 2},
+    "CONDICAO_IF": {
+        "COD_TIPO_UNIDADE_TEMPO_PAGA": "F",
+        "QTD_UNID_TEMPO_PAGAMENTO": 1,
+        "NUM_ID_ORIG_DESL_LIQ": 0,
+    },
+    "JUROS_FLUTUANTE": {
+        "IND_ANO_COMERCIAL": 2,
+        "IND_DIAS_CORRIDOS": 1,
+        "NUM_ID_TIPO_INDICADOR": 0,
+        "NOM_AGENDA_PAGAMENTO": "CONSTANTE",
+    },
+    "RESGATE": {"COD_TIPO_EXERCICIO": "EUROPEIA"},
+    "EVENTO": {"NUM_ID_ESTADO_EVENTO": 1, "IND_INCORPORA": "N"},
+}
+
+
+def _cat8_unavailable(check_id: str, table: str, missing: List[str]) -> Finding:
+    return Finding(
+        check_id,
+        "Log-derived invariants",
+        SEV_WARN,
+        table,
+        False,
+        hint="Include the required table and columns in the synthetic validation input.",
+        message=f"Check unavailable; missing required table/column(s): {', '.join(missing)}.",
+    )
+
+
+def _cat8_bad_rows(
+    check_id: str,
+    table: str,
+    column: str,
+    bad: DataFrame,
+    key_cols: List[str],
+    sample: int,
+    severity: str,
+    hint: str,
+    message: str,
+) -> Finding:
+    count = bad.count()
+    return Finding(
+        check_id,
+        "Log-derived invariants",
+        severity if count else SEV_INFO,
+        table,
+        count == 0,
+        count=count,
+        column=column,
+        sample=_sample_keys(bad, key_cols, sample) if count else [],
+        hint=hint if count else "",
+        message=message,
+    )
+
+
+def _cat8_active_cdb(tables: Dict[str, DataFrame], required: List[str]):
+    table = "INSTRUMENTO_FINANCEIRO"
+    df = tables.get(table)
+    if df is None:
+        return None, [table]
+    columns = {name: resolve(df, name) for name in required}
+    missing = [name for name, actual in columns.items() if not actual]
+    if missing:
+        return None, missing
+    return df.where(
+        (_norm_code(F.col(columns["NUM_TIPO_IF"])) == str(CDB_TIPO_IF))
+        & F.col(columns["DAT_EXCLUSAO"]).isNull()
+    ), []
+
+
+def _cat8_type_mix(
+    tables: Dict[str, DataFrame],
+    check_id: str,
+    parent_table: str,
+    parent_key: str,
+    child_table: str,
+    child_key: str,
+    type_column: str,
+    expected_types: Tuple[str, str],
+    sample: int,
+    parent_df: Optional[DataFrame] = None,
+) -> Finding:
+    parent = parent_df if parent_df is not None else tables.get(parent_table)
+    child = tables.get(child_table)
+    missing_tables = [
+        table for table, df in ((parent_table, parent), (child_table, child)) if df is None
+    ]
+    if missing_tables:
+        return _cat8_unavailable(
+            check_id, f"{parent_table},{child_table}", missing_tables
+        )
+
+    pkey = resolve(parent, parent_key)
+    ckey = resolve(child, child_key)
+    ctype = resolve(child, type_column)
+    missing = [
+        name
+        for name, actual in ((parent_key, pkey), (child_key, ckey), (type_column, ctype))
+        if not actual
+    ]
+    if missing:
+        return _cat8_unavailable(check_id, f"{parent_table},{child_table}", missing)
+
+    parents = parent.select(F.col(pkey).cast("string").alias("parent_key")).dropDuplicates()
+    children = _shape_active(child).select(
+        F.col(ckey).cast("string").alias("parent_key"),
+        _norm_code(F.col(ctype)).alias("child_type"),
+    )
+    counts = children.groupBy("parent_key").agg(
+        F.count(F.lit(1)).alias("total"),
+        *[
+            F.sum(F.when(F.col("child_type") == value, 1).otherwise(0)).alias(
+                f"type_{value}"
+            )
+            for value in expected_types
+        ],
+    )
+    joined = parents.join(counts, "parent_key", "left").fillna(0)
+    bad = joined.where(
+        (F.col("total") != len(expected_types))
+        | reduce(
+            lambda left, right: left | right,
+            [F.col(f"type_{value}") != 1 for value in expected_types],
+        )
+    )
+    return _cat8_bad_rows(
+        check_id,
+        child_table,
+        type_column,
+        bad,
+        ["parent_key"],
+        sample,
+        SEV_WARN,
+        f"Generate exactly one child of each type {expected_types} for every parent.",
+        f"Parents must have exactly one child of each type {expected_types} and no extras.",
+    )
+
+
+def check_log_invariants(
+    tables: Dict[str, DataFrame], sample: int, registration_profile: bool = False
+) -> List[Finding]:
+    out: List[Finding] = []
+    active, active_missing = _cat8_active_cdb(
+        tables, ["NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO", "COD_IF"]
+    )
+    if active is None:
+        out.append(
+            _cat8_unavailable("8a.cod_if_unique", "INSTRUMENTO_FINANCEIRO", active_missing)
+        )
+    else:
+        num_if, cod_if = resolve(active, "NUM_IF"), resolve(active, "COD_IF")
+        rows = active.select(
+            F.col(num_if),
+            F.col(cod_if),
+            _norm_code(F.col(cod_if)).alias("normalized_cod_if"),
+        ).where(
+            F.col(cod_if).isNotNull()
+            & (_norm_code(F.col(cod_if)) != "")
+        )
+        duplicates = (
+            rows.groupBy("normalized_cod_if")
+            .count()
+            .where(F.col("count") > 1)
+            .select("normalized_cod_if")
+        )
+        out.append(
+            _cat8_bad_rows(
+                "8a.cod_if_unique",
+                "INSTRUMENTO_FINANCEIRO",
+                "COD_IF",
+                rows.join(duplicates, "normalized_cod_if", "inner"),
+                [num_if, cod_if],
+                sample,
+                SEV_ERROR,
+                "Assign a distinct COD_IF to every active synthetic CDB.",
+                "Active synthetic CDB rows participating in duplicate COD_IF values.",
+            )
+        )
+
+    operation = tables.get(OPERACAO_TABLE)
+    if operation is None:
+        out.append(
+            _cat8_unavailable("8a.cod_operacao_unique", OPERACAO_TABLE, [OPERACAO_TABLE])
+        )
+    else:
+        cod_operacao = resolve(operation, "COD_OPERACAO")
+        if not cod_operacao:
+            out.append(
+                _cat8_unavailable(
+                    "8a.cod_operacao_unique", OPERACAO_TABLE, ["COD_OPERACAO"]
+                )
+            )
+        else:
+            op_key = resolve(operation, "NUM_ID_OPERACAO")
+            rows = operation.select(
+                *([F.col(op_key)] if op_key else []),
+                F.col(cod_operacao),
+                _norm_code(F.col(cod_operacao)).alias("normalized_cod_operacao"),
+            ).where(
+                F.col(cod_operacao).isNotNull()
+                & (_norm_code(F.col(cod_operacao)) != "")
+            )
+            duplicates = (
+                rows.groupBy("normalized_cod_operacao")
+                .count()
+                .where(F.col("count") > 1)
+                .select("normalized_cod_operacao")
+            )
+            out.append(
+                _cat8_bad_rows(
+                    "8a.cod_operacao_unique",
+                    OPERACAO_TABLE,
+                    "COD_OPERACAO",
+                    rows.join(duplicates, "normalized_cod_operacao", "inner"),
+                    [c for c in (op_key, cod_operacao) if c],
+                    sample,
+                    SEV_ERROR,
+                    "Assign a distinct non-empty COD_OPERACAO to every synthetic operation.",
+                    "Synthetic operation rows participating in duplicate COD_OPERACAO values.",
+                )
+            )
+
+    tuple_columns = [
+        "NUM_ID_OPERACAO",
+        "DAT_OPERACAO",
+        "NUM_CONTA_PARTICIPANTE_P1",
+        "NUM_CONTA_PARTICIPANTE_P2",
+        "NUM_CONTROLE_LANCAMENTO_P1",
+        "NUM_CONTROLE_LANCAMENTO_P2",
+        "NUM_ID_TIPO_OPER_OBJETO_SERV",
+    ]
+    if operation is None:
+        out.append(_cat8_unavailable("8a.meu_numero_unique", OPERACAO_TABLE, [OPERACAO_TABLE]))
+    else:
+        op_cols = {name: resolve(operation, name) for name in tuple_columns}
+        missing_tuple = [name for name, actual in op_cols.items() if not actual]
+        if missing_tuple:
+            out.append(_cat8_unavailable("8a.meu_numero_unique", OPERACAO_TABLE, missing_tuple))
+        else:
+            projections = [
+                operation.select(
+                    F.col(op_cols["NUM_ID_OPERACAO"]).alias("operation_id"),
+                    F.lit(side).alias("side"),
+                    F.col(op_cols["DAT_OPERACAO"]).alias("operation_date"),
+                    F.col(op_cols[f"NUM_CONTA_PARTICIPANTE_{side}"]).alias("account"),
+                    F.col(op_cols[f"NUM_CONTROLE_LANCAMENTO_{side}"]).alias("control"),
+                    F.col(op_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]).alias("tos"),
+                )
+                for side in ("P1", "P2")
+            ]
+            flattened = projections[0].unionByName(projections[1])
+            tuple_names = ["operation_date", "account", "control", "tos"]
+            complete = flattened.where(
+                reduce(
+                    lambda left, right: left & right,
+                    [
+                        F.col(column).isNotNull()
+                        & (F.trim(F.col(column).cast("string")) != "")
+                        for column in tuple_names
+                    ],
+                )
+            )
+            duplicates = (
+                complete.groupBy(*tuple_names)
+                .count()
+                .where(F.col("count") > 1)
+                .select(*tuple_names)
+            )
+            out.append(
+                _cat8_bad_rows(
+                    "8a.meu_numero_unique",
+                    OPERACAO_TABLE,
+                    "DAT_OPERACAO,NUM_CONTA_PARTICIPANTE_P1/P2,"
+                    "NUM_CONTROLE_LANCAMENTO_P1/P2,NUM_ID_TIPO_OPER_OBJETO_SERV",
+                    complete.join(duplicates, tuple_names, "inner"),
+                    ["operation_id", "side"],
+                    sample,
+                    SEV_ERROR,
+                    "Regenerate participant control numbers so the flattened P1/P2 tuple "
+                    "is unique.",
+                    "P1/P2 projections participating in duplicate f_testa_meunumero tuples.",
+                )
+            )
+
+    if not registration_profile:
+        return out
+
+    if active is None:
+        out.append(
+            _cat8_unavailable("8b.cod_if_format", "INSTRUMENTO_FINANCEIRO", active_missing)
+        )
+    else:
+        num_if, cod_if = resolve(active, "NUM_IF"), resolve(active, "COD_IF")
+        valid = F.coalesce(
+            F.col(cod_if).cast("string").rlike(r"^CDB[1-9A-C][0-9]{2}[0-9A-Z]{5}$"),
+            F.lit(False),
+        )
+        out.append(
+            _cat8_bad_rows(
+                "8b.cod_if_format",
+                "INSTRUMENTO_FINANCEIRO",
+                "COD_IF",
+                active.where(~valid),
+                [num_if, cod_if],
+                sample,
+                SEV_WARN,
+                "Generate COD_IF with the current CDB registration format.",
+                "Active CDB COD_IF values outside ^CDB[1-9A-C][0-9]{2}[0-9A-Z]{5}$.",
+            )
+        )
+
+    if operation is None:
+        out.append(
+            _cat8_unavailable("8b.cod_operacao_format", OPERACAO_TABLE, [OPERACAO_TABLE])
+        )
+    else:
+        cod_operacao = resolve(operation, "COD_OPERACAO")
+        if not cod_operacao:
+            out.append(
+                _cat8_unavailable("8b.cod_operacao_format", OPERACAO_TABLE, ["COD_OPERACAO"])
+            )
+        else:
+            op_key = resolve(operation, "NUM_ID_OPERACAO")
+            valid = F.coalesce(
+                F.col(cod_operacao).cast("string").rlike(r"^[0-9]{16}$"), F.lit(False)
+            )
+            out.append(
+                _cat8_bad_rows(
+                    "8b.cod_operacao_format",
+                    OPERACAO_TABLE,
+                    "COD_OPERACAO",
+                    operation.where(~valid),
+                    [c for c in (op_key, cod_operacao) if c],
+                    sample,
+                    SEV_WARN,
+                    "Generate COD_OPERACAO as exactly 16 decimal digits.",
+                    "COD_OPERACAO values outside ^[0-9]{16}$.",
+                )
+            )
+
+    for table, constants in REGISTRATION_CONSTANTS.items():
+        df = tables.get(table)
+        check_id = f"8c.registration_constants.{table.lower()}"
+        if df is None:
+            out.append(_cat8_unavailable(check_id, table, [table]))
+            continue
+        columns = {name: resolve(df, name) for name in constants}
+        missing_constants = [name for name, actual in columns.items() if not actual]
+        if missing_constants:
+            out.append(_cat8_unavailable(check_id, table, missing_constants))
+            continue
+        mismatch = reduce(
+            lambda left, right: left | right,
+            [
+                ~F.coalesce(_norm_code(F.col(columns[name])) == str(value), F.lit(False))
+                for name, value in constants.items()
+            ],
+        )
+        keys = [
+            column
+            for name in ("NUM_IF", "NUM_CONDICAO_IF", "NUM_EVENTO")
+            if (column := resolve(df, name))
+        ]
+        out.append(
+            _cat8_bad_rows(
+                check_id,
+                table,
+                ",".join(constants),
+                df.where(mismatch),
+                keys or df.columns[:1],
+                sample,
+                SEV_WARN,
+                "Persist the current registration values for the listed profile columns.",
+                "Rows differing from the empirical current-registration persisted profile.",
+            )
+        )
+
+    profile_parents, profile_missing = _cat8_active_cdb(
+        tables, ["NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO"]
+    )
+    if profile_parents is None:
+        out.extend(
+            _cat8_unavailable(check_id, "INSTRUMENTO_FINANCEIRO", profile_missing)
+            for check_id in ("8c.condicao_type_mix", "8c.evento_type_mix")
+        )
+    else:
+        out.append(
+            _cat8_type_mix(
+                tables, "8c.condicao_type_mix", "INSTRUMENTO_FINANCEIRO", "NUM_IF",
+                "CONDICAO_IF", "NUM_IF", "COD_TIPO_CONDICAO_IF", ("3", "20"), sample,
+                profile_parents,
+            )
+        )
+        out.append(
+            _cat8_type_mix(
+                tables, "8c.evento_type_mix", "INSTRUMENTO_FINANCEIRO", "NUM_IF",
+                "EVENTO", "NUM_IF", "NUM_TIPO_EVENTO_LEGADO", ("83", "85"), sample,
+                profile_parents,
+            )
+        )
+    out.append(
+        _cat8_type_mix(
+            tables, "8c.dado_operacao_type_mix", OPERACAO_TABLE, "NUM_ID_OPERACAO",
+            DADO_OPERACAO_TABLE, "NUM_ID_OPERACAO", "NUM_ID_TIPO_DADO_OPERACAO",
+            ("502", "503"), sample,
+        )
+    )
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
 def emit_report(spark: SparkSession, findings: List[Finding],
@@ -2169,6 +2593,9 @@ def parse_args() -> argparse.Namespace:
                    help="Check-id prefix(es) to skip (repeatable), e.g. 6.combo.")
     p.add_argument("--no-oracle", action="store_true",
                    help="Do not read Oracle metadata (limits Categories 3/4/6).")
+    p.add_argument("--registration-profile", action="store_true",
+                   help="Enable Cat 8 current-registration format, persisted-profile, and "
+                        "exact type-mix WARN checks.")
     return p.parse_args()
 
 
@@ -2225,6 +2652,7 @@ def main() -> None:
     findings += check_shapes(spark, tables, args.shape_baseline, args.sample_size,
                              args.shape_unseen_tol, args.shape_drift_tol,
                              args.shape_op_ratio_tol)
+    findings += check_log_invariants(tables, args.sample_size, args.registration_profile)
 
     if args.skip_check:
         findings = [f for f in findings

@@ -1,0 +1,668 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>CDB Simplificado: Catálogo de regras derivadas de logs</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #070b14;
+      --panel: #0d1422;
+      --panel-2: #111c2e;
+      --text: #f2f5f7;
+      --muted: #a7b4c5;
+      --line: #25334a;
+      --line-strong: #3b4c67;
+      --cyan: #4dd7e8;
+      --cyan-dark: #123e4b;
+      --amber: #f3bd52;
+      --red: #ff747d;
+      --green: #69d69b;
+      --blue: #79aef8;
+      --shadow: 0 18px 46px rgba(0, 0, 0, .35);
+      --sans: "Avenir Next", Avenir, "Segoe UI", Helvetica, Arial, sans-serif;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 85% -10%, rgba(77, 215, 232, .12), transparent 34rem),
+        var(--page);
+      color: var(--text);
+      font-family: var(--sans);
+      line-height: 1.55;
+    }
+    button:focus-visible, input:focus-visible, select:focus-visible, [tabindex="0"]:focus-visible {
+      outline: 3px solid var(--amber);
+      outline-offset: 3px;
+    }
+    code {
+      padding: .08em .28em;
+      border-radius: 4px;
+      background: rgba(77, 215, 232, .1);
+      color: #d8f8fb;
+      font-family: var(--mono);
+      font-size: .9em;
+      overflow-wrap: anywhere;
+    }
+    .skip-link {
+      position: fixed;
+      z-index: 100;
+      top: .75rem;
+      left: .75rem;
+      padding: .7rem 1rem;
+      transform: translateY(-180%);
+      background: var(--amber);
+      color: #111827;
+    }
+    .skip-link:focus { transform: none; }
+    .shell { width: min(1500px, calc(100% - 40px)); margin: 0 auto; }
+
+    .masthead {
+      padding: 28px 0 24px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(7, 11, 20, .78);
+    }
+    .kicker {
+      margin: 0 0 .35rem;
+      color: var(--cyan);
+      font-size: .76rem;
+      font-weight: 800;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(2rem, 5vw, 4rem);
+      line-height: 1;
+      letter-spacing: -.04em;
+    }
+    .deck {
+      max-width: 900px;
+      margin: .75rem 0 0;
+      color: var(--muted);
+      font-size: 1rem;
+    }
+
+    .metrics {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .55rem;
+      margin-top: 1rem;
+    }
+    .metric {
+      display: flex;
+      gap: .4rem;
+      align-items: baseline;
+      padding: .38rem .62rem;
+      border: 1px solid var(--line);
+      background: var(--panel);
+    }
+    .metric strong { color: var(--cyan); font: 800 1rem/1 var(--mono); }
+    .metric span { color: var(--muted); font-size: .72rem; text-transform: uppercase; }
+
+    main { padding: 28px 0 64px; }
+    h2 { margin: 0; font-size: 1.35rem; letter-spacing: -.015em; }
+    .section-head { margin-bottom: 1rem; }
+    .section-intro { max-width: 980px; margin: .35rem 0 0; color: var(--muted); font-size: .9rem; }
+    .section-intro p { margin: 0; }
+
+    .controls {
+      display: grid;
+      grid-template-columns: minmax(240px, 2fr) repeat(3, minmax(145px, .65fr)) auto;
+      gap: .7rem;
+      align-items: end;
+      margin: 1rem 0 .8rem;
+      padding: 1rem;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+    label { display: block; color: var(--muted); font-size: .7rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    input, select, button {
+      width: 100%;
+      min-height: 44px;
+      margin-top: .35rem;
+      border: 1px solid var(--line-strong);
+      border-radius: 5px;
+      background: var(--panel-2);
+      color: var(--text);
+      font: inherit;
+    }
+    input, select { padding: .65rem .72rem; }
+    input::placeholder { color: #75849a; }
+    button { padding: .65rem .9rem; background: var(--cyan-dark); border-color: var(--cyan); cursor: pointer; font-weight: 750; }
+    button:hover { background: #195365; }
+    .classification-help {
+      margin: 0 0 .8rem;
+      border: 1px solid var(--line);
+      background: var(--panel);
+    }
+    .classification-help summary {
+      padding: .75rem 1rem;
+      color: var(--cyan);
+      cursor: pointer;
+      font-weight: 800;
+    }
+    .classification-help summary:focus-visible { outline: 3px solid var(--amber); outline-offset: 3px; }
+    .classification-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      border-top: 1px solid var(--line);
+    }
+    .classification-grid div { padding: .9rem 1rem; border-left: 1px solid var(--line); }
+    .classification-grid div:first-child { border-left: 0; }
+    .classification-grid strong { display: block; margin-bottom: .3rem; color: var(--text); }
+    .classification-grid p { margin: 0; color: var(--muted); font-size: .82rem; }
+    .countline { display: flex; justify-content: space-between; gap: 1rem; margin: .7rem 0; color: var(--muted); font: 700 .78rem/1.3 var(--mono); }
+
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line-strong); background: var(--panel); box-shadow: var(--shadow); }
+    table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+    caption { padding: .8rem 1rem; text-align: left; color: var(--muted); font-size: .75rem; }
+    thead { background: #151f31; color: var(--text); }
+    th { padding: .8rem .7rem; text-align: left; vertical-align: bottom; font-size: .68rem; letter-spacing: .08em; text-transform: uppercase; }
+    td { padding: .85rem .7rem; border-top: 1px solid var(--line); vertical-align: top; }
+    tbody tr:hover { background: rgba(77, 215, 232, .055); }
+    tbody tr:target { background: rgba(243, 189, 82, .12); box-shadow: inset 4px 0 var(--amber); }
+    .rule-id { display: block; color: var(--cyan); font: 800 .78rem/1.2 var(--mono); }
+    .rule-name { display: block; margin-top: .25rem; font-weight: 800; line-height: 1.25; }
+    .exact { min-width: 300px; }
+    .refs { min-width: 220px; color: var(--muted); font-family: var(--mono); font-size: .72rem; line-height: 1.5; }
+    .refs code { background: transparent; padding: 0; font-size: inherit; }
+    .badge {
+      display: inline-block;
+      margin: 0 .25rem .28rem 0;
+      padding: .21rem .42rem;
+      border: 1px solid currentColor;
+      color: var(--cyan);
+      font: 800 .62rem/1.15 var(--mono);
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+    .badge.error { color: var(--red); }
+    .badge.warn { color: var(--amber); }
+    .badge.info { color: var(--blue); }
+    .badge.runtime { color: #bd91f7; }
+    .badge.new { color: var(--amber); }
+    .confidence { font-weight: 800; }
+    .confidence.high { color: var(--green); }
+    .confidence.medium { color: var(--amber); }
+    .confidence.low { color: var(--red); }
+    tr[hidden] { display: none; }
+
+    @media (max-width: 1050px) {
+      .controls { grid-template-columns: 1fr 1fr; }
+      .controls .search { grid-column: 1 / -1; }
+    }
+    @media (max-width: 720px) {
+      .shell { width: min(100% - 24px, 1540px); }
+      .masthead { padding-top: 26px; }
+      .controls { grid-template-columns: 1fr; position: static; }
+      .controls .search { grid-column: auto; }
+      .classification-grid { grid-template-columns: 1fr; }
+      .classification-grid div { border-top: 1px solid var(--line); border-left: 0; }
+      .classification-grid div:first-child { border-top: 0; }
+      .countline { align-items: flex-start; flex-direction: column; }
+      .table-wrap.catalog { overflow: visible; border: 0; box-shadow: none; background: transparent; }
+      .catalog table, .catalog tbody, .catalog tr, .catalog td { display: block; width: 100%; }
+      .catalog thead, .catalog caption { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+      .catalog tr { margin-bottom: .85rem; border: 1px solid var(--line-strong); background: var(--panel); box-shadow: 0 8px 20px rgba(0,0,0,.25); }
+      .catalog td { display: block; padding: .7rem .75rem; border-top: 1px solid var(--line); }
+      .catalog td:first-child { border-top: 0; }
+      .catalog td::before { content: attr(data-label); display: block; margin-bottom: .45rem; color: var(--muted); font-size: .63rem; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; }
+      .exact, .refs { min-width: 0; }
+    }
+    @media print {
+      :root { --page: white; --panel: white; --panel-2: white; --text: black; --muted: #333; --line: #bbb; --line-strong: #666; }
+      body { background: white; font-size: 9pt; }
+      .shell { width: 100%; }
+      .masthead { padding: 14pt 0; background: white; color: black; border-bottom: 2pt solid black; }
+      .controls, .countline, button { display: none !important; }
+      .deck, .metric span { color: #222; }
+      .metric { background: white; }
+      .metric strong, .rule-id, code { color: black; }
+      main { padding: 16pt 0; }
+      .table-wrap { box-shadow: none; }
+      tr[hidden] { display: table-row !important; }
+      thead { display: table-header-group; background: #ddd; color: black; }
+      tr { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">Ir para o catálogo de regras</a>
+  <header class="masthead">
+    <div class="shell">
+      <p class="kicker">CETIP / NoMe</p>
+      <h1>CDB Simplificado: catálogo de regras</h1>
+      <p class="deck">Regras sustentadas pela aplicação, pelo perfil das 20 inclusões persistidas e pelo estado do Oracle em runtime.</p>
+      <div class="metrics" role="group" aria-label="Resumo do corpus">
+        <div class="metric"><strong>31</strong><span>regras</span></div>
+        <div class="metric"><strong>20</strong><span>inclusões persistidas</span></div>
+        <div class="metric"><strong>5</strong><span>lotes de inclusão</span></div>
+        <div class="metric"><strong>4</strong><span>famílias de emissor/conta</span></div>
+      </div>
+    </div>
+  </header>
+
+  <main id="main" class="shell">
+    <section id="catalog" aria-labelledby="catalog-title">
+      <div class="section-head">
+        <h2 id="catalog-title">Regras</h2>
+        <div class="section-intro">
+          <p>Cada linha registra o predicado exato, as linhas correspondentes no validador, a classificação, a severidade, o escopo e a confiança.</p>
+        </div>
+      </div>
+
+      <div class="controls" role="search" aria-label="Filtrar catálogo de regras">
+        <label class="search">Buscar regras
+          <input id="search" type="search" placeholder="COD_IF, serializer, 7c.op_ratio..." autocomplete="off">
+        </label>
+        <label>Classificação
+          <select id="class-filter">
+            <option value="all">Todas as classes</option>
+            <option value="application-backed">Sustentada pela aplicação</option>
+            <option value="persisted-20">Logs de inserção</option>
+            <option value="runtime-only">Somente runtime</option>
+          </select>
+        </label>
+        <label>Severidade
+          <select id="severity-filter">
+            <option value="all">Todas as severidades</option>
+            <option value="error">ERROR</option>
+            <option value="warn">WARN</option>
+            <option value="info">INFO</option>
+          </select>
+        </label>
+        <label>Validador
+          <select id="status-filter">
+            <option value="all">Todas as relações</option>
+            <option value="existing">Existente</option>
+            <option value="category-8">Contrato da Categoria 8</option>
+            <option value="runtime">Somente runtime</option>
+          </select>
+        </label>
+        <button id="reset" type="button">Limpar</button>
+      </div>
+      <details class="classification-help">
+        <summary>O que significam as classificações?</summary>
+        <div class="classification-grid">
+          <div>
+            <strong>Sustentada pela aplicação</strong>
+            <p>A regra aparece no código, em procedures, em metadados ou em consultas explícitas da aplicação. A evidência é mais forte que a repetição nos logs.</p>
+          </div>
+          <div>
+            <strong>Logs de inserção</strong>
+            <p>O valor ou shape apareceu nas 20 inclusões bem-sucedidas analisadas. É uma evidência empírica do perfil observado, não uma regra universal sem confirmação adicional.</p>
+          </div>
+          <div>
+            <strong>Somente runtime</strong>
+            <p>A regra depende do estado atual do Oracle, como contas, bloqueios, sequences ou locks. O validador offline não consegue reproduzi-la integralmente.</p>
+          </div>
+        </div>
+      </details>
+      <div class="countline">
+        <span id="result-count" role="status" aria-live="polite">Exibindo todas as regras</span>
+        <span>ERROR = violação de invariante; WARN = revisão ou desvio de perfil; INFO = contexto</span>
+      </div>
+
+      <div class="table-wrap catalog" role="region" aria-label="Catálogo de regras com rolagem horizontal" tabindex="0">
+        <table id="rules-table">
+          <caption>Catálogo de regras do validador, da aplicação, do perfil persistido e de runtime.</caption>
+          <thead>
+            <tr>
+              <th scope="col">ID / regra</th>
+              <th scope="col">Regra exata</th>
+              <th scope="col">Linhas no validador</th>
+              <th scope="col">Classificação</th>
+              <th scope="col">Relação com o validador</th>
+              <th scope="col">Severidade / escopo</th>
+              <th scope="col">Confiança</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="r-1-polymorphism" data-class="application-backed" data-severity="error" data-status="existing">
+              <td data-label="ID / regra"><span class="rule-id">1.polymorphism</span><span class="rule-name">Identidade de subclasse unida de CONDICAO_IF</span></td>
+              <td data-label="Regra exata" class="exact">Cada <code>CONDICAO_IF.NUM_CONDICAO_IF</code> tem exatamente uma linha de subtipo, na tabela mapeada por <code>COD_TIPO_CONDICAO_IF</code>; nenhuma chave de subtipo pendente, ambígua, divergente, desconhecida ou órfã é permitida.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:98-119, 1024-1171</code></td>
+              <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span></td>
+              <td data-label="Validador"><code>1a.dangling_condicao_if</code>, <code>1a.ambiguous_subtype</code>, <code>1b.subtype_mismatch</code>, <code>1b.unknown_tipo</code>, <code>1c.orphan_subtype</code></td>
+              <td data-label="Severidade"><span class="badge error">ERROR</span> todas as linhas de condição/subtipo; valor de mapeamento desconhecido é WARN</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-2-domain" data-class="application-backed" data-severity="error" data-status="existing">
+              <td data-label="ID / regra"><span class="rule-id">2.domain</span><span class="rule-name">Predicados de domínio do CDB simplificado</span></td>
+              <td data-label="Regra exata" class="exact"><code>INSTRUMENTO_FINANCEIRO.NUM_TIPO_IF=49 AND DAT_EXCLUSAO IS NULL</code>; <code>RESGATE</code> ativo tem <code>COD_COND_RESGATE='SEM TABELA'</code>; <code>TITULO.COD_TIPO_ESCALONAMENTO IS NULL</code>; <code>CONDICAO_IF</code> ativa; quantidades de carteira positivas.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:124-133, 1205-1234</code></td>
+              <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span></td>
+              <td data-label="Validador"><code>2.domain</code> existente</td>
+              <td data-label="Severidade"><span class="badge error">ERROR</span> por predicado de tabela</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-3-fk" data-class="application-backed" data-severity="error" data-status="existing">
+              <td data-label="ID / regra"><span class="rule-id">3.fk</span><span class="rule-name">Integridade de FK e chave compartilhada</span></td>
+              <td data-label="Regra exata" class="exact">Toda FK não nula resolve na saída sintética ou no Oracle de destino; filhos com chave compartilhada <code>PK==FK</code> são um-para-um e não contêm chave filha duplicada.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:1237-1401</code></td>
+              <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span></td>
+              <td data-label="Validador"><code>3.fk_orphan</code>, <code>3.fk_unresolved</code>, <code>3.shared_key_dup</code></td>
+              <td data-label="Severidade"><span class="badge error">ERROR</span> órfão/duplicado resolvido; não resolvido é WARN</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-4-null" data-class="application-backed" data-severity="error" data-status="existing">
+              <td data-label="ID / regra"><span class="rule-id">4.not_null</span><span class="rule-name">NOT NULL do Oracle, incluindo texto vazio</span></td>
+              <td data-label="Regra exata" class="exact">Colunas declaradas como NOT NULL devem ser não nulas; para colunas de texto do Oracle, <code>''</code> após remoção de espaços também é nulo e deve ser rejeitado.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:1452-1498</code></td>
+              <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span></td>
+              <td data-label="Validador"><code>4.not_null_fk</code>, <code>4.not_null_nonfk</code></td>
+              <td data-label="Severidade"><span class="badge error">ERROR</span> colunas NOT NULL do dicionário</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-4-capacity" data-class="application-backed" data-severity="error" data-status="existing">
+              <td data-label="ID / regra"><span class="rule-id">4.capacity</span><span class="rule-name">Capacidade do Oracle e da aplicação</span></td>
+              <td data-label="Regra exata" class="exact">O texto deve caber na semântica CHAR/BYTE e no charset de destino; números devem caber em <code>NUMBER(p,s)</code>. Contratos automáticos da aplicação com alta confiança são ERROR; contratos dependentes do chamador, ambíguos ou não verificáveis são WARN.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:478-600, 691-1009</code></td>
+              <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span></td>
+              <td data-label="Validador"><code>4.capacity.application_text</code>, <code>.application_number</code>, <code>.oracle_string</code>, <code>.oracle_number</code> e variantes não verificadas</td>
+              <td data-label="Severidade"><span class="badge error">ERROR</span><span class="badge warn">WARN</span> conforme a confiança da aplicação</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-5-dates" data-class="application-backed" data-severity="error" data-status="existing">
+              <td data-label="ID / regra"><span class="rule-id">5.date_order</span><span class="rule-name">Coerência de datas</span></td>
+              <td data-label="Regra exata" class="exact">Quando ambas as datas existem: as datas de emissão e inclusão da IF, e a data de emissão de TITULO, são anteriores ou iguais ao vencimento; o início da condição é anterior ou igual ao fim da condição.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:135-142, 1501-1527</code></td>
+              <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span></td>
+              <td data-label="Validador"><code>5.date_order</code></td>
+              <td data-label="Severidade"><span class="badge error">ERROR</span> linhas com ambas as datas</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-6-tos" data-class="application-backed" data-severity="error" data-status="existing">
+              <td data-label="ID / regra"><span class="rule-id">6.combo.tos_fk</span><span class="rule-name">Existência do mapeamento de serviço da operação</span></td>
+              <td data-label="Regra exata" class="exact">Todo <code>OPERACAO.NUM_ID_TIPO_OPER_OBJETO_SERV</code> não nulo existe em <code>TIPO_OPER_OBJETO_SERV</code> no destino; a FK estática exata deve ser preservada, em vez de substituída por qualquer linha válida.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:1544-1649</code></td>
+              <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span></td>
+              <td data-label="Validador"><code>6.combo.tos_fk</code></td>
+              <td data-label="Severidade"><span class="badge error">ERROR</span> FK de TOS da operação</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-6-cdb" data-class="application-backed" data-severity="warn" data-status="existing">
+              <td data-label="ID / regra"><span class="rule-id">6.combo.cdb_compatibility</span><span class="rule-name">Compatibilidade do serviço de CDB</span></td>
+              <td data-label="Regra exata" class="exact">O TOS resolvido deve ser exposto por <code>V_PARAMETRO_SIC</code> no destino para <code>NUM_TIPO_IF=49</code> e <code>NUM_ID_OBJETO_SERVICO=44</code>.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:1600-1604, 1652-1693</code></td>
+              <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span></td>
+              <td data-label="Validador"><code>6.combo.cdb_compatibility</code></td>
+              <td data-label="Severidade"><span class="badge warn">WARN</span> combinação de lookup no destino</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-6-modalidade" data-class="application-backed" data-severity="warn" data-status="existing">
+              <td data-label="ID / regra"><span class="rule-id">6.combo.sem_modalidade</span><span class="rule-name">Habilitação sem modalidade</span></td>
+              <td data-label="Regra exata" class="exact">Para IDs fixos de modalidade <code>6</code> ou <code>16</code>, o tipo de operação resolvido deve ter <code>TIPO_OPERACAO.IND_SEM_MODALIDADE_INFOHUB='S'</code>.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:151, 1695-1727</code></td>
+              <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span></td>
+              <td data-label="Validador"><code>6.combo.sem_modalidade</code></td>
+              <td data-label="Severidade"><span class="badge warn">WARN</span> combinação de lookup no destino</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-6-identification" data-class="application-backed" data-severity="warn" data-status="existing">
+              <td data-label="ID / regra"><span class="rule-id">6.combo.identification_availability</span><span class="rule-name">Identificação disponível</span></td>
+              <td data-label="Regra exata" class="exact">A linha de TOS resolvida tem <code>IND_DISPONIVEL_IDENTIFICACAO='S'</code>.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:1590-1599, 1729-1743</code></td>
+              <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span></td>
+              <td data-label="Validador"><code>6.combo.identification_availability</code></td>
+              <td data-label="Severidade"><span class="badge warn">WARN</span> linha de TOS no destino</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-7-ratio" data-class="application-backed" data-severity="error" data-status="existing">
+              <td data-label="ID / regra"><span class="rule-id">7c.op_ratio</span><span class="rule-name">Proporção de filhos da operação</span></td>
+              <td data-label="Regra exata" class="exact">Para IFs com operação, <code>OPERACAO:DADO_OPERACAO:LANCAMENTO = 1:2:1</code>; ERROR somente quando a tolerância configurada para o percentual de IFs em violação for excedida.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:1958-1982</code></td>
+              <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span></td>
+              <td data-label="Validador"><code>7c.op_ratio</code></td>
+              <td data-label="Severidade"><span class="badge error">ERROR</span> distribuição de IFs com operação</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-7-resgate" data-class="application-backed" data-severity="error" data-status="existing">
+              <td data-label="ID / regra"><span class="rule-id">7d.resgate_multiplicity</span><span class="rule-name">No máximo uma condição de resgate</span></td>
+              <td data-label="Regra exata" class="exact">Uma IF de CDB ativa tem no máximo uma linha de <code>RESGATE</code>.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:1984-1996</code></td>
+              <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span></td>
+              <td data-label="Validador"><code>7d.resgate_multiplicity</code></td>
+              <td data-label="Severidade"><span class="badge error">ERROR</span> por IF</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-7-baseline" data-class="application-backed" data-severity="error" data-status="existing">
+              <td data-label="ID / regra"><span class="rule-id">7a / 7b</span><span class="rule-name">Novidade de shape e desvio de distribuição</span></td>
+              <td data-label="Regra exata" class="exact">Em relação a uma baseline filtrada de produção, a massa de shapes inéditos deve permanecer dentro de <code>shape-unseen-tol</code> e a distância de variação total dentro de <code>shape-drift-tol</code>. Baseline ausente ou inexistente é WARN, não aprovação silenciosa.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:1803-1838, 1924-1955, 1998-2059</code></td>
+              <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span></td>
+              <td data-label="Validador"><code>7a.unseen_shapes</code>, <code>7b.distribution_drift</code>, <code>7.baseline</code></td>
+              <td data-label="Severidade"><span class="badge error">ERROR</span><span class="badge warn">WARN</span> perfil da saída completa</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+
+            <tr id="r-8-codif-unique" data-class="application-backed" data-severity="error" data-status="category-8">
+              <td data-label="ID / regra"><span class="rule-id">8a.cod_if_unique</span><span class="rule-name">Unicidade de COD_IF</span></td>
+              <td data-label="Regra exata" class="exact">Para instrumentos de CDB ativos e não nulos, o <code>COD_IF</code> normalizado ocorre uma vez. Esta verificação de duplicidade está sempre ativa e não depende do modo de perfil de inclusão.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2217-2257</code></td>
+              <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span></td>
+              <td data-label="Validador"><span class="badge new">contrato da Categoria 8</span><code>8a.cod_if_unique</code>; sempre ativa</td>
+              <td data-label="Severidade"><span class="badge error">ERROR</span> saída ativa de CDB</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-8-codop-unique" data-class="application-backed" data-severity="error" data-status="category-8">
+              <td data-label="ID / regra"><span class="rule-id">8a.cod_operacao_unique</span><span class="rule-name">Unicidade de COD_OPERACAO</span></td>
+              <td data-label="Regra exata" class="exact">Todo <code>OPERACAO.COD_OPERACAO</code> normalizado e não nulo é único na saída. Sempre ativa, independentemente do modo de perfil de inclusão.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2259-2302</code></td>
+              <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span></td>
+              <td data-label="Validador"><span class="badge new">contrato da Categoria 8</span><code>8a.cod_operacao_unique</code>; contrato novo</td>
+              <td data-label="Severidade"><span class="badge error">ERROR</span> todas as linhas de OPERACAO</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-8-meu-unique" data-class="application-backed" data-severity="error" data-status="category-8">
+              <td data-label="ID / regra"><span class="rule-id">8a.meu_numero_unique</span><span class="rule-name">Unicidade da tupla meu-número</span></td>
+              <td data-label="Regra exata" class="exact">Nos dois lados da operação, nenhuma tupla duplicada <code>(DAT_OPERACAO, NUM_CONTA_PARTICIPANTE_Pn, NUM_CONTROLE_LANCAMENTO_Pn, NUM_ID_TIPO_OPER_OBJETO_SERV)</code> é permitida. Sempre ativa; P1 e P2 são comparados como um único espaço de chaves unido.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2304-2361</code></td>
+              <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span></td>
+              <td data-label="Validador"><span class="badge new">contrato da Categoria 8</span><code>8a.meu_numero_unique</code>; contrato novo</td>
+              <td data-label="Severidade"><span class="badge error">ERROR</span> união das chaves de operação P1/P2</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-8-codif-format" data-class="persisted-20" data-severity="warn" data-status="category-8">
+              <td data-label="ID / regra"><span class="rule-id">8b.cod_if_format</span><span class="rule-name">Formato observado de COD_IF</span></td>
+              <td data-label="Regra exata" class="exact">Quando o modo de perfil de inclusão está habilitado, emitir WARN se o <code>COD_IF</code> de CDB ativo não corresponder a <code>^CDB[1-9A-C][0-9]{2}[0-9A-Z]{5}$</code>. Esta é uma conformidade de formato, nunca o próprio gerador.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2363-2388</code></td>
+              <td data-label="Classificação"><span class="badge warn">logs de inserção</span></td>
+              <td data-label="Validador"><span class="badge new">Categoria 8 opcional</span><code>8b.cod_if_format</code></td>
+              <td data-label="Severidade"><span class="badge warn">WARN</span> somente no perfil de inclusão</td>
+              <td data-label="Confiança"><span class="confidence medium">Média</span></td>
+            </tr>
+            <tr id="r-8-codop-format" data-class="application-backed" data-severity="warn" data-status="category-8">
+              <td data-label="ID / regra"><span class="rule-id">8b.cod_operacao_format</span><span class="rule-name">Formato do gerador de COD_OPERACAO</span></td>
+              <td data-label="Regra exata" class="exact">Quando o modo de perfil de inclusão está habilitado, emitir WARN a menos que <code>COD_OPERACAO</code> tenha 16 dígitos: <code>YYYYMMDD</code> de <code>CONTROLE_OPERACIONAL.DAT_CTL_OPER</code> mais uma sequência de 8 dígitos preenchida com zeros à esquerda.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2390-2417</code></td>
+              <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span><span class="badge warn">controle de perfil</span></td>
+              <td data-label="Validador"><span class="badge new">Categoria 8 opcional</span><code>8b.cod_operacao_format</code></td>
+              <td data-label="Severidade"><span class="badge warn">WARN</span> somente no perfil de inclusão</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-8-condition-mix" data-class="persisted-20" data-severity="warn" data-status="category-8">
+              <td data-label="ID / regra"><span class="rule-id">8c.condicao_type_mix</span><span class="rule-name">Composição observada de tipos de condição</span></td>
+              <td data-label="Regra exata" class="exact">WARN opcional de perfil, a menos que cada IF com shape de inclusão tenha uma condição de tipo <code>3</code> <code>JUROS_FLUTUANTE</code> e uma condição de tipo <code>20</code> <code>RESGATE</code>, com chaves compartilhadas correspondentes.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2459-2471</code></td>
+              <td data-label="Classificação"><span class="badge warn">logs de inserção</span></td>
+              <td data-label="Validador"><span class="badge new">Categoria 8 opcional</span><code>8c.condicao_type_mix</code>; sobrepõe-se às Categorias 1 e 7, mas vale somente para o perfil</td>
+              <td data-label="Severidade"><span class="badge warn">WARN</span> IF com shape de inclusão</td>
+              <td data-label="Confiança"><span class="confidence medium">Média</span></td>
+            </tr>
+            <tr id="r-8-condition-constants" data-class="persisted-20" data-severity="warn" data-status="category-8">
+              <td data-label="ID / regra"><span class="rule-id">8c.registration_constants.condicao_if</span><span class="rule-name">Constantes de condição observadas</span></td>
+              <td data-label="Regra exata" class="exact">WARN opcional de perfil em caso de desvio de <code>COD_TIPO_UNIDADE_TEMPO_PAGA='F'</code>, <code>QTD_UNID_TEMPO_PAGAMENTO=1</code> e <code>NUM_ID_ORIG_DESL_LIQ=0</code> para as duas condições observadas.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2419-2457</code></td>
+              <td data-label="Classificação"><span class="badge warn">logs de inserção</span></td>
+              <td data-label="Validador"><span class="badge new">Categoria 8 opcional</span><code>8c.registration_constants.condicao_if</code></td>
+              <td data-label="Severidade"><span class="badge warn">WARN</span> somente no perfil</td>
+              <td data-label="Confiança"><span class="confidence medium">Média</span></td>
+            </tr>
+            <tr id="r-8-interest-constants" data-class="persisted-20" data-severity="warn" data-status="category-8">
+              <td data-label="ID / regra"><span class="rule-id">8c.registration_constants.juros_flutuante</span><span class="rule-name">Constantes observadas de juros flutuantes</span></td>
+              <td data-label="Regra exata" class="exact">WARN opcional de perfil em caso de desvio de <code>IND_ANO_COMERCIAL=2</code>, <code>IND_DIAS_CORRIDOS=1</code>, <code>NUM_ID_TIPO_INDICADOR=0</code> e <code>NOM_AGENDA_PAGAMENTO='CONSTANTE'</code>. <code>IND_INCORPORA_JUROS='N'</code> e <code>NUM_INDICE_VALORIZACAO=4</code>, derivados da entrada, ficam excluídos.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2419-2457</code></td>
+              <td data-label="Classificação"><span class="badge warn">logs de inserção</span></td>
+              <td data-label="Validador"><span class="badge new">Categoria 8 opcional</span><code>8c.registration_constants.juros_flutuante</code></td>
+              <td data-label="Severidade"><span class="badge warn">WARN</span> somente no perfil</td>
+              <td data-label="Confiança"><span class="confidence medium">Média</span></td>
+            </tr>
+            <tr id="r-8-resgate-constants" data-class="persisted-20" data-severity="warn" data-status="category-8">
+              <td data-label="ID / regra"><span class="rule-id">8c.registration_constants.resgate</span><span class="rule-name">Estilo observado de exercício do resgate</span></td>
+              <td data-label="Regra exata" class="exact">WARN opcional de perfil, a menos que o perfil de resgate observado use <code>COD_TIPO_EXERCICIO='EUROPEIA'</code>. <code>COD_COND_RESGATE='SEM TABELA'</code> continua sob responsabilidade independente do ERROR de domínio existente na Categoria 2 e não é duplicado aqui.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2419-2457</code></td>
+              <td data-label="Classificação"><span class="badge warn">logs de inserção</span></td>
+              <td data-label="Validador"><span class="badge new">Categoria 8 opcional</span><code>8c.registration_constants.resgate</code>; <code>2.domain</code> cobre <code>SEM TABELA</code></td>
+              <td data-label="Severidade"><span class="badge warn">WARN</span> estilo de exercício; o predicado de domínio existente permanece ERROR</td>
+              <td data-label="Confiança"><span class="confidence medium">Média</span></td>
+            </tr>
+
+            <tr id="r-8-root-constants" data-class="persisted-20" data-severity="warn" data-status="category-8">
+              <td data-label="ID / regra"><span class="rule-id">8c.registration_constants.instrumento_financeiro / titulo</span><span class="rule-name">Valores-padrão observados da raiz e do título</span></td>
+              <td data-label="Regra exata" class="exact">WARN opcional de perfil nos valores-padrão da IF: <code>NUM_SISTEMA=55</code>, agenda <code>S</code>, especifica-comitente <code>N</code>, motivo <code>25</code>, mantém-prêmio <code>N</code>, exclui/elegível para IOF <code>N/N</code>; e nos valores-padrão de TITULO: fracionamento <code>N</code>, regime <code>2</code>.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2419-2457</code></td>
+              <td data-label="Classificação"><span class="badge warn">logs de inserção</span></td>
+              <td data-label="Validador"><span class="badge new">Categoria 8 opcional</span><code>8c.registration_constants.instrumento_financeiro</code>, <code>.titulo</code></td>
+              <td data-label="Severidade"><span class="badge warn">WARN</span> somente no perfil</td>
+              <td data-label="Confiança"><span class="confidence medium">Média</span></td>
+            </tr>
+            <tr id="r-8-event-profile" data-class="persisted-20" data-severity="warn" data-status="category-8">
+              <td data-label="ID / regra"><span class="rule-id">8c.evento_type_mix / registration_constants.evento</span><span class="rule-name">Perfil de eventos observado</span></td>
+              <td data-label="Regra exata" class="exact">WARN opcional de perfil, a menos que cada IF de CDB ativa tenha exatamente um evento de tipo <code>83</code> e um de tipo <code>85</code>, sem extras; as linhas de evento observadas usam estado <code>1</code> e <code>IND_INCORPORA='N'</code>.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2419-2457, 2472-2478</code></td>
+              <td data-label="Classificação"><span class="badge warn">logs de inserção</span></td>
+              <td data-label="Validador"><span class="badge new">Categoria 8 opcional</span><code>8c.evento_type_mix</code>, <code>8c.registration_constants.evento</code></td>
+              <td data-label="Severidade"><span class="badge warn">WARN</span> somente no perfil</td>
+              <td data-label="Confiança"><span class="confidence medium">Média</span></td>
+            </tr>
+            <tr id="r-8-dado-profile" data-class="persisted-20" data-severity="warn" data-status="category-8">
+              <td data-label="ID / regra"><span class="rule-id">8c.dado_operacao_type_mix</span><span class="rule-name">Composição observada de tipos de dados da operação</span></td>
+              <td data-label="Regra exata" class="exact">WARN opcional de perfil, a menos que toda operação no escopo tenha exatamente um <code>DADO_OPERACAO</code> de tipo <code>502</code> e um de tipo <code>503</code>, sem extras. Os valores de payload CPF/PF não são afirmados.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2479-2485</code></td>
+              <td data-label="Classificação"><span class="badge warn">logs de inserção</span></td>
+              <td data-label="Validador"><span class="badge new">Categoria 8 opcional</span><code>8c.dado_operacao_type_mix</code></td>
+              <td data-label="Severidade"><span class="badge warn">WARN</span> somente no perfil</td>
+              <td data-label="Confiança"><span class="confidence medium">Média</span></td>
+            </tr>
+
+            <tr id="r-p-codif" data-class="runtime-only" data-severity="info" data-status="runtime">
+              <td data-label="ID / regra"><span class="rule-id">APP.cod_if_generator</span><span class="rule-name">Alocação de COD_IF</span></td>
+              <td data-label="Regra exata" class="exact">A aplicação obtém um novo código de IF chamando <code>PKG_CODIGO.f_getcodigonovoif21('49', emission_date)</code>. A validação offline pode verificar unicidade/formato, mas não deve emular a alocação da sequência.</td>
+              <td data-label="Linhas no validador" class="refs">Não implementada no validador</td>
+              <td data-label="Classificação"><span class="badge runtime">somente runtime</span></td>
+              <td data-label="Validador">Excluída da reprodução offline; a Categoria 8 verifica somente a saída</td>
+              <td data-label="Severidade"><span class="badge info">INFO</span> gerador em runtime</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-p-codop" data-class="runtime-only" data-severity="info" data-status="runtime">
+              <td data-label="ID / regra"><span class="rule-id">APP.cod_operacao_generator</span><span class="rule-name">Alocação de COD_OPERACAO</span></td>
+              <td data-label="Regra exata" class="exact"><code>GET_COD_OPERACAO</code> lê a data de controle e acrescenta <code>LPAD(sequence.NEXTVAL,8,'0')</code>. O estado da sequência e a data de controle dependem do Oracle em runtime.</td>
+              <td data-label="Linhas no validador" class="refs">Não implementada no validador</td>
+              <td data-label="Classificação"><span class="badge runtime">somente runtime</span></td>
+              <td data-label="Validador">Gerador excluído; a unicidade da saída na Categoria 8 está sempre ativa</td>
+              <td data-label="Severidade"><span class="badge info">INFO</span> gerador em runtime</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-p-radical" data-class="runtime-only" data-severity="info" data-status="runtime">
+              <td data-label="ID / regra"><span class="rule-id">APP.account_radical</span><span class="rule-name">Conta própria por radical</span></td>
+              <td data-label="Regra exata" class="exact">Dado um código de conta, selecionar uma conta própria ativa (<code>situacao=1</code>, <code>tipo=1</code>) cujo código comece pelos seis primeiros caracteres; se ausente, buscar pela titularidade da conta principal do participante; caso contrário, retornar nulo.</td>
+              <td data-label="Linhas no validador" class="refs">Não implementada no validador</td>
+              <td data-label="Classificação"><span class="badge runtime">somente runtime</span></td>
+              <td data-label="Validador">Sem verificação offline: exige o estado atual do cadastro de contas</td>
+              <td data-label="Severidade"><span class="badge info">INFO</span> lookup de conta em runtime</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-p-comitente" data-class="runtime-only" data-severity="info" data-status="runtime">
+              <td data-label="ID / regra"><span class="rule-id">APP.comitente_resolution</span><span class="rule-name">Identidade do comitente e relação com a conta</span></td>
+              <td data-label="Regra exata" class="exact">PF resolve pelo tipo de relação <code>56</code>; PJ/SPJ por <code>57</code> ou <code>92</code>. Os registros de pessoa e conta-comitente devem estar ativos, e a conta deve resolver pela função de radical de conta própria.</td>
+              <td data-label="Linhas no validador" class="refs">Não implementada no validador</td>
+              <td data-label="Classificação"><span class="badge runtime">somente runtime</span></td>
+              <td data-label="Validador">Sem verificação offline; candidato com falha excluído</td>
+              <td data-label="Severidade"><span class="badge info">INFO</span> grafo de identidade/conta em runtime</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-p-cpin" data-class="runtime-only" data-severity="info" data-status="runtime">
+              <td data-label="ID / regra"><span class="rule-id">APP.cpin_block</span><span class="rule-name">Bloqueio de CPIN e estado do comitente</span></td>
+              <td data-label="Regra exata" class="exact">Rejeitar quando bloqueios ativos de negociação corresponderem ao documento/comitente e à semântica de bloqueio da IF, ou quando o estado do comitente estiver inativo/bloqueado; o comportamento de atualização pendente depende do indicador de captura da IF e da regra de conta ativa.</td>
+              <td data-label="Linhas no validador" class="refs">Não implementada no validador</td>
+              <td data-label="Classificação"><span class="badge runtime">somente runtime</span></td>
+              <td data-label="Validador">Sem verificação offline: exige tabelas de bloqueio/estado no momento da transação</td>
+              <td data-label="Severidade"><span class="badge info">INFO</span> controle de autorização em runtime</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+            <tr id="r-p-serializer" data-class="runtime-only" data-severity="info" data-status="runtime">
+              <td data-label="ID / regra"><span class="rule-id">APP.meu_numero_serializer</span><span class="rule-name">Lock por hash e nova tentativa</span></td>
+              <td data-label="Regra exata" class="exact">Bloquear o bucket <code>ENTRADA mod 131072</code> usando <code>FOR UPDATE WAIT</code>; tentar novamente para ORA-02049, ORA-00060 e ORA-30006 até o limite configurado; bucket ausente gera <code>-20001</code>; outros erros são propagados.</td>
+              <td data-label="Linhas no validador" class="refs">Não implementada no validador</td>
+              <td data-label="Classificação"><span class="badge runtime">somente runtime</span></td>
+              <td data-label="Validador">Não reproduzível; a Categoria 8 verifica a unicidade da tupla resultante</td>
+              <td data-label="Severidade"><span class="badge info">INFO</span> protocolo de lock/nova tentativa em runtime</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
+
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <script>
+    (function () {
+      "use strict";
+      var search = document.getElementById("search");
+      var classFilter = document.getElementById("class-filter");
+      var severityFilter = document.getElementById("severity-filter");
+      var statusFilter = document.getElementById("status-filter");
+      var reset = document.getElementById("reset");
+      var count = document.getElementById("result-count");
+      var rows = Array.prototype.slice.call(document.querySelectorAll("#rules-table tbody tr"));
+
+      function normalize(value) {
+        return (value || "").toLowerCase().replace(/\s+/g, " ").trim();
+      }
+
+      function applyFilters() {
+        var query = normalize(search.value);
+        var wantedClass = classFilter.value;
+        var wantedSeverity = severityFilter.value;
+        var wantedStatus = statusFilter.value;
+        var visible = 0;
+
+        rows.forEach(function (row) {
+          var matchesText = !query || normalize(row.textContent).indexOf(query) !== -1;
+          var matchesClass = wantedClass === "all" || row.dataset.class === wantedClass;
+          var matchesSeverity = wantedSeverity === "all" || row.dataset.severity === wantedSeverity;
+          var matchesStatus = wantedStatus === "all" || row.dataset.status === wantedStatus;
+          var show = matchesText && matchesClass && matchesSeverity && matchesStatus;
+          row.hidden = !show;
+          if (show) visible += 1;
+        });
+
+        count.textContent = "Exibindo " + visible + " de " + rows.length + " regras";
+      }
+
+      [search, classFilter, severityFilter, statusFilter].forEach(function (control) {
+        control.addEventListener(control === search ? "input" : "change", applyFilters);
+      });
+      reset.addEventListener("click", function () {
+        search.value = "";
+        classFilter.value = "all";
+        severityFilter.value = "all";
+        statusFilter.value = "all";
+        applyFilters();
+        search.focus();
+      });
+      applyFilters();
+    }());
+  </script>
+</body>
+</html>
