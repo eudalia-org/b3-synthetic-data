@@ -69,6 +69,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from functools import reduce
+from time import perf_counter
 from typing import Dict, List, Optional, Tuple
 
 from pyspark.sql import DataFrame, SparkSession
@@ -82,6 +83,16 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 logger = logging.getLogger("validate_cdb")
+
+
+def _timed(label: str, operation):
+    """Run an operation and log elapsed wall time without changing its result."""
+    started = perf_counter()
+    logger.info("[PERF] start %s", label)
+    try:
+        return operation()
+    finally:
+        logger.info("[PERF] end %s elapsed=%.1fs", label, perf_counter() - started)
 
 ORACLE_DRIVER = "oracle.jdbc.OracleDriver"
 
@@ -1323,6 +1334,10 @@ def check_referential(
     faltantes: List[Tuple[str, str, str]] = []
     for table, df in tables.items():
         for fk in meta.fks.get(table, []):
+            fk_label = (
+                f"{table}.{','.join(fk.child_cols)}->"
+                f"{fk.parent_table}.{','.join(fk.parent_cols)}"
+            )
             child_actual = [resolve(df, c) for c in fk.child_cols]
             if any(a is None for a in child_actual):
                 continue  # FK columns not all present in the output
@@ -1347,8 +1362,13 @@ def check_referential(
                     residual_df = child_keys.join(
                         pkeys, [f"k{i}" for i in range(len(child_actual))], "left_anti")
 
+            residual_started = perf_counter()
             residual = [tuple(r[f"k{i}"] for i in range(len(child_actual)))
                         for r in residual_df.limit(max_residual_keys + 1).collect()]
+            logger.info(
+                "[PERF] fk synthetic-residual %s keys=%d elapsed=%.1fs",
+                fk_label, len(residual), perf_counter() - residual_started,
+            )
 
             # Stage 2: push the residual into Oracle (union mode).
             note = ""
@@ -1364,7 +1384,18 @@ def check_referential(
                     ))
                     continue
                 try:
+                    oracle_started = perf_counter()
+                    oracle_input_count = len(residual)
                     found = _residual_in_oracle(spark, cfg, fk, residual)
+                    logger.info(
+                        "[PERF] fk oracle-residual %s input_keys=%d batches=%d "
+                        "found=%d elapsed=%.1fs",
+                        fk_label,
+                        oracle_input_count,
+                        (oracle_input_count + 999) // 1000,
+                        len(found),
+                        perf_counter() - oracle_started,
+                    )
                     residual = [t for t in residual if t not in found]
                     note = " (checked against synthetic ∪ Oracle)"
                     # Oracle-verified misses on a single-column FK feed the
@@ -3031,6 +3062,7 @@ def create_spark() -> SparkSession:
 
 
 def main() -> None:
+    run_started = perf_counter()
     args = parse_args()
     cfg = read_config(args.no_oracle)
     spark = create_spark()
@@ -3038,48 +3070,99 @@ def main() -> None:
 
     # A supplied contract is an input to the validation run, so fail before
     # expensive synthetic reads if it cannot be read or parsed.
-    application_capacities = load_application_capacity_contract(
-        spark, args.application_capacity_contract)
+    application_capacities = _timed(
+        "setup application capacity contract",
+        lambda: load_application_capacity_contract(
+            spark, args.application_capacity_contract,
+        ),
+    )
 
     only = [t.strip().upper() for t in args.tables.split(",")] if args.tables else None
-    tables = read_synthetic_tables(spark, cfg.synthetic_base, only)
+    tables = _timed(
+        "setup synthetic table discovery",
+        lambda: read_synthetic_tables(spark, cfg.synthetic_base, only),
+    )
 
     if args.no_oracle:
         meta = Metadata(set(tables), {}, {}, {}, {})
         logger.warning("--no-oracle: Categories 3/4/6 are limited (no PK/FK/NOT NULL metadata).")
     else:
-        meta = load_oracle_metadata(spark, cfg)
+        meta = _timed(
+            "setup Oracle metadata",
+            lambda: load_oracle_metadata(spark, cfg),
+        )
 
     findings: List[Finding] = []
-    findings += check_polymorphism(tables, meta, args.sample_size)
+    findings += _timed(
+        "category 1 polymorphism",
+        lambda: check_polymorphism(tables, meta, args.sample_size),
+    )
     if not args.no_oracle:
-        findings += verify_subtype_map_against_production(spark, cfg)
-    findings += check_domain(tables, meta, args.sample_size)
+        findings += _timed(
+            "category 1 Oracle subtype verification",
+            lambda: verify_subtype_map_against_production(spark, cfg),
+        )
+    findings += _timed(
+        "category 2 domain",
+        lambda: check_domain(tables, meta, args.sample_size),
+    )
     if args.max_parent_keys is not None:
         logger.warning("--max-parent-keys is deprecated and ignored; "
                        "see --max-residual-keys.")
-    ref_findings, faltantes = check_referential(
-        spark, cfg, tables, meta, args.sample_size,
-        args.validate_against, args.max_residual_keys)
+    ref_findings, faltantes = _timed(
+        "category 3 referential",
+        lambda: check_referential(
+            spark, cfg, tables, meta, args.sample_size,
+            args.validate_against, args.max_residual_keys,
+        ),
+    )
     findings += ref_findings
     if args.emit_faltantes:
-        emit_faltantes(spark, args.emit_faltantes, faltantes)
-    findings += check_not_null(tables, meta, args.sample_size)
-    findings += check_capacity(tables, meta, application_capacities, args.sample_size)
-    findings += check_dates(tables, meta, args.sample_size)
-    findings += check_lookup_combos(
-        spark, cfg, tables, meta, args.sample_size, args.max_residual_keys
+        _timed(
+            "category 3 emit faltantes",
+            lambda: emit_faltantes(spark, args.emit_faltantes, faltantes),
+        )
+    findings += _timed(
+        "category 4 not null",
+        lambda: check_not_null(tables, meta, args.sample_size),
     )
-    findings += check_shapes(spark, tables, args.shape_baseline, args.sample_size,
-                             args.shape_unseen_tol, args.shape_drift_tol,
-                             args.shape_op_ratio_tol)
-    findings += check_log_invariants(tables, args.sample_size, args.registration_profile)
+    findings += _timed(
+        "category 4 capacity",
+        lambda: check_capacity(tables, meta, application_capacities, args.sample_size),
+    )
+    findings += _timed(
+        "category 5 dates",
+        lambda: check_dates(tables, meta, args.sample_size),
+    )
+    findings += _timed(
+        "category 6 lookup combinations",
+        lambda: check_lookup_combos(
+            spark, cfg, tables, meta, args.sample_size, args.max_residual_keys,
+        ),
+    )
+    findings += _timed(
+        "category 7 shapes",
+        lambda: check_shapes(
+            spark, tables, args.shape_baseline, args.sample_size,
+            args.shape_unseen_tol, args.shape_drift_tol, args.shape_op_ratio_tol,
+        ),
+    )
+    findings += _timed(
+        "category 8 log invariants",
+        lambda: check_log_invariants(
+            tables, args.sample_size, args.registration_profile,
+        ),
+    )
 
     if args.skip_check:
         findings = [f for f in findings
                     if not any(f.check_id.startswith(s) for s in args.skip_check)]
 
-    code = emit_report(spark, findings, args.report_path, args.fail_severity)
+    code = _timed(
+        "report emission",
+        lambda: emit_report(spark, findings, args.report_path, args.fail_severity),
+    )
+    logger.info("[PERF] complete run elapsed=%.1fs", perf_counter() - run_started)
     spark.stop()
     sys.exit(code)
 
