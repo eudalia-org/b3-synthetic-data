@@ -72,8 +72,30 @@ CDB_TIPO_IF = 49
 
 CONDICAO_IF_TABLE = "CONDICAO_IF"
 CONDICAO_IF_KEY = "NUM_CONDICAO_IF"
+CONDICAO_IF_TYPE = "COD_TIPO_CONDICAO_IF"
 OPERACAO_TABLE = "OPERACAO"
 OPERACAO_KEY = "NUM_ID_OPERACAO"
+
+# Physical joined-subclass tables used by the application to resolve CONDICAO_IF.
+# This app is deployed as a standalone file, so the list mirrors the validator.
+SUBTYPE_TABLES = [
+    "AMORTIZACAO",
+    "ATUALIZACAO_POS",
+    "ATUALIZACAO_PRE",
+    "DESDOBRAMENTO",
+    "JUROS_FIXO",
+    "JUROS_FLUTUANTE",
+    "OPCAO",
+    "PARAMETRO_LIMITE",
+    "PARTICIPACAO_LUCROS",
+    "PREMIO",
+    "PREMIO_CONTRATO",
+    "PREMIO_OPCAO",
+    "RESET",
+    "RESGATE",
+    "SPREAD",
+    "TERMO",
+]
 
 
 @dataclass(frozen=True)
@@ -301,6 +323,85 @@ def build_universe(
         universe = universe.join(universe_keys, ROOT_KEY, "leftsemi")
         notes.append("universe restricted to --universe-keys")
     return universe
+
+
+def build_subtype_map_snapshot(
+    tables: Dict[str, DataFrame], universe: DataFrame
+) -> dict:
+    """Observe joined-subclass discriminator values within the baseline universe."""
+    snapshot = {
+        "version": 1,
+        "source": "raw_parquet",
+        "condition_table": CONDICAO_IF_TABLE,
+        "key_column": CONDICAO_IF_KEY,
+        "type_column": CONDICAO_IF_TYPE,
+        "observed_by_table": {},
+        "missing_tables": [],
+        "unobserved_tables": [],
+        "invalid_tables": [],
+    }
+    membership = None
+    readable_tables = []
+    for table in SUBTYPE_TABLES:
+        subtype = tables.get(table)
+        if subtype is None:
+            snapshot["missing_tables"].append(table)
+            continue
+        subtype_key = _ci(subtype, CONDICAO_IF_KEY)
+        if not subtype_key:
+            snapshot["invalid_tables"].append(table)
+            continue
+        readable_tables.append(table)
+        projection = active_rows(subtype, [], table).select(
+            F.col(subtype_key).cast("long").alias(CONDICAO_IF_KEY),
+            F.lit(table).alias("subtype_table"),
+        )
+        membership = projection if membership is None else membership.unionByName(projection)
+
+    condition = tables.get(CONDICAO_IF_TABLE)
+    if condition is None:
+        snapshot["missing_tables"].append(CONDICAO_IF_TABLE)
+        snapshot["missing_tables"].sort()
+        snapshot["invalid_tables"].sort()
+        snapshot["unobserved_tables"] = sorted(readable_tables)
+        return snapshot
+
+    condition_key = _ci(condition, CONDICAO_IF_KEY)
+    condition_if = _ci(condition, ROOT_KEY)
+    condition_type = _ci(condition, CONDICAO_IF_TYPE)
+    if not condition_key or not condition_if or not condition_type:
+        snapshot["invalid_tables"].append(CONDICAO_IF_TABLE)
+        snapshot["missing_tables"].sort()
+        snapshot["invalid_tables"].sort()
+        snapshot["unobserved_tables"] = sorted(readable_tables)
+        return snapshot
+
+    condition_scope = (
+        active_rows(condition, [], CONDICAO_IF_TABLE)
+        .select(
+            F.col(condition_key).cast("long").alias(CONDICAO_IF_KEY),
+            F.col(condition_if).cast("long").alias(ROOT_KEY),
+            _norm_code(F.col(condition_type)).alias("condition_type"),
+        )
+        .join(universe, ROOT_KEY, "leftsemi")
+        .select(CONDICAO_IF_KEY, "condition_type")
+    )
+
+    observed = {}
+    if membership is not None:
+        rows = (
+            membership.join(condition_scope, CONDICAO_IF_KEY, "inner")
+            .groupBy("subtype_table")
+            .agg(F.sort_array(F.collect_set("condition_type")).alias("types"))
+            .collect()
+        )
+        observed = {row["subtype_table"]: list(row["types"]) for row in rows}
+
+    snapshot["observed_by_table"] = dict(sorted(observed.items()))
+    snapshot["missing_tables"].sort()
+    snapshot["invalid_tables"].sort()
+    snapshot["unobserved_tables"] = sorted(set(readable_tables) - set(observed))
+    return snapshot
 
 
 def _keyed_by_num_if(
@@ -640,6 +741,7 @@ def build_profile(
         "by_simplificado": {},
         "evento_path_crosscheck": evento_path_crosscheck(universe, tables, sample_size),
         "attribute_audits": attribute_audits(universe, tables, notes),
+        "subtype_map": build_subtype_map_snapshot(tables, universe),
     }
 
     for r in counts.groupBy("SIMPLIFICADO").count().collect():
@@ -790,7 +892,10 @@ def _selftest_tables(spark: SparkSession) -> Dict[str, DataFrame]:
         ),
         "RESGATE": df([(11, "SEM TABELA", None), (14, "COM TABELA", None)],
                       ["NUM_CONDICAO_IF", "COD_COND_RESGATE", "DAT_EXCLUSAO"]),
-        "JUROS_FLUTUANTE": df([(12,)], ["NUM_CONDICAO_IF"]),
+        "JUROS_FLUTUANTE": df(
+            [(12, None), (13, "2024-01-01")],
+            ["NUM_CONDICAO_IF", "DAT_EXCLUSAO"],
+        ),
         "JUROS_FIXO": df([(13,)], ["NUM_CONDICAO_IF"]),
         "ATUALIZACAO_POS": spark.createDataFrame([], "NUM_CONDICAO_IF long"),
         "ATUALIZACAO_PRE": spark.createDataFrame([], "NUM_CONDICAO_IF long"),
@@ -830,6 +935,21 @@ def run_selftest(spark: SparkSession) -> None:
 
     assert profile["universe_size"] == 3, profile["universe_size"]
     assert profile["metrics_skipped"] == [], profile["metrics_skipped"]
+    assert profile["subtype_map"]["observed_by_table"] == {
+        "JUROS_FIXO": ["2"],
+        "JUROS_FLUTUANTE": ["3"],
+        "RESGATE": ["1", "20"],
+        "SPREAD": ["5"],
+    }
+    tables_without_condition = _selftest_tables(spark)
+    del tables_without_condition[CONDICAO_IF_TABLE]
+    incomplete = build_subtype_map_snapshot(
+        tables_without_condition,
+        spark.createDataFrame([(1001,)], f"{ROOT_KEY} long"),
+    )
+    assert CONDICAO_IF_TABLE in incomplete["missing_tables"]
+    assert "JUROS_FLUTUANTE" not in incomplete["missing_tables"]
+    assert "JUROS_FLUTUANTE" in incomplete["unobserved_tables"]
 
     ref = profile["reference_match"]
     assert ref["matching_ifs"] == 1 and ref["total_ifs"] == 3, ref
@@ -960,6 +1080,7 @@ def main() -> None:
         {ROOT_TABLE, CONDICAO_IF_TABLE, OPERACAO_TABLE}
         | {m.table for m in METRICS}
         | set(EXTRA_TABLES)
+        | set(SUBTYPE_TABLES)
     )
     tables = read_tables(spark, base, needed)
     logger.info("Read %d/%d tables from %s", len(tables), len(needed), base)

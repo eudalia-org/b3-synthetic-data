@@ -334,3 +334,35 @@ def test_registration_profile_cli_flag(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["validate_cdb_simplificado.py", "--registration-profile"])
 
     assert validator.parse_args().registration_profile is True
+
+
+def test_subtype_map_verification_is_opt_in(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["validate_cdb_simplificado.py"])
+    assert validator.parse_args().verify_subtype_map is False
+
+    monkeypatch.setattr(sys, "argv", ["validate_cdb_simplificado.py", "--verify-subtype-map"])
+    assert validator.parse_args().verify_subtype_map is True
+
+
+def test_precomputed_subtype_map_matches_curated_map():
+    findings = validator.check_subtype_map_snapshot({
+        "observed_by_table": {
+            "JUROS_FLUTUANTE": ["3"],
+            "RESGATE": ["20"],
+        }
+    })
+
+    assert len(findings) == 1
+    assert findings[0].passed is True
+    assert findings[0].count == 2
+
+
+def test_precomputed_subtype_map_reports_unexpected_type():
+    findings = validator.check_subtype_map_snapshot({
+        "observed_by_table": {"JUROS_FLUTUANTE": ["2", "3"]}
+    })
+
+    assert len(findings) == 1
+    assert findings[0].passed is False
+    assert findings[0].severity == validator.SEV_WARN
+    assert findings[0].sample == ["2"]

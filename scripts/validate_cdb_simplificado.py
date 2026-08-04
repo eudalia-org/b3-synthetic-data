@@ -1232,6 +1232,67 @@ def verify_subtype_map_against_production(spark: SparkSession, cfg: Config) -> L
     return out
 
 
+def check_subtype_map_snapshot(snapshot: dict, source: str = "baseline") -> List[Finding]:
+    """Compare a precomputed raw-Parquet subtype snapshot with the curated map."""
+    category = "CONDICAO_IF polymorphism"
+    observed = snapshot.get("observed_by_table") if isinstance(snapshot, dict) else None
+    if not isinstance(observed, dict) or not observed:
+        return [Finding(
+            "1.map_snapshot", category, SEV_WARN, CONDICAO_IF_TABLE, False,
+            hint="Regenerate the shape baseline with the current profile_cdb_shapes.py.",
+            message=f"Subtype-map snapshot from {source} has no observed subtype mappings.",
+        )]
+
+    expected_by_table: Dict[str, set] = {}
+    for tipo, table in SUBTYPE_BY_TIPO.items():
+        expected_by_table.setdefault(table, set()).add(tipo)
+
+    out: List[Finding] = []
+    for table, values in sorted(observed.items()):
+        found = {str(value) for value in values}
+        expected = expected_by_table.get(table, set())
+        unexpected = sorted(found - expected)
+        if unexpected:
+            out.append(Finding(
+                "1.map_snapshot", category, SEV_WARN, table, False,
+                column=CONDICAO_IF_TIPO_COL,
+                sample=unexpected,
+                hint="Review the raw baseline and update SUBTYPE_BY_TIPO only if the "
+                     "application joined-subclass mapping changed.",
+                message=f"Raw baseline {table} rows carry unexpected subtype value(s) "
+                        f"{unexpected}; curated value(s): {sorted(expected)}.",
+            ))
+
+    if not out:
+        out.append(Finding(
+            "1.map_snapshot", category, SEV_INFO, CONDICAO_IF_TABLE, True,
+            count=len(observed),
+            message=f"{len(observed)} raw subtype table mapping(s) from {source} match "
+                    "the curated application map.",
+        ))
+    return out
+
+
+def verify_subtype_map_from_baseline(
+    spark: SparkSession, baseline_path: str
+) -> List[Finding]:
+    """Load and verify the subtype snapshot embedded by profile_cdb_shapes.py."""
+    try:
+        baseline = json.loads(read_text(spark, baseline_path))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not load baseline subtype-map snapshot: %s", exc)
+        return []
+    snapshot = baseline.get("subtype_map")
+    if snapshot is None:
+        logger.warning(
+            "Shape baseline %s has no subtype_map; regenerate it with the current profiler.",
+            baseline_path,
+        )
+        return []
+    source = baseline.get("base_uri") or baseline_path
+    return check_subtype_map_snapshot(snapshot, str(source))
+
+
 # ---------------------------------------------------------------------------
 # Category 2 - Domain conformance (FILTROS_FONTE image)
 # ---------------------------------------------------------------------------
@@ -3004,7 +3065,8 @@ def parse_args() -> argparse.Namespace:
                    help="Write a JSON report to this path (local or oci:// URI).")
     p.add_argument("--shape-baseline", default=None,
                    help="Shape-profile JSON from profile_cdb_shapes.py --apply-filtros-fonte "
-                        "(local or oci:// URI). Enables the Cat 7 distribution checks.")
+                        "(local or oci:// URI). Enables Cat 1 subtype-map and Cat 7 "
+                        "distribution checks.")
     p.add_argument("--application-capacity-contract",
                    default=os.environ.get("DATAGEN_APPLICATION_CAPACITY_CONTRACT") or None,
                    help="Optional application capacity-contract JSON (local or oci:// URI). "
@@ -3043,6 +3105,10 @@ def parse_args() -> argparse.Namespace:
                    help="Check-id prefix(es) to skip (repeatable), e.g. 6.combo.")
     p.add_argument("--no-oracle", action="store_true",
                    help="Do not read Oracle metadata (limits Categories 3/4/6).")
+    p.add_argument("--verify-subtype-map", action="store_true",
+                   help="Run the expensive best-effort production audit of the static "
+                        "CONDICAO_IF subtype map. Disabled by default; synthetic subtype "
+                        "integrity is always validated by Category 1.")
     p.add_argument("--registration-profile", action="store_true",
                    help="Enable Cat 8 current-registration format, persisted-profile, and "
                         "exact type-mix WARN checks.")
@@ -3097,10 +3163,19 @@ def main() -> None:
         "category 1 polymorphism",
         lambda: check_polymorphism(tables, meta, args.sample_size),
     )
-    if not args.no_oracle:
+    if args.shape_baseline:
+        findings += _timed(
+            "category 1 baseline subtype verification",
+            lambda: verify_subtype_map_from_baseline(spark, args.shape_baseline),
+        )
+    if not args.no_oracle and args.verify_subtype_map:
         findings += _timed(
             "category 1 Oracle subtype verification",
             lambda: verify_subtype_map_against_production(spark, cfg),
+        )
+    elif not args.no_oracle:
+        logger.info(
+            "Production subtype-map audit skipped; use --verify-subtype-map to run it."
         )
     findings += _timed(
         "category 2 domain",
