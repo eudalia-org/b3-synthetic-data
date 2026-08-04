@@ -105,7 +105,7 @@ root_rows AS (
     DAT_REGISTRO,
     DAT_VENCIMENTO,
     COD_IF,
-    REGEXP_REPLACE(TRIM(CAST(COD_IF AS STRING)), '[.]0$', '') AS normalized_cod_if
+    TRIM(CAST(COD_IF AS STRING)) AS normalized_cod_if
   FROM src_instrumento_financeiro
 ),
 candidates AS (
@@ -242,6 +242,8 @@ operation_rows AS (
       ELSE TRIM(CAST(NUM_IF AS STRING))
     END AS NUM_IF,
     DAT_EXCLUSAO,
+    COD_IF,
+    TRIM(CAST(COD_IF AS STRING)) AS normalized_cod_if,
     COD_OPERACAO,
     REGEXP_REPLACE(TRIM(CAST(COD_OPERACAO AS STRING)), '[.]0$', '')
       AS normalized_cod_operacao,
@@ -584,6 +586,21 @@ cod_if_invalid AS (
   INNER JOIN duplicate_cod_if_values d
     ON d.normalized_cod_if = r.normalized_cod_if
 ),
+operation_cod_if_invalid AS (
+  SELECT DISTINCT o.NUM_IF, 'consistency.operacao_cod_if' AS reason
+  FROM operation_rows o
+  INNER JOIN candidates c ON c.NUM_IF = o.NUM_IF
+  LEFT JOIN root_rows r
+    ON r.NUM_IF = o.NUM_IF
+   AND r.NUM_TIPO_IF = '49'
+   AND r.DAT_EXCLUSAO IS NULL
+  WHERE o.COD_IF IS NULL
+     OR o.normalized_cod_if = ''
+     OR r.NUM_IF IS NULL
+     OR r.COD_IF IS NULL
+     OR r.normalized_cod_if = ''
+     OR NOT (o.normalized_cod_if <=> r.normalized_cod_if)
+),
 duplicate_cod_operacao_values AS (
   SELECT normalized_cod_operacao
   FROM operation_rows
@@ -804,6 +821,7 @@ invalid_num_ifs_raw AS (
   UNION ALL SELECT * FROM operation_shape_invalid
   UNION ALL SELECT * FROM resgate_shape_invalid
   UNION ALL SELECT * FROM cod_if_invalid
+  UNION ALL SELECT * FROM operation_cod_if_invalid
   UNION ALL SELECT * FROM cod_operacao_invalid
   UNION ALL SELECT * FROM meu_numero_invalid
   UNION ALL SELECT * FROM blank_account_invalid

@@ -2767,6 +2767,87 @@ def check_log_invariants(
         )
 
     operation = tables.get(OPERACAO_TABLE)
+    match_check_id = "8a.operacao_cod_if_match"
+    if active is None or operation is None:
+        missing_match = active_missing if active is None else []
+        if operation is None:
+            missing_match = [*missing_match, OPERACAO_TABLE]
+        out.append(
+            _cat8_unavailable(
+                match_check_id,
+                f"INSTRUMENTO_FINANCEIRO,{OPERACAO_TABLE}",
+                missing_match,
+            )
+        )
+    else:
+        root_cols = {name: resolve(active, name) for name in ("NUM_IF", "COD_IF")}
+        op_cols = {
+            name: resolve(operation, name)
+            for name in ("NUM_ID_OPERACAO", "NUM_IF", "COD_IF")
+        }
+        missing_match = [
+            name
+            for name, actual in {**root_cols, **op_cols}.items()
+            if not actual
+        ]
+        if missing_match:
+            out.append(
+                _cat8_unavailable(
+                    match_check_id,
+                    f"INSTRUMENTO_FINANCEIRO,{OPERACAO_TABLE}",
+                    missing_match,
+                )
+            )
+        else:
+            roots = (
+                active.select(
+                    _canon_key_col(F.col(root_cols["NUM_IF"])).alias("normalized_num_if"),
+                    F.trim(F.col(root_cols["COD_IF"]).cast("string")).alias("root_cod_if"),
+                )
+                .where(
+                    F.col("normalized_num_if").isNotNull()
+                    & (F.col("normalized_num_if") != "")
+                )
+                .groupBy("normalized_num_if")
+                .agg(
+                    F.count(F.lit(1)).alias("root_count"),
+                    F.min("root_cod_if").alias("root_cod_if"),
+                )
+            )
+            operations = operation.select(
+                F.col(op_cols["NUM_ID_OPERACAO"]).alias("operation_id"),
+                F.col(op_cols["NUM_IF"]).alias("operation_num_if"),
+                _canon_key_col(F.col(op_cols["NUM_IF"])).alias("normalized_num_if"),
+                F.trim(F.col(op_cols["COD_IF"]).cast("string")).alias(
+                    "operation_cod_if"
+                ),
+            )
+            compared = operations.join(roots, "normalized_num_if", "left")
+            bad = compared.where(
+                F.col("normalized_num_if").isNull()
+                | (F.col("normalized_num_if") == "")
+                | F.col("root_count").isNull()
+                | (F.col("root_count") != 1)
+                | F.col("operation_cod_if").isNull()
+                | (F.col("operation_cod_if") == "")
+                | F.col("root_cod_if").isNull()
+                | (F.col("root_cod_if") == "")
+                | ~(F.col("operation_cod_if") == F.col("root_cod_if"))
+            )
+            out.append(
+                _cat8_bad_rows(
+                    match_check_id,
+                    OPERACAO_TABLE,
+                    "NUM_IF,COD_IF",
+                    bad,
+                    ["operation_id", "operation_num_if", "root_cod_if", "operation_cod_if"],
+                    sample,
+                    SEV_ERROR,
+                    "Copy the active root COD_IF to every operation sharing its normalized NUM_IF.",
+                    "Operations with blank, mismatching, or unmatched active-root COD_IF values.",
+                )
+            )
+
     if operation is None:
         out.append(
             _cat8_unavailable("8a.cod_operacao_unique", OPERACAO_TABLE, [OPERACAO_TABLE])

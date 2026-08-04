@@ -266,9 +266,10 @@
       <h1>CDB Simplificado: catálogo de regras</h1>
       <p class="deck">Regras presentes nos logs de inserção e diagnósticos adicionais executados pelo validador.</p>
       <div class="metrics" role="group" aria-label="Resumo do corpus">
-        <div class="metric"><strong>44</strong><span>regras</span></div>
-        <div class="metric"><strong>34</strong><span>presentes nos logs</span></div>
-        <div class="metric"><strong>10</strong><span>somente validador</span></div>
+        <div class="metric"><strong>46</strong><span>regras</span></div>
+        <div class="metric"><strong>35</strong><span>presentes nos logs</span></div>
+        <div class="metric"><strong>11</strong><span>somente validador</span></div>
+        <div class="metric"><strong>57</strong><span>IDs executáveis</span></div>
         <div class="metric"><strong>20</strong><span>inclusões analisadas</span></div>
       </div>
     </div>
@@ -341,13 +342,13 @@
       </div>
       <div id="rules-panel" role="tabpanel" aria-labelledby="tab-logs">
       <div class="countline">
-        <span id="result-count" role="status" aria-live="polite">Exibindo 34 de 44 regras</span>
+        <span id="result-count" role="status" aria-live="polite">Exibindo 35 de 46 regras</span>
         <span>ERROR = violação de invariante; WARN = revisão ou desvio de perfil; INFO = contexto</span>
       </div>
 
       <div class="table-wrap catalog" role="region" aria-label="Catálogo de regras com rolagem horizontal" tabindex="0">
         <table id="rules-table">
-          <caption>Catálogo de 44 regras: 34 presentes nos logs de inserção e 10 diagnósticos adicionais do validador.</caption>
+          <caption>Catálogo de 46 regras: 35 presentes nos logs de inserção e 11 diagnósticos adicionais do validador, cobrindo 57 IDs executáveis.</caption>
           <thead>
             <tr>
               <th scope="col">ID / regra</th>
@@ -395,6 +396,15 @@
               <td data-label="Validador"><code>1.map_verify</code></td>
               <td data-label="Severidade"><span class="badge warn">WARN</span> contradição entre amostra de produção e mapa curado</td>
               <td data-label="Confiança"><span class="confidence medium">Média</span></td>
+            </tr>
+            <tr id="r-1-map-snapshot" data-tab="validator" data-class="validator-only" data-severity="warn info" data-status="existing">
+              <td data-label="ID / regra"><span class="rule-id">1.map_snapshot</span><span class="rule-name">Snapshot baseline do mapa de subtipos</span></td>
+              <td data-label="Regra exata" class="exact">Comparar o snapshot pré-calculado de subtipos do Parquet bruto com o mapa curado: snapshot ausente/vazio ou valores de tipo inesperados geram WARN; correspondência integral gera INFO.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:1235-1273</code></td>
+              <td data-label="Classificação"><span class="badge">somente validador</span></td>
+              <td data-label="Validador"><code>1.map_snapshot</code> existente</td>
+              <td data-label="Severidade"><span class="badge warn">WARN</span><span class="badge info">INFO</span> diagnóstico do snapshot baseline de subtipos</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
             </tr>
             <tr id="r-2-domain" data-class="application-backed" data-severity="error" data-status="existing">
               <td data-label="ID / regra"><span class="rule-id">2.domain</span><span class="rule-name">Predicados de domínio do CDB simplificado</span></td>
@@ -598,16 +608,25 @@
             <tr id="r-8-codif-unique" data-class="application-backed" data-severity="error" data-status="category-8">
               <td data-label="ID / regra"><span class="rule-id">8a.cod_if_unique</span><span class="rule-name">Unicidade de COD_IF</span></td>
               <td data-label="Regra exata" class="exact">Entre instrumentos de CDB ativos, somente valores de <code>COD_IF</code> normalizados e não vazios participam da verificação e cada valor participante deve ocorrer uma vez. A verificação está sempre ativa.</td>
-              <td data-label="Linhas no validador" class="refs"><code>validator:2636-2675, 3076</code></td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2732-2767, 3308-3311</code></td>
               <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span></td>
               <td data-label="Validador"><span class="badge new">contrato da Categoria 8</span><code>8a.cod_if_unique</code>; sempre ativa</td>
               <td data-label="Severidade"><span class="badge error">ERROR</span> saída ativa de CDB</td>
               <td data-label="Confiança"><span class="confidence high">Alta</span></td>
             </tr>
+            <tr id="r-8-operacao-codif-match" data-class="application-backed" data-severity="error" data-status="category-8">
+              <td data-label="ID / regra"><span class="rule-id">8a.operacao_cod_if_match</span><span class="rule-name">COD_IF da operação igual ao da raiz</span></td>
+              <td data-label="Regra exata" class="exact">Toda linha de <code>OPERACAO</code> deve resolver, pelo <code>NUM_IF</code> normalizado, uma raiz de CDB ativa e ter <code>TRIM(CAST(COD_IF AS STRING))</code> não vazio e exatamente igual ao código aparado dessa raiz. Código nulo, vazio, divergente, chave de raiz ambígua ou raiz ativa não resolvida é ERROR. A verificação está sempre ativa.</td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2769-2849, 3308-3311</code></td>
+              <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span></td>
+              <td data-label="Validador"><span class="badge new">contrato da Categoria 8</span><code>8a.operacao_cod_if_match</code>; sempre ativa</td>
+              <td data-label="Severidade"><span class="badge error">ERROR</span> todas as linhas de OPERACAO e a raiz ativa correspondente</td>
+              <td data-label="Confiança"><span class="confidence high">Alta</span></td>
+            </tr>
             <tr id="r-8-codop-unique" data-class="application-backed" data-severity="error" data-status="category-8">
               <td data-label="ID / regra"><span class="rule-id">8a.cod_operacao_unique</span><span class="rule-name">Unicidade de COD_OPERACAO</span></td>
               <td data-label="Regra exata" class="exact">Somente valores de <code>OPERACAO.COD_OPERACAO</code> normalizados e não vazios participam da verificação e cada valor participante deve ser único na saída. A verificação está sempre ativa.</td>
-              <td data-label="Linhas no validador" class="refs"><code>validator:2677-2718, 3076</code></td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2851-2891, 3308-3311</code></td>
               <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span></td>
               <td data-label="Validador"><span class="badge new">contrato da Categoria 8</span><code>8a.cod_operacao_unique</code>; contrato novo</td>
               <td data-label="Severidade"><span class="badge error">ERROR</span> todas as linhas de OPERACAO</td>
@@ -616,7 +635,7 @@
             <tr id="r-8-meu-unique" data-class="application-backed" data-severity="error" data-status="category-8">
               <td data-label="ID / regra"><span class="rule-id">8a.meu_numero_unique</span><span class="rule-name">Unicidade da tupla meu-número</span></td>
               <td data-label="Regra exata" class="exact">Nos dois lados da operação, somente tuplas completas, sem componentes nulos ou vazios, participam; entre elas, nenhuma duplicata de <code>(DAT_OPERACAO, NUM_CONTA_PARTICIPANTE_Pn, NUM_CONTROLE_LANCAMENTO_Pn, NUM_ID_TIPO_OPER_OBJETO_SERV)</code> é permitida. P1 e P2 formam um único espaço de chaves.</td>
-              <td data-label="Linhas no validador" class="refs"><code>validator:2720-2780, 3076</code></td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2893-2953, 3308-3311</code></td>
               <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span></td>
               <td data-label="Validador"><span class="badge new">contrato da Categoria 8</span><code>8a.meu_numero_unique</code>; contrato novo</td>
               <td data-label="Severidade"><span class="badge error">ERROR</span> união das chaves de operação P1/P2</td>
@@ -625,7 +644,7 @@
             <tr id="r-8-codif-format" data-class="persisted-20" data-severity="warn" data-status="category-8">
               <td data-label="ID / regra"><span class="rule-id">8b.cod_if_format</span><span class="rule-name">Formato observado de COD_IF</span></td>
               <td data-label="Regra exata" class="exact">Quando o modo de perfil de inclusão está habilitado, emitir WARN se o <code>COD_IF</code> de CDB ativo não corresponder a <code>^CDB[1-9A-C][0-9]{2}[0-9A-Z]{5}$</code>. Esta é uma conformidade de formato, nunca o próprio gerador.</td>
-              <td data-label="Linhas no validador" class="refs"><code>validator:2782-2807, 3076</code></td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2958-2980, 3308-3311</code></td>
               <td data-label="Classificação"><span class="badge warn">logs de inserção</span></td>
               <td data-label="Validador"><span class="badge new">Categoria 8 opcional</span><code>8b.cod_if_format</code></td>
               <td data-label="Severidade"><span class="badge warn">WARN</span> somente no perfil de inclusão</td>
@@ -634,7 +653,7 @@
             <tr id="r-8-codop-format" data-class="application-backed" data-severity="warn" data-status="category-8">
               <td data-label="ID / regra"><span class="rule-id">8b.cod_operacao_format</span><span class="rule-name">Formato de COD_OPERACAO</span></td>
               <td data-label="Regra exata" class="exact">Quando o modo de perfil de inclusão está habilitado, emitir WARN se <code>COD_OPERACAO</code> não corresponder a <code>^[0-9]{16}$</code>. O validador não interpreta prefixo de data nem sequência.</td>
-              <td data-label="Linhas no validador" class="refs"><code>validator:2809-2836, 3076</code></td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2982-3009, 3308-3311</code></td>
               <td data-label="Classificação"><span class="badge">sustentada pela aplicação</span><span class="badge warn">controle de perfil</span></td>
               <td data-label="Validador"><span class="badge new">Categoria 8 opcional</span><code>8b.cod_operacao_format</code></td>
               <td data-label="Severidade"><span class="badge warn">WARN</span> somente no perfil de inclusão</td>
@@ -643,7 +662,7 @@
             <tr id="r-8-condition-mix" data-class="persisted-20" data-severity="warn" data-status="category-8">
               <td data-label="ID / regra"><span class="rule-id">8c.condicao_type_mix</span><span class="rule-name">Composição observada de tipos de condição</span></td>
               <td data-label="Regra exata" class="exact">WARN opcional de perfil, a menos que cada IF de CDB ativa tenha exatamente uma linha ativa de <code>CONDICAO_IF</code> do tipo <code>3</code> e uma do tipo <code>20</code>, sem tipos extras. Esta regra não verifica as linhas físicas correspondentes nas tabelas de subtipo.</td>
-              <td data-label="Linhas no validador" class="refs"><code>validator:2568-2633, 2875-2890, 3076</code></td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2660-2725, 3048-3063, 3308-3311</code></td>
               <td data-label="Classificação"><span class="badge warn">logs de inserção</span></td>
               <td data-label="Validador"><span class="badge new">Categoria 8 opcional</span><code>8c.condicao_type_mix</code>; sobrepõe-se às Categorias 1 e 7, mas vale somente para o perfil</td>
               <td data-label="Severidade"><span class="badge warn">WARN</span> IF com shape de inclusão</td>
@@ -652,7 +671,7 @@
             <tr id="r-8-condition-constants" data-class="persisted-20" data-severity="warn" data-status="category-8">
               <td data-label="ID / regra"><span class="rule-id">8c.registration_constants.condicao_if</span><span class="rule-name">Constantes de condição observadas</span></td>
               <td data-label="Regra exata" class="exact">WARN opcional de perfil em caso de desvio de <code>COD_TIPO_UNIDADE_TEMPO_PAGA='F'</code>, <code>QTD_UNID_TEMPO_PAGAMENTO=1</code> e <code>NUM_ID_ORIG_DESL_LIQ=0</code> para as duas condições observadas.</td>
-              <td data-label="Linhas no validador" class="refs"><code>validator:2499-2503, 2838-2873, 3076</code></td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2591-2595, 3011-3046, 3308-3311</code></td>
               <td data-label="Classificação"><span class="badge warn">logs de inserção</span></td>
               <td data-label="Validador"><span class="badge new">Categoria 8 opcional</span><code>8c.registration_constants.condicao_if</code></td>
               <td data-label="Severidade"><span class="badge warn">WARN</span> somente no perfil</td>
@@ -661,7 +680,7 @@
             <tr id="r-8-interest-constants" data-class="persisted-20" data-severity="warn" data-status="category-8">
               <td data-label="ID / regra"><span class="rule-id">8c.registration_constants.juros_flutuante</span><span class="rule-name">Constantes observadas de juros flutuantes</span></td>
               <td data-label="Regra exata" class="exact">WARN opcional de perfil em caso de desvio de <code>IND_ANO_COMERCIAL=2</code>, <code>IND_DIAS_CORRIDOS=1</code>, <code>NUM_ID_TIPO_INDICADOR=0</code> e <code>NOM_AGENDA_PAGAMENTO='CONSTANTE'</code>. <code>IND_INCORPORA_JUROS='N'</code> e <code>NUM_INDICE_VALORIZACAO=4</code>, derivados da entrada, ficam excluídos.</td>
-              <td data-label="Linhas no validador" class="refs"><code>validator:2504-2509, 2838-2873, 3076</code></td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2596-2601, 3011-3046, 3308-3311</code></td>
               <td data-label="Classificação"><span class="badge warn">logs de inserção</span></td>
               <td data-label="Validador"><span class="badge new">Categoria 8 opcional</span><code>8c.registration_constants.juros_flutuante</code></td>
               <td data-label="Severidade"><span class="badge warn">WARN</span> somente no perfil</td>
@@ -670,7 +689,7 @@
             <tr id="r-8-resgate-constants" data-class="persisted-20" data-severity="warn" data-status="category-8">
               <td data-label="ID / regra"><span class="rule-id">8c.registration_constants.resgate</span><span class="rule-name">Estilo observado de exercício do resgate</span></td>
               <td data-label="Regra exata" class="exact">WARN opcional de perfil, a menos que o perfil de resgate observado use <code>COD_TIPO_EXERCICIO='EUROPEIA'</code>. <code>COD_COND_RESGATE='SEM TABELA'</code> continua sob responsabilidade independente do ERROR de domínio existente na Categoria 2 e não é duplicado aqui.</td>
-              <td data-label="Linhas no validador" class="refs"><code>validator:2510, 2838-2873, 3076</code></td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2602, 3011-3046, 3308-3311</code></td>
               <td data-label="Classificação"><span class="badge warn">logs de inserção</span></td>
               <td data-label="Validador"><span class="badge new">Categoria 8 opcional</span><code>8c.registration_constants.resgate</code>; <code>2.domain</code> cobre <code>SEM TABELA</code></td>
               <td data-label="Severidade"><span class="badge warn">WARN</span> estilo de exercício; o predicado de domínio existente permanece ERROR</td>
@@ -680,7 +699,7 @@
             <tr id="r-8-root-constants" data-class="persisted-20" data-severity="warn" data-status="category-8">
               <td data-label="ID / regra"><span class="rule-id">8c.registration_constants.instrumento_financeiro / 8c.registration_constants.titulo</span><span class="rule-name">Valores-padrão observados da raiz e do título</span></td>
               <td data-label="Regra exata" class="exact">WARN opcional de perfil nos valores-padrão da IF: <code>NUM_SISTEMA=55</code>, agenda <code>S</code>, especifica-comitente <code>N</code>, motivo <code>25</code>, mantém-prêmio <code>N</code>, exclui/elegível para IOF <code>N/N</code>; e nos valores-padrão de TITULO: fracionamento <code>N</code>, regime <code>2</code>.</td>
-              <td data-label="Linhas no validador" class="refs"><code>validator:2489-2498, 2838-2873, 3076</code></td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2581-2590, 3011-3046, 3308-3311</code></td>
               <td data-label="Classificação"><span class="badge warn">logs de inserção</span></td>
               <td data-label="Validador"><span class="badge new">Categoria 8 opcional</span><code>8c.registration_constants.instrumento_financeiro</code>, <code>8c.registration_constants.titulo</code></td>
               <td data-label="Severidade"><span class="badge warn">WARN</span> somente no perfil</td>
@@ -689,7 +708,7 @@
             <tr id="r-8-event-profile" data-class="persisted-20" data-severity="warn" data-status="category-8">
               <td data-label="ID / regra"><span class="rule-id">8c.evento_type_mix / registration_constants.evento</span><span class="rule-name">Perfil de eventos observado</span></td>
               <td data-label="Regra exata" class="exact">WARN opcional de perfil, a menos que cada IF de CDB ativa tenha exatamente um evento de tipo <code>83</code> e um de tipo <code>85</code>, sem extras; as linhas de evento observadas usam estado <code>1</code> e <code>IND_INCORPORA='N'</code>.</td>
-              <td data-label="Linhas no validador" class="refs"><code>validator:2511, 2568-2633, 2838-2873, 2875-2897, 3076</code></td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2603, 2660-2725, 3011-3046, 3048-3070, 3308-3311</code></td>
               <td data-label="Classificação"><span class="badge warn">logs de inserção</span></td>
               <td data-label="Validador"><span class="badge new">Categoria 8 opcional</span><code>8c.evento_type_mix</code>, <code>8c.registration_constants.evento</code></td>
               <td data-label="Severidade"><span class="badge warn">WARN</span> somente no perfil</td>
@@ -698,7 +717,7 @@
             <tr id="r-8-dado-profile" data-class="persisted-20" data-severity="warn" data-status="category-8">
               <td data-label="ID / regra"><span class="rule-id">8c.dado_operacao_type_mix</span><span class="rule-name">Composição observada de tipos de dados da operação</span></td>
               <td data-label="Regra exata" class="exact">WARN opcional de perfil, a menos que toda operação no escopo tenha exatamente um <code>DADO_OPERACAO</code> de tipo <code>502</code> e um de tipo <code>503</code>, sem extras. Os valores de payload CPF/PF não são afirmados.</td>
-              <td data-label="Linhas no validador" class="refs"><code>validator:2568-2633, 2898-2904, 3076</code></td>
+              <td data-label="Linhas no validador" class="refs"><code>validator:2660-2725, 3071-3077, 3308-3311</code></td>
               <td data-label="Classificação"><span class="badge warn">logs de inserção</span></td>
               <td data-label="Validador"><span class="badge new">Categoria 8 opcional</span><code>8c.dado_operacao_type_mix</code></td>
               <td data-label="Severidade"><span class="badge warn">WARN</span> somente no perfil</td>

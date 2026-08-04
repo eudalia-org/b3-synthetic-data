@@ -308,14 +308,87 @@ def test_multiple_batches_join_slots_once(spark, tmp_path, monkeypatch):
 
 def _operation_df(spark):
     return spark.createDataFrame([
-        (20, "2020-01-01", "old1", "old2", "keep1", "keep2", "1", "2", "4509"),
-        (10, "2020-01-01", "old3", "old4", "keep3", "keep4", "3", "3", "4509"),
+        (20, "2020-01-01", "old1", "old2", "keep1", "keep2", "1", "2", "4509",
+         1, "CDB10000001"),
+        (10, "2020-01-01", "old3", "old4", "keep3", "keep4", "3", "3", "4509",
+         1, "CDB10000001"),
     ], """NUM_ID_OPERACAO long, DAT_OPERACAO string,
            NUM_CONTROLE_LANCAMENTO_P1 string, NUM_CONTROLE_LANCAMENTO_P2 string,
            NUM_CONTROLE_LANCAMENTO_P1_ORIGINAL string,
            NUM_CONTROLE_LANCAMENTO_P2_ORIGINAL string,
            NUM_CONTA_PARTICIPANTE_P1 string, NUM_CONTA_PARTICIPANTE_P2 string,
-           NUM_ID_TIPO_OPER_OBJETO_SERV string""")
+           NUM_ID_TIPO_OPER_OBJETO_SERV string, NUM_IF long, COD_IF string""")
+
+
+@pytest.mark.parametrize("factor", [1, 2])
+def test_operation_cod_if_is_propagated_by_normalized_num_if_and_preserves_rows(
+        spark, factor):
+    instrumentos = spark.createDataFrame(
+        [(index, f"CDB{index:08d}", None) for index in range(1, factor + 1)],
+        "NUM_IF long, COD_IF string, DAT_EXCLUSAO string",
+    )
+    operacoes = spark.createDataFrame(
+        [
+            (index * 10 + suffix, Decimal(f"{index}.000"), "OLD", "LEGACY", suffix)
+            for index in range(1, factor + 1)
+            for suffix in (1, 2)
+        ],
+        "NUM_ID_OPERACAO long, NUM_IF decimal(38,9), COD_IF string, "
+        "COD_ANTIGO_IF string, PAYLOAD long",
+    )
+
+    rows = eng._propagate_root_cod_if(instrumentos, operacoes).orderBy(
+        "NUM_ID_OPERACAO"
+    ).collect()
+
+    assert [row.COD_IF for row in rows] == [
+        f"CDB{index:08d}" for index in range(1, factor + 1) for _ in (1, 2)
+    ]
+    assert [(row.COD_ANTIGO_IF, row.PAYLOAD) for row in rows] == [
+        ("LEGACY", suffix)
+        for _ in range(1, factor + 1)
+        for suffix in (1, 2)
+    ]
+    assert eng._propagate_root_cod_if(
+        instrumentos.repartition(2), operacoes.repartition(2)
+    ).orderBy("NUM_ID_OPERACAO").collect() == rows
+
+
+@pytest.mark.parametrize(
+    "failure", ["missing", "operation_missing", "duplicate", "blank", "inactive", "unmatched"]
+)
+def test_operation_cod_if_propagation_rejects_invalid_root_mapping(spark, failure):
+    instrumentos = spark.createDataFrame([(1, "CDB10000001", None)],
+                                         "NUM_IF long, COD_IF string, DAT_EXCLUSAO string")
+    operacoes = spark.createDataFrame([(10, 1, "OLD")],
+                                      "NUM_ID_OPERACAO long, NUM_IF long, COD_IF string")
+    if failure == "missing":
+        instrumentos = instrumentos.drop("COD_IF")
+    elif failure == "operation_missing":
+        operacoes = operacoes.drop("COD_IF")
+    elif failure == "duplicate":
+        instrumentos = instrumentos.unionByName(instrumentos)
+    elif failure == "blank":
+        instrumentos = instrumentos.withColumn("COD_IF", F.lit("  "))
+    elif failure == "inactive":
+        instrumentos = instrumentos.withColumn("DAT_EXCLUSAO", F.lit("2026-07-19"))
+    else:
+        operacoes = operacoes.withColumn("NUM_IF", F.lit(2))
+
+    with pytest.raises(ValueError):
+        eng._propagate_root_cod_if(instrumentos, operacoes)
+
+
+def test_operation_cod_if_propagation_rejects_numeric_cod_if_type(spark):
+    instrumentos = spark.createDataFrame(
+        [(1, "CDB10000001", None)], "NUM_IF long, COD_IF string, DAT_EXCLUSAO string"
+    )
+    operacoes = spark.createDataFrame(
+        [(10, 1, 0)], "NUM_ID_OPERACAO long, NUM_IF long, COD_IF long"
+    )
+
+    with pytest.raises(ValueError, match="StringType"):
+        eng._propagate_root_cod_if(instrumentos, operacoes)
 
 
 @pytest.mark.parametrize("prefix", ["", "012", "12", "1234", "A12"])
@@ -416,7 +489,9 @@ def test_target_preflight_distinguishes_tos_and_exact_timestamp(spark):
 
 
 def test_business_validation_rejects_composite_collision(spark):
-    instrumentos = spark.createDataFrame([(1, "CDB10000001")], "NUM_IF long, COD_IF string")
+    instrumentos = spark.createDataFrame(
+        [(1, "CDB10000001", None)], "NUM_IF long, COD_IF string, DAT_EXCLUSAO string"
+    )
     op = _operation_df(spark).withColumn(
         "COD_OPERACAO", F.lpad(F.col("NUM_ID_OPERACAO"), 16, "0"))
     generated = eng._generate_meu_numeros(op, "321", date(2026, 7, 19))
@@ -430,6 +505,28 @@ def test_business_validation_rejects_composite_collision(spark):
     )
     with pytest.raises(ValueError, match="colisão"):
         eng._validate_business_keys(instrumentos, duplicate)
+
+
+@pytest.mark.parametrize("failure", ["mismatch", "missing", "duplicate", "unmatched"])
+def test_business_validation_rejects_invalid_operation_root_cod_if_mapping(spark, failure):
+    instrumentos = spark.createDataFrame(
+        [(1, "CDB10000001", None)], "NUM_IF long, COD_IF string, DAT_EXCLUSAO string"
+    )
+    op = (_operation_df(spark)
+          .withColumn("COD_OPERACAO", F.lpad(F.col("NUM_ID_OPERACAO"), 16, "0"))
+          .withColumn("COD_IF", F.lit("CDB10000001")))
+    if failure == "mismatch":
+        op = op.withColumn("COD_IF", F.lit("CDB20000002"))
+    elif failure == "missing":
+        instrumentos = instrumentos.drop("DAT_EXCLUSAO")
+    elif failure == "duplicate":
+        instrumentos = instrumentos.unionByName(instrumentos)
+    else:
+        op = op.withColumn("NUM_IF", F.lit(2))
+    generated = eng._generate_meu_numeros(op, "321", date(2026, 7, 19))
+
+    with pytest.raises(ValueError, match="Validação final"):
+        eng._validate_business_keys(instrumentos, generated)
 
 
 def test_strict_domain_excludes_any_invalid_operation_and_optional_account_refs(spark):

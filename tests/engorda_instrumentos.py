@@ -1949,7 +1949,85 @@ def _flatten_meu_tuples(operacoes: DataFrame) -> DataFrame:
     return pieces[0].unionByName(pieces[1])
 
 
+def _validated_root_cod_if_map(instrumentos: DataFrame) -> DataFrame:
+    required = {COL_NUM_IF, "COD_IF", "DAT_EXCLUSAO"}
+    missing = sorted(required - set(instrumentos.columns))
+    if missing:
+        raise ValueError(f"INSTRUMENTO_FINANCEIRO sem coluna(s) para COD_IF: {missing}")
+
+    roots = instrumentos.where(F.col("DAT_EXCLUSAO").isNull()).select(
+        _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if"),
+        F.col("COD_IF").alias("__root_cod_if"),
+    )
+    invalid = roots.where(
+        F.col("__num_if").isNull()
+        | (F.col("__num_if") == "")
+        | F.col("__root_cod_if").isNull()
+        | (F.trim(F.col("__root_cod_if").cast("string")) == "")
+    ).count()
+    if invalid:
+        raise ValueError(
+            "INSTRUMENTO_FINANCEIRO: mapeamento NUM_IF -> COD_IF ausente/vazio"
+        )
+    duplicates = (roots.groupBy("__num_if").count()
+                  .where(F.col("count") != 1).limit(1).count())
+    if duplicates:
+        raise ValueError("INSTRUMENTO_FINANCEIRO: mapeamento NUM_IF -> COD_IF duplicado")
+    return roots
+
+
+def _propagate_root_cod_if(instrumentos: DataFrame, operacoes: DataFrame) -> DataFrame:
+    required = {COL_NUM_IF, "COD_IF"}
+    missing = sorted(required - set(operacoes.columns))
+    if missing:
+        raise ValueError(f"OPERACAO sem coluna(s) para COD_IF: {missing}")
+    if not isinstance(operacoes.schema["COD_IF"].dataType, T.StringType):
+        raise ValueError("OPERACAO.COD_IF precisa ter tipo textual StringType")
+
+    roots = _validated_root_cod_if_map(instrumentos).withColumn(
+        "__root_found", F.lit(True)
+    )
+    joined = operacoes.withColumn(
+        "__num_if", _norm_key_col(F.col(COL_NUM_IF))
+    ).join(roots, "__num_if", "left")
+    unmatched = joined.where(
+        F.col("__num_if").isNull()
+        | (F.col("__num_if") == "")
+        | F.col("__root_found").isNull()
+    ).limit(1).count()
+    if unmatched:
+        raise ValueError("OPERACAO: NUM_IF sem mapeamento ativo de COD_IF na raiz")
+
+    propagated = joined.select(*[
+        F.col("__root_cod_if").cast("string").alias(column)
+        if column == "COD_IF" else F.col(column)
+        for column in operacoes.columns
+    ])
+    compared = propagated.withColumn(
+        "__num_if", _norm_key_col(F.col(COL_NUM_IF))
+    ).join(roots.select("__num_if", "__root_cod_if"), "__num_if", "left")
+    invalid = compared.where(
+        F.col("COD_IF").isNull()
+        | F.col("__root_cod_if").isNull()
+        | (F.trim(F.col("COD_IF")) != F.trim(F.col("__root_cod_if").cast("string")))
+    ).limit(1).count()
+    if invalid:
+        raise ValueError("OPERACAO.COD_IF não preservou exatamente o código textual da raiz")
+    return propagated
+
+
 def _validate_business_keys(instrumentos: DataFrame, operacoes: DataFrame) -> None:
+    try:
+        roots = _validated_root_cod_if_map(instrumentos)
+        required = {COL_NUM_IF, "COD_IF"}
+        missing = sorted(required - set(operacoes.columns))
+        if missing:
+            raise ValueError(f"OPERACAO sem coluna(s) para COD_IF: {missing}")
+        if not isinstance(operacoes.schema["COD_IF"].dataType, T.StringType):
+            raise ValueError("OPERACAO.COD_IF precisa ter tipo textual StringType")
+    except ValueError as exc:
+        raise ValueError(f"Validação final de chaves de negócio FALHOU: {exc}") from exc
+
     checks = (
         (instrumentos, "COD_IF", COD_IF_PATTERN),
         (operacoes, "COD_OPERACAO", COD_OPERACAO_PATTERN),
@@ -1980,6 +2058,18 @@ def _validate_business_keys(instrumentos: DataFrame, operacoes: DataFrame) -> No
         errors.append(f"meu-número: {incomplete} tupla(s) incompleta(s)/malformada(s)")
     if distinct_tuples != total_tuples:
         errors.append(f"meu-número: {total_tuples - distinct_tuples} colisão(ões) interna(s)")
+    compared = operacoes.withColumn(
+        "__num_if", _norm_key_col(F.col(COL_NUM_IF))
+    ).join(roots, "__num_if", "left")
+    mismatches = compared.where(
+        F.col("__root_cod_if").isNull()
+        | F.col("COD_IF").isNull()
+        | (F.trim(F.col("COD_IF")) != F.trim(F.col("__root_cod_if").cast("string")))
+    ).count()
+    if mismatches:
+        errors.append(
+            f"OPERACAO.COD_IF: {mismatches} valor(es) divergente(s) da raiz por NUM_IF"
+        )
     if errors:
         raise ValueError("Validação final de chaves de negócio FALHOU: " + "; ".join(errors))
 
@@ -2425,6 +2515,7 @@ def executa_clonagem(spark, config, spec: dict, *,
             instrumentos, mapa_cod_if, pk_col=COL_NUM_IF, new_pk_alias="NUM_IF_NOVO",
             code_col="COD_IF", generated_alias="COD_IF_GERADO").localCheckpoint(eager=True)
         resultados[TABELA_RAIZ] = (instrumentos, n_raiz)
+        operacoes = _propagate_root_cod_if(instrumentos, operacoes)
 
         slots_operacao = _code_slots(
             operacoes, "NUM_ID_OPERACAO", "COD_OPERACAO",

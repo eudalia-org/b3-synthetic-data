@@ -71,13 +71,15 @@ def valid_tables(spark):
         ),
         "OPERACAO": spark.createDataFrame(
             [
-                (1001, "20260101", "0000000000000001", 10, 11, "A1", "B1", 100),
-                (1002, "20260101", "0000000000000002", 20, 21, "A2", "B2", 100),
+                (1001, "20260101", "0000000000000001", 10, 11, "A1", "B1", 100,
+                 "1.000", "CDB101ABCDE"),
+                (1002, "20260101", "0000000000000002", 20, 21, "A2", "B2", 100,
+                 "2.000", "CDB202FGHIJ"),
             ],
             "NUM_ID_OPERACAO long, DAT_OPERACAO string, COD_OPERACAO string, "
             "NUM_CONTA_PARTICIPANTE_P1 long, NUM_CONTA_PARTICIPANTE_P2 long, "
             "NUM_CONTROLE_LANCAMENTO_P1 string, NUM_CONTROLE_LANCAMENTO_P2 string, "
-            "NUM_ID_TIPO_OPER_OBJETO_SERV long",
+            "NUM_ID_TIPO_OPER_OBJETO_SERV long, NUM_IF string, COD_IF string",
         ),
         "DADO_OPERACAO": spark.createDataFrame(
             [(1, 1001, 502), (2, 1001, 503), (3, 1002, 502), (4, 1002, 503)],
@@ -119,21 +121,64 @@ def test_duplicate_active_cdb_cod_if_is_error_and_samples_keys(spark):
     assert {row[0] for row in finding.sample} == {1, 2}
 
 
-def test_empty_cod_if_is_left_to_nullability_and_format_checks(spark):
+@pytest.mark.parametrize("root_cod_if", [None, "   "])
+def test_empty_root_cod_if_fails_cross_table_match_and_format(spark, root_cod_if):
     tables = valid_tables(spark)
     tables["INSTRUMENTO_FINANCEIRO"] = tables["INSTRUMENTO_FINANCEIRO"].withColumn(
-        "COD_IF", pyspark.sql.functions.lit("   ")
+        "COD_IF", pyspark.sql.functions.lit(root_cod_if).cast("string")
     )
 
-    global_finding = by_id(
+    global_findings = by_id(
         validator.check_log_invariants(tables, sample=5)
-    )["8a.cod_if_unique"]
+    )
     profile_finding = by_id(
         validator.check_log_invariants(tables, sample=5, registration_profile=True)
     )["8b.cod_if_format"]
 
-    assert global_finding.passed
+    assert global_findings["8a.cod_if_unique"].passed
+    assert global_findings["8a.operacao_cod_if_match"].severity == validator.SEV_ERROR
+    assert global_findings["8a.operacao_cod_if_match"].count == 2
     assert_hinted_warn(profile_finding)
+
+
+@pytest.mark.parametrize(
+    ("operation_cod_if", "operation_num_if", "expected_root"),
+    [
+        ("WRONG", "1", "CDB101ABCDE"),
+        (None, "1", "CDB101ABCDE"),
+        ("   ", "1", "CDB101ABCDE"),
+        ("CDB101ABCDE", "   ", None),
+        ("CDB101ABCDE", "999", None),
+        ("CDB101ABCDE.0", "1", "CDB101ABCDE"),
+    ],
+)
+def test_operation_cod_if_mismatch_is_error_and_samples_cross_table_values(
+    spark, operation_cod_if, operation_num_if, expected_root
+):
+    tables = valid_tables(spark)
+    operation = tables["OPERACAO"]
+    tables["OPERACAO"] = operation.withColumn(
+        "COD_IF",
+        pyspark.sql.functions.when(
+            pyspark.sql.functions.col("NUM_ID_OPERACAO") == 1001,
+            pyspark.sql.functions.lit(operation_cod_if).cast("string"),
+        ).otherwise(pyspark.sql.functions.col("COD_IF")),
+    ).withColumn(
+        "NUM_IF",
+        pyspark.sql.functions.when(
+            pyspark.sql.functions.col("NUM_ID_OPERACAO") == 1001,
+            pyspark.sql.functions.lit(operation_num_if),
+        ).otherwise(pyspark.sql.functions.col("NUM_IF")),
+    )
+
+    finding = by_id(validator.check_log_invariants(tables, sample=5))[
+        "8a.operacao_cod_if_match"
+    ]
+
+    assert finding.severity == validator.SEV_ERROR
+    assert finding.count == 1
+    assert finding.sample == [[1001, operation_num_if, expected_root, operation_cod_if.strip()
+                               if operation_cod_if is not None else None]]
 
 
 def test_duplicate_cod_operacao_is_error_and_samples_operations(spark):
@@ -147,6 +192,25 @@ def test_duplicate_cod_operacao_is_error_and_samples_operations(spark):
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 2
     assert {row[0] for row in finding.sample} == {1001, 1002}
+
+
+def test_operation_cod_if_duplicate_root_key_is_one_error_per_operation(spark):
+    tables = valid_tables(spark)
+    duplicate = spark.createDataFrame(
+        [(1, 49, None, "OTHER", 55, "S", "N", 25, "N", "N", "N")],
+        tables["INSTRUMENTO_FINANCEIRO"].schema,
+    )
+    tables["INSTRUMENTO_FINANCEIRO"] = tables["INSTRUMENTO_FINANCEIRO"].unionByName(
+        duplicate
+    )
+
+    finding = by_id(validator.check_log_invariants(tables, sample=5))[
+        "8a.operacao_cod_if_match"
+    ]
+
+    assert finding.severity == validator.SEV_ERROR
+    assert finding.count == 1
+    assert finding.sample[0][0] == 1001
 
 
 def test_null_and_empty_cod_operacao_are_left_to_nullability_checks(spark):
@@ -232,6 +296,7 @@ def test_missing_tables_and_columns_return_hinted_warnings(spark):
     assert all(finding.severity == validator.SEV_WARN for finding in unavailable)
     assert all(finding.hint.strip() for finding in unavailable)
     assert "COD_IF" in by_id(findings)["8a.cod_if_unique"].message
+    assert_hinted_warn(by_id(findings)["8a.operacao_cod_if_match"])
     assert "COD_OPERACAO" in by_id(findings)["8a.cod_operacao_unique"].message
 
 
@@ -246,10 +311,57 @@ def test_registration_profile_disabled_skips_formats_constants_and_type_mixes(sp
 
     assert {finding.check_id for finding in findings} == {
         "8a.cod_if_unique",
+        "8a.operacao_cod_if_match",
         "8a.cod_operacao_unique",
         "8a.meu_numero_unique",
     }
     assert all(finding.passed for finding in findings)
+
+
+def test_valid_id_sql_executes_operation_cod_if_inconsistency_cte(spark):
+    sql = (
+        Path(__file__).resolve().parent.parent / "scripts" / "select_valid_cdb_num_ifs.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "operation_cod_if_invalid AS (" in sql
+    assert "'consistency.operacao_cod_if' AS reason" in sql
+    assert "NOT (o.normalized_cod_if <=> r.normalized_cod_if)" in sql
+    assert "UNION ALL SELECT * FROM operation_cod_if_invalid" in sql
+    body = sql.split("operation_cod_if_invalid AS (", 1)[1].split(
+        "\n),\nduplicate_cod_operacao_values AS (", 1
+    )[0]
+    spark.createDataFrame(
+        [
+            ("1", "49", None, "ROOT1", "ROOT1"),
+            ("2", "49", None, "ROOT2", "ROOT2"),
+            ("3", "49", None, "ROOT3", "ROOT3"),
+        ],
+        "NUM_IF string, NUM_TIPO_IF string, DAT_EXCLUSAO string, COD_IF string, "
+        "normalized_cod_if string",
+    ).createOrReplaceTempView("root_rows")
+    spark.createDataFrame(
+        [
+            ("1", None, "ROOT1", "ROOT1"),
+            ("2", None, "WRONG", "WRONG"),
+            ("3", None, "   ", ""),
+            ("1", "2026-07-19", "WRONG", "WRONG"),
+        ],
+        "NUM_IF string, DAT_EXCLUSAO string, COD_IF string, normalized_cod_if string",
+    ).createOrReplaceTempView("operation_rows")
+    spark.createDataFrame([("1",), ("2",), ("3",)], "NUM_IF string").createOrReplaceTempView(
+        "candidates"
+    )
+
+    invalid = spark.sql(
+        f"WITH operation_cod_if_invalid AS ({body}) "
+        "SELECT NUM_IF, reason FROM operation_cod_if_invalid"
+    ).collect()
+
+    assert {(row.NUM_IF, row.reason) for row in invalid} == {
+        ("1", "consistency.operacao_cod_if"),
+        ("2", "consistency.operacao_cod_if"),
+        ("3", "consistency.operacao_cod_if"),
+    }
 
 
 def test_registration_profile_bad_formats_and_constants_warn(spark):
