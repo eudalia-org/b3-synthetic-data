@@ -1706,8 +1706,19 @@ def _oracle_credentials(config: Mapping[str, str]) -> Tuple[str, str, str]:
 
 def _open_oracle_connection(jvm, jdbc_url: str, user: str, password: str):
     try:
-        jvm.java.lang.Class.forName("oracle.jdbc.OracleDriver")
-        return jvm.java.sql.DriverManager.getConnection(jdbc_url, user, password)
+        # Spark carrega --jars no context classloader. DriverManager chamado via
+        # Py4J pode usar outro loader e responder "No suitable driver" embora o
+        # mesmo jar funcione no DataFrameReader JDBC do validador.
+        loader = jvm.java.lang.Thread.currentThread().getContextClassLoader()
+        driver_class = loader.loadClass("oracle.jdbc.OracleDriver")
+        driver = driver_class.newInstance()
+        properties = jvm.java.util.Properties()
+        properties.setProperty("user", user)
+        properties.setProperty("password", password)
+        connection = driver.connect(jdbc_url, properties)
+        if connection is None:
+            raise RuntimeError("OracleDriver não aceitou a JDBC URL")
+        return connection
     except Exception:
         # A exceção Java pode incluir a URL; o erro público não replica credenciais.
         raise RuntimeError("falha ao abrir conexão Oracle no driver") from None

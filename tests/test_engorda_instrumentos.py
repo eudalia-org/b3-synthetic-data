@@ -2,6 +2,7 @@ import sys
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pyspark.sql import SparkSession
@@ -147,6 +148,56 @@ class FakeConnection:
 
     def close(self):
         self.closed = True
+
+
+def test_open_oracle_connection_uses_spark_context_classloader_not_driver_manager():
+    expected = object()
+
+    class Properties(dict):
+        def setProperty(self, key, value):
+            self[key] = value
+
+    class Driver:
+        def connect(self, url, properties):
+            assert url == "jdbc:oracle:thin:@target"
+            assert properties == {"user": "alice", "password": "secret"}
+            return expected
+
+    class DriverClass:
+        @staticmethod
+        def newInstance():
+            return Driver()
+
+    class Loader:
+        @staticmethod
+        def loadClass(name):
+            assert name == "oracle.jdbc.OracleDriver"
+            return DriverClass()
+
+    class CurrentThread:
+        @staticmethod
+        def getContextClassLoader():
+            return Loader()
+
+    class Thread:
+        @staticmethod
+        def currentThread():
+            return CurrentThread()
+
+    class DriverManager:
+        @staticmethod
+        def getConnection(*_):
+            raise AssertionError("DriverManager must not be used")
+
+    jvm = SimpleNamespace(java=SimpleNamespace(
+        lang=SimpleNamespace(Thread=Thread),
+        util=SimpleNamespace(Properties=Properties),
+        sql=SimpleNamespace(DriverManager=DriverManager),
+    ))
+
+    assert eng._open_oracle_connection(
+        jvm, "jdbc:oracle:thin:@target", "alice", "secret"
+    ) is expected
 
 
 def test_oracle_allocator_batches_and_uses_exact_function_sql(monkeypatch):
