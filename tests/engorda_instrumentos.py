@@ -23,8 +23,9 @@ ficam intocadas — é isso que preserva as combinações de negócio e o
 polimorfismo Hibernate de CONDICAO_IF (a linha-subtipo é copiada junto, na
 tabela certa, por construção; nada é recombinado).
 
-DIRIGIDO SÓ PELO spec_config.json (o mesmo do engorda_tables.py, gerado por
-gera_spec_config.py). Não usa arquivo de decisões nem conexão Oracle.
+DIRIGIDO pelo spec_config.json (o mesmo do engorda_tables.py, gerado por
+gera_spec_config.py). Usa Oracle no driver apenas para alocar COD_IF,
+COD_OPERACAO e fazer o preflight de colisão de meu-número; não cria objetos.
 
 POLÍTICAS PADRÃO (onde haveria decisão manual, vale a regra abaixo — cada uma
 é logada por tabela para auditoria):
@@ -43,12 +44,9 @@ POLÍTICAS PADRÃO (onde haveria decisão manual, vale a regra abaixo — cada u
     próprio acima do max real (com --pk-safety-band). PK com componente de FK
     para pai clonado -> segue o pai. PK sem regra possível -> ABORTA listando
     as tabelas (use --tratar-como-static para excluí-las da clonagem).
-  * Chaves únicas de NEGÓCIO (unique constraints fora da PK, ex.: COD_IF):
-    copiadas como estão. Risco residual: ORA-00001 na carga se existir unique
-    policiada sobre coluna não remapeada. Evidência a favor do padrão: o
-    bootstrap do engorda já copia esses códigos duplicados hoje e a carga
-    passa. Se a carga acusar ORA-00001, rode o diagnostica_clonagem.py para
-    identificar a chave e definimos a regra de regeneração.
+  * Chaves únicas de NEGÓCIO: COD_IF e COD_OPERACAO são alocados pelas funções
+    oficiais do Oracle para TODO clone (inclusive K=1). Controles P1/P2 são
+    gerados localmente com prefixo obrigatório e preflight no destino.
   * Tabelas static do spec: não são clonadas nem escritas; FKs para elas
     mantêm o valor original (o pai static continua existindo).
 
@@ -61,17 +59,27 @@ VALIDAÇÕES PRÉ-ESCRITA (abortam o job, nada é gravado parcial por tabela):
 SAÍDA: Parquet por tabela em
     {DATAGEN_SYNTHETIC_BASE_URI}/{DATAGEN_CLONE_PREFIX}/{TABELA}
 (mesmo layout de saída do engorda — o processo de carga existente lê e faz o
-append no Oracle). Também grava MAPA_CLONE_NUM_IF (NUM_IF_ORIG, K, NUM_IF_NOVO)
-para auditoria. Com --dry-run nada é gravado: só validações e relatório.
+append no Oracle). Também grava MAPA_CLONE_NUM_IF, MAPA_CLONE_COD_IF e
+MAPA_CLONE_COD_OPERACAO para auditoria. Com --dry-run nada é gravado nem
+alocado no Oracle: usa placeholders locais só para validação. Fora do dry-run,
+toda a árvore é validada em staging irmão antes de substituir a saída anterior.
+A publicação por rename NÃO é atômica em object storage: se o processo cair
+entre os renames, restaure manualmente o backup `<destino>.__previous_*` para
+o caminho fixo `<destino>` antes de consumir a saída.
 
 USO (OCI Data Flow — mesmas envs do engorda_tables.py):
-    envs: DATAGEN_RAW_BASE_URI, DATAGEN_SPECS_URI, DATAGEN_SYNTHETIC_BASE_URI
+    envs: DATAGEN_RAW_BASE_URI, DATAGEN_SPECS_URI, DATAGEN_SYNTHETIC_BASE_URI,
+          DATAGEN_SOURCE_JDBC_URL, DATAGEN_SOURCE_DB_USER,
+          DATAGEN_SOURCE_DB_PASSWORD (nomes legados: apontam para o Oracle
+          receptor; as três últimas são dispensadas no --dry-run)
           (+ opcionais DATAGEN_RAW_PREFIX, DATAGEN_SYNTHETIC_PREFIX,
            DATAGEN_CLONE_PREFIX — default "clones_instrumentos")
     argumentos:
       --num-ifs 12345,67890         # lista explícita (aceita 1 só), OU
       --n-instrumentos 5 --seed 42  # amostra do domínio do produto (query)
       --fator-k 3                   # clones por instrumento (default 1)
+      --meu-numero-prefix 321       # obrigatório; exatamente 3 dígitos, 1º não-zero
+      --oracle-code-batch-size 50000  # códigos por round-trip Oracle
       --dry-run                     # valida e loga, não grava
       --pk-safety-band 100000       # folga acima do max real (default 0)
       --pk-passo 10                 # folga ENTRE PKs novas consecutivas (default 1)
@@ -108,14 +116,14 @@ import copy
 import json
 import logging
 import os
+import re
 import sys
 import time
-from collections import defaultdict
+import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
@@ -258,9 +266,24 @@ REQUIRED_ENV_VARS = (
     "DATAGEN_SYNTHETIC_BASE_URI",
     "DATAGEN_SPECS_URI",
 )
+# Nomes legados "SOURCE"; neste job apontam contratualmente para o Oracle
+# receptor, usado no driver para alocação oficial e preflight antes da publicação.
+ORACLE_ENV_VARS = (
+    "DATAGEN_SOURCE_JDBC_URL",
+    "DATAGEN_SOURCE_DB_USER",
+    "DATAGEN_SOURCE_DB_PASSWORD",
+)
 DEFAULT_CLONE_PREFIX = "clones_instrumentos"
 DEFAULT_SEED = 42
 MAPA_NUM_IF_TABLE = "MAPA_CLONE_NUM_IF"
+MAPA_COD_IF_TABLE = "MAPA_CLONE_COD_IF"
+MAPA_COD_OPERACAO_TABLE = "MAPA_CLONE_COD_OPERACAO"
+DEFAULT_ORACLE_CODE_BATCH_SIZE = 50_000
+MAX_MEU_NUMERO_ORDINAL = 9_999_999
+COD_IF_PATTERN = r"^CDB[1-9A-C][0-9]{2}[0-9A-Z]{5}$"
+COD_OPERACAO_PATTERN = r"^[0-9]{16}$"
+MEU_PREFIX_PATTERN = re.compile(r"^[1-9][0-9]{2}$")
+ACCOUNT_CODE_PATTERN = r"^[0-9]{5}\.(40|10)-[0-9]$"
 
 # Coluna temporária com o índice do clone (1..K). Sufixo improvável de
 # colidir com colunas reais; ainda assim é checado em tempo de execução.
@@ -307,6 +330,10 @@ def get_engorda_env() -> dict[str, str]:
         "DATAGEN_SYNTHETIC_PREFIX", "").strip("/")
     config["DATAGEN_CLONE_PREFIX"] = os.environ.get(
         "DATAGEN_CLONE_PREFIX", DEFAULT_CLONE_PREFIX).strip("/")
+    for name in ORACLE_ENV_VARS:
+        value = os.environ.get(name)
+        if value:
+            config[name] = value
     return config
 
 
@@ -806,12 +833,96 @@ def ordem_topologica(planos: Dict[str, PlanoTabela]) -> List[str]:
 # ---------------------------------------------------------------------------
 # Seleção do lote de instrumentos.
 # ---------------------------------------------------------------------------
+def _strict_lookup_eligible_domain(
+    dominio: DataFrame,
+    operacao: DataFrame,
+    tipo_oper_objeto_serv: DataFrame,
+    tipo_operacao: DataFrame,
+    conta_participante: DataFrame,
+    titulo: DataFrame,
+    deposito: DataFrame,
+) -> DataFrame:
+    """Exclui o instrumento inteiro se qualquer referência clonada for inválida.
+
+    O domínio usa somente tabelas raw disponíveis. As views adicionais continuam
+    sob responsabilidade do validador Python conectado ao destino.
+    """
+    candidatos = dominio.select(COL_NUM_IF).dropDuplicates()
+    op = operacao.join(candidatos, on=COL_NUM_IF, how="left_semi").alias("o")
+    tos = tipo_oper_objeto_serv.alias("tos")
+    top = tipo_operacao.alias("top")
+    p1 = conta_participante.alias("p1")
+    p2 = conta_participante.alias("p2")
+    joined = (op
+              .join(tos,
+                    F.col("o.NUM_ID_TIPO_OPER_OBJETO_SERV") ==
+                    F.col("tos.NUM_ID_TIPO_OPER_OBJETO_SERV"), "left")
+              .join(top,
+                    F.col("tos.NUM_ID_TIPO_OPERACAO") ==
+                    F.col("top.NUM_ID_TIPO_OPERACAO"), "left")
+              .join(p1,
+                    F.col("o.NUM_CONTA_PARTICIPANTE_P1") ==
+                    F.col("p1.NUM_CONTA_PARTICIPANTE"), "left")
+              .join(p2,
+                    F.col("o.NUM_CONTA_PARTICIPANTE_P2") ==
+                    F.col("p2.NUM_CONTA_PARTICIPANTE"), "left"))
+
+    def _nonblank(name: str):
+        return F.col(name).isNotNull() & (F.trim(F.col(name).cast("string")) != "")
+
+    def _exact_number(name: str, expected: str):
+        return _norm_key_col(F.col(name)) == F.lit(expected)
+
+    def _valid_account(raw_col: str, alias: str):
+        return (_nonblank(raw_col)
+                & F.col(f"{alias}.NUM_CONTA_PARTICIPANTE").isNotNull()
+                & _exact_number(f"{alias}.NUM_ID_SITUACAO_CONTA", "1")
+                & F.trim(F.col(f"{alias}.COD_CONTA_PARTICIPANTE").cast("string"))
+                .rlike(ACCOUNT_CODE_PATTERN))
+
+    valid_op = (
+        _nonblank("o.NUM_ID_TIPO_OPER_OBJETO_SERV")
+        & F.col("tos.NUM_ID_TIPO_OPER_OBJETO_SERV").isNotNull()
+        & _exact_number("tos.NUM_ID_OBJETO_SERVICO", "44")
+        & (F.trim(F.col("tos.IND_DISPONIVEL_IDENTIFICACAO")) == F.lit("S"))
+        & F.col("top.NUM_ID_TIPO_OPERACAO").isNotNull()
+        & _exact_number("top.COD_TIPO_OPERACAO", "1")
+        & _valid_account("o.NUM_CONTA_PARTICIPANTE_P1", "p1")
+        & _valid_account("o.NUM_CONTA_PARTICIPANTE_P2", "p2")
+    )
+    invalidos = joined.where(~F.coalesce(valid_op, F.lit(False))).select(
+        F.col(f"o.{COL_NUM_IF}").alias(COL_NUM_IF))
+
+    def _invalid_optional_account(rows: DataFrame) -> DataFrame:
+        r = rows.join(candidatos, on=COL_NUM_IF, how="left_semi").alias("r")
+        cp = conta_participante.alias("cp")
+        checked = r.join(
+            cp,
+            F.col("r.NUM_CONTA_PARTICIPANTE") == F.col("cp.NUM_CONTA_PARTICIPANTE"),
+            "left",
+        )
+        supplied = F.col("r.NUM_CONTA_PARTICIPANTE").isNotNull()
+        valid = (_nonblank("r.NUM_CONTA_PARTICIPANTE")
+                 & F.col("cp.NUM_CONTA_PARTICIPANTE").isNotNull()
+                 & _exact_number("cp.NUM_ID_SITUACAO_CONTA", "1")
+                 & F.trim(F.col("cp.COD_CONTA_PARTICIPANTE").cast("string"))
+                 .rlike(ACCOUNT_CODE_PATTERN))
+        return checked.where(supplied & ~F.coalesce(valid, F.lit(False))).select(
+            F.col(f"r.{COL_NUM_IF}").alias(COL_NUM_IF))
+
+    invalidos = (invalidos
+                  .unionByName(_invalid_optional_account(titulo))
+                  .unionByName(_invalid_optional_account(deposito))
+                  .dropDuplicates())
+    return candidatos.join(invalidos, on=COL_NUM_IF, how="left_anti")
+
+
 def _dominio_num_if_produto(spark, config) -> DataFrame:
-    """Domínio de NUM_IF elegível à amostragem/validação do lote — reprodução
-    FIEL da query OFICIAL de validação do produto (CDB simplificado), a FONTE
-    DA VERDADE do domínio. Roda via spark.sql lendo os Parquet RAW diretamente
-    (parquet.`<path>`), com os paths montados por raw_path a partir das envs —
-    de propósito SEM FILTROS_FONTE (a query tem os próprios predicados).
+    """Domínio elegível: query oficial preservada, seguida da política raw hard.
+
+    A base roda via spark.sql lendo os Parquet RAW diretamente
+    (parquet.`<path>`), com paths montados por raw_path. Depois, anti-joins
+    instrument-level removem qualquer operação/conta incompatível com a carga.
 
     Query oficial (manter em sincronia com nova1/nova2/nova3):
 
@@ -915,6 +1026,9 @@ def _dominio_num_if_produto(spark, config) -> DataFrame:
     p_lan = raw_path(config, "LANCAMENTO")
     p_esp = raw_path(config, "ESPECIFICACAO")
     p_epc = raw_path(config, "ESPECIFICACAO_COMITENTE")
+    p_tos = raw_path(config, "TIPO_OPER_OBJETO_SERV")
+    p_top = raw_path(config, "TIPO_OPERACAO")
+    p_con = raw_path(config, "CONTA_PARTICIPANTE")
     sql = f"""
     WITH FILTRO_BASE AS (
         SELECT DISTINCT IFE.NUM_IF
@@ -993,7 +1107,16 @@ def _dominio_num_if_produto(spark, config) -> DataFrame:
         INNER JOIN parquet.`{p_esp}` e2 ON e2.NUM_ID_OPERACAO = o.NUM_ID_OPERACAO
         INNER JOIN parquet.`{p_epc}` ec ON ec.NUM_ID_ESPECIFICACAO = e2.NUM_ID_ESPECIFICACAO
     """
-    return spark.sql(sql)
+    base = spark.sql(sql)
+    return _strict_lookup_eligible_domain(
+        base,
+        _read_source(spark, config, "OPERACAO"),
+        read_parquet(spark, p_tos),
+        read_parquet(spark, p_top),
+        read_parquet(spark, p_con),
+        _read_source(spark, config, "TITULO"),
+        _read_source(spark, config, "DEPOSITO_AUTOMATICO_IF"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1192,8 +1315,8 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
         raise ValueError("Lista de NUM_IF vazia; informe valores ou use "
                          "--n-instrumentos.")
     fonte = _dominio_num_if_produto(spark, config).select(COL_NUM_IF).dropDuplicates()
-    logger.info("Domínio de amostragem/validação de NUM_IF: query do produto "
-                "(fecho TITULO+CONDICAO_IF+EVENTO + regra de RESGATE).")
+    logger.info("Domínio de amostragem/validação de NUM_IF: query do produto + "
+                "política raw hard de TOS e contas (P1/P2/título/depósito).")
 
     # Poda de domínio: junta as exclusões dos itens 1/3/4 e tira do domínio.
     exclusoes: List[Tuple[str, DataFrame]] = []
@@ -1559,6 +1682,381 @@ def loga_chaves_amostra(ordem: List[str], planos: Dict[str, PlanoTabela],
 
 
 # ---------------------------------------------------------------------------
+# Chaves de negócio geradas pelo Oracle e meu-número da operação.
+# ---------------------------------------------------------------------------
+def _validate_meu_numero_prefix(value: str) -> str:
+    if not MEU_PREFIX_PATTERN.fullmatch(value or ""):
+        raise argparse.ArgumentTypeError(
+            "--meu-numero-prefix deve ter exatamente 3 dígitos e começar em 1-9")
+    return value
+
+
+def _validate_meu_capacity(allocated: int) -> None:
+    if allocated > MAX_MEU_NUMERO_ORDINAL:
+        raise ValueError(
+            f"meu-número excede capacidade: {allocated} > {MAX_MEU_NUMERO_ORDINAL}")
+
+
+def _oracle_credentials(config: Mapping[str, str]) -> Tuple[str, str, str]:
+    missing = [name for name in ORACLE_ENV_VARS if not config.get(name)]
+    if missing:
+        raise ValueError("Env var(s) Oracle obrigatória(s) ausente(s): " + ", ".join(missing))
+    return tuple(config[name] for name in ORACLE_ENV_VARS)  # type: ignore[return-value]
+
+
+def _open_oracle_connection(jvm, jdbc_url: str, user: str, password: str):
+    try:
+        jvm.java.lang.Class.forName("oracle.jdbc.OracleDriver")
+        return jvm.java.sql.DriverManager.getConnection(jdbc_url, user, password)
+    except Exception:
+        # A exceção Java pode incluir a URL; o erro público não replica credenciais.
+        raise RuntimeError("falha ao abrir conexão Oracle no driver") from None
+
+
+def _allocation_sql(code_kind: str, batch_count: int) -> str:
+    if batch_count < 1:
+        raise ValueError("batch_count deve ser >= 1")
+    if code_kind == "COD_IF":
+        expression = "CETIP.PKG_CODIGO.F_GETCODIGONOVOIF21(49, TO_DATE(?, 'YYYY-MM-DD'))"
+    elif code_kind == "COD_OPERACAO":
+        expression = "CETIP.GET_COD_OPERACAO"
+    else:
+        raise ValueError(f"tipo de código desconhecido: {code_kind}")
+    return (f"SELECT LEVEL ordinal, {expression} code FROM dual "
+            f"CONNECT BY LEVEL <= {int(batch_count)}")
+
+
+def _iter_oracle_code_batches(jvm, jdbc_url: str, user: str, password: str, *,
+                              code_kind: str, total: int, batch_size: int,
+                              engorda_date: date):
+    """Entrega um lote por round-trip; não retém códigos de lotes anteriores."""
+    if total < 0 or batch_size < 1:
+        raise ValueError("total deve ser >= 0 e batch_size deve ser >= 1")
+    connection = None
+    try:
+        connection = _open_oracle_connection(jvm, jdbc_url, user, password)
+        offset = 0
+        while offset < total:
+            expected = min(batch_size, total - offset)
+            statement = None
+            result_set = None
+            batch: List[Tuple[int, str]] = []
+            try:
+                statement = connection.prepareStatement(_allocation_sql(code_kind, expected))
+                if code_kind == "COD_IF":
+                    statement.setString(1, engorda_date.isoformat())
+                result_set = statement.executeQuery()
+                while result_set.next():
+                    local_ordinal = int(result_set.getInt(1))
+                    raw_code = result_set.getString(2)
+                    code = "" if raw_code is None else str(raw_code).strip()
+                    batch.append((offset + local_ordinal, code))
+            finally:
+                if result_set is not None:
+                    result_set.close()
+                if statement is not None:
+                    statement.close()
+            if len(batch) != expected:
+                raise ValueError(
+                    f"{code_kind}: Oracle retornou {len(batch)} código(s), esperado {expected}")
+            local_ordinals = [ordinal - offset for ordinal, _ in batch]
+            if local_ordinals != list(range(1, expected + 1)):
+                raise ValueError(f"{code_kind}: ordinais Oracle incompletos/fora de ordem")
+            codes = [code for _, code in batch]
+            pattern = COD_IF_PATTERN if code_kind == "COD_IF" else COD_OPERACAO_PATTERN
+            invalid = [code for code in codes if not re.fullmatch(pattern, code)]
+            if invalid:
+                raise ValueError(f"{code_kind}: Oracle retornou código vazio/malformado")
+            if len(set(codes)) != expected:
+                raise ValueError(f"{code_kind}: Oracle retornou código duplicado no lote")
+            yield batch
+            offset += expected
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _with_distributed_ordinal(df: DataFrame, order_cols: Sequence[str],
+                              ordinal_col: str = "ORDINAL") -> DataFrame:
+    """Ordenação distribuída estável + índice contíguo, sem Window global."""
+    if ordinal_col in df.columns:
+        raise ValueError(f"colisão de coluna ordinal: {ordinal_col}")
+    positions = [df.columns.index(column) for column in order_cols]
+    partitions = max(2, df.rdd.getNumPartitions())
+    ordered = df.rdd.sortBy(
+        lambda row: tuple(row[position] for position in positions),
+        ascending=True,
+        numPartitions=partitions,
+    )
+    indexed = ordered.zipWithIndex().map(
+        lambda pair: tuple(pair[0]) + (int(pair[1]) + 1,))
+    schema = T.StructType(list(df.schema.fields) + [
+        T.StructField(ordinal_col, T.LongType(), False)])
+    return df.sparkSession.createDataFrame(indexed, schema)
+
+
+def _code_slots(df: DataFrame, pk_col: str, old_code_col: str,
+                new_pk_alias: str, old_code_alias: str) -> DataFrame:
+    if pk_col not in df.columns or old_code_col not in df.columns:
+        raise ValueError(f"colunas obrigatórias ausentes: {pk_col}, {old_code_col}")
+    indexed = _with_distributed_ordinal(df.select(pk_col, old_code_col), [pk_col])
+    return indexed.select(
+        "ORDINAL", F.col(pk_col).alias(new_pk_alias),
+        F.col(old_code_col).alias(old_code_alias))
+
+
+def _dry_placeholder(kind: str):
+    if kind == "COD_IF":
+        return F.concat(F.lit("CDB100"),
+                        F.upper(F.lpad(F.conv(F.col("ORDINAL"), 10, 36), 5, "0")))
+    return F.lpad(F.col("ORDINAL").cast("string"), 16, "0")
+
+
+def _join_code_chunks(slots: DataFrame, code_chunks: DataFrame,
+                      generated_alias: str) -> DataFrame:
+    return slots.join(code_chunks.select("ORDINAL", generated_alias), on="ORDINAL", how="inner")
+
+
+def _materialize_code_map(spark: SparkSession, slots: DataFrame, *, code_kind: str,
+                          generated_alias: str, out_path: Optional[str], dry_run: bool,
+                          credentials: Optional[Tuple[str, str, str]], batch_size: int,
+                          engorda_date: date) -> DataFrame:
+    """Anexa códigos por ordinal, mantendo no driver somente o lote corrente."""
+    total = slots.count()
+    if dry_run:
+        return slots.withColumn(generated_alias, _dry_placeholder(code_kind))
+    if out_path is None or credentials is None:
+        raise ValueError("destino e credenciais são obrigatórios fora do dry-run")
+    jdbc_url, user, password = credentials
+    if total == 0:
+        empty = slots.withColumn(generated_alias, F.lit(None).cast("string"))
+        empty.write.mode("overwrite").parquet(out_path)
+        return spark.read.parquet(out_path)
+
+    chunk_path = f"{out_path}.__code_chunks"
+    for batch in _iter_oracle_code_batches(
+            spark.sparkContext._jvm, jdbc_url, user, password,
+            code_kind=code_kind, total=total, batch_size=batch_size,
+            engorda_date=engorda_date):
+        schema = T.StructType([
+            T.StructField("ORDINAL", T.LongType(), False),
+            T.StructField(generated_alias, T.StringType(), False)])
+        spark.createDataFrame(batch, schema).write.mode("append").parquet(chunk_path)
+    code_chunks = spark.read.parquet(chunk_path)
+    mapping = _join_code_chunks(slots, code_chunks, generated_alias)
+    mapping.write.mode("overwrite").parquet(out_path)
+    _delete_path(spark, chunk_path)
+    mapping = spark.read.parquet(out_path)
+    pk_column = slots.columns[1]
+    pattern = COD_IF_PATTERN if code_kind == "COD_IF" else COD_OPERACAO_PATTERN
+    summary = mapping.agg(
+        F.count(F.lit(1)).alias("total"),
+        F.countDistinct("ORDINAL").alias("ordinals"),
+        F.countDistinct(pk_column).alias("pks"),
+        F.countDistinct(generated_alias).alias("codes"),
+        F.count(F.when(~F.col(generated_alias).rlike(pattern), 1)).alias("invalid"),
+    ).first()
+    if any(int(summary[name]) != total
+           for name in ("total", "ordinals", "pks", "codes")) or int(summary["invalid"]):
+        raise ValueError(f"{code_kind}: mapa Parquet incompleto, duplicado ou malformado")
+    return mapping
+
+
+def _attach_generated_code(df: DataFrame, mapping: DataFrame, *, pk_col: str,
+                           new_pk_alias: str, code_col: str,
+                           generated_alias: str) -> DataFrame:
+    right = mapping.select(new_pk_alias, generated_alias).alias("m")
+    left = df.alias("d")
+    joined = left.join(right, F.col(f"d.{pk_col}") == F.col(f"m.{new_pk_alias}"), "left")
+    return joined.select(*[
+        F.col(f"m.{generated_alias}").cast(df.schema[c].dataType).alias(c)
+        if c == code_col else F.col(f"d.{c}").alias(c)
+        for c in df.columns
+    ])
+
+
+def _generate_meu_numeros(operacoes: DataFrame, prefix: str,
+                          engorda_date: date) -> DataFrame:
+    _validate_meu_numero_prefix(prefix)
+    required = {
+        "NUM_ID_OPERACAO", "DAT_OPERACAO", "NUM_CONTA_PARTICIPANTE_P1",
+        "NUM_CONTA_PARTICIPANTE_P2", "NUM_CONTROLE_LANCAMENTO_P1",
+        "NUM_CONTROLE_LANCAMENTO_P2", "NUM_ID_TIPO_OPER_OBJETO_SERV",
+    }
+    missing = sorted(required - set(operacoes.columns))
+    if missing:
+        raise ValueError(f"OPERACAO sem coluna(s) para meu-número: {missing}")
+    norm_p1 = _norm_key_col(F.col("NUM_CONTA_PARTICIPANTE_P1"))
+    norm_p2 = _norm_key_col(F.col("NUM_CONTA_PARTICIPANTE_P2"))
+    staged = operacoes.withColumn("__meu_same_account", norm_p1.eqNullSafe(norm_p2))
+    allocations = (staged.select(
+        "NUM_ID_OPERACAO", F.lit(1).cast("int").alias("__meu_side"))
+        .unionByName(staged.where("__meu_same_account").select(
+            "NUM_ID_OPERACAO", F.lit(2).cast("int").alias("__meu_side"))))
+    allocated = allocations.count()
+    _validate_meu_capacity(allocated)
+    allocation_map = _with_distributed_ordinal(
+        allocations, ["NUM_ID_OPERACAO", "__meu_side"], "__meu_ord"
+    ).localCheckpoint(eager=True)
+    p1_map = allocation_map.where(F.col("__meu_side") == 1).select(
+        "NUM_ID_OPERACAO", F.col("__meu_ord").alias("__meu_p1_ord"))
+    p2_map = allocation_map.where(F.col("__meu_side") == 2).select(
+        "NUM_ID_OPERACAO", F.col("__meu_ord").alias("__meu_p2_allocated_ord"))
+    staged = (staged.join(p1_map, on="NUM_ID_OPERACAO", how="inner")
+              .join(p2_map, on="NUM_ID_OPERACAO", how="left")
+              .withColumn(
+                  "__meu_p2_ord",
+                  F.coalesce(F.col("__meu_p2_allocated_ord"), F.col("__meu_p1_ord"))))
+
+    def _control(ordinal_col: str):
+        return F.concat(F.lit(prefix), F.lpad(F.col(ordinal_col).cast("string"), 7, "0"))
+
+    dat_type = operacoes.schema["DAT_OPERACAO"].dataType
+    return (staged
+            .withColumn("DAT_OPERACAO", _date_literal_for_type(engorda_date, dat_type))
+            .withColumn("NUM_CONTROLE_LANCAMENTO_P1", _control("__meu_p1_ord").cast(
+                operacoes.schema["NUM_CONTROLE_LANCAMENTO_P1"].dataType))
+            .withColumn("NUM_CONTROLE_LANCAMENTO_P2", _control("__meu_p2_ord").cast(
+                operacoes.schema["NUM_CONTROLE_LANCAMENTO_P2"].dataType))
+            .drop("__meu_p1_ord", "__meu_p2_ord", "__meu_p2_allocated_ord",
+                  "__meu_same_account"))
+
+
+def _flatten_meu_tuples(operacoes: DataFrame) -> DataFrame:
+    pieces = []
+    for side in ("P1", "P2"):
+        pieces.append(operacoes.select(
+            F.date_trunc("second", F.col("DAT_OPERACAO").cast("timestamp")).alias(
+                "DAT_OPERACAO"),
+            _norm_key_col(F.col(f"NUM_CONTA_PARTICIPANTE_{side}")).alias(
+                "NUM_CONTA_PARTICIPANTE"),
+            F.col(f"NUM_CONTROLE_LANCAMENTO_{side}").cast("string").alias(
+                "NUM_CONTROLE_LANCAMENTO"),
+            _norm_key_col(F.col("NUM_ID_TIPO_OPER_OBJETO_SERV")).alias(
+                "NUM_ID_TIPO_OPER_OBJETO_SERV"),
+        ))
+    return pieces[0].unionByName(pieces[1])
+
+
+def _validate_business_keys(instrumentos: DataFrame, operacoes: DataFrame) -> None:
+    checks = (
+        (instrumentos, "COD_IF", COD_IF_PATTERN),
+        (operacoes, "COD_OPERACAO", COD_OPERACAO_PATTERN),
+    )
+    errors = []
+    for df, column, pattern in checks:
+        total = df.count()
+        invalid = df.where(
+            F.col(column).isNull() | ~F.trim(F.col(column)).rlike(pattern)).count()
+        distinct = df.select(F.trim(F.col(column))).dropDuplicates().count()
+        if invalid:
+            errors.append(f"{column}: {invalid} valor(es) vazio(s)/malformado(s)")
+        if distinct != total:
+            errors.append(f"{column}: {total - distinct} duplicata(s)")
+    tuples = _flatten_meu_tuples(operacoes)
+    total_tuples = tuples.count()
+    incomplete = tuples.where(
+        F.col("DAT_OPERACAO").isNull()
+        | F.col("NUM_CONTA_PARTICIPANTE").isNull()
+        | (F.col("NUM_CONTA_PARTICIPANTE") == "")
+        | F.col("NUM_CONTROLE_LANCAMENTO").isNull()
+        | ~F.col("NUM_CONTROLE_LANCAMENTO").rlike(r"^[1-9][0-9]{9}$")
+        | F.col("NUM_ID_TIPO_OPER_OBJETO_SERV").isNull()
+        | (F.col("NUM_ID_TIPO_OPER_OBJETO_SERV") == "")
+    ).count()
+    distinct_tuples = tuples.dropDuplicates().count()
+    if incomplete:
+        errors.append(f"meu-número: {incomplete} tupla(s) incompleta(s)/malformada(s)")
+    if distinct_tuples != total_tuples:
+        errors.append(f"meu-número: {total_tuples - distinct_tuples} colisão(ões) interna(s)")
+    if errors:
+        raise ValueError("Validação final de chaves de negócio FALHOU: " + "; ".join(errors))
+
+
+def _assert_no_meu_collisions(operacoes: DataFrame, existing: DataFrame) -> None:
+    generated = _flatten_meu_tuples(operacoes).dropDuplicates()
+    normalized_existing = existing.select(
+        F.date_trunc("second", F.col("DAT_OPERACAO").cast("timestamp")).alias(
+            "DAT_OPERACAO"),
+        _norm_key_col(F.col("NUM_CONTA_PARTICIPANTE")).alias(
+            "NUM_CONTA_PARTICIPANTE"),
+        F.col("NUM_CONTROLE_LANCAMENTO").cast("string").alias(
+            "NUM_CONTROLE_LANCAMENTO"),
+        _norm_key_col(F.col("NUM_ID_TIPO_OPER_OBJETO_SERV")).alias(
+            "NUM_ID_TIPO_OPER_OBJETO_SERV"),
+    ).dropDuplicates()
+    if generated.join(normalized_existing, generated.columns, "left_semi").limit(1).count():
+        raise ValueError("preflight Oracle: colisão de tupla meu-número no destino")
+
+
+def _read_existing_meu_tuples(spark: SparkSession, credentials: Tuple[str, str, str], *,
+                              engorda_date: date, prefix: str, temp_path: str,
+                              chunk_size: int = 50_000) -> DataFrame:
+    jdbc_url, user, password = credentials
+    sql = """
+        SELECT DAT_OPERACAO, NUM_CONTA_PARTICIPANTE, NUM_CONTROLE_LANCAMENTO,
+               NUM_ID_TIPO_OPER_OBJETO_SERV
+        FROM (
+            SELECT DAT_OPERACAO,
+                   NUM_CONTA_PARTICIPANTE_P1 NUM_CONTA_PARTICIPANTE,
+                   NUM_CONTROLE_LANCAMENTO_P1 NUM_CONTROLE_LANCAMENTO,
+                   NUM_ID_TIPO_OPER_OBJETO_SERV
+            FROM CETIP.OPERACAO
+            WHERE DAT_OPERACAO >= TO_DATE(?, 'YYYY-MM-DD')
+              AND DAT_OPERACAO < TO_DATE(?, 'YYYY-MM-DD') + 1
+              AND NUM_CONTROLE_LANCAMENTO_P1 LIKE ?
+            UNION ALL
+            SELECT DAT_OPERACAO,
+                   NUM_CONTA_PARTICIPANTE_P2 NUM_CONTA_PARTICIPANTE,
+                   NUM_CONTROLE_LANCAMENTO_P2 NUM_CONTROLE_LANCAMENTO,
+                   NUM_ID_TIPO_OPER_OBJETO_SERV
+            FROM CETIP.OPERACAO
+            WHERE DAT_OPERACAO >= TO_DATE(?, 'YYYY-MM-DD')
+              AND DAT_OPERACAO < TO_DATE(?, 'YYYY-MM-DD') + 1
+              AND NUM_CONTROLE_LANCAMENTO_P2 LIKE ?
+        )
+    """
+    schema = T.StructType([
+        T.StructField("DAT_OPERACAO", T.StringType(), False),
+        T.StructField("NUM_CONTA_PARTICIPANTE", T.StringType(), False),
+        T.StructField("NUM_CONTROLE_LANCAMENTO", T.StringType(), False),
+        T.StructField("NUM_ID_TIPO_OPER_OBJETO_SERV", T.StringType(), False),
+    ])
+    connection = statement = result_set = None
+    wrote = False
+    try:
+        connection = _open_oracle_connection(spark.sparkContext._jvm, jdbc_url, user, password)
+        statement = connection.prepareStatement(sql)
+        day = engorda_date.isoformat()
+        for position, value in enumerate((day, day, f"{prefix}%", day, day, f"{prefix}%"), 1):
+            statement.setString(position, value)
+        statement.setFetchSize(chunk_size)
+        result_set = statement.executeQuery()
+        chunk: List[Tuple[str, str, str, str]] = []
+        while result_set.next():
+            timestamp = result_set.getTimestamp(1)
+            timestamp_text = str(timestamp.toString()) if hasattr(timestamp, "toString") \
+                else str(timestamp)
+            values = (timestamp_text,) + tuple(result_set.getString(i) for i in range(2, 5))
+            chunk.append(tuple(str(value) for value in values))
+            if len(chunk) >= chunk_size:
+                spark.createDataFrame(chunk, schema).write.mode("append").parquet(temp_path)
+                wrote = True
+                chunk = []
+        if chunk:
+            spark.createDataFrame(chunk, schema).write.mode("append").parquet(temp_path)
+            wrote = True
+        return spark.read.parquet(temp_path) if wrote else spark.createDataFrame([], schema)
+    finally:
+        if result_set is not None:
+            result_set.close()
+        if statement is not None:
+            statement.close()
+        if connection is not None:
+            connection.close()
+
+
+# ---------------------------------------------------------------------------
 # Validações pré-escrita.
 # ---------------------------------------------------------------------------
 def valida_tabela(spec_cfg: dict, plano: PlanoTabela, clones: DataFrame,
@@ -1606,13 +2104,114 @@ def _delete_path(spark: SparkSession, path: str) -> None:
     jsc = spark.sparkContext._jsc
     hpath = jvm.org.apache.hadoop.fs.Path(path)
     fs = hpath.getFileSystem(jsc.hadoopConfiguration())
-    if fs.exists(hpath):
-        fs.delete(hpath, True)
+    if fs.exists(hpath) and not fs.delete(hpath, True):
+        raise ValueError(f"não foi possível apagar caminho de trabalho: {path}")
+
+
+def _promote_staging_paths(fs, staging, final, backup) -> None:
+    """Promove staging com rollback explícito, sem alegar atomicidade.
+
+    Object stores podem implementar rename como copy+delete. Existe uma janela
+    de crash entre `final -> backup` e `staging -> final`; nesse caso, o operador
+    deve restaurar manualmente o caminho `.__previous_*` informado no log.
+    """
+    staging_text, final_text, backup_text = map(str, (staging, final, backup))
+    if not fs.exists(staging):
+        raise ValueError(f"staging ausente antes da publicação: {staging_text}")
+    had_previous = fs.exists(final)
+    if had_previous:
+        logger.warning(
+            "Publicação object-store não atômica: se o processo cair entre renames, "
+            "restaure manualmente %s para %s.", backup_text, final_text)
+        try:
+            preserved = bool(fs.rename(final, backup))
+            backup_exists = bool(fs.exists(backup))
+        except Exception:
+            preserved = backup_exists = False
+        if not preserved or not backup_exists:
+            raise RuntimeError(
+                "CRÍTICO: não foi possível verificar a preservação do destino anterior; "
+                f"caminho de backup esperado: {backup_text}")
+
+    try:
+        promoted = bool(fs.rename(staging, final))
+        final_exists = bool(fs.exists(final))
+    except Exception:
+        promoted = final_exists = False
+    if not promoted or not final_exists:
+        if not had_previous:
+            raise ValueError("falha ao promover staging; não havia destino anterior")
+        try:
+            partial_exists = bool(fs.exists(final))
+        except Exception:
+            raise RuntimeError(
+                "CRÍTICO: promoção falhou e o destino parcial não pôde ser verificado; "
+                f"backup para recuperação manual: {backup_text}") from None
+        if partial_exists:
+            try:
+                partial_deleted = bool(fs.delete(final, True))
+            except Exception:
+                partial_deleted = False
+            if not partial_deleted:
+                raise RuntimeError(
+                    "CRÍTICO: promoção falhou e o destino parcial não pôde ser removido; "
+                    f"backup para recuperação manual: {backup_text}")
+        try:
+            restored = bool(fs.rename(backup, final))
+            restored_exists = bool(fs.exists(final))
+        except Exception:
+            restored = restored_exists = False
+        if not restored or not restored_exists:
+            raise RuntimeError(
+                "CRÍTICO: promoção e restauração do destino anterior falharam; "
+                f"recupere manualmente o backup {backup_text} para {final_text}")
+        raise ValueError(
+            "falha ao promover staging; destino anterior restaurado e verificado")
+
+    if had_previous:
+        try:
+            deleted = bool(fs.delete(backup, True))
+            backup_remains = bool(fs.exists(backup))
+        except Exception:
+            deleted, backup_remains = False, True
+        if not deleted or backup_remains:
+            logger.warning(
+                "Destino novo publicado e verificado, mas a limpeza do backup falhou; "
+                "remova manualmente %s. O destino final não foi alterado.", backup_text)
+
+
+def _publish_staging(spark: SparkSession, staging_path: str, final_path: str) -> None:
+    jvm = spark.sparkContext._jvm
+    jsc = spark.sparkContext._jsc
+    staging = jvm.org.apache.hadoop.fs.Path(staging_path)
+    final = jvm.org.apache.hadoop.fs.Path(final_path)
+    backup = jvm.org.apache.hadoop.fs.Path(f"{final_path}.__previous_{uuid.uuid4().hex}")
+    fs = final.getFileSystem(jsc.hadoopConfiguration())
+    _promote_staging_paths(fs, staging, final, backup)
+
+
+def _stage_and_publish(spark: SparkSession, final_path: str,
+                       prepare: Callable[[str], None]) -> None:
+    staging_path = f"{final_path}.__staging_{uuid.uuid4().hex}"
+    _delete_path(spark, staging_path)
+    try:
+        prepare(staging_path)
+        _publish_staging(spark, staging_path, final_path)
+    except Exception:
+        logger.error(
+            "Publicação abortada; verifique o erro e qualquer backup .__previous_* "
+            "antes de consumir o destino fixo.")
+        raise
 
 
 def escreve_tabela(spark: SparkSession, df: DataFrame, out_path: str) -> None:
     _delete_path(spark, out_path)
     df.write.mode("append").parquet(out_path)
+    expected = df.count()
+    actual = spark.read.parquet(out_path).count()
+    if actual != expected:
+        raise ValueError(
+            f"readback Parquet falhou em {out_path}: {actual} linha(s), esperado {expected}")
 
 
 def _area(base: str, prefix: Optional[str]) -> str:
@@ -1633,16 +2232,17 @@ def _mesmo_ou_ancestral(a: str, b: str) -> bool:
 
 
 def _valida_destino(config: dict) -> str:
-    """O prefixo de clones é EXCLUSIVO deste job e é apagado POR INTEIRO a
-    cada execução (senão tabela com lote 0 num run novo deixaria clones do
-    run anterior misturados, e o processo de carga os aplicaria de novo).
+    """O prefixo de clones é EXCLUSIVO e substituído por staging completo.
+
+    A saída anterior permanece publicada durante alocação, preflight, escrita e
+    readback; só depois o staging validado é promovido como uma árvore completa.
     Por isso o destino NÃO pode ser vazio, nem conter/estar contido na área
     raw, nem conter a área de saída do engorda."""
     prefix = (config.get("DATAGEN_CLONE_PREFIX") or "").strip("/")
     if not prefix:
         raise ValueError(
             "DATAGEN_CLONE_PREFIX vazio: o destino seria a RAIZ de "
-            "DATAGEN_SYNTHETIC_BASE_URI, que é apagada por inteiro a cada run. "
+            "DATAGEN_SYNTHETIC_BASE_URI, que seria substituída por inteiro. "
             f"Defina um prefixo dedicado (default: {DEFAULT_CLONE_PREFIX}).")
 
     save_base = clone_base_path(config)
@@ -1651,14 +2251,14 @@ def _valida_destino(config: dict) -> str:
     engorda_area = _area(config["DATAGEN_SYNTHETIC_BASE_URI"],
                          config.get("DATAGEN_SYNTHETIC_PREFIX"))
 
-    # Área raw: nem apagar por cima (save_base ancestral) nem escrever dentro
+    # Área raw: nem publicar por cima (save_base ancestral) nem escrever dentro
     # (misturar clones com snapshots que o engorda lê por nome de tabela).
     if _mesmo_ou_ancestral(save_base, raw_area) or _mesmo_ou_ancestral(raw_area, save_base):
         raise ValueError(
             f"Destino dos clones ({save_base}) sobrepõe a área raw "
             f"({raw_area}). Ajuste DATAGEN_CLONE_PREFIX/DATAGEN_RAW_PREFIX "
             "para áreas disjuntas.")
-    # Área do engorda: só é problema se apagar save_base LEVAR JUNTO a área
+    # Área do engorda: só é problema se substituir save_base LEVAR JUNTO a área
     # do engorda (igual ou descendente). O contrário — clones DENTRO da base
     # sintética, em prefixo próprio — é o layout esperado.
     if _mesmo_ou_ancestral(save_base, engorda_area):
@@ -1673,6 +2273,7 @@ def _valida_destino(config: dict) -> str:
 # Orquestração.
 # ---------------------------------------------------------------------------
 def executa_clonagem(spark, config, spec: dict, *,
+                     meu_numero_prefix: str,
                      num_ifs: Optional[List[int]] = None,
                      n_instrumentos: Optional[int] = None,
                      fator_k: int = 1,
@@ -1689,6 +2290,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                      faltantes_parquet: Optional[str] = None,
                      poda_subtipo: bool = True,
                      anular_cols: Optional[Mapping[str, Sequence[str]]] = None,
+                     oracle_code_batch_size: int = DEFAULT_ORACLE_CODE_BATCH_SIZE,
                      dry_run: bool = False) -> Dict[str, dict]:
     """Roda a clonagem fim a fim; devolve {tabela: estatísticas} (para uso em
     notebook). Aborta sem gravar NADA se qualquer validação falhar.
@@ -1701,6 +2303,10 @@ def executa_clonagem(spark, config, spec: dict, *,
     Anulação de colunas de drift (item 2): anular_cols (default
     NULIFICA_COLS_POR_TABELA) seta NULL nas colunas nullable listadas por tabela."""
     inicio = time.perf_counter()
+    _validate_meu_numero_prefix(meu_numero_prefix)
+    if oracle_code_batch_size < 1:
+        raise ValueError("--oracle-code-batch-size deve ser >= 1")
+    credentials = None if dry_run else _oracle_credentials(config)
     anular_cols = NULIFICA_COLS_POR_TABELA if anular_cols is None else anular_cols
     # UM instante para o run inteiro: tabelas diferentes não podem divergir no
     # timestamp só porque foram materializadas em ações Spark diferentes.
@@ -1750,10 +2356,7 @@ def executa_clonagem(spark, config, spec: dict, *,
         plano = planos[t]
         n_lote = lotes[t].count()
         if n_lote == 0:
-            logger.info("[%s] lote vazio — nada a clonar.", t)
-            stats[t] = {"lote": 0, "clones": 0, "colunas_remapeadas": [],
-                        "colunas_data": []}
-            continue
+            logger.info("[%s] lote vazio — materializando clone e mapa vazios.", t)
         clones, mapa_pk = clona_tabela(spark, plano, lotes[t], fator_k, mapeamentos)
         mapeamentos[t] = mapa_pk
         # Regras de data ANTES do checkpoint/validação: o NOT NULL precisa ser
@@ -1793,30 +2396,74 @@ def executa_clonagem(spark, config, spec: dict, *,
     loga_chaves_amostra(ordem, planos, lotes, mapeamentos, valores[0], fator_k)
 
     save_base = clone_base_path(config)
-    if dry_run:
-        logger.info("--dry-run: validações OK; NADA gravado (destino seria %s).",
-                    save_base)
-    else:
-        save_base = _valida_destino(config)
-        # Apaga o prefixo de clones POR INTEIRO: o destino reflete exatamente
-        # ESTA execução (tabela com lote 0 ou removida do plano não deixa
-        # Parquet velho para o processo de carga reaplicar).
-        logger.info("Limpando destino %s (prefixo exclusivo deste job)...", save_base)
-        _delete_path(spark, save_base)
+    if TABELA_RAIZ not in resultados or "OPERACAO" not in resultados:
+        raise ValueError("plano precisa produzir INSTRUMENTO_FINANCEIRO e OPERACAO")
+
+    def _prepare_business_outputs(output_base: Optional[str], is_dry_run: bool) -> None:
+        instrumentos, n_raiz = resultados[TABELA_RAIZ]
+        operacoes, n_operacoes = resultados["OPERACAO"]
+        slots_if = _code_slots(
+            instrumentos, COL_NUM_IF, "COD_IF", "NUM_IF_NOVO", "COD_IF_ORIG"
+        ).localCheckpoint(eager=True)
+        mapa_cod_if = _materialize_code_map(
+            spark, slots_if, code_kind="COD_IF", generated_alias="COD_IF_GERADO",
+            out_path=None if is_dry_run else f"{output_base}/{MAPA_COD_IF_TABLE}",
+            dry_run=is_dry_run, credentials=credentials, batch_size=oracle_code_batch_size,
+            engorda_date=engorda_ts.date())
+        instrumentos = _attach_generated_code(
+            instrumentos, mapa_cod_if, pk_col=COL_NUM_IF, new_pk_alias="NUM_IF_NOVO",
+            code_col="COD_IF", generated_alias="COD_IF_GERADO").localCheckpoint(eager=True)
+        resultados[TABELA_RAIZ] = (instrumentos, n_raiz)
+
+        slots_operacao = _code_slots(
+            operacoes, "NUM_ID_OPERACAO", "COD_OPERACAO",
+            "NUM_ID_OPERACAO_NOVO", "COD_OPERACAO_ORIG").localCheckpoint(eager=True)
+        mapa_cod_operacao = _materialize_code_map(
+            spark, slots_operacao, code_kind="COD_OPERACAO",
+            generated_alias="COD_OPERACAO_GERADO",
+            out_path=None if is_dry_run else f"{output_base}/{MAPA_COD_OPERACAO_TABLE}",
+            dry_run=is_dry_run, credentials=credentials, batch_size=oracle_code_batch_size,
+            engorda_date=engorda_ts.date())
+        operacoes = _attach_generated_code(
+            operacoes, mapa_cod_operacao, pk_col="NUM_ID_OPERACAO",
+            new_pk_alias="NUM_ID_OPERACAO_NOVO", code_col="COD_OPERACAO",
+            generated_alias="COD_OPERACAO_GERADO")
+        operacoes = _generate_meu_numeros(
+            operacoes, meu_numero_prefix, engorda_ts.date()).localCheckpoint(eager=True)
+        resultados["OPERACAO"] = (operacoes, n_operacoes)
+        _validate_business_keys(instrumentos, operacoes)
+        if is_dry_run:
+            return
+
+        preflight_path = f"{output_base}/__PREFLIGHT_MEU"
+        try:
+            existing = _read_existing_meu_tuples(
+                spark, credentials, engorda_date=engorda_ts.date(),
+                prefix=meu_numero_prefix, temp_path=preflight_path)
+            _assert_no_meu_collisions(operacoes, existing)
+        finally:
+            _delete_path(spark, preflight_path)
         for t in ordem:
-            if t not in resultados:
-                continue
             clones, _ = resultados[t]
-            out_path = f"{save_base}/{t}"
-            logger.info("Gravando %s -> %s", t, out_path)
+            out_path = f"{output_base}/{t}"
+            logger.info("Gravando staging %s -> %s", t, out_path)
             escreve_tabela(spark, clones, out_path)
-        # Mapa NUM_IF para auditoria (NUM_IF_ORIG, K, NUM_IF_NOVO).
         mapa_if = (mapeamentos[TABELA_RAIZ]
                    .select(F.col(f"old_{COL_NUM_IF}").alias("NUM_IF_ORIG"),
                            F.col(K_COL).alias("K"),
                            F.col(f"new_{COL_NUM_IF}").alias("NUM_IF_NOVO")))
-        escreve_tabela(spark, mapa_if, f"{save_base}/{MAPA_NUM_IF_TABLE}")
-        logger.info("Mapa de NUM_IF gravado em %s/%s.", save_base, MAPA_NUM_IF_TABLE)
+        escreve_tabela(spark, mapa_if, f"{output_base}/{MAPA_NUM_IF_TABLE}")
+
+    if dry_run:
+        _prepare_business_outputs(None, True)
+        logger.info("--dry-run: validações OK; NADA gravado (destino seria %s).",
+                    save_base)
+    else:
+        save_base = _valida_destino(config)
+        _stage_and_publish(
+            spark, save_base,
+            lambda staging_base: _prepare_business_outputs(staging_base, False))
+        logger.info("Staging validado e publicado em %s.", save_base)
 
     logger.info("=" * 78)
     logger.info("RESUMO DA CLONAGEM (%.1fs) — %d instrumento(s) × K=%d, "
@@ -1922,7 +2569,7 @@ def _parse_data_engorda(txt: str) -> datetime:
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Clonagem por entidade (clone-and-remap) do CDB simplificado. "
-                    "Dirigido pelo spec_config.json; sem conexão Oracle.")
+                    "Dirigido pelo spec_config.json; Oracle aloca chaves de negócio.")
     grupo = parser.add_mutually_exclusive_group(required=True)
     grupo.add_argument("--num-ifs", type=_parse_num_ifs, default=None,
                        help="Lista explícita de NUM_IF (ex.: 123,456). Aceita 1 só.")
@@ -1931,6 +2578,13 @@ def parse_arguments() -> argparse.Namespace:
                             "(query de validação; com --seed).")
     parser.add_argument("--fator-k", type=positive_int, default=1,
                         help="Clones por instrumento (default 1).")
+    parser.add_argument("--meu-numero-prefix", type=_validate_meu_numero_prefix,
+                        required=True,
+                        help="Prefixo obrigatório de 3 dígitos (primeiro 1-9) para "
+                             "controles de lançamento.")
+    parser.add_argument("--oracle-code-batch-size", type=positive_int,
+                        default=DEFAULT_ORACLE_CODE_BATCH_SIZE,
+                        help="Códigos Oracle por round-trip (default 50000).")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
                         help="Semente do sorteio de instrumentos.")
     parser.add_argument("--pk-offset", type=nonneg_int, default=0,
@@ -2018,6 +2672,7 @@ def main() -> None:
         spec = load_specs(spark, specs_uri)
         executa_clonagem(
             spark, config, spec,
+            meu_numero_prefix=args.meu_numero_prefix,
             num_ifs=args.num_ifs,
             n_instrumentos=args.n_instrumentos,
             fator_k=args.fator_k,
@@ -2034,6 +2689,7 @@ def main() -> None:
             faltantes_parquet=args.faltantes_parquet,
             poda_subtipo=not args.sem_poda_subtipo,
             anular_cols=_merge_anular_cols(NULIFICA_COLS_POR_TABELA, args.anular_cols),
+            oracle_code_batch_size=args.oracle_code_batch_size,
             dry_run=args.dry_run,
         )
     finally:
