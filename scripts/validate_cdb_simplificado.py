@@ -147,6 +147,15 @@ DADO_OPERACAO_TABLE = "DADO_OPERACAO"
 TIPO_OPER_OBJETO_SERV_TABLE = "TIPO_OPER_OBJETO_SERV"
 V_PARAMETRO_SIC_TABLE = "V_PARAMETRO_SIC"
 TIPO_OPERACAO_TABLE = "TIPO_OPERACAO"
+CONTA_PARTICIPANTE_TABLE = "CONTA_PARTICIPANTE"
+V_FAMILIA_CONTAS_TABLE = "V_FAMILIA_CONTAS"
+V_OBJETOS_SERVICO_TABLE = "V_OBJETOS_SERVICO"
+ACCOUNT_REFERENCES: Tuple[Tuple[str, str], ...] = (
+    ("TITULO", "NUM_CONTA_PARTICIPANTE"),
+    ("DEPOSITO_AUTOMATICO_IF", "NUM_CONTA_PARTICIPANTE"),
+    ("OPERACAO", "NUM_CONTA_PARTICIPANTE_P1"),
+    ("OPERACAO", "NUM_CONTA_PARTICIPANTE_P2"),
+)
 CDB_TIPO_IF = 49
 CDB_OBJETO_SERVICO = 44
 SEM_MODALIDADE_IDS = (6, 16)
@@ -419,6 +428,15 @@ def _is_string_type(data_type: str) -> bool:
 def _norm_code(col):
     """Normalize an id/code column to a trimmed string, dropping a trailing .0."""
     return F.regexp_replace(F.trim(col.cast("string")), r"\.0$", "")
+
+
+def _canon_key_col(col):
+    """Spark expression equivalent of _canon_key for required lookup IDs."""
+    value = F.trim(col.cast("string"))
+    stripped = F.regexp_replace(
+        F.regexp_replace(value, r"(\.\d*?)0+$", "$1"), r"\.$", ""
+    )
+    return F.when(value.rlike(r"^-?\d+\.\d*0*$"), stripped).otherwise(value)
 
 
 def _sample_keys(df: DataFrame, key_cols: List[str], n: int) -> List:
@@ -1531,6 +1549,322 @@ def check_dates(tables: Dict[str, DataFrame], meta: Metadata, sample: int) -> Li
 # ---------------------------------------------------------------------------
 # Category 6 - Lookup combinations (SEM MODALIDADE)
 # ---------------------------------------------------------------------------
+def check_required_lookup_frames(
+    tables: Dict[str, DataFrame],
+    account_df: Optional[DataFrame],
+    tos_df: Optional[DataFrame],
+    tipo_df: Optional[DataFrame],
+    cdb_object_df: Optional[DataFrame],
+    sample: int,
+    lookup_errors: Optional[Dict[str, str]] = None,
+) -> List[Finding]:
+    """Enforce the three mandatory target-backed CDB registration lookups."""
+    cat = "Required lookup combinations"
+    errors = dict(lookup_errors or {})
+    lookup_hint = (
+        "Check Oracle JDBC credentials/schema, SELECT grants, target columns, and target "
+        "view/table availability, then rerun against QAB."
+    )
+
+    def target_columns(
+        df: Optional[DataFrame], table: str, required: List[str]
+    ) -> Optional[Dict[str, str]]:
+        if df is None:
+            errors.setdefault(table, "lookup was not loaded")
+            return None
+        resolved = {name: resolve(df, name) for name in required}
+        missing = [name for name, actual in resolved.items() if not actual]
+        if missing:
+            errors[table] = f"missing column(s): {', '.join(missing)}"
+            return None
+        return {name: actual for name, actual in resolved.items() if actual}
+
+    missing_refs = []
+    account_parts = []
+    for table, column in ACCOUNT_REFERENCES:
+        source = tables.get(table)
+        actual = resolve(source, column) if source is not None else None
+        if source is None or actual is None:
+            missing_refs.append(f"{table}.{column}")
+            continue
+        account_parts.append(
+            source.select(
+                F.lit(table).alias("source_table"),
+                F.lit(column).alias("source_column"),
+                F.col(actual).cast("string").alias("raw_account"),
+                _canon_key_col(F.col(actual)).alias("account_id"),
+            )
+        )
+
+    if missing_refs:
+        account_finding = Finding(
+            "6.required.active_account", cat, SEV_ERROR, CONTA_PARTICIPANTE_TABLE, False,
+            count=len(missing_refs), column=",".join(missing_refs), sample=missing_refs[:sample],
+            hint="Export all four approved synthetic account reference columns; do not "
+                 "substitute or broaden the check to other account columns.",
+            message="Required synthetic account source table/column(s) are missing: "
+                    f"{', '.join(missing_refs)}.",
+        )
+    else:
+        accounts = reduce(lambda left, right: left.unionByName(right), account_parts)
+        blank_accounts = accounts.where(
+            F.col("raw_account").isNotNull() & (F.trim(F.col("raw_account")) == "")
+        )
+        nonblank_accounts = accounts.where(
+            F.col("raw_account").isNotNull() & (F.trim(F.col("raw_account")) != "")
+        )
+        if account_df is None and nonblank_accounts.limit(1).count() == 0:
+            account_df = accounts.sparkSession.createDataFrame(
+                [],
+                "NUM_CONTA_PARTICIPANTE string, NUM_ID_SITUACAO_CONTA string, "
+                "COD_CONTA_PARTICIPANTE string, NUM_ID_AREA_ATUACAO string, "
+                "COD_TIPO_ACESSO string",
+            )
+        account_cols = target_columns(
+            account_df,
+            CONTA_PARTICIPANTE_TABLE,
+            [
+                "NUM_CONTA_PARTICIPANTE",
+                "NUM_ID_SITUACAO_CONTA",
+                "COD_CONTA_PARTICIPANTE",
+                "NUM_ID_AREA_ATUACAO",
+                "COD_TIPO_ACESSO",
+            ],
+        )
+        if account_cols is None:
+            account_finding = Finding(
+                "6.required.active_account", cat, SEV_ERROR,
+                CONTA_PARTICIPANTE_TABLE, False,
+                sample=_sample_keys(
+                    accounts.where(F.col("raw_account").isNotNull()),
+                    ["source_table", "source_column", "account_id"],
+                    sample,
+                ),
+                hint=lookup_hint,
+                message="Required active/local account check unavailable: "
+                        f"{CONTA_PARTICIPANTE_TABLE} "
+                        f"{errors[CONTA_PARTICIPANTE_TABLE]}.",
+            )
+        else:
+            eligible_accounts = (
+                account_df.select(
+                    _canon_key_col(F.col(account_cols["NUM_CONTA_PARTICIPANTE"]))
+                    .alias("account_id"),
+                    _canon_key_col(F.col(account_cols["NUM_ID_SITUACAO_CONTA"]))
+                    .alias("situation_id"),
+                    F.trim(
+                        F.col(account_cols["COD_CONTA_PARTICIPANTE"]).cast("string")
+                    )
+                    .alias("account_code"),
+                    _canon_key_col(F.col(account_cols["NUM_ID_AREA_ATUACAO"]))
+                    .alias("area_id"),
+                    F.col(account_cols["COD_TIPO_ACESSO"]).cast("string")
+                    .alias("access_type"),
+                )
+                .where(
+                    (F.col("situation_id") == "1")
+                    & F.col("account_code").rlike(r"^[0-9]{5}\.(40|10)-[0-9]$")
+                    & (F.col("area_id") == "1")
+                    & (F.col("access_type") == "L")
+                )
+                .select("account_id")
+                .where(F.col("account_id").isNotNull())
+                .dropDuplicates()
+            )
+            invalid_accounts = blank_accounts.select(
+                "source_table", "source_column", "account_id"
+            ).unionByName(
+                nonblank_accounts.join(
+                    F.broadcast(eligible_accounts), "account_id", "left_anti"
+                ).select("source_table", "source_column", "account_id")
+            )
+            invalid_account_count = invalid_accounts.count()
+            account_finding = Finding(
+                "6.required.active_account", cat,
+                SEV_ERROR if invalid_account_count else SEV_INFO,
+                CONTA_PARTICIPANTE_TABLE, invalid_account_count == 0,
+                count=invalid_account_count,
+                column=",".join(f"{table}.{column}" for table, column in ACCOUNT_REFERENCES),
+                sample=_sample_keys(
+                    invalid_accounts,
+                    ["source_table", "source_column", "account_id"],
+                    sample,
+                ),
+                hint=(
+                    "Use a nonblank target CONTA_PARTICIPANTE with "
+                    "NUM_ID_SITUACAO_CONTA=1 whose COD_CONTA_PARTICIPANTE has a "
+                    "V_FAMILIA_CONTAS row with NUM_ID_AREA_ATUACAO=1 and COD_TIPO_ACESSO='L'. "
+                    "The trimmed account code must match ^[0-9]{5}\\.(40|10)-[0-9]$; "
+                    "situation 2 is not eligible."
+                    if invalid_account_count else ""
+                ),
+                message="Synthetic account references must resolve to an active local-access "
+                        "target account whose trimmed code has the required .40/.10 shape.",
+            )
+
+    op_df = tables.get(OPERACAO_TABLE)
+    op_tos_col = resolve(op_df, "NUM_ID_TIPO_OPER_OBJETO_SERV") if op_df is not None else None
+    if op_df is None or op_tos_col is None:
+        missing = (
+            OPERACAO_TABLE
+            if op_df is None
+            else f"{OPERACAO_TABLE}.NUM_ID_TIPO_OPER_OBJETO_SERV"
+        )
+        operation_finding = Finding(
+            "6.required.operation_tos", cat, SEV_ERROR, OPERACAO_TABLE, False,
+            column="NUM_ID_TIPO_OPER_OBJETO_SERV",
+            sample=(
+                _sample_keys(op_df, [resolve(op_df, "NUM_ID_OPERACAO")], sample)
+                if op_df is not None and resolve(op_df, "NUM_ID_OPERACAO") else []
+            ),
+            hint="Export OPERACAO with NUM_ID_TIPO_OPER_OBJETO_SERV; every row requires its "
+                 "original nonblank target TOS reference.",
+            message=f"Required operation TOS source is missing: {missing}.",
+        )
+    else:
+        tos_cols = target_columns(
+            tos_df,
+            TIPO_OPER_OBJETO_SERV_TABLE,
+            [
+                "NUM_ID_TIPO_OPER_OBJETO_SERV",
+                "NUM_ID_TIPO_OPERACAO",
+                "NUM_ID_OBJETO_SERVICO",
+                "IND_DISPONIVEL_IDENTIFICACAO",
+            ],
+        )
+        tipo_cols = target_columns(
+            tipo_df,
+            TIPO_OPERACAO_TABLE,
+            ["NUM_ID_TIPO_OPERACAO", "COD_TIPO_OPERACAO"],
+        )
+        unavailable = [
+            f"{table} {errors[table]}"
+            for table, columns in (
+                (TIPO_OPER_OBJETO_SERV_TABLE, tos_cols),
+                (TIPO_OPERACAO_TABLE, tipo_cols),
+            )
+            if columns is None
+        ]
+        if unavailable:
+            operation_finding = Finding(
+                "6.required.operation_tos", cat, SEV_ERROR, OPERACAO_TABLE, False,
+                sample=_sample_keys(
+                    op_df,
+                    [resolve(op_df, "NUM_ID_OPERACAO")]
+                    if resolve(op_df, "NUM_ID_OPERACAO") else [op_tos_col],
+                    sample,
+                ),
+                hint=lookup_hint,
+                message="Required operation TOS check unavailable: "
+                        f"{'; '.join(unavailable)}.",
+            )
+        else:
+            op_id_col = resolve(op_df, "NUM_ID_OPERACAO")
+            operations = op_df.select(
+                *(
+                    [_norm_code(F.col(op_id_col)).alias("operation_id")]
+                    if op_id_col else []
+                ),
+                F.col(op_tos_col).cast("string").alias("raw_tos_id"),
+                _canon_key_col(F.col(op_tos_col)).alias("tos_id"),
+            )
+            valid_tos = (
+                tos_df.select(
+                    _canon_key_col(F.col(tos_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
+                    .alias("tos_id"),
+                    _canon_key_col(F.col(tos_cols["NUM_ID_TIPO_OPERACAO"]))
+                    .alias("tipo_operacao_id"),
+                    _canon_key_col(F.col(tos_cols["NUM_ID_OBJETO_SERVICO"]))
+                    .alias("objeto_servico_id"),
+                    F.trim(
+                        F.col(tos_cols["IND_DISPONIVEL_IDENTIFICACAO"]).cast("string")
+                    ).alias("identification_flag"),
+                )
+                .join(
+                    tipo_df.select(
+                        _canon_key_col(F.col(tipo_cols["NUM_ID_TIPO_OPERACAO"]))
+                        .alias("tipo_operacao_id"),
+                        F.col(tipo_cols["COD_TIPO_OPERACAO"]).cast("string")
+                        .alias("operation_type_code"),
+                    ),
+                    "tipo_operacao_id",
+                    "inner",
+                )
+                .where(
+                    (F.col("objeto_servico_id") == str(CDB_OBJETO_SERVICO))
+                    & (F.col("identification_flag") == "S")
+                    & (F.col("operation_type_code") == "1")
+                )
+                .select("tos_id")
+                .where(F.col("tos_id").isNotNull())
+                .dropDuplicates()
+            )
+            invalid_operations = operations.where(
+                F.col("raw_tos_id").isNull() | (F.trim(F.col("raw_tos_id")) == "")
+            ).unionByName(
+                operations.where(
+                    F.col("raw_tos_id").isNotNull()
+                    & (F.trim(F.col("raw_tos_id")) != "")
+                ).join(F.broadcast(valid_tos), "tos_id", "left_anti"),
+                allowMissingColumns=True,
+            )
+            invalid_operation_count = invalid_operations.count()
+            operation_sample_cols = (
+                ["operation_id"] if "operation_id" in operations.columns else ["tos_id"]
+            )
+            operation_finding = Finding(
+                "6.required.operation_tos", cat,
+                SEV_ERROR if invalid_operation_count else SEV_INFO,
+                OPERACAO_TABLE, invalid_operation_count == 0,
+                count=invalid_operation_count,
+                column="NUM_ID_TIPO_OPER_OBJETO_SERV",
+                sample=_sample_keys(invalid_operations, operation_sample_cols, sample),
+                hint=(
+                    "Use a nonblank target TOS with NUM_ID_OBJETO_SERVICO=44, trimmed "
+                    "IND_DISPONIVEL_IDENTIFICACAO='S', and joined "
+                    "TIPO_OPERACAO.COD_TIPO_OPERACAO exactly '1' (not '2')."
+                    if invalid_operation_count else ""
+                ),
+                message="Every synthetic operation must resolve to the approved CDB TOS.",
+            )
+
+    cdb_cols = target_columns(
+        cdb_object_df,
+        V_OBJETOS_SERVICO_TABLE,
+        ["COD_OBJETO_SERVICO", "IND_PLATAFORMA_BAIXA"],
+    )
+    if cdb_cols is None:
+        platform_finding = Finding(
+            "6.required.cdb_platform", cat, SEV_ERROR, V_OBJETOS_SERVICO_TABLE, False,
+            hint=lookup_hint,
+            message="Required CDB platform check unavailable: "
+                    f"{V_OBJETOS_SERVICO_TABLE} {errors[V_OBJETOS_SERVICO_TABLE]}.",
+        )
+    else:
+        eligible_cdb_count = cdb_object_df.where(
+            (F.col(cdb_cols["COD_OBJETO_SERVICO"]).cast("string") == "CDB")
+            & (
+                F.trim(F.col(cdb_cols["IND_PLATAFORMA_BAIXA"]).cast("string"))
+                == "S"
+            )
+        ).limit(1).count()
+        platform_finding = Finding(
+            "6.required.cdb_platform", cat,
+            SEV_INFO if eligible_cdb_count else SEV_ERROR,
+            V_OBJETOS_SERVICO_TABLE, bool(eligible_cdb_count),
+            count=0 if eligible_cdb_count else 1,
+            column="COD_OBJETO_SERVICO,IND_PLATAFORMA_BAIXA",
+            hint=(
+                "Ensure target V_OBJETOS_SERVICO exposes COD_OBJETO_SERVICO='CDB' with "
+                "trimmed IND_PLATAFORMA_BAIXA='S'."
+                if not eligible_cdb_count else ""
+            ),
+            message="Target CDB object service must be enabled for the baixa platform.",
+        )
+
+    return [account_finding, operation_finding, platform_finding]
+
+
 def check_lookup_combo_frames(
     op_df: DataFrame,
     tos_df: Optional[DataFrame],
@@ -1747,19 +2081,24 @@ def check_lookup_combo_frames(
 
 def check_lookup_combos(
     spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame], meta: Metadata, sample: int,
+    max_account_keys: int = 1_000_000,
 ) -> List[Finding]:
     op_df = tables.get(OPERACAO_TABLE)
     if op_df is None:
-        return [Finding("6.combo", "Lookup combinations", SEV_INFO, OPERACAO_TABLE, True,
-                        message="OPERACAO not in output; combo check skipped.")]
-    if not cfg.jdbc_url:
-        return [Finding(
+        existing = [Finding(
+            "6.combo", "Lookup combinations", SEV_INFO, OPERACAO_TABLE, True,
+            message="OPERACAO not in output; combo check skipped.",
+        )]
+    elif not cfg.jdbc_url:
+        existing = [Finding(
             "6.combo.no_jdbc", "Lookup combinations", SEV_WARN, OPERACAO_TABLE, False,
             hint="Configure and verify Oracle JDBC credentials/schema, SELECT grants, and "
-                 "target view/table availability, then rerun against QAB.",
+                  "target view/table availability, then rerun against QAB.",
             message="No Oracle connection; cannot resolve valid "
                     "(tipo_operacao, modalidade, servico) combinations for CDB.",
         )]
+    else:
+        existing = []
 
     queries = {
         TIPO_OPER_OBJETO_SERV_TABLE: (
@@ -1774,27 +2113,107 @@ def check_lookup_combos(
             f"AND NUM_ID_OBJETO_SERVICO = {CDB_OBJETO_SERVICO}"
         ),
         TIPO_OPERACAO_TABLE: (
-            "SELECT NUM_ID_TIPO_OPERACAO, IND_SEM_MODALIDADE_INFOHUB "
+            "SELECT NUM_ID_TIPO_OPERACAO, IND_SEM_MODALIDADE_INFOHUB, COD_TIPO_OPERACAO "
             f"FROM {cfg.schema}.{TIPO_OPERACAO_TABLE}"
+        ),
+        V_OBJETOS_SERVICO_TABLE: (
+            "SELECT COD_OBJETO_SERVICO, IND_PLATAFORMA_BAIXA "
+            f"FROM {cfg.schema}.{V_OBJETOS_SERVICO_TABLE} "
+            "WHERE COD_OBJETO_SERVICO = 'CDB'"
         ),
     }
     lookups: Dict[str, DataFrame] = {}
     errors: Dict[str, str] = {}
-    for table, query in queries.items():
-        try:
-            remote = _jdbc(spark, cfg, query)
-            # Detach small config lookups so later actions cannot lazily re-read JDBC.
-            rows = remote.collect()
-            lookups[table] = spark.createDataFrame(rows, remote.schema)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Category 6 lookup load failed for %s: %s", table, exc)
-            errors[table] = str(exc)
+    if cfg.jdbc_url:
+        for table, query in queries.items():
+            try:
+                remote = _jdbc(spark, cfg, query)
+                # Detach small config lookups so later actions cannot lazily re-read JDBC.
+                rows = remote.collect()
+                lookups[table] = spark.createDataFrame(rows, remote.schema)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Category 6 lookup load failed for %s: %s", table, exc)
+                errors[table] = str(exc)
+    else:
+        errors.update({table: "No Oracle connection" for table in queries})
 
-    return check_lookup_combo_frames(
-        op_df,
+    account_sources_available = all(
+        tables.get(table) is not None and resolve(tables[table], column) is not None
+        for table, column in ACCOUNT_REFERENCES
+    )
+    account_keys: List[str] = []
+    if account_sources_available:
+        key_frames = [
+            tables[table].select(
+                _canon_key_col(F.col(resolve(tables[table], column))).alias("key")
+            )
+            for table, column in ACCOUNT_REFERENCES
+        ]
+        distinct_keys = reduce(lambda left, right: left.unionByName(right), key_frames).where(
+            F.col("key").isNotNull() & (F.trim(F.col("key")) != "")
+        ).dropDuplicates()
+        account_keys = [
+            _canon_key(row["key"])
+            for row in distinct_keys.limit(max_account_keys + 1).collect()
+        ]
+
+    if account_sources_available and not account_keys:
+        lookups[CONTA_PARTICIPANTE_TABLE] = spark.createDataFrame(
+            [],
+            "NUM_CONTA_PARTICIPANTE string, NUM_ID_SITUACAO_CONTA string, "
+            "COD_CONTA_PARTICIPANTE string, NUM_ID_AREA_ATUACAO string, "
+            "COD_TIPO_ACESSO string",
+        )
+    elif len(account_keys) > max_account_keys:
+        errors[CONTA_PARTICIPANTE_TABLE] = (
+            f"more than {max_account_keys} distinct synthetic account keys; lookup skipped"
+        )
+    elif account_keys and cfg.jdbc_url:
+        account_rows = []
+        account_schema = None
+        try:
+            for offset in range(0, len(account_keys), 1000):
+                literals = ", ".join(
+                    _sql_literal(value) for value in account_keys[offset:offset + 1000]
+                )
+                query = (
+                    "SELECT cp.NUM_CONTA_PARTICIPANTE, cp.NUM_ID_SITUACAO_CONTA, "
+                    "cp.COD_CONTA_PARTICIPANTE, vf.NUM_ID_AREA_ATUACAO, "
+                    "vf.COD_TIPO_ACESSO "
+                    f"FROM {cfg.schema}.{CONTA_PARTICIPANTE_TABLE} cp "
+                    f"LEFT JOIN {cfg.schema}.{V_FAMILIA_CONTAS_TABLE} vf "
+                    "ON cp.COD_CONTA_PARTICIPANTE = vf.COD_CONTA_MEMBRO "
+                    f"WHERE cp.NUM_CONTA_PARTICIPANTE IN ({literals})"
+                )
+                remote = _jdbc(spark, cfg, query)
+                rows = remote.collect()
+                account_schema = account_schema or remote.schema
+                account_rows.extend(rows)
+            lookups[CONTA_PARTICIPANTE_TABLE] = spark.createDataFrame(
+                account_rows, account_schema
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Category 6 account lookup load failed: %s", exc)
+            errors[CONTA_PARTICIPANTE_TABLE] = str(exc)
+    elif account_keys:
+        errors[CONTA_PARTICIPANTE_TABLE] = "No Oracle connection"
+
+    if op_df is not None and cfg.jdbc_url:
+        existing = check_lookup_combo_frames(
+            op_df,
+            lookups.get(TIPO_OPER_OBJETO_SERV_TABLE),
+            lookups.get(V_PARAMETRO_SIC_TABLE),
+            lookups.get(TIPO_OPERACAO_TABLE),
+            sample,
+            errors,
+        )
+
+    return existing + check_required_lookup_frames(
+        tables,
+        lookups.get(CONTA_PARTICIPANTE_TABLE),
         lookups.get(TIPO_OPER_OBJETO_SERV_TABLE),
-        lookups.get(V_PARAMETRO_SIC_TABLE),
         lookups.get(TIPO_OPERACAO_TABLE),
+        lookups.get(V_OBJETOS_SERVICO_TABLE),
         sample,
         errors,
     )
@@ -2648,7 +3067,9 @@ def main() -> None:
     findings += check_not_null(tables, meta, args.sample_size)
     findings += check_capacity(tables, meta, application_capacities, args.sample_size)
     findings += check_dates(tables, meta, args.sample_size)
-    findings += check_lookup_combos(spark, cfg, tables, meta, args.sample_size)
+    findings += check_lookup_combos(
+        spark, cfg, tables, meta, args.sample_size, args.max_residual_keys
+    )
     findings += check_shapes(spark, tables, args.shape_baseline, args.sample_size,
                              args.shape_unseen_tol, args.shape_drift_tol,
                              args.shape_op_ratio_tol)
