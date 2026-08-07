@@ -89,8 +89,8 @@ USO (OCI Data Flow — mesmas envs do engorda_tables.py):
       --tratar-como-static TAB1,TAB2  # excluir tabela(s) da clonagem
       --sem-poda-subtipo            # DESLIGA a poda do item 1 (dangling CONDICAO_IF)
       --faltantes-arg 'CARTEIRA_COMITENTE.NUM_ID_ENTIDADE=343..;...'
-                                    # itens 3/4: poda NUM_IF que referenciam chave
-                                    #   inexistente no destino (QAB), sem Oracle
+                                    # itens 3/4: poda NUM_IF por padrão; para a
+                                    #   allowlist nullable, anula só clones casados
       --faltantes-parquet oci://.../faltantes  # idem, TABELA/COLUNA/VALOR (listas grandes)
       --anular-cols 'TAB.COL,COL2;...'  # item 2 (extra): colunas nullable a anular
       --specs oci://.../spec_config.json  # override de DATAGEN_SPECS_URI
@@ -100,8 +100,9 @@ CORREÇÕES DE CARGA (saída carregável por construção — ver executa_clonag
      existe na origem; a amostragem repõe até fechar N (--sem-poda-subtipo desliga).
   2. NUM_ID_TRANSF_ARQ_P1/P2 órfãos: anulados nos clones de OPERACAO (nullable) —
      ver NULIFICA_COLS_POR_TABELA / --anular-cols.
-  3/4. Comitente/conta inexistentes no destino: poda do domínio os NUM_IF que os
-     referenciam, via --faltantes-arg/--faltantes-parquet (sem conexão Oracle).
+  3/4. Chaves inexistentes no destino: por padrão, poda do domínio os NUM_IF que
+     as referenciam. A allowlist nullable FALTANTES_NULIFICACAO_SELETIVA preserva
+     o instrumento e anula somente os valores listados nos clones.
 
 Em notebook: from clona_instrumentos import executa_clonagem (ver main()).
 
@@ -209,6 +210,12 @@ SUBTYPE_BY_TIPO: dict[str, str] = {
 NULIFICA_COLS_POR_TABELA: dict[str, tuple[str, ...]] = {
     "OPERACAO": ("NUM_ID_TRANSF_ARQ_P1", "NUM_ID_TRANSF_ARQ_P2"),
 }
+
+# Exceção exata à poda por faltantes: metadados Oracle/QAB confirmam que esta
+# FK filha é nullable. O contrato é revalidado contra o spec em todo startup.
+FALTANTES_NULIFICACAO_SELETIVA = {("OPERACAO", "NUM_ID_CTX_MSG_P2")}
+FALTANTES_SELECTIVE_KEY_COL = "__faltante_seletiva_key"
+FALTANTES_SELECTIVE_MARKER_COL = "__faltante_seletiva_match"
 
 # ---------------------------------------------------------------------------
 # Regras de engorda por coluna.
@@ -1120,13 +1127,54 @@ def _dominio_num_if_produto(spark, config) -> DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Poda de domínio (itens 1, 3 e 4) e anulação de colunas de drift (item 2).
+# Poda de domínio (itens 1, 3 e 4) e duas políticas de anulação: drift integral
+# (item 2) e faltantes seletivos para a allowlist nullable.
 # ---------------------------------------------------------------------------
 def _norm_key_col(col):
     """Normaliza uma chave para string comparável: valor numérico perde o '.0'
     final (a mesma chave pode chegar como decimal numa fonte e int noutra — ver
     harmoniza_tipos_fk_com_pai / os falsos fk_orphan por tipo físico)."""
     return F.regexp_replace(F.trim(col.cast("string")), r"\.0+$", "")
+
+
+def _valida_contrato_nulificacao_seletiva(spec: dict) -> None:
+    """Aborta se a exceção nullable deixar de ser uma FK filha no spec."""
+    problemas: List[str] = []
+    for tabela, coluna in sorted(FALTANTES_NULIFICACAO_SELETIVA):
+        cfg = spec.get(tabela)
+        if cfg is None:
+            problemas.append(f"{tabela}.{coluna}: tabela ausente no spec")
+            continue
+        fk_filha = any(
+            fk.get("parent_table") and coluna in (fk.get("columns") or [])
+            for fk in _fk_list(cfg)
+        )
+        if not fk_filha:
+            problemas.append(
+                f"{tabela}.{coluna}: coluna ausente ou não é FK filha no spec"
+            )
+        if coluna in _not_null_cols(cfg):
+            problemas.append(f"{tabela}.{coluna}: consta em not_null_cols")
+    if problemas:
+        raise ValueError(
+            "Contrato da nulificação seletiva de faltantes divergiu do metadata "
+            "Oracle/QAB; corrija a allowlist/spec antes de clonar:\n  - "
+            + "\n  - ".join(problemas)
+        )
+    logger.info(
+        "Contrato de faltantes seletivos validado (FK filha nullable): %s",
+        sorted(FALTANTES_NULIFICACAO_SELETIVA),
+    )
+
+
+def _pred_faltante_seletivo():
+    pred = F.lit(False)
+    for tabela, coluna in sorted(FALTANTES_NULIFICACAO_SELETIVA):
+        pred = pred | (
+            (F.col("TABELA") == F.lit(tabela))
+            & (F.col("COLUNA") == F.lit(coluna))
+        )
+    return pred
 
 
 def _subtipos_clonaveis(spec: dict) -> List[str]:
@@ -1233,8 +1281,11 @@ def _num_if_excluidos_por_faltantes(spark, config, spec, faltantes: DataFrame,
     (comitente) e NUM_CONTA (conta) por NUM_IF. Tabela sem NUM_IF (ex.:
     ESPECIFICACAO_COMITENTE) é coberta transitivamente: o mesmo comitente sai do
     lote quando o instrumento é podado via CARTEIRA_COMITENTE."""
+    # A allowlist nullable tem outra política: preserva o instrumento e anula
+    # apenas clones cujo valor aparece em faltantes.
+    faltantes_poda = faltantes.where(~_pred_faltante_seletivo())
     pares = [(r["TABELA"], r["COLUNA"]) for r in
-             faltantes.select("TABELA", "COLUNA").dropDuplicates().collect()]
+             faltantes_poda.select("TABELA", "COLUNA").dropDuplicates().collect()]
     excl: Optional[DataFrame] = None
     for tab, col in pares:
         if tab not in spec:
@@ -1253,8 +1304,8 @@ def _num_if_excluidos_por_faltantes(spark, config, spec, faltantes: DataFrame,
         if col not in src.columns:
             logger.warning("faltantes: %s sem coluna %s; ignorada.", tab, col)
             continue
-        miss = (faltantes.where((F.col("TABELA") == F.lit(tab))
-                                & (F.col("COLUNA") == F.lit(col)))
+        miss = (faltantes_poda.where((F.col("TABELA") == F.lit(tab))
+                                     & (F.col("COLUNA") == F.lit(col)))
                 .select(F.col("VALOR").alias("__v")).dropDuplicates())
         hit = (src.select(F.col(COL_NUM_IF).alias(COL_NUM_IF),
                           _norm_key_col(F.col(col)).alias("__v"))
@@ -1293,6 +1344,90 @@ def aplica_nulificacao(df: DataFrame, tabela: str,
     return df, anuladas
 
 
+def aplica_nulificacao_faltantes(
+    df: DataFrame,
+    tabela: str,
+    faltantes: Optional[DataFrame],
+) -> Tuple[DataFrame, List[str], Dict[str, Dict[str, int]]]:
+    """Anula somente clones casados com faltantes da allowlist nullable.
+
+    As chaves ficam distribuídas: um broadcast left join com lado direito
+    deduplicado marca os matches sem coletar valores no driver nem multiplicar
+    linhas. Devolve também colunas efetivamente alteradas e contagens separadas.
+    """
+    if faltantes is None:
+        return df, [], {}
+
+    out = df
+    anuladas: List[str] = []
+    contagens: Dict[str, Dict[str, int]] = {}
+    for tab, coluna in sorted(FALTANTES_NULIFICACAO_SELETIVA):
+        if tab != tabela:
+            continue
+        chaves = (
+            faltantes.where(
+                (F.col("TABELA") == F.lit(tab))
+                & (F.col("COLUNA") == F.lit(coluna))
+            )
+            .select(_norm_key_col(F.col("VALOR")).alias(FALTANTES_SELECTIVE_KEY_COL))
+            .where(F.col(FALTANTES_SELECTIVE_KEY_COL).isNotNull())
+            .dropDuplicates()
+        )
+        n_chaves = chaves.count()
+        if n_chaves == 0:
+            logger.info(
+                "faltantes seletivos: %s.%s -> 0 chave(s) distinta(s), 0 clone(s) casado(s).",
+                tab, coluna,
+            )
+            continue
+        if coluna not in out.columns:
+            raise ValueError(
+                f"{tab}.{coluna}: coluna allowlisted não existe no schema dos clones."
+            )
+        colisao = [
+            c for c in (FALTANTES_SELECTIVE_KEY_COL, FALTANTES_SELECTIVE_MARKER_COL)
+            if c in out.columns
+        ]
+        if colisao:
+            raise ValueError(f"{tab}: colisão de coluna temporária {colisao}.")
+
+        marcadores = chaves.withColumn(FALTANTES_SELECTIVE_MARKER_COL, F.lit(True))
+        joined = (
+            out.withColumn(
+                FALTANTES_SELECTIVE_KEY_COL, _norm_key_col(F.col(coluna))
+            )
+            .join(F.broadcast(marcadores), on=FALTANTES_SELECTIVE_KEY_COL, how="left")
+        )
+        n_casados = joined.where(F.col(FALTANTES_SELECTIVE_MARKER_COL)).count()
+        tipo = out.schema[coluna].dataType
+        out = joined.select(
+            *[
+                F.when(
+                    F.col(FALTANTES_SELECTIVE_MARKER_COL), F.lit(None).cast(tipo)
+                ).otherwise(F.col(c)).alias(c)
+                if c == coluna else F.col(c)
+                for c in out.columns
+            ]
+        )
+        logger.info(
+            "faltantes seletivos: %s.%s -> %d chave(s) distinta(s) listada(s), "
+            "%d linha(s) clone casada(s).",
+            tab, coluna, n_chaves, n_casados,
+        )
+        contagens[coluna] = {
+            "chaves_distintas_listadas": n_chaves,
+            "linhas_clone_casadas": n_casados,
+        }
+        if n_casados:
+            anuladas.append(coluna)
+    return out, anuladas, contagens
+
+
+def _colunas_anuladas_resumo(*grupos: Sequence[str]) -> List[str]:
+    """Une políticas de anulação em ordem, sem repetir nomes no resumo."""
+    return list(dict.fromkeys(coluna for grupo in grupos for coluna in grupo))
+
+
 def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
                            n_instrumentos: Optional[int], seed: int,
                            faltantes: Optional[DataFrame] = None,
@@ -1304,7 +1439,8 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
       * item 1 (poda_subtipo): remove instrumentos que gerariam CONDICAO_IF
         dangling (subtipo sem linha na origem — Cat 1);
       * itens 3/4 (faltantes): remove instrumentos que referenciam comitente/
-        conta/etc. inexistentes no destino (Cat 3/4, sem Oracle).
+        conta/etc. inexistentes no destino (Cat 3/4, sem Oracle), exceto a
+        allowlist nullable, tratada por nulificação seletiva após o remap.
 
     A amostragem de N sorteia do domínio PODADO, então a contagem final continua
     N (cada instrumento podado é reposto por outra amostra válida — o que atende
@@ -2400,7 +2536,8 @@ def executa_clonagem(spark, config, spec: dict, *,
       * poda_subtipo (item 1): tira do domínio os NUM_IF que gerariam CONDICAO_IF
         dangling; a amostragem repõe até fechar N;
       * faltantes_arg/parquet (itens 3/4): tira os NUM_IF que referenciam chaves
-        inexistentes no destino (QAB), sem conexão Oracle.
+        inexistentes no destino (QAB), sem conexão Oracle, exceto a allowlist
+        nullable, que anula somente os clones com valores listados.
     Anulação de colunas de drift (item 2): anular_cols (default
     NULIFICA_COLS_POR_TABELA) seta NULL nas colunas nullable listadas por tabela."""
     inicio = time.perf_counter()
@@ -2418,6 +2555,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                 if prazo_vencimento_dias is not None
                 else "preserva o prazo original da linha clonada")
     spec = normalize_specs(spec)
+    _valida_contrato_nulificacao_seletiva(spec)
     estaticas_extra = {table_path_name(t.strip().upper())
                        for t in (tratar_como_static or set()) if t.strip()}
     if estaticas_extra:
@@ -2465,10 +2603,18 @@ def executa_clonagem(spark, config, spec: dict, *,
         clones, cols_data = aplica_regras_engorda(
             clones, t, engorda_ts=engorda_ts,
             prazo_vencimento_dias=prazo_vencimento_dias)
-        # Anulação de colunas de drift (item 2) ANTES do checkpoint/validação:
-        # o NOT NULL e a gravação precisam enxergar o valor já nulo.
-        clones, cols_anuladas = aplica_nulificacao(
+        # Faltantes allowlisted são anulados seletivamente após todo remap e
+        # antes de checkpoint, validação e geração de chaves de negócio.
+        clones, cols_anuladas_seletivas, contagens_seletivas = (
+            aplica_nulificacao_faltantes(clones, t, faltantes)
+        )
+        # Anulação integral de colunas de drift (item 2), também antes do
+        # checkpoint/validação: a gravação precisa enxergar o valor já nulo.
+        clones, cols_anuladas_integrais = aplica_nulificacao(
             clones, t, anular_cols, _not_null_cols(spec[t]))
+        cols_anuladas = _colunas_anuladas_resumo(
+            cols_anuladas_integrais, cols_anuladas_seletivas
+        )
         clones = clones.localCheckpoint(eager=True)  # congela p/ validar e gravar
 
         cols_remap = sorted({*plano.pk_cols,
@@ -2478,6 +2624,8 @@ def executa_clonagem(spark, config, spec: dict, *,
         stats[t] = {"lote": n_lote, "clones": n_lote * fator_k,
                     "colunas_remapeadas": cols_remap,
                     "colunas_data": cols_data, "colunas_anuladas": cols_anuladas,
+                    "colunas_anuladas_seletivas": cols_anuladas_seletivas,
+                    "faltantes_seletivos": contagens_seletivas,
                     "erros": erros}
         logger.info("[%s] lote=%d clones=%d remapeadas=%s datas=%s anuladas=%s %s",
                     t, n_lote, n_lote * fator_k, cols_remap, cols_data or "-",

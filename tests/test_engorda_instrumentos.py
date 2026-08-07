@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from pyspark.sql import SparkSession
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
@@ -599,6 +599,168 @@ def test_filter_reference_contains_strict_instrument_level_policy():
     assert "NUM_ID_OBJETO_SERVICO <> 44" in text
     assert "COD_TIPO_OPERACAO <> 1" in text
     assert "IND_DISPONIVEL_IDENTIFICACAO" in text
+
+
+def _selective_faltantes_spec(not_null=(), foreign_key=True):
+    fks = ([{"columns": ["NUM_ID_CTX_MSG_P2"],
+             "parent_table": "CONTEXTO_MENSAGEM",
+             "parent_columns": ["NUM_ID_CTX_MSG"]}]
+           if foreign_key else [])
+    return {"OPERACAO": {"pk_cols": ["NUM_ID_OPERACAO"],
+                          "foreign_keys": fks,
+                          "not_null_cols": list(not_null)}}
+
+
+def test_selective_faltantes_contract_accepts_only_nullable_child_fk():
+    assert eng.FALTANTES_NULIFICACAO_SELETIVA == {
+        ("OPERACAO", "NUM_ID_CTX_MSG_P2")
+    }
+    eng._valida_contrato_nulificacao_seletiva(_selective_faltantes_spec())
+
+
+@pytest.mark.parametrize(
+    ("spec", "message"),
+    [
+        ({}, "tabela ausente"),
+        (_selective_faltantes_spec(foreign_key=False), "não é FK filha"),
+        (_selective_faltantes_spec(not_null=("NUM_ID_CTX_MSG_P2",)), "not_null_cols"),
+    ],
+)
+def test_selective_faltantes_contract_aborts_on_metadata_drift(spec, message):
+    with pytest.raises(ValueError, match=message):
+        eng._valida_contrato_nulificacao_seletiva(spec)
+
+
+def test_allowlisted_faltante_does_not_prune_while_default_pairs_do(spark, monkeypatch):
+    domain = spark.createDataFrame([(1,), (2,), (3,)], "NUM_IF long")
+    sources = {
+        "OPERACAO": spark.createDataFrame(
+            [(1, "10", "900"), (2, "20", "901")],
+            "NUM_IF long, NUM_ID_CTX_MSG_P2 string, OUTRA_FK string",
+        ),
+        "OUTRA": spark.createDataFrame([(3, "777")], "NUM_IF long, FK string"),
+    }
+    monkeypatch.setattr(eng, "_read_source", lambda _spark, _config, table: sources[table])
+    faltantes = spark.createDataFrame(
+        [
+            ("OPERACAO", "NUM_ID_CTX_MSG_P2", "10.000"),
+            ("OPERACAO", "OUTRA_FK", "901"),
+            ("OUTRA", "FK", "777"),
+        ],
+        "TABELA string, COLUNA string, VALOR string",
+    )
+
+    excluded = eng._num_if_excluidos_por_faltantes(
+        spark, {}, {"OPERACAO": {}, "OUTRA": {}}, faltantes, domain
+    )
+
+    assert {row.NUM_IF for row in excluded.collect()} == {2, 3}
+
+
+def test_selective_faltantes_nulls_only_normalized_matches_and_preserves_k2(spark):
+    clones = spark.createDataFrame(
+        [
+            (1, 1, Decimal("10.000"), "copy-1"),
+            (2, 2, Decimal("10.000"), "copy-2"),
+            (3, 1, None, "already-null"),
+            (4, 1, Decimal("20.000"), "valid"),
+        ],
+        "ID long, K int, NUM_ID_CTX_MSG_P2 decimal(38,9), PAYLOAD string",
+    )
+    faltantes = spark.createDataFrame(
+        [
+            ("OPERACAO", "NUM_ID_CTX_MSG_P2", "10"),
+            ("OPERACAO", "NUM_ID_CTX_MSG_P2", "10.000"),
+            ("OPERACAO", "NUM_ID_CTX_MSG_P2", "999.0"),
+        ],
+        "TABELA string, COLUNA string, VALOR string",
+    )
+
+    out, anuladas, metrics = eng.aplica_nulificacao_faltantes(
+        clones, "OPERACAO", faltantes
+    )
+    rows = out.orderBy("ID").collect()
+
+    assert out.schema == clones.schema
+    assert out.columns == clones.columns
+    assert len(rows) == 4
+    assert [row.NUM_ID_CTX_MSG_P2 for row in rows] == [
+        None, None, None, Decimal("20.000000000")
+    ]
+    assert [(row.K, row.PAYLOAD) for row in rows[:2]] == [(1, "copy-1"), (2, "copy-2")]
+    assert anuladas == ["NUM_ID_CTX_MSG_P2"]
+    assert metrics == {"NUM_ID_CTX_MSG_P2": {
+        "chaves_distintas_listadas": 2,
+        "linhas_clone_casadas": 2,
+    }}
+
+
+def test_selective_faltantes_no_relevant_keys_is_noop(spark):
+    clones = spark.createDataFrame([(1, "10")], "ID long, NUM_ID_CTX_MSG_P2 string")
+    faltantes = spark.createDataFrame(
+        [("OPERACAO", "OUTRA_COLUNA", "10")],
+        "TABELA string, COLUNA string, VALOR string",
+    )
+
+    out, anuladas, metrics = eng.aplica_nulificacao_faltantes(
+        clones, "OPERACAO", faltantes
+    )
+
+    assert out.schema == clones.schema and out.collect() == clones.collect()
+    assert anuladas == [] and metrics == {}
+    assert eng.aplica_nulificacao_faltantes(clones, "OPERACAO", None)[1:] == ([], {})
+
+
+def test_selective_faltantes_guards_temporary_column_collisions(spark):
+    clones = spark.createDataFrame(
+        [(1, "10", "occupied")],
+        f"ID long, NUM_ID_CTX_MSG_P2 string, {eng.FALTANTES_SELECTIVE_KEY_COL} string",
+    )
+    faltantes = spark.createDataFrame(
+        [("OPERACAO", "NUM_ID_CTX_MSG_P2", "10")],
+        "TABELA string, COLUNA string, VALOR string",
+    )
+    with pytest.raises(ValueError, match="colisão de coluna temporária"):
+        eng.aplica_nulificacao_faltantes(clones, "OPERACAO", faltantes)
+
+
+def test_selective_faltantes_64k_keys_never_collects_values(spark, monkeypatch):
+    faltantes = spark.range(64_000).select(
+        F.lit("OPERACAO").alias("TABELA"),
+        F.lit("NUM_ID_CTX_MSG_P2").alias("COLUNA"),
+        F.col("id").cast("string").alias("VALOR"),
+    )
+    clones = spark.createDataFrame(
+        [(1, 0), (2, 63_999), (3, 64_000)], "ID long, NUM_ID_CTX_MSG_P2 long"
+    )
+
+    with monkeypatch.context() as guarded:
+        guarded.setattr(
+            DataFrame,
+            "collect",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("faltantes values must stay distributed")
+            ),
+        )
+        out, anuladas, metrics = eng.aplica_nulificacao_faltantes(
+            clones, "OPERACAO", faltantes
+        )
+        assert out.count() == 3
+
+    assert anuladas == ["NUM_ID_CTX_MSG_P2"]
+    assert metrics["NUM_ID_CTX_MSG_P2"] == {
+        "chaves_distintas_listadas": 64_000,
+        "linhas_clone_casadas": 2,
+    }
+    assert [row.NUM_ID_CTX_MSG_P2 for row in out.orderBy("ID").collect()] == [
+        None, None, 64_000
+    ]
+
+
+def test_selective_faltantes_summary_only_lists_matched_column_once():
+    column = "NUM_ID_CTX_MSG_P2"
+    assert eng._colunas_anuladas_resumo([column], [column]) == [column]
+    assert eng._colunas_anuladas_resumo([], []) == []
 
 
 class FakePublicationFs:

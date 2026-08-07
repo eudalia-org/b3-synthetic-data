@@ -1,4 +1,6 @@
+import ast
 import hashlib
+import inspect
 import json
 import math
 import os
@@ -11,6 +13,7 @@ import pytest
 os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
 pyspark = pytest.importorskip("pyspark")
 
+from pyspark.sql import DataFrame  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
 from pyspark.sql import types as T  # noqa: E402
 
@@ -288,8 +291,8 @@ def test_exact_only_profiles_do_not_pay_for_hash_sort(spark):
         "psi_value string, is_valid boolean, is_invalid boolean",
     )
     columns = spark.createDataFrame(
-        [(table, "code", '"string"', "jaccard") for table in ("A", "B")],
-        "table string, column string, type_json string, route string",
+        [(table, "code", '"string"', "jaccard", True) for table in ("A", "B")],
+        "table string, column string, type_json string, route string, eligible boolean",
     )
     pairs = spark.createDataFrame(
         [("ok", "jaccard", 3, 3, "A", "code", "B", "code", '"string"')],
@@ -300,6 +303,61 @@ def test_exact_only_profiles_do_not_pay_for_hash_sort(spark):
         values, columns, pairs, similarity.Config(exact_distinct_threshold=3)
     )
     assert result.where(F.col("sha256_rank").isNotNull()).count() == 0
+
+
+def test_exact_batch_intersects_only_requested_pair_profiles(spark):
+    jvalues = spark.createDataFrame(
+        [
+            ("A", "value", '"string"', "X"),
+            ("A", "value", '"string"', "Y"),
+            ("B", "value", '"string"', "X"),
+            ("B", "value", '"string"', "Z"),
+            ("C", "value", '"string"', "X"),
+            ("C", "value", '"string"', "Y"),
+        ],
+        "table string, column string, type_json string, value string",
+    )
+    pairs = spark.createDataFrame(
+        [
+            ("AB", "A", "value", "B", "value", '"string"', 2, 2),
+            ("AC", "A", "value", "C", "value", '"string"', 2, 2),
+        ],
+        "pair_id string, table_a string, column_a string, table_b string, column_b string, "
+        "type_json string, distinct_count_a long, distinct_count_b long",
+    )
+    scores = {
+        row["pair_id"]: row
+        for row in similarity._exact_jaccard_pair_batch(pairs, jvalues).collect()
+    }
+    assert set(scores) == {"AB", "AC"}
+    assert scores["AB"]["jaccard"] == pytest.approx(1 / 3)
+    assert scores["AC"]["jaccard"] == pytest.approx(1.0)
+
+
+def test_exact_batch_partition_filter_prunes_unrequested_profiles(spark, tmp_path):
+    path = (tmp_path / "partitioned-jvalues").as_uri()
+    spark.createDataFrame(
+        [
+            (table, "value", '"string"', value, None, None)
+            for table in ("A", "B", "C", "D")
+            for value in ("X", "Y")
+        ],
+        "table string, column string, type_json string, value string, "
+        "sha256_rank string, sketch_rank int",
+    ).write.partitionBy("table", "column").parquet(path)
+    pair_batch = spark.createDataFrame(
+        [("AB", "A", "value", "B", "value")],
+        "pair_id string, table_a string, column_a string, table_b string, column_b string",
+    )
+    filtered = similarity._read_exact_batch_jvalues(spark, path, pair_batch, 0)
+    assert {row["table"] for row in filtered.select("table").distinct().collect()} == {
+        "A",
+        "B",
+    }
+    plan = filtered._jdf.queryExecution().executedPlan().toString()
+    assert "PartitionFilters" in plan
+    assert "table#" in plan and "column#" in plan
+    assert "A" in plan and "B" in plan
 
 
 def test_psi_matches_hand_calculation_with_jeffreys_smoothing(analyzed):
@@ -515,53 +573,7 @@ def test_path_normalization_is_segment_aware_for_file_and_oci():
     assert allowed.text.endswith("/raw2")
 
 
-def test_interrupted_staging_preserves_previous_complete_output(spark, tmp_path):
-    final = tmp_path / "final"
-    final.mkdir()
-    marker = final / "previous.marker"
-    marker.write_text("old", encoding="utf-8")
-
-    def prepare(staging):
-        staging_path = type(final)(staging)
-        staging_path.mkdir()
-        (staging_path / "partial").write_text("partial", encoding="utf-8")
-        raise RuntimeError("interrupted")
-
-    with pytest.raises(RuntimeError, match="interrupted"):
-        similarity._stage_and_publish(spark, str(final), prepare, lambda _root: None)
-    assert marker.read_text(encoding="utf-8") == "old"
-    assert not list(tmp_path.glob("final.__staging_*"))
-
-
-class FakePublicationFs:
-    def __init__(self, entries, failed_renames=()):
-        self.entries = dict(entries)
-        self.failed_renames = set(failed_renames)
-
-    def exists(self, path):
-        return str(path) in self.entries
-
-    def rename(self, source, target):
-        pair = (str(source), str(target))
-        if pair in self.failed_renames or pair[0] not in self.entries:
-            return False
-        self.entries[pair[1]] = self.entries.pop(pair[0])
-        return True
-
-    def delete(self, path, recursive):
-        return self.entries.pop(str(path), None) is not None
-
-
-def test_promotion_failure_restores_previous_output():
-    fs = FakePublicationFs(
-        {"staging": "new", "final": "old"}, failed_renames={("staging", "final")}
-    )
-    with pytest.raises(ValueError, match="restored and verified"):
-        similarity._promote_staging_paths(fs, "staging", "final", "backup")
-    assert fs.entries == {"final": "old", "staging": "new"}
-
-
-def test_output_schema_and_scoped_root_overwrite_preserve_adjacent_prefix(
+def test_immutable_runs_update_latest_last_and_preserve_prior_and_adjacent(
     analyzed, spark, tmp_path
 ):
     analysis, _ = analyzed
@@ -574,27 +586,317 @@ def test_output_schema_and_scoped_root_overwrite_preserve_adjacent_prefix(
 
     report1 = {"run": 1, "summary": {"integrity": analysis.integrity}}
     report2 = {"run": 2, "summary": {"integrity": analysis.integrity}}
-    similarity.write_outputs(spark, analysis, output, report1)
+    first = similarity.write_outputs(spark, analysis, output, report1)
     stale = root / "stale.txt"
-    stale.write_text("remove", encoding="utf-8")
-    similarity.write_outputs(spark, analysis, output, report2)
+    stale.write_text("preserve", encoding="utf-8")
+    second = similarity.write_outputs(spark, analysis, output, report2)
 
     assert marker.read_text(encoding="utf-8") == "keep"
-    assert not stale.exists()
-    assert json.loads(similarity.read_text(spark, f"{output}/report.json")) == report2
-    pairs = spark.read.parquet(f"{output}/pairs")
+    assert stale.read_text(encoding="utf-8") == "preserve"
+    assert first.run_id != second.run_id
+    latest = json.loads(similarity.read_text(spark, f"{output}/LATEST.json"))
+    assert latest == {
+        "run_id": second.run_id,
+        "run_uri": second.run_uri,
+        "report_uri": second.report_uri,
+        "generated_at": second.generated_at,
+    }
+    assert json.loads(similarity.read_text(spark, first.report_uri))["run"] == 1
+    assert json.loads(similarity.read_text(spark, second.report_uri))["run"] == 2
+    pairs = spark.read.parquet(f"{second.run_uri}/pairs")
     required_pair_fields = {
         "table_a", "column_a", "table_b", "column_b", "type_json", "metric", "mode",
         "status", "jaccard", "psi", "threshold", "is_match", "sketch_sample_size",
         "jaccard_interval_low", "jaccard_interval_high",
     }
     assert required_pair_fields <= set(pairs.columns)
-    columns = spark.read.parquet(f"{output}/profiles/columns")
+    columns = spark.read.parquet(f"{second.run_uri}/profiles/columns")
     assert {
         "table", "column", "type_json", "included", "exclusion_reason", "row_count",
         "non_null_count", "valid_count", "invalid_count", "null_count", "distinct_count",
         "null_rate", "route", "eligible",
     } <= set(columns.columns)
+
+
+def test_failed_immutable_run_leaves_latest_on_previous_run(
+    analyzed, spark, tmp_path, monkeypatch
+):
+    analysis, _ = analyzed
+    output = (tmp_path / "immutable-failure").as_uri()
+    report = {"summary": {"integrity": analysis.integrity}}
+    previous = similarity.write_outputs(spark, analysis, output, report)
+    original = similarity._validate_output_readback
+
+    def fail_validation(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError("post-write validation failed")
+
+    monkeypatch.setattr(similarity, "_validate_output_readback", fail_validation)
+    with pytest.raises(RuntimeError, match="post-write validation failed"):
+        similarity.write_outputs(spark, analysis, output, report)
+    latest = json.loads(similarity.read_text(spark, f"{output}/LATEST.json"))
+    assert latest["run_id"] == previous.run_id
+    runs = list((tmp_path / "immutable-failure" / "runs").iterdir())
+    assert [run.name for run in runs] == [previous.run_id]
+
+
+def _sorted_rows(df):
+    rows = [row.asDict(recursive=True) for row in df.collect()]
+    return sorted(rows, key=lambda row: json.dumps(row, sort_keys=True, default=str))
+
+
+def test_production_parity_without_local_checkpoint_and_bounded_batches(
+    spark, tmp_path, monkeypatch
+):
+    tables = {
+        "A": spark.createDataFrame(
+            [
+                (1, " a ", 2**62, datetime(2024, 1, 1, 0, 0, 0, 1)),
+                (2, "b", 2**62 + 1, datetime(2024, 1, 1, 0, 0, 0, 2)),
+                (3, "c", 2**62 + 2, datetime(2024, 1, 1, 0, 0, 0, 3)),
+                (4, "", 2**62 + 3, datetime(2024, 1, 1, 0, 0, 0, 4)),
+            ],
+            "id long, code string, amount long, moment timestamp",
+        ),
+        "C": spark.createDataFrame(
+            [
+                (1, "B", 2**62 + 2, datetime(2024, 1, 1, 0, 0, 0, 3)),
+                (2, "c", 2**62 + 3, datetime(2024, 1, 1, 0, 0, 0, 4)),
+                (3, "e", 2**62 + 5, datetime(2024, 1, 1, 0, 0, 0, 6)),
+                (4, None, 2**62 + 6, datetime(2024, 1, 1, 0, 0, 0, 7)),
+            ],
+            "id long, code string, amount long, moment timestamp",
+        ),
+        "B": spark.createDataFrame(
+            [
+                (1, "B", 2**62 + 1, datetime(2024, 1, 1, 0, 0, 0, 2)),
+                (2, "c", 2**62 + 2, datetime(2024, 1, 1, 0, 0, 0, 3)),
+                (3, "d", 2**62 + 4, datetime(2024, 1, 1, 0, 0, 0, 5)),
+                (4, None, 2**62 + 5, datetime(2024, 1, 1, 0, 0, 0, 6)),
+            ],
+            "id long, code string, amount long, moment timestamp",
+        ),
+    }
+    specs = {table: {"pk_cols": ["id"]} for table in tables}
+    config = similarity.Config(
+        exact_distinct_threshold=3,
+        sketch_size=3,
+        numeric_categorical_threshold=2,
+        min_nonnull=3,
+        min_distinct=2,
+        psi_bins=4,
+        psi_representatives=8,
+        column_batch_size=2,
+        exact_pair_batch_size=1,
+    )
+    expected = similarity.analyze_tables(spark, tables, specs=specs, config=config)
+    events = []
+    monkeypatch.setattr(
+        DataFrame,
+        "localCheckpoint",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("forbidden checkpoint")),
+    )
+    monkeypatch.setattr(
+        similarity, "_perf_log", lambda phase, **fields: events.append((phase, fields))
+    )
+    output = (tmp_path / "production").as_uri()
+    actual = similarity.run_production(
+        spark, tables, output, specs=specs, config=config
+    )
+
+    for expected_df, actual_df in (
+        (expected.columns, actual.columns),
+        (expected.jaccard_values, actual.jaccard_values),
+        (expected.psi_bins, actual.psi_bins),
+        (expected.pairs, actual.pairs),
+    ):
+        assert _sorted_rows(actual_df) == _sorted_rows(expected_df)
+    expected_report = similarity.build_report(
+        expected, list(tables), None, "", None, "expected", config
+    )
+    latest = json.loads(similarity.read_text(spark, f"{output}/LATEST.json"))
+    actual_report = json.loads(similarity.read_text(spark, latest["report_uri"]))
+    assert actual_report["top_qualifying_matches"] == expected_report["top_qualifying_matches"]
+    assert actual_report["config"]["column_batch_size"] == 2
+    assert actual_report["config"]["exact_pair_batch_size"] == 1
+    assert all(
+        fields["columns"] <= config.column_batch_size
+        for phase, fields in events
+        if phase.endswith("_batch") and "columns" in fields
+    )
+    assert all(
+        fields["pairs"] <= config.exact_pair_batch_size
+        for phase, fields in events
+        if phase == "exact_score_batch"
+    )
+    assert sum(phase == "exact_batches_materialized" for phase, _fields in events) == 1
+    exact_batches = sum(phase == "exact_score_batch" for phase, _fields in events)
+    partition_reads = [fields for phase, fields in events if phase == "exact_partition_read"]
+    assert exact_batches >= 3 and len(partition_reads) == exact_batches
+    assert all(
+        fields["partition_filter"] and fields["profiles"] <= 2
+        for fields in partition_reads
+    )
+
+
+def test_production_failure_preserves_final_and_cleans_workspace(spark, tmp_path, monkeypatch):
+    final = tmp_path / "final"
+    final.mkdir()
+    marker = final / "previous.marker"
+    marker.write_text("old", encoding="utf-8")
+    previous_latest = {
+        "run_id": "previous",
+        "run_uri": f"{final.as_uri()}/runs/previous",
+        "report_uri": f"{final.as_uri()}/runs/previous/report.json",
+        "generated_at": "2026-01-01T00:00:00+00:00",
+    }
+    similarity.write_text(
+        spark, f"{final.as_uri()}/LATEST.json", json.dumps(previous_latest)
+    )
+    tables = {
+        "A": spark.createDataFrame([(1, "a"), (2, "b")], "id long, value string"),
+        "B": spark.createDataFrame([(1, "a"), (2, "c")], "id long, value string"),
+    }
+
+    def fail_phase(*args, **kwargs):
+        raise RuntimeError("jaccard extraction failed")
+
+    monkeypatch.setattr(similarity, "_production_jaccard_values", fail_phase)
+    with pytest.raises(RuntimeError, match="jaccard extraction failed"):
+        similarity.run_production(
+            spark,
+            tables,
+            final.as_uri(),
+            specs={table: {"pk_cols": ["id"]} for table in tables},
+            config=similarity.Config(min_nonnull=2),
+        )
+    assert marker.read_text(encoding="utf-8") == "old"
+    current_latest = json.loads(
+        similarity.read_text(spark, f"{final.as_uri()}/LATEST.json")
+    )
+    assert current_latest == previous_latest
+    assert not list(tmp_path.glob("final.__workspace_*"))
+
+
+def test_production_persists_ineligible_jaccard_values_and_zeroes_empty_counts(
+    spark, tmp_path
+):
+    tables = {
+        "A": spark.createDataFrame([(1, " x ")], "id long, code string"),
+        "B": spark.createDataFrame([(1, "x"), (2, "y")], "id long, code string"),
+        "C": spark.createDataFrame([], "id long, code string"),
+    }
+    result = similarity.run_production(
+        spark,
+        tables,
+        (tmp_path / "empty-and-ineligible").as_uri(),
+        specs={table: {"pk_cols": ["id"]} for table in tables},
+        config=similarity.Config(min_nonnull=2, min_distinct=2),
+    )
+    profiles = {
+        (row["table"], row["column"]): row for row in result.columns.collect()
+    }
+    assert not profiles[("A", "code")]["eligible"]
+    assert profiles[("A", "code")]["valid_count"] == 1
+    empty = profiles[("C", "code")]
+    assert (empty["row_count"], empty["valid_count"], empty["invalid_count"]) == (0, 0, 0)
+    assert empty["distinct_count"] == 0 and empty["null_count"] == 0
+    raw = {
+        (row["table"], row["value"])
+        for row in result.jaccard_values.select("table", "value").collect()
+    }
+    assert ("A", "X") in raw
+
+
+def test_production_call_graph_has_no_checkpoint_or_all_column_union():
+    source = inspect.getsource(similarity)
+    assert ".localCheckpoint(" not in source
+    tree = ast.parse(source)
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    reachable = set()
+    pending = ["run_production"]
+    while pending:
+        name = pending.pop()
+        if name in reachable or name not in functions:
+            continue
+        reachable.add(name)
+        pending.extend(
+            node.func.id
+            for node in ast.walk(functions[name])
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        )
+    assert "_normalized_projection" not in reachable
+    assert "_union_all" not in reachable
+    assert "zipWithIndex" in inspect.getsource(similarity._assign_exact_pair_batches)
+    assert "_promote_staging_paths" not in source and ".rename(" not in source
+    main_calls = {
+        node.func.id
+        for node in ast.walk(functions["main"])
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "run_production" in main_calls and "execute_from_tables" not in main_calls
+
+
+def test_production_scale_20k_rows_40_columns_stays_within_column_batches(
+    spark, tmp_path, monkeypatch
+):
+    def wide(offset):
+        frame = spark.range(20_000).withColumnRenamed("id", "pk")
+        for index in range(10):
+            frame = frame.withColumn(
+                f"c{index}", ((F.col("pk") + offset + index) % 5).cast("string")
+            )
+        for index in range(10):
+            frame = frame.withColumn(f"n{index}", F.col("pk") * 100 + offset + index)
+        return frame
+
+    tables = {"A": wide(0), "B": wide(1)}
+    events = []
+    monkeypatch.setattr(
+        similarity, "_perf_log", lambda phase, **fields: events.append((phase, fields))
+    )
+    config = similarity.Config(
+        exact_distinct_threshold=10,
+        min_nonnull=100,
+        psi_sample_rows=5_000,
+        sample_seed=42,
+        column_batch_size=8,
+        exact_pair_batch_size=100,
+    )
+    output = (tmp_path / "wide-production").as_uri()
+    result = similarity.run_production(
+        spark,
+        tables,
+        output,
+        specs={table: {"pk_cols": ["pk"]} for table in tables},
+        config=config,
+    )
+    assert result.columns.count() == 42
+    assert result.pairs.count() == 200
+    extraction = [fields for phase, fields in events if phase == "jaccard_extract_batch"]
+    assert extraction and max(fields["columns"] for fields in extraction) <= 8
+    assert len(extraction) == 4
+    samples = [fields for phase, fields in events if phase == "psi_sample_table"]
+    assert len(samples) == 2
+    assert all(fields["sample_rows"] <= 5_000 and fields["columns"] == 10 for fields in samples)
+    representatives = [fields for phase, fields in events if phase == "psi_representatives"]
+    assert len(representatives) == 20
+    assert {fields["source"] for fields in representatives} == {"workspace_sample"}
+    psi_profiles = result.columns.where(F.col("route") == "psi").collect()
+    assert psi_profiles and all(row["psi_sample_rows"] == 5_000 for row in psi_profiles)
+    latest = similarity.read_latest(spark, output)
+    report = json.loads(similarity.read_text(spark, latest.report_uri))
+    assert len(report["psi_sampling"]) == 2
+    assert all(item["actual_sample_count"] <= 5_000 for item in report["psi_sampling"])
+    assert all(item["requested_fraction"] == 0.25 for item in report["psi_sampling"])
+    assert all(
+        item["actual_fraction"] == item["actual_sample_count"] / 20_000
+        for item in report["psi_sampling"]
+    )
 
 
 def test_cli_parses_comma_and_repeatable_tables_and_defaults(monkeypatch):
@@ -616,8 +918,18 @@ def test_cli_parses_comma_and_repeatable_tables_and_defaults(monkeypatch):
         psi_match_threshold=0.05,
         psi_accuracy=10_000,
         psi_representatives=100,
+        psi_sample_rows=100_000,
+        sample_seed=42,
+        column_batch_size=8,
+        exact_pair_batch_size=100,
         timezone="UTC",
     )
+    assert args.column_batch_size == 8 and args.exact_pair_batch_size == 100
+    assert args.psi_sample_rows == 100_000 and args.sample_seed == 42
+    with pytest.raises(SystemExit, match="column-batch-size"):
+        similarity._validate_config(similarity.Config(column_batch_size=0))
+    with pytest.raises(SystemExit, match="exact-pair-batch-size"):
+        similarity._validate_config(similarity.Config(exact_pair_batch_size=0))
 
 
 def test_builtin_selftest_is_end_to_end(spark, capsys):
