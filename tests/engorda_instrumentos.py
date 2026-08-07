@@ -849,12 +849,21 @@ def _strict_lookup_eligible_domain(
     titulo: DataFrame,
     deposito: DataFrame,
 ) -> DataFrame:
-    """Exclui o instrumento inteiro se qualquer referência clonada for inválida.
+    """Exige depósito e exclui o instrumento se uma referência for inválida.
 
-    O domínio usa somente tabelas raw disponíveis. As views adicionais continuam
-    sob responsabilidade do validador Python conectado ao destino.
+    Cada candidato precisa de ao menos uma linha DEPOSITO_AUTOMATICO_IF com o
+    mesmo NUM_IF físico. Depois desse left-semi, contas opcionais do depósito e
+    do título continuam válidas quando nulas; quando informadas, precisam
+    resolver situação 1 e código no formato esperado. O domínio usa somente
+    tabelas raw disponíveis. As views adicionais continuam sob responsabilidade
+    do validador Python conectado ao destino.
     """
     candidatos = dominio.select(COL_NUM_IF).dropDuplicates()
+    depositos_num_if = (deposito
+                        .where(F.col(COL_NUM_IF).isNotNull())
+                        .select(COL_NUM_IF)
+                        .dropDuplicates())
+    candidatos = candidatos.join(depositos_num_if, on=COL_NUM_IF, how="left_semi")
     op = operacao.join(candidatos, on=COL_NUM_IF, how="left_semi").alias("o")
     tos = tipo_oper_objeto_serv.alias("tos")
     top = tipo_operacao.alias("top")
@@ -984,9 +993,10 @@ def _dominio_num_if_produto(spark, config) -> DataFrame:
                 LEFT JOIN EVENTOS_IF E ON E.NUM_IF = FB.NUM_IF
         ),
         DEP_IF AS (
-            SELECT COUNT(DISTINCT DP.NUM_IF) QDEP
+            SELECT DISTINCT DP.NUM_IF
             FROM CETIP.DEPOSITO_AUTOMATICO_IF DP
                 JOIN FILTRO_BASE FB ON FB.NUM_IF = DP.NUM_IF
+            WHERE DP.NUM_IF IS NOT NULL
         ),
         COM_IF AS (
             SELECT COUNT(DISTINCT CM.NUM_IF) QCOM
@@ -1002,6 +1012,7 @@ def _dominio_num_if_produto(spark, config) -> DataFrame:
         )
         SELECT DISTINCT f.NUM_IF
         FROM FLAGS_IF f
+            INNER JOIN DEP_IF                        dep ON dep.NUM_IF = f.NUM_IF
             INNER JOIN CETIP.OPERACAO             o  ON o.NUM_IF = f.NUM_IF
             INNER JOIN CETIP.DADO_OPERACAO        do ON do.NUM_ID_OPERACAO = o.NUM_ID_OPERACAO
             INNER JOIN CETIP.LANCAMENTO           l  ON l.NUM_ID_OPERACAO = o.NUM_ID_OPERACAO
@@ -1009,14 +1020,13 @@ def _dominio_num_if_produto(spark, config) -> DataFrame:
             INNER JOIN CETIP.ESPECIFICACAO_COMITENTE ec
                        ON ec.NUM_ID_ESPECIFICACAO = e2.NUM_ID_ESPECIFICACAO
 
-    Nota: EVENTOS_IF, AGREGADO_BASE, AGREGADO_FLAGS, DEP_IF, COM_IF e CPA_IF são
-    declaradas na query oficial mas NÃO são referenciadas pelo SELECT final — o
-    Spark não materializa CTE não referenciada. Mantidas idênticas à oficial (só
-    CETIP.<TAB> vira parquet.`<path>`). O SELECT final agora faz INNER JOIN com a
-    cadeia OPERACAO -> DADO_OPERACAO / LANCAMENTO / ESPECIFICACAO ->
-    ESPECIFICACAO_COMITENTE, então o domínio efetivo é FILTRO_BASE ∩ instrumentos
-    com CONDICAO_IF ativa de tipo <> 20 ∩ instrumentos que têm essa cadeia de
-    operação/especificação completa (cada INNER JOIN restringe o domínio).
+    Nota: EVENTOS_IF, AGREGADO_BASE, AGREGADO_FLAGS, COM_IF e CPA_IF continuam
+    declaradas mas não são referenciadas pelo SELECT final. DEP_IF é uma relação
+    de chaves distintas e participa por INNER JOIN (equivalente a left-semi):
+    todo NUM_IF elegível precisa ter ao menos um depósito não-nulo, sem ampliar
+    cardinalidade por depósitos duplicados. O domínio efetivo também exige
+    FILTRO_BASE, CONDICAO_IF ativa de tipo <> 20 e a cadeia OPERACAO ->
+    DADO_OPERACAO / LANCAMENTO / ESPECIFICACAO -> ESPECIFICACAO_COMITENTE.
     """
     p_ife = raw_path(config, TABELA_RAIZ)
     p_tit = raw_path(config, "TITULO")
@@ -1090,9 +1100,10 @@ def _dominio_num_if_produto(spark, config) -> DataFrame:
             LEFT JOIN EVENTOS_IF E ON E.NUM_IF = FB.NUM_IF
     ),
     DEP_IF AS (
-        SELECT COUNT(DISTINCT DP.NUM_IF) QDEP
+        SELECT DISTINCT DP.NUM_IF
         FROM parquet.`{p_dep}` DP
             JOIN FILTRO_BASE FB ON FB.NUM_IF = DP.NUM_IF
+        WHERE DP.NUM_IF IS NOT NULL
     ),
     COM_IF AS (
         SELECT COUNT(DISTINCT CM.NUM_IF) QCOM
@@ -1108,6 +1119,7 @@ def _dominio_num_if_produto(spark, config) -> DataFrame:
     )
     SELECT DISTINCT f.NUM_IF
     FROM FLAGS_IF f
+        INNER JOIN DEP_IF dep              ON dep.NUM_IF = f.NUM_IF
         INNER JOIN parquet.`{p_ope}` o  ON o.NUM_IF = f.NUM_IF
         INNER JOIN parquet.`{p_dop}` do ON do.NUM_ID_OPERACAO = o.NUM_ID_OPERACAO
         INNER JOIN parquet.`{p_lan}` l  ON l.NUM_ID_OPERACAO = o.NUM_ID_OPERACAO
@@ -1452,7 +1464,8 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
                          "--n-instrumentos.")
     fonte = _dominio_num_if_produto(spark, config).select(COL_NUM_IF).dropDuplicates()
     logger.info("Domínio de amostragem/validação de NUM_IF: query do produto + "
-                "política raw hard de TOS e contas (P1/P2/título/depósito).")
+                "depósito obrigatório (semi-join distinto) + política raw hard "
+                "de TOS e contas (P1/P2/título/depósito).")
 
     # Poda de domínio: junta as exclusões dos itens 1/3/4 e tira do domínio.
     exclusoes: List[Tuple[str, DataFrame]] = []

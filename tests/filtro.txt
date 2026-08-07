@@ -49,6 +49,13 @@ WHERE NOT EXISTS (
           OR NOT REGEXP_LIKE(TRIM(p2.COD_CONTA_PARTICIPANTE), '^[0-9]{5}\.(40|10)-[0-9]$')
       )
 )
+AND EXISTS (
+    -- Hard requirement: ao menos um depósito do mesmo NUM_IF físico.
+    SELECT 1
+    FROM CETIP.DEPOSITO_AUTOMATICO_IF dep_required
+    WHERE dep_required.NUM_IF = f.NUM_IF
+      AND dep_required.NUM_IF IS NOT NULL
+)
 AND NOT EXISTS (
     SELECT 1
     FROM CETIP.TITULO t

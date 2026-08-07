@@ -530,7 +530,7 @@ def test_business_validation_rejects_invalid_operation_root_cod_if_mapping(spark
 
 
 def test_strict_domain_excludes_any_invalid_operation_and_optional_account_refs(spark):
-    candidates = spark.createDataFrame([(str(i),) for i in range(1, 14)], "NUM_IF string")
+    candidates = spark.createDataFrame([(str(i),) for i in range(1, 15)], "NUM_IF string")
     operations = spark.createDataFrame([
         ("1", "100", "10", "11"),
         ("2", "100", "10", "11"), ("2", "101", "10", "11"),
@@ -545,6 +545,7 @@ def test_strict_domain_excludes_any_invalid_operation_and_optional_account_refs(
         ("11", "100", "10", "11"),
         ("12", "100", "10", "999"),
         ("13", "", "", "11"),
+        ("14", "100", "10", "11"),
     ], "NUM_IF string, NUM_ID_TIPO_OPER_OBJETO_SERV string, "
        "NUM_CONTA_PARTICIPANTE_P1 string, NUM_CONTA_PARTICIPANTE_P2 string")
     tos = spark.createDataFrame([
@@ -565,17 +566,29 @@ def test_strict_domain_excludes_any_invalid_operation_and_optional_account_refs(
        "COD_CONTA_PARTICIPANTE string")
     titulo = spark.createDataFrame([("9", "999"), ("11", None)],
                                    "NUM_IF string, NUM_CONTA_PARTICIPANTE string")
-    deposito = spark.createDataFrame([("10", "12"), ("11", None)],
-                                     "NUM_IF string, NUM_CONTA_PARTICIPANTE string")
+    deposito = spark.createDataFrame(
+        [(str(i), "12" if i == 10 else None) for i in range(1, 14)]
+        + [("1", None), (None, None)],
+        "NUM_IF string, NUM_CONTA_PARTICIPANTE string",
+    )
     result = eng._strict_lookup_eligible_domain(
         candidates, operations, tos, top, accounts, titulo, deposito)
     assert {r.NUM_IF for r in result.collect()} == {"1", "11"}
+    assert result.count() == 2
+
+    deposito_com_14 = deposito.unionByName(
+        spark.createDataFrame([("14", None)], deposito.schema)
+    )
+    result_com_14 = eng._strict_lookup_eligible_domain(
+        candidates, operations, tos, top, accounts, titulo, deposito_com_14)
+    assert {r.NUM_IF for r in result_com_14.collect()} == {"1", "11", "14"}
+    assert result_com_14.count() == 3
 
     numeric_columns = {
         "NUM_ID_TIPO_OPER_OBJETO_SERV", "NUM_CONTA_PARTICIPANTE_P1",
         "NUM_CONTA_PARTICIPANTE_P2", "NUM_ID_TIPO_OPERACAO",
         "NUM_ID_OBJETO_SERVICO", "COD_TIPO_OPERACAO",
-        "NUM_CONTA_PARTICIPANTE", "NUM_ID_SITUACAO_CONTA",
+        "NUM_CONTA_PARTICIPANTE", "NUM_ID_SITUACAO_CONTA", "NUM_IF",
     }
 
     def decimalize(df):
@@ -584,9 +597,64 @@ def test_strict_domain_excludes_any_invalid_operation_and_optional_account_refs(
         return df
 
     decimal_result = eng._strict_lookup_eligible_domain(
-        candidates, decimalize(operations), decimalize(tos), decimalize(top),
-        decimalize(accounts), decimalize(titulo), decimalize(deposito))
-    assert {r.NUM_IF for r in decimal_result.collect()} == {"1", "11"}
+        decimalize(candidates), decimalize(operations), decimalize(tos), decimalize(top),
+        decimalize(accounts), decimalize(titulo), decimalize(deposito_com_14))
+    assert {r.NUM_IF for r in decimal_result.collect()} == {
+        Decimal("1.000000000"), Decimal("11.000000000"), Decimal("14.000000000")
+    }
+    assert decimal_result.count() == 3
+
+
+def test_required_deposit_survives_k2_clone_seam_with_qdep_equal_qife(spark):
+    candidates = spark.createDataFrame([(7,)], "NUM_IF long")
+    operations = spark.createDataFrame(
+        [(7, 100, 10, 11)],
+        "NUM_IF long, NUM_ID_TIPO_OPER_OBJETO_SERV long, "
+        "NUM_CONTA_PARTICIPANTE_P1 long, NUM_CONTA_PARTICIPANTE_P2 long",
+    )
+    tos = spark.createDataFrame(
+        [(100, 200, 44, "S")],
+        "NUM_ID_TIPO_OPER_OBJETO_SERV long, NUM_ID_TIPO_OPERACAO long, "
+        "NUM_ID_OBJETO_SERVICO long, IND_DISPONIVEL_IDENTIFICACAO string",
+    )
+    top = spark.createDataFrame([(200, 1)],
+                                "NUM_ID_TIPO_OPERACAO long, COD_TIPO_OPERACAO long")
+    accounts = spark.createDataFrame(
+        [(10, 1, "12345.40-1"), (11, 1, "54321.10-9")],
+        "NUM_CONTA_PARTICIPANTE long, NUM_ID_SITUACAO_CONTA long, "
+        "COD_CONTA_PARTICIPANTE string",
+    )
+    titulo = spark.createDataFrame([(7, None)],
+                                   "NUM_IF long, NUM_CONTA_PARTICIPANTE long")
+    deposito = spark.createDataFrame([(7, None)],
+                                     "NUM_IF long, NUM_CONTA_PARTICIPANTE long")
+    selected = eng._strict_lookup_eligible_domain(
+        candidates, operations, tos, top, accounts, titulo, deposito)
+    assert [row.NUM_IF for row in selected.collect()] == [7]
+
+    root_source = selected.withColumn("COD_IF", F.lit("OLD"))
+    root_plan = eng.PlanoTabela(
+        name=eng.TABELA_RAIZ, pk_cols=("NUM_IF",), pk_regra="OFFSET_PROPRIO",
+        pk_start=100, pk_passo=1,
+    )
+    root_clones, root_map = eng.clona_tabela(spark, root_plan, root_source, 2, {})
+    deposit_plan = eng.PlanoTabela(
+        name="DEPOSITO_AUTOMATICO_IF",
+        pk_cols=("NUM_IF",),
+        fks_remap=[eng.FkRemap(
+            columns=("NUM_IF",), parent_table=eng.TABELA_RAIZ,
+            parent_columns=("NUM_IF",), principal=True,
+        )],
+        pk_regra="VIA_PAI",
+    )
+    deposit_clones, _ = eng.clona_tabela(
+        spark, deposit_plan, deposito, 2, {eng.TABELA_RAIZ: root_map})
+
+    qife = root_clones.select("NUM_IF").distinct().count()
+    qdep = deposit_clones.select("NUM_IF").distinct().count()
+    assert qife == qdep == 2
+    assert {row.NUM_IF for row in root_clones.select("NUM_IF").collect()} == {100, 101}
+    assert {row.NUM_IF for row in deposit_clones.select("NUM_IF").collect()} == {100, 101}
 
 
 def test_filter_reference_contains_strict_instrument_level_policy():
@@ -594,6 +662,13 @@ def test_filter_reference_contains_strict_instrument_level_policy():
     assert "NOT EXISTS" in text
     assert "NUM_CONTA_PARTICIPANTE_P2" in text
     assert "CETIP.TITULO" in text and "CETIP.DEPOSITO_AUTOMATICO_IF" in text
+    assert """AND EXISTS (
+    -- HARD REQUIREMENT: AO MENOS UM DEPÓSITO DO MESMO NUM_IF FÍSICO.
+    SELECT 1
+    FROM CETIP.DEPOSITO_AUTOMATICO_IF DEP_REQUIRED
+    WHERE DEP_REQUIRED.NUM_IF = F.NUM_IF
+      AND DEP_REQUIRED.NUM_IF IS NOT NULL
+)""" in text
     assert "NUM_ID_SITUACAO_CONTA <> 1" in text
     assert "NUM_ID_SITUACAO_CONTA IN (1, 2)" not in text
     assert "NUM_ID_OBJETO_SERVICO <> 44" in text
