@@ -1,4 +1,5 @@
--- Query Spark SQL que define o domínio de instrumentos a clonar.
+-- Query Spark SQL que define o domínio completo de CDBs a clonar.
+-- Inclui CDB simplificado, com resgate e/ou com escalonamento.
 -- Contrato: retornar somente uma coluna chamada NUM_IF, sem valores nulos.
 -- Use RAW_<TABELA> entre chaves duplas para referenciar uma fonte RAW.
 
@@ -12,8 +13,6 @@ WITH FILTRO_BASE AS (
         INNER JOIN {{RAW_RESGATE}} RES
             ON RES.NUM_CONDICAO_IF = CIF.NUM_CONDICAO_IF
     WHERE IFE.NUM_TIPO_IF = 49
-        AND TIT.COD_TIPO_ESCALONAMENTO IS NULL
-        AND RES.COD_COND_RESGATE = 'SEM TABELA'
         AND IFE.DAT_EXCLUSAO IS NULL
         AND CIF.DAT_EXCLUSAO IS NULL
         AND RES.DAT_EXCLUSAO IS NULL

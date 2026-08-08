@@ -67,9 +67,10 @@ entre os renames, restaure manualmente o backup `<destino>.__previous_*` para
 o caminho fixo `<destino>` antes de consumir a saída.
 
 USO RECOMENDADO:
-    edite JOB em executar_engorda.py e execute:
-    spark-submit --py-files engorda_instrumentos.py \
-      --files cdb_simplificado.sql executar_engorda.py
+    escolha PRODUTO_A_EXECUTAR em executar_engorda_multiproduto.py e execute:
+    spark-submit --py-files engorda_instrumentos_multiproduto.py \
+      --files cdb_simplificado.sql,cdb.sql,rdb.sql \
+      executar_engorda_multiproduto.py
 
 CLI DIRETA (OCI Data Flow — mesmas envs do engorda_tables.py):
     envs: DATAGEN_RAW_BASE_URI, DATAGEN_SPECS_URI, DATAGEN_SYNTHETIC_BASE_URI,
@@ -79,12 +80,12 @@ CLI DIRETA (OCI Data Flow — mesmas envs do engorda_tables.py):
           (+ opcionais DATAGEN_RAW_PREFIX, DATAGEN_SYNTHETIC_PREFIX,
            DATAGEN_CLONE_PREFIX — default específico do perfil)
     argumentos:
-      --produto cdb_simplificado      # perfil obrigatório
+      --produto cdb_simplificado     # ou cdb ou rdb
       --num-ifs 12345,67890         # lista explícita (aceita 1 só), OU
       --n-instrumentos 5 --seed 42  # amostra do domínio definido no SQL
       --query-num-if-sql cdb_simplificado.sql  # override opcional do perfil
       --fator-k 3                   # clones por instrumento (default 1)
-      --meu-numero-prefix 321       # obrigatório no perfil CDB
+      --meu-numero-prefix 321       # obrigatório nos três perfis
       --oracle-code-batch-size 50000  # códigos por round-trip Oracle
       --dry-run                     # valida e loga, não grava
       --pk-safety-band 100000       # folga acima do max real (default 0)
@@ -109,7 +110,7 @@ REGRAS POR PRODUTO:
   A geração segura de COD_IF é obrigatória em todo produto e não pode ser
   desligada; cada produto precisa declarar sua estratégia em chaves_negocio.
 
-CORREÇÕES DO PERFIL CDB (saída carregável por construção):
+CORREÇÕES DOS PERFIS CDB/RDB (saída carregável por construção):
   1. CONDICAO_IF dangling (Cat 1): poda do domínio os NUM_IF cujo subtipo não
      existe na origem; a amostragem repõe até fechar N (--sem-poda-subtipo desliga).
   2. NUM_ID_TRANSF_ARQ_P1/P2 órfãos: anulados nos clones de OPERACAO (nullable) —
@@ -118,7 +119,7 @@ CORREÇÕES DO PERFIL CDB (saída carregável por construção):
      as referenciam. A regra faltantes_seletivos do produto preserva
      o instrumento e anula somente os valores listados nos clones.
 
-API: from engorda_instrumentos import EngordaJob, executar_job.
+API: from engorda_instrumentos_multiproduto import EngordaJob, executar_job.
 
 Comentários e logs em português; helpers copiados do engorda_tables.py estão
 marcados como tal (arquivo único e autocontido, como o Data Flow espera).
@@ -353,7 +354,7 @@ class EngordaJob:
 REGRAS_PRODUTO: Dict[str, Dict[str, Any]] = {
     "cdb_simplificado": {
         "arquivo_sql": "cdb_simplificado.sql",
-        "prefixo_saida": DEFAULT_CLONE_PREFIX,
+        "prefixo_saida": f"{DEFAULT_CLONE_PREFIX}/cdb_simplificado",
         # None desliga os ajustes DAT_* deste produto.
         "ajuste_datas": "standard",
         "tabelas_static": (),
@@ -404,6 +405,26 @@ REGRAS_PRODUTO: Dict[str, Dict[str, Any]] = {
         },
     },
 }
+
+# Os três produtos usam a mesma política técnica de clonagem. O arquivo SQL
+# define o domínio de NUM_IF; o perfil também informa ao Oracle qual tipo de
+# instrumento deve ser usado para gerar um COD_IF novo.
+REGRAS_PRODUTO["cdb"] = copy.deepcopy(REGRAS_PRODUTO["cdb_simplificado"])
+REGRAS_PRODUTO["cdb"]["arquivo_sql"] = "cdb.sql"
+REGRAS_PRODUTO["cdb"]["prefixo_saida"] = (
+    f"{DEFAULT_CLONE_PREFIX}/cdb_completo"
+)
+
+REGRAS_PRODUTO["rdb"] = copy.deepcopy(REGRAS_PRODUTO["cdb_simplificado"])
+REGRAS_PRODUTO["rdb"]["arquivo_sql"] = "rdb.sql"
+REGRAS_PRODUTO["rdb"]["prefixo_saida"] = (
+    f"{DEFAULT_CLONE_PREFIX}/rdb_completo"
+)
+REGRAS_PRODUTO["rdb"]["chaves_negocio"]["cod_if"].update({
+    "tipo_oracle": 50,
+    "padrao": r"^RDB[1-9A-C][0-9]{2}[0-9A-Z]{5}$",
+    "prefixo_dry_run": "RDB100",
+})
 
 
 def _rule_mapping(value: Any, expected: Set[str], context: str) -> Mapping[str, Any]:
