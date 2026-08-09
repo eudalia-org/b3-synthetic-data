@@ -3708,8 +3708,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-Copy agent link
-Report this
-Terms of Service
-
-This paste expires in <30 min. Public IP access. Share what you see with others in seconds with Context.
