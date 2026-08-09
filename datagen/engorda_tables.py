@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 engorda_instrumentos.py — motor multi-produto de sintetização por entidade.
@@ -2937,11 +2936,13 @@ _CONTAGENS_DOMINIO_COLS = (
 )
 
 
-def _monta_query_contagens_dominio(config: dict) -> str:
-    """Monta a query de contagens do domínio CDB sobre os Parquets ENGORDADOS
+def _monta_query_contagens_dominio(config: dict, num_tipo_if: int) -> str:
+    """Monta a query de contagens do domínio sobre os Parquets ENGORDADOS
     (saída sintética em clone_base_path). Só lê os sintéticos recém-gravados — não
-    altera nada."""
+    altera nada. O tipo de instrumento (NUM_TIPO_IF) vem do perfil do produto
+    (cod_if_oracle_type: 49 = CDB, 50 = RDB, etc.), tornando a query genérica."""
     base = clone_base_path(config)
+    tipo_if = int(num_tipo_if)
 
     def src(table: str) -> str:
         path = f"{base}/{table_path_name(table)}"
@@ -2957,7 +2958,7 @@ WITH FILTRO_BASE AS
          INNER JOIN {src("TITULO")} TIT ON TIT.NUM_IF = IFE.NUM_IF
          INNER JOIN {src("CONDICAO_IF")} CIF ON CIF.NUM_IF = IFE.NUM_IF
          INNER JOIN {src("RESGATE")} RES ON RES.NUM_CONDICAO_IF = CIF.NUM_CONDICAO_IF
-    WHERE IFE.NUM_TIPO_IF = 49
+    WHERE IFE.NUM_TIPO_IF = {tipo_if}
       AND TIT.COD_TIPO_ESCALONAMENTO IS NULL
       AND RES.COD_COND_RESGATE = 'SEM TABELA'
       AND IFE.DAT_EXCLUSAO IS NULL
@@ -3025,17 +3026,19 @@ CROSS JOIN AGREGADO_FLAGS F
 """
 
 
-def _loga_contagens_dominio(spark, config: dict, dry_run: bool = False) -> None:
-    """Roda a query de contagens do domínio CDB nos Parquets ENGORDADOS (saída
+def _loga_contagens_dominio(spark, config: dict, num_tipo_if: int,
+                            dry_run: bool = False) -> None:
+    """Roda a query de contagens do domínio nos Parquets ENGORDADOS (saída
     sintética) e escreve o resultado no log. É puramente diagnóstico: qualquer
     falha é logada como aviso e NÃO interrompe nem altera a sintetização. No
-    --dry-run nada foi gravado, então as contagens são puladas."""
+    --dry-run nada foi gravado, então as contagens são puladas. O tipo de
+    instrumento (NUM_TIPO_IF) vem do perfil, deixando a query genérica."""
     if dry_run:
         logger.info("--dry-run: contagens do domínio (dados engordados) puladas "
                     "— nada foi gravado.")
         return
     try:
-        sql = _monta_query_contagens_dominio(config)
+        sql = _monta_query_contagens_dominio(config, num_tipo_if)
         row = spark.sql(sql).first()
         logger.info("=" * 78)
         logger.info("CONTAGENS DO DOMÍNIO (dados engordados — diagnóstico):")
@@ -3341,7 +3344,8 @@ def executa_clonagem(spark, config, spec: dict, *,
                     ",".join(s.get("colunas_data", [])) or "-",
                     ",".join(s.get("colunas_anuladas", [])) or "-")
     logger.info("=" * 78)
-    _loga_contagens_dominio(spark, config, dry_run)
+    _loga_contagens_dominio(spark, config,
+                            business_policy.cod_if_oracle_type, dry_run)
     return stats
 
 
