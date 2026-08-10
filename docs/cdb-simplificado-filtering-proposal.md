@@ -66,12 +66,17 @@ pairing and the `OPERACAO:DADO_OPERACAO:LANCAMENTO = 1:2:1` ratio then hold by c
 Regenerate and run the gate:
 
 ```
-spark-submit profile_cdb_shapes.py --base-uri <raw> --apply-filtros-fonte \
-    --label raw_filtered --report-path <baseline.json>       # rebuild if filters change
+spark-submit profile_cdb_shapes.py --product cdb_simplificado --base-uri <raw> \
+    --apply-filtros-fonte --label raw_filtered --report-path <baseline.json>
 
 spark-submit --jars ojdbc8.jar validate_cdb_simplificado.py \
+    --product cdb_simplificado \
     --shape-baseline <baseline.json> --report-path <report.json>
 ```
+
+The baseline is tagged with its product/`NUM_TIPO_IF` (schema v2); the validator rejects a
+cross-product or wrong-type baseline. Build a per-product baseline
+(`--product cdb`/`rdb`) before enabling shape checks for that product.
 
 Category 7 (shape conformance) fails the run when synthetic shapes don't exist in the
 baseline (7a), the distributions drift (7b), the 1:2:1 operação ratio breaks (7c), or any

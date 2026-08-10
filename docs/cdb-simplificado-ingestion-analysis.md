@@ -149,14 +149,18 @@ hint:
 | 5 | `check_dates` | emissão ≤ vencimento, registro ≤ vencimento, condição início ≤ fim |
 | 6 | `check_lookup_combos` | operação × modalidade × serviço combos → **SEM MODALIDADE** |
 
-Run:
+Run (multi-product; `--product` is required — `cdb_simplificado`, `cdb`, or `rdb`):
 ```
 spark-submit --jars ojdbc8.jar validate_cdb_simplificado.py \
+    --product cdb_simplificado \
     --report-path report.json --fail-severity error --validate-against union
 ```
-Env: `DATAGEN_SYNTHETIC_BASE_URI` (+ `DATAGEN_SYNTHETIC_PREFIX`), `DATAGEN_SOURCE_JDBC_URL`,
-`DATAGEN_SOURCE_DB_USER`, `DATAGEN_SOURCE_DB_PASSWORD`, `DATAGEN_SOURCE_SCHEMA` (default
-`CETIP`) — the same names the other datagen jobs use.
+Env: `DATAGEN_SYNTHETIC_BASE_URI` (+ `DATAGEN_CLONE_PREFIX`, or use `--input-base`),
+`DATAGEN_SOURCE_JDBC_URL`, `DATAGEN_SOURCE_DB_USER`, `DATAGEN_SOURCE_DB_PASSWORD`,
+`DATAGEN_SOURCE_SCHEMA` (default `CETIP`) — the same names the other datagen jobs use.
+`DATAGEN_SYNTHETIC_PREFIX` is deprecated and honored only for `--product cdb_simplificado`.
+The run reports `PASS` / `FAIL` / `PARTIAL`; `PARTIAL` (e.g. RDB pending Task 8 evidence)
+exits non-zero and must not be treated as green.
 
 ---
 

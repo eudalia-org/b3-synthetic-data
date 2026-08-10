@@ -133,16 +133,35 @@ CONDICAO_IF_TABLE = "CONDICAO_IF"
 CONDICAO_IF_PK = "NUM_CONDICAO_IF"
 CONDICAO_IF_TIPO_COL = "COD_TIPO_CONDICAO_IF"
 
-# CDB-simplificado product predicates (image of engorda's FILTROS_FONTE). Each is
-# a Spark SQL boolean expression that must be TRUE for every row of the table.
-DOMAIN_RULES: Dict[str, List[str]] = {
-    "INSTRUMENTO_FINANCEIRO": ["NUM_TIPO_IF = 49", "DAT_EXCLUSAO IS NULL"],
-    "RESGATE": ["UPPER(TRIM(COD_COND_RESGATE)) = 'SEM TABELA'", "DAT_EXCLUSAO IS NULL"],
-    "TITULO": ["COD_TIPO_ESCALONAMENTO IS NULL"],
-    "CONDICAO_IF": ["DAT_EXCLUSAO IS NULL"],
-    "CARTEIRA_COMITENTE": ["QTD_CARTEIRA_COMITENTE > 0"],
-    "CARTEIRA_PARTICIPANTE": ["QTD_CARTEIRA_PARTICIPANTE > 0"],
+# Complete COD_TIPO_CONDICAO_IF inventory from the application
+# (framework/.../instrumentofinanceiro/TipoCondicaoIFDO.java:42-73). Every code that can
+# appear in production must have a REVIEWED physical joined-subclass mapping in
+# SUBTYPE_BY_TIPO before a product using it can be validated strictly. Codes present here
+# but absent from SUBTYPE_BY_TIPO (8 TRIGGER_IN, 18 TRIGGER_OUT, 19 TERMO_MOEDA,
+# 25 TERMO_COMMODITY, 26 PAGTO_MONETARIO, 27 TERMO_INDICE, 28 CORRECAO, 29 TERMO_FLUXO,
+# 30 TRIGGER_CCP) are NOT guessed: their physical subclass table was not confirmed in
+# CondicaoIFDO.hbm.xml during this pass, so an observed instance is reported as
+# `1b.unknown_tipo` (WARN) for review rather than silently accepted.
+EXPECTED_CONDICAO_TYPE_CODES: Dict[str, str] = {
+    "1": "AMORTIZACAO", "2": "JUROS_FIXO", "3": "JUROS_FLUTUANTE", "4": "ATUALIZACAO_POS",
+    "5": "SPREAD", "6": "PARTICIPACAO_NOS_LUCROS", "7": "PREMIO", "8": "TRIGGER_IN",
+    "14": "ATUALIZACAO_PRE", "15": "PREMIO_OPCAO", "16": "TERMO", "17": "PARAMETRO_LIMITE",
+    "18": "TRIGGER_OUT", "19": "TERMO_MOEDA", "20": "RESGATE", "21": "PREMIO_CONTRATO",
+    "22": "OPCAO", "23": "RESET", "24": "DESDOBRAMENTO", "25": "TERMO_COMMODITY",
+    "26": "PAGTO_MONETARIO", "27": "TERMO_INDICE", "28": "CORRECAO", "29": "TERMO_FLUXO",
+    "30": "TRIGGER_CCP",
 }
+# Codes with a physical subclass table still pending confirmation (must be reviewed against
+# CondicaoIFDO.hbm.xml before full-product/RDB strict rollout).
+UNMAPPED_CONDICAO_TYPE_CODES: Tuple[str, ...] = tuple(
+    code for code in EXPECTED_CONDICAO_TYPE_CODES if code not in SUBTYPE_BY_TIPO
+)
+
+# Category 2 domain conformance is evaluated per-instrument with EXISTS semantics
+# (see build_eligible_num_ifs / check_domain), matching the product SQL definitions in
+# tests/{cdb_simplificado,cdb,rdb}.sql. The former row-level DOMAIN_RULES table was
+# removed because it wrongly rejected valid copied closure rows (e.g. a title/resgate that
+# did not itself match the qualifying predicate although its instrument qualified).
 
 # Date-ordering business rules: (table, left_col, op, right_col). Compared only
 # where both dates are present. op is "<=" or "<".
@@ -155,6 +174,7 @@ DATE_RULES: List[Tuple[str, str, str, str]] = [
 
 OPERACAO_TABLE = "OPERACAO"
 DADO_OPERACAO_TABLE = "DADO_OPERACAO"
+OPERACAO_KEY_COL = "NUM_ID_OPERACAO"
 TIPO_OPER_OBJETO_SERV_TABLE = "TIPO_OPER_OBJETO_SERV"
 V_PARAMETRO_SIC_TABLE = "V_PARAMETRO_SIC"
 TIPO_OPERACAO_TABLE = "TIPO_OPERACAO"
@@ -170,6 +190,177 @@ ACCOUNT_REFERENCES: Tuple[Tuple[str, str], ...] = (
 CDB_TIPO_IF = 49
 CDB_OBJETO_SERVICO = 44
 SEM_MODALIDADE_IDS = (6, 16)
+
+
+# ---------------------------------------------------------------------------
+# Product profiles (multi-product validation contract)
+# ---------------------------------------------------------------------------
+# Evidence anchors (application source under framework/):
+#   NUM_TIPO_IF: CDB = 49 (TipoIFDO.java:49), RDB = 50 (TipoIFDO.java:56).
+#   Object service: CDB = 44 (ObjetoServicoDO.java:52), RDB = 45 (ObjetoServicoDO.java:80).
+#   CONDICAO_IF polymorphism: joined-subclass, no discriminator (CondicaoIFDO.hbm.xml)
+#     + type codes (TipoCondicaoIFDO.java:42-73).
+#   COD_IF allocator: CETIP.PKG_CODIGO.F_GETCODIGONOVOIF21(num_tipo_if, date)
+#     (engorda_tables.py:2235).
+# Unresolved RDB values (COD_IF format body, platform code, modalidade, account rule,
+# registration constants, shape) are NOT filled with CDB defaults; the profile marks them
+# unsupported so the run is reported PARTIAL until Task 8 evidence closes them.
+#
+# Capability ledger: every product declares what STRICT semantic validation *requires*
+# and what current evidence *supports*. Any required-but-unsupported capability produces an
+# explicit unsupported finding (see build_capability_findings) and mechanically forces a
+# PARTIAL verdict; it cannot vanish because a check function was disabled.
+CAP_IDENTITY = "identity"
+CAP_DOMAIN = "domain"
+CAP_POLYMORPHISM = "polymorphism"
+CAP_REFERENTIAL = "referential"
+CAP_NOT_NULL = "not_null"
+CAP_CAPACITY = "capacity"
+CAP_DATES = "dates"
+CAP_PRIMARY_KEYS = "primary_keys"
+CAP_CLONE_MAP = "clone_map"
+CAP_LOOKUP_TOS = "lookup_tos"
+CAP_PLATFORM = "platform"
+CAP_ACCOUNT = "account"
+CAP_MODALIDADE = "modalidade"
+CAP_COD_IF_FORMAT = "cod_if_format"
+CAP_COD_OPERACAO_FORMAT = "cod_operacao_format"
+CAP_MEU_NUMERO = "meu_numero"
+CAP_SHAPE = "shape"
+CAP_REGISTRATION_PROFILE = "registration_profile"
+
+ALL_CAPABILITIES: Tuple[str, ...] = (
+    CAP_IDENTITY, CAP_DOMAIN, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
+    CAP_CAPACITY, CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_LOOKUP_TOS,
+    CAP_PLATFORM, CAP_ACCOUNT, CAP_MODALIDADE, CAP_COD_IF_FORMAT,
+    CAP_COD_OPERACAO_FORMAT, CAP_MEU_NUMERO, CAP_SHAPE, CAP_REGISTRATION_PROFILE,
+)
+
+# Hard shape-rule identifiers (subset toggled per product via hard_shape_rules).
+SHAPE_RULE_OP_RATIO = "op_ratio"
+SHAPE_RULE_RESGATE_MAX = "resgate_max"
+SHAPE_RULE_DISTRIBUTION = "distribution"
+
+
+@dataclass(frozen=True)
+class ValidationProfile:
+    name: str
+    num_tipo_if: int
+    default_clone_prefix: str
+    simplified_domain: bool
+    object_service_id: int
+    object_service_code: Optional[str]
+    cod_if_pattern: Optional[str]
+    sic_enabled: bool
+    platform_check_enabled: bool
+    account_check_enabled: bool
+    sem_modalidade_ids: Optional[Tuple[int, ...]]
+    hard_shape_rules: Tuple[str, ...]
+    registration_constants: Optional[Dict[str, Dict[str, object]]]
+    required_capabilities: Tuple[str, ...]
+    supported_capabilities: Tuple[str, ...]
+    evidence_version: int
+
+    def unsupported_required(self) -> Tuple[str, ...]:
+        supported = set(self.supported_capabilities)
+        return tuple(c for c in self.required_capabilities if c not in supported)
+
+
+# CDB simplificado — the known-good product; every capability is supported.
+_SIMPLIFICADO_REQUIRED = ALL_CAPABILITIES
+# Full CDB — strict structural + domain + lookup; simplificado-only shape/registration
+# rules are intentionally NOT required (they must not fail a valid escalonado/multi-resgate
+# CDB). CDB object service 44 and the CDB code prefix are evidence-backed.
+_CDB_REQUIRED = (
+    CAP_IDENTITY, CAP_DOMAIN, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
+    CAP_CAPACITY, CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_LOOKUP_TOS,
+    CAP_PLATFORM, CAP_ACCOUNT, CAP_MODALIDADE, CAP_COD_IF_FORMAT,
+    CAP_COD_OPERACAO_FORMAT, CAP_MEU_NUMERO,
+)
+# RDB — strict structural mode only. Lookup/shape/registration remain BLOCKED (required but
+# unsupported) until Task 8 target evidence is captured; this forces PARTIAL.
+_RDB_REQUIRED = (
+    CAP_IDENTITY, CAP_DOMAIN, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
+    CAP_CAPACITY, CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_LOOKUP_TOS,
+    CAP_COD_OPERACAO_FORMAT, CAP_MEU_NUMERO,
+    # Blocked pending evidence — required so their absence is reported, not silently skipped:
+    CAP_PLATFORM, CAP_ACCOUNT, CAP_MODALIDADE, CAP_COD_IF_FORMAT, CAP_SHAPE,
+    CAP_REGISTRATION_PROFILE,
+)
+_RDB_SUPPORTED = (
+    CAP_IDENTITY, CAP_DOMAIN, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
+    CAP_CAPACITY, CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_LOOKUP_TOS,
+    CAP_COD_OPERACAO_FORMAT, CAP_MEU_NUMERO,
+)
+
+VALIDATION_PROFILES: Dict[str, ValidationProfile] = {
+    "cdb_simplificado": ValidationProfile(
+        name="cdb_simplificado",
+        num_tipo_if=49,
+        default_clone_prefix="sintetizacao_multiproduto/cdb_simplificado",
+        simplified_domain=True,
+        object_service_id=44,
+        object_service_code="CDB",
+        cod_if_pattern=r"^CDB[1-9A-C][0-9]{2}[0-9A-Z]{5}$",
+        sic_enabled=True,
+        platform_check_enabled=True,
+        account_check_enabled=True,
+        sem_modalidade_ids=(6, 16),
+        hard_shape_rules=(SHAPE_RULE_OP_RATIO, SHAPE_RULE_RESGATE_MAX, SHAPE_RULE_DISTRIBUTION),
+        registration_constants=None,  # bound below to REGISTRATION_CONSTANTS
+        required_capabilities=_SIMPLIFICADO_REQUIRED,
+        supported_capabilities=_SIMPLIFICADO_REQUIRED,
+        evidence_version=1,
+    ),
+    "cdb": ValidationProfile(
+        name="cdb",
+        num_tipo_if=49,
+        default_clone_prefix="sintetizacao_multiproduto/cdb_completo",
+        simplified_domain=False,
+        object_service_id=44,
+        object_service_code="CDB",
+        cod_if_pattern=r"^CDB[1-9A-C][0-9]{2}[0-9A-Z]{5}$",
+        sic_enabled=True,
+        platform_check_enabled=True,
+        account_check_enabled=True,
+        sem_modalidade_ids=(6, 16),
+        # op_ratio (1:2:1 operation cluster) is a structural cluster rule, believed
+        # product-agnostic; simplificado-only resgate_max / distribution are NOT enforced.
+        hard_shape_rules=(SHAPE_RULE_OP_RATIO,),
+        registration_constants=None,
+        required_capabilities=_CDB_REQUIRED,
+        supported_capabilities=_CDB_REQUIRED,
+        evidence_version=1,
+    ),
+    "rdb": ValidationProfile(
+        name="rdb",
+        num_tipo_if=50,
+        default_clone_prefix="sintetizacao_multiproduto/rdb_completo",
+        simplified_domain=False,
+        object_service_id=45,  # ObjetoServicoDO.java:80 (NOT 44)
+        object_service_code=None,  # UNKNOWN — do not assume 'RDB'
+        cod_if_pattern=None,  # UNKNOWN — do not promote ^RDB...$ from assumption
+        sic_enabled=False,  # (50,45) SIC mapping unverified — Task 8
+        platform_check_enabled=False,
+        account_check_enabled=False,
+        sem_modalidade_ids=None,  # UNKNOWN for tipo 50
+        hard_shape_rules=(),  # no type-50 baseline yet
+        registration_constants=None,
+        required_capabilities=_RDB_REQUIRED,
+        supported_capabilities=_RDB_SUPPORTED,
+        evidence_version=1,
+    ),
+}
+
+
+def get_validation_profile(name: str) -> ValidationProfile:
+    key = str(name).strip().lower()
+    try:
+        return VALIDATION_PROFILES[key]
+    except KeyError as exc:
+        raise SystemExit(
+            f"unknown --product {name!r}; available: {sorted(VALIDATION_PROFILES)}"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -203,15 +394,50 @@ class Config:
     jdbc_user: Optional[str]
     jdbc_password: Optional[str]
     schema: str
+    product: str = "cdb_simplificado"
 
 
-def read_config(no_oracle: bool) -> Config:
+def resolve_input_base(profile: ValidationProfile, input_base_arg: Optional[str]) -> str:
+    """Resolve the synthetic input tree for the selected product.
+
+    Order (first match wins):
+      1. explicit --input-base;
+      2. DATAGEN_SYNTHETIC_BASE_URI + DATAGEN_CLONE_PREFIX;
+      3. DATAGEN_SYNTHETIC_BASE_URI + profile.default_clone_prefix.
+
+    DATAGEN_SYNTHETIC_PREFIX is intentionally NOT part of the multi-product interface.
+    It is honored (with a deprecation warning) ONLY for cdb_simplificado, to bridge the
+    already-deployed Data Flow application until its arguments are updated.
+    """
+    if input_base_arg and input_base_arg.strip():
+        return input_base_arg.strip().rstrip("/")
     base = os.environ.get("DATAGEN_SYNTHETIC_BASE_URI", "").strip()
     if not base:
-        raise SystemExit("DATAGEN_SYNTHETIC_BASE_URI is required.")
-    prefix = os.environ.get("DATAGEN_SYNTHETIC_PREFIX", "").strip().strip("/")
-    if prefix:
-        base = f"{base.rstrip('/')}/{prefix}"
+        raise SystemExit(
+            "Input base is required: pass --input-base or set DATAGEN_SYNTHETIC_BASE_URI."
+        )
+    base = base.rstrip("/")
+    clone_prefix = os.environ.get("DATAGEN_CLONE_PREFIX", "").strip().strip("/")
+    if clone_prefix:
+        return f"{base}/{clone_prefix}"
+    legacy = os.environ.get("DATAGEN_SYNTHETIC_PREFIX", "").strip().strip("/")
+    if legacy:
+        if profile.name != "cdb_simplificado":
+            raise SystemExit(
+                "DATAGEN_SYNTHETIC_PREFIX is not supported for --product "
+                f"{profile.name}; use DATAGEN_CLONE_PREFIX or --input-base."
+            )
+        logger.warning(
+            "DATAGEN_SYNTHETIC_PREFIX is DEPRECATED; migrate the Data Flow arguments to "
+            "DATAGEN_CLONE_PREFIX or --input-base. Honored here only for cdb_simplificado."
+        )
+        return f"{base}/{legacy}"
+    return f"{base}/{profile.default_clone_prefix}"
+
+
+def read_config(no_oracle: bool, profile: ValidationProfile,
+                input_base_arg: Optional[str] = None) -> Config:
+    resolved = resolve_input_base(profile, input_base_arg)
     jdbc_url = os.environ.get("DATAGEN_SOURCE_JDBC_URL", "").strip() or None
     jdbc_user = os.environ.get("DATAGEN_SOURCE_DB_USER", "").strip() or None
     jdbc_pwd = os.environ.get("DATAGEN_SOURCE_DB_PASSWORD", "")
@@ -221,7 +447,7 @@ def read_config(no_oracle: bool) -> Config:
             "Oracle metadata requires DATAGEN_SOURCE_JDBC_URL and "
             "DATAGEN_SOURCE_DB_USER (or run with --no-oracle)."
         )
-    return Config(base.rstrip("/"), jdbc_url, jdbc_user, jdbc_pwd, schema)
+    return Config(resolved.rstrip("/"), jdbc_url, jdbc_user, jdbc_pwd, schema, profile.name)
 
 
 # ---------------------------------------------------------------------------
@@ -1294,34 +1520,377 @@ def verify_subtype_map_from_baseline(
 
 
 # ---------------------------------------------------------------------------
-# Category 2 - Domain conformance (FILTROS_FONTE image)
+# Product identity preflight (runs before every semantic check)
 # ---------------------------------------------------------------------------
-def check_domain(tables: Dict[str, DataFrame], meta: Metadata, sample: int) -> List[Finding]:
+def check_product_identity(
+    tables: Dict[str, DataFrame], profile: ValidationProfile, sample: int
+) -> List[Finding]:
+    """Assert the output root universe is exactly the selected product's type.
+
+    Errors (never skips) on: missing root table/columns, no active roots, wrong root
+    type, or a mix of root types. This guarantees an RDB dataset validated as --product cdb
+    fails loudly instead of yielding an empty-universe false pass.
+    """
+    cat = "Product identity"
+    root = tables.get(SHAPE_ROOT_TABLE)
+    if root is None:
+        return [Finding("0.identity", cat, SEV_ERROR, SHAPE_ROOT_TABLE, False,
+                        hint="Export INSTRUMENTO_FINANCEIRO in the synthetic output.",
+                        message=f"Root table {SHAPE_ROOT_TABLE} absent; cannot validate "
+                                f"product {profile.name}.")]
+    tipo = resolve(root, "NUM_TIPO_IF")
+    key = resolve(root, SHAPE_ROOT_KEY)
+    excl = resolve(root, "DAT_EXCLUSAO")
+    missing = [n for n, a in (("NUM_TIPO_IF", tipo), (SHAPE_ROOT_KEY, key)) if not a]
+    if missing:
+        return [Finding("0.identity", cat, SEV_ERROR, SHAPE_ROOT_TABLE, False,
+                        column=",".join(missing),
+                        hint="Root must carry NUM_TIPO_IF and NUM_IF for identity.",
+                        message=f"Root table missing column(s) {missing} for product "
+                                f"{profile.name}.")]
+    active = root.where(F.col(excl).isNull()) if excl else root
+    type_counts = (
+        active.select(_norm_code(F.col(tipo)).alias("t"))
+        .groupBy("t").count().collect()
+    )
+    present = {r["t"]: r["count"] for r in type_counts}
+    expected = str(profile.num_tipo_if)
+    n_expected = present.get(expected, 0)
+    wrong = {t: c for t, c in present.items() if t != expected}
     out: List[Finding] = []
-    for table, preds in DOMAIN_RULES.items():
+    out.append(Finding(
+        "0.identity.type", cat,
+        SEV_INFO if n_expected > 0 else SEV_ERROR, SHAPE_ROOT_TABLE, n_expected > 0,
+        count=n_expected, column="NUM_TIPO_IF",
+        hint="" if n_expected else
+             f"No active roots of NUM_TIPO_IF={expected}. Wrong --product for this output?",
+        message=f"Active {SHAPE_ROOT_TABLE} rows with NUM_TIPO_IF={expected} "
+                f"(product {profile.name}).",
+    ))
+    out.append(Finding(
+        "0.identity.mixed", cat,
+        SEV_ERROR if wrong else SEV_INFO, SHAPE_ROOT_TABLE, not wrong,
+        count=sum(wrong.values()), column="NUM_TIPO_IF",
+        sample=sorted(wrong)[:sample],
+        hint="Output mixes root types; a product output must contain a single NUM_TIPO_IF."
+             if wrong else "",
+        message=f"Foreign root NUM_TIPO_IF value(s) present besides {expected}: "
+                f"{sorted(wrong)}." if wrong else
+                f"Only NUM_TIPO_IF={expected} present.",
+    ))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Capability ledger: unsupported required capabilities force PARTIAL
+# ---------------------------------------------------------------------------
+def build_capability_findings(profile: ValidationProfile) -> List[Finding]:
+    """One WARN 'unsupported' finding per required-but-unsupported capability.
+
+    This set is derived from the profile, not from which check functions ran, so a
+    required capability can never disappear because its check was disabled/skipped.
+    """
+    out: List[Finding] = []
+    for cap in profile.unsupported_required():
+        out.append(Finding(
+            f"0.capability.{cap}", "Coverage", SEV_WARN, profile.name, False,
+            column=cap,
+            hint="Capture the target evidence for this product before enabling strict "
+                 "validation of this capability; do NOT inherit CDB defaults.",
+            message=f"Capability {cap!r} is REQUIRED for strict validation of product "
+                    f"{profile.name!r} but is UNSUPPORTED by current evidence "
+                    f"(forces PARTIAL).",
+        ))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Category 2 - Domain conformance (IF-level EXISTS eligibility)
+# ---------------------------------------------------------------------------
+def _active(df: DataFrame) -> DataFrame:
+    col = resolve(df, "DAT_EXCLUSAO")
+    return df.where(F.col(col).isNull()) if col else df
+
+
+def _long_keys(df: DataFrame, col: str, alias: str) -> Optional[DataFrame]:
+    actual = resolve(df, col)
+    if not actual:
+        return None
+    return df.select(F.col(actual).cast("long").alias(alias))
+
+
+def build_eligible_num_ifs(
+    tables: Dict[str, DataFrame], profile: ValidationProfile
+) -> Tuple[Optional[DataFrame], List[str]]:
+    """IF-level eligible root set via left-semi (EXISTS) joins matching the product SQL.
+
+    Returns (eligible_num_if_df keyed NUM_IF, missing_requirements). If a required table or
+    column is absent, returns (None, [...]) so the caller reports availability rather than
+    silently passing.
+    """
+    missing: List[str] = []
+    root = tables.get(SHAPE_ROOT_TABLE)
+    if root is None:
+        return None, [SHAPE_ROOT_TABLE]
+    root_tipo = resolve(root, "NUM_TIPO_IF")
+    root_key = resolve(root, SHAPE_ROOT_KEY)
+    if not root_tipo or not root_key:
+        return None, [f"{SHAPE_ROOT_TABLE}.NUM_TIPO_IF/NUM_IF"]
+
+    universe = _active(root.where(F.col(root_tipo).cast("long") == profile.num_tipo_if)) \
+        .select(F.col(root_key).cast("long").alias("NUM_IF")).dropDuplicates()
+
+    def require(table: str) -> Optional[DataFrame]:
         df = tables.get(table)
         if df is None:
+            missing.append(table)
+        return df
+
+    titulo = require("TITULO")
+    condicao = require("CONDICAO_IF")
+    resgate = require("RESGATE")
+    deposito = require("DEPOSITO_AUTOMATICO_IF")
+    operacao = require(OPERACAO_TABLE)
+    dado = require(DADO_OPERACAO_TABLE)
+    lancamento = require("LANCAMENTO")
+    especificacao = require("ESPECIFICACAO")
+    espec_comitente = require("ESPECIFICACAO_COMITENTE")
+    if missing:
+        return None, missing
+
+    # TITULO existence (non-escalonado for simplificado).
+    esc = resolve(titulo, "COD_TIPO_ESCALONAMENTO")
+    titulo_ok = titulo
+    if profile.simplified_domain and esc:
+        titulo_ok = titulo.where(F.col(esc).isNull())
+    tit_keys = _long_keys(titulo_ok, SHAPE_ROOT_KEY, "NUM_IF")
+
+    # Active CONDICAO_IF joined to an active RESGATE row; for simplificado the resgate must
+    # be 'SEM TABELA'. Full CDB / RDB accept any COD_COND_RESGATE.
+    cif = _active(condicao)
+    cif_key = resolve(cif, CONDICAO_IF_PK)
+    cif_if = resolve(cif, SHAPE_ROOT_KEY)
+    res = _active(resgate)
+    res_key = resolve(res, CONDICAO_IF_PK)
+    res_cond = resolve(res, "COD_COND_RESGATE")
+    if not all([cif_key, cif_if, res_key]):
+        return None, ["CONDICAO_IF/RESGATE key columns"]
+    res_ok = res
+    if profile.simplified_domain and res_cond:
+        res_ok = res.where(F.upper(F.trim(F.col(res_cond).cast("string"))) == "SEM TABELA")
+    res_keys = res_ok.select(F.col(res_key).cast("long").alias(CONDICAO_IF_PK))
+    cif_slim = cif.select(
+        F.col(cif_key).cast("long").alias(CONDICAO_IF_PK),
+        F.col(cif_if).cast("long").alias("NUM_IF"),
+    )
+    resgate_ifs = cif_slim.join(res_keys, CONDICAO_IF_PK, "leftsemi").select("NUM_IF")
+
+    # Active non-resgate condição (COD_TIPO_CONDICAO_IF <> 20) — FLAGS_IF in the product SQL.
+    cif_tipo = resolve(cif, CONDICAO_IF_TIPO_COL)
+    if not cif_tipo:
+        return None, ["CONDICAO_IF.COD_TIPO_CONDICAO_IF"]
+    nonresgate_ifs = cif.where(_norm_code(F.col(cif_tipo)) != "20").select(
+        F.col(cif_if).cast("long").alias("NUM_IF"))
+
+    dep_keys = _long_keys(deposito, SHAPE_ROOT_KEY, "NUM_IF")
+
+    # Operation cluster: OPERACAO with DADO_OPERACAO and LANCAMENTO.
+    op_if = _long_keys(operacao, SHAPE_ROOT_KEY, "NUM_IF")
+    op_id = resolve(operacao, OPERACAO_KEY_COL)
+    dado_op = resolve(dado, OPERACAO_KEY_COL)
+    lan_op = resolve(lancamento, OPERACAO_KEY_COL)
+    if not all([op_if is not None, op_id, dado_op, lan_op]):
+        return None, ["OPERACAO/DADO_OPERACAO/LANCAMENTO key columns"]
+    op_ids = operacao.select(
+        F.col(op_id).cast("long").alias("OP"),
+        F.col(resolve(operacao, SHAPE_ROOT_KEY)).cast("long").alias("NUM_IF"),
+    )
+    op_with_dado = op_ids.join(
+        dado.select(F.col(dado_op).cast("long").alias("OP")).dropDuplicates(), "OP", "leftsemi")
+    op_cluster = op_with_dado.join(
+        lancamento.select(F.col(lan_op).cast("long").alias("OP")).dropDuplicates(),
+        "OP", "leftsemi").select("NUM_IF")
+
+    # Specification cluster: ESPECIFICACAO with ESPECIFICACAO_COMITENTE, reached via OPERACAO.
+    esp_op = resolve(especificacao, OPERACAO_KEY_COL)
+    esp_id = resolve(especificacao, "NUM_ID_ESPECIFICACAO")
+    epc_id = resolve(espec_comitente, "NUM_ID_ESPECIFICACAO")
+    if not all([esp_op, esp_id, epc_id]):
+        return None, ["ESPECIFICACAO/ESPECIFICACAO_COMITENTE key columns"]
+    esp_ok = especificacao.select(
+        F.col(esp_op).cast("long").alias("OP"),
+        F.col(esp_id).cast("long").alias("ESP"),
+    ).join(
+        espec_comitente.select(F.col(epc_id).cast("long").alias("ESP")).dropDuplicates(),
+        "ESP", "leftsemi").select("OP")
+    spec_cluster = op_ids.join(esp_ok, "OP", "leftsemi").select("NUM_IF")
+
+    eligible = universe
+    for req in (tit_keys, resgate_ifs, nonresgate_ifs, dep_keys, op_cluster, spec_cluster):
+        eligible = eligible.join(req.dropDuplicates(), "NUM_IF", "leftsemi")
+    return eligible.dropDuplicates(), []
+
+
+def check_domain(
+    tables: Dict[str, DataFrame], meta: Metadata, sample: int, profile: ValidationProfile
+) -> List[Finding]:
+    cat = "Domain conformance"
+    root = tables.get(SHAPE_ROOT_TABLE)
+    if root is None:
+        return [Finding("2.domain", cat, SEV_ERROR, SHAPE_ROOT_TABLE, False,
+                        message=f"{SHAPE_ROOT_TABLE} absent; cannot evaluate domain.")]
+    eligible, missing = build_eligible_num_ifs(tables, profile)
+    if eligible is None:
+        return [Finding("2.domain.availability", cat, SEV_WARN, ",".join(missing), False,
+                        hint="Include the required domain tables/columns in the output.",
+                        message=f"Domain eligibility unavailable; missing: {missing}.")]
+
+    tipo = resolve(root, "NUM_TIPO_IF")
+    key = resolve(root, SHAPE_ROOT_KEY)
+    active_roots = _active(root.where(F.col(tipo).cast("long") == profile.num_tipo_if)) \
+        .select(F.col(key).cast("long").alias("NUM_IF")).dropDuplicates()
+    ineligible = active_roots.join(eligible, "NUM_IF", "left_anti")
+    c = ineligible.count()
+    hint = (
+        "Instrument is not a valid member of product "
+        f"{profile.name} (product SQL eligibility): missing a qualifying "
+        + ("non-escalonado title / 'SEM TABELA' resgate / " if profile.simplified_domain else "")
+        + "active resgate path, non-resgate condição, deposit, operation cluster, or "
+        "specification cluster."
+    )
+    return [Finding(
+        "2.domain", cat, SEV_ERROR if c else SEV_INFO, SHAPE_ROOT_TABLE, c == 0, count=c,
+        column="NUM_IF", sample=_sample_keys(ineligible, ["NUM_IF"], sample),
+        hint=hint if c else "",
+        message=f"Active {profile.name} roots not eligible per IF-level EXISTS domain.",
+    )]
+
+
+# ---------------------------------------------------------------------------
+# Category 3b - Primary-key integrity (all synthetic Oracle tables)
+# ---------------------------------------------------------------------------
+MAPA_CLONE_NUM_IF_TABLE = "MAPA_CLONE_NUM_IF"
+
+
+def check_primary_keys(
+    tables: Dict[str, DataFrame], meta: Metadata, sample: int, no_oracle: bool
+) -> List[Finding]:
+    """Every synthetic Oracle table must have its PK columns present, non-null, and unique.
+
+    Under --no-oracle there is no PK metadata; emit ONE explicit unsupported finding rather
+    than silently skipping PK validation.
+    """
+    cat = "Primary keys"
+    if no_oracle:
+        return [Finding("3b.pk_unsupported", cat, SEV_WARN, "*", False,
+                        hint="Run with Oracle metadata to validate primary keys.",
+                        message="PK validation unavailable under --no-oracle (no PK metadata).")]
+    out: List[Finding] = []
+    for table, df in tables.items():
+        if table == MAPA_CLONE_NUM_IF_TABLE:
+            continue  # artifact, not an Oracle table (see check_clone_map)
+        if table not in meta.tables:
+            continue  # not an Oracle table in the target schema
+        pk = meta.pk.get(table) or []
+        if not pk:
+            out.append(Finding("3b.pk_missing_meta", cat, SEV_ERROR, table, False,
+                               hint="Table has no primary key in Oracle metadata; confirm it "
+                                    "is a real base table before appending.",
+                               message=f"{table} has no PK defined in Oracle metadata."))
             continue
-        pk_cols = _pk_cols_for(meta, table, df)
-        for pred in preds:
-            try:
-                bad = df.where(F.expr(f"NOT ({pred})"))
-                c = bad.count()
-                out.append(Finding(
-                    "2.domain", "Domain conformance",
-                    SEV_ERROR if c else SEV_INFO, table, c == 0, count=c,
-                    sample=_sample_keys(bad, pk_cols, sample),
-                    hint="Row outside the CDB-simplificado product (FILTROS_FONTE). A "
-                         "fecho/rebind pass re-injected an out-of-product row, or the "
-                         "source filter was not applied.",
-                    message=f"Rows violating domain predicate: {pred}",
-                ))
-            except Exception as exc:  # noqa: BLE001
-                out.append(Finding(
-                    "2.domain", "Domain conformance", SEV_WARN, table, False,
-                    hint="Check that the predicate columns exist in the output.",
-                    message=f"Predicate skipped ({pred}): {exc}",
-                ))
+        resolved = [resolve(df, c) for c in pk]
+        missing = [c for c, a in zip(pk, resolved) if not a]
+        if missing:
+            out.append(Finding("3b.pk_missing_cols", cat, SEV_ERROR, table, False,
+                               column=",".join(missing),
+                               hint="Export the full PK for every synthetic table.",
+                               message=f"{table} missing PK column(s) {missing}."))
+            continue
+        null_pred = reduce(lambda a, b: a | b, [F.col(c).isNull() for c in resolved])
+        null_bad = df.where(null_pred)
+        null_c = null_bad.count()
+        out.append(Finding("3b.pk_not_null", cat, SEV_ERROR if null_c else SEV_INFO,
+                           table, null_c == 0, count=null_c, column=",".join(pk),
+                           sample=_sample_keys(null_bad, resolved, sample),
+                           hint="PK columns must be non-null." if null_c else "",
+                           message=f"{table} PK null in {null_c} row(s)."))
+        total = df.select(*resolved).count()
+        distinct = df.select(*resolved).dropDuplicates().count()
+        dup = total - distinct
+        out.append(Finding("3b.pk_unique", cat, SEV_ERROR if dup else SEV_INFO,
+                           table, dup == 0, count=dup, column=",".join(pk),
+                           hint="PK tuple must be unique." if dup else "",
+                           message=f"{table} has {dup} duplicate PK tuple(s)."))
+    return out
+
+
+def check_clone_map(
+    tables: Dict[str, DataFrame], profile: ValidationProfile, sample: int
+) -> List[Finding]:
+    """Validate the MAPA_CLONE_NUM_IF artifact against the synthetic root output."""
+    cat = "Clone map"
+    mapa = tables.get(MAPA_CLONE_NUM_IF_TABLE)
+    root = tables.get(SHAPE_ROOT_TABLE)
+    if mapa is None:
+        return [Finding("3c.clone_map", cat, SEV_WARN, MAPA_CLONE_NUM_IF_TABLE, False,
+                        hint="Emit MAPA_CLONE_NUM_IF alongside the synthetic tables.",
+                        message="MAPA_CLONE_NUM_IF absent; clone-map integrity unchecked.")]
+    orig = resolve(mapa, "NUM_IF_ORIG") or resolve(mapa, "NUM_IF_ORIGEM")
+    novo = resolve(mapa, "NUM_IF_NOVO")
+    kcol = resolve(mapa, "K") or resolve(mapa, "__clone_k")
+    missing = [n for n, a in (("NUM_IF_ORIG", orig), ("NUM_IF_NOVO", novo)) if not a]
+    if missing:
+        return [Finding("3c.clone_map", cat, SEV_ERROR, MAPA_CLONE_NUM_IF_TABLE, False,
+                        column=",".join(missing),
+                        hint="MAPA_CLONE_NUM_IF must carry NUM_IF_ORIG and NUM_IF_NOVO.",
+                        message=f"MAPA_CLONE_NUM_IF missing column(s) {missing}.")]
+    out: List[Finding] = []
+    # (NUM_IF_ORIG, K) uniqueness — one synthetic per source instance per K.
+    if kcol:
+        pair_total = mapa.select(orig, kcol).count()
+        pair_distinct = mapa.select(orig, kcol).dropDuplicates().count()
+        pair_dup = pair_total - pair_distinct
+        out.append(Finding("3c.clone_map_orig_k_unique", cat,
+                           SEV_ERROR if pair_dup else SEV_INFO, MAPA_CLONE_NUM_IF_TABLE,
+                           pair_dup == 0, count=pair_dup, column="NUM_IF_ORIG,K",
+                           hint="(NUM_IF_ORIG,K) must be unique." if pair_dup else "",
+                           message=f"{pair_dup} duplicate (NUM_IF_ORIG,K) row(s)."))
+    # NUM_IF_NOVO uniqueness.
+    novo_total = mapa.select(novo).count()
+    novo_distinct = mapa.select(novo).dropDuplicates().count()
+    novo_dup = novo_total - novo_distinct
+    out.append(Finding("3c.clone_map_novo_unique", cat,
+                       SEV_ERROR if novo_dup else SEV_INFO, MAPA_CLONE_NUM_IF_TABLE,
+                       novo_dup == 0, count=novo_dup, column="NUM_IF_NOVO",
+                       hint="NUM_IF_NOVO must be unique." if novo_dup else "",
+                       message=f"{novo_dup} duplicate NUM_IF_NOVO value(s)."))
+    if root is not None:
+        rkey = resolve(root, SHAPE_ROOT_KEY)
+        rtipo = resolve(root, "NUM_TIPO_IF")
+        if rkey and rtipo:
+            roots = _active(root.where(F.col(rtipo).cast("long") == profile.num_tipo_if)) \
+                .select(F.col(rkey).cast("long").alias("NUM_IF")).dropDuplicates()
+            map_novo = mapa.select(F.col(novo).cast("long").alias("NUM_IF")).dropDuplicates()
+            # every synthetic root has a map row.
+            roots_wo_map = roots.join(map_novo, "NUM_IF", "left_anti")
+            c1 = roots_wo_map.count()
+            out.append(Finding("3c.clone_map_covers_roots", cat,
+                               SEV_ERROR if c1 else SEV_INFO, MAPA_CLONE_NUM_IF_TABLE,
+                               c1 == 0, count=c1, column="NUM_IF_NOVO",
+                               sample=_sample_keys(roots_wo_map, ["NUM_IF"], sample),
+                               hint="Every synthetic root needs a clone-map row." if c1 else "",
+                               message=f"{c1} synthetic root(s) missing from MAPA_CLONE_NUM_IF."))
+            # no map row points outside the synthetic root output.
+            map_wo_root = map_novo.join(roots, "NUM_IF", "left_anti")
+            c2 = map_wo_root.count()
+            out.append(Finding("3c.clone_map_no_dangling", cat,
+                               SEV_ERROR if c2 else SEV_INFO, MAPA_CLONE_NUM_IF_TABLE,
+                               c2 == 0, count=c2, column="NUM_IF_NOVO",
+                               sample=_sample_keys(map_wo_root, ["NUM_IF"], sample),
+                               hint="Clone-map NUM_IF_NOVO must exist in the root output."
+                                    if c2 else "",
+                               message=f"{c2} MAPA_CLONE_NUM_IF row(s) point outside the root "
+                                       f"output."))
     return out
 
 
@@ -1648,9 +2217,17 @@ def check_required_lookup_frames(
     tipo_df: Optional[DataFrame],
     cdb_object_df: Optional[DataFrame],
     sample: int,
+    profile: Optional["ValidationProfile"] = None,
     lookup_errors: Optional[Dict[str, str]] = None,
 ) -> List[Finding]:
-    """Enforce the three mandatory target-backed CDB registration lookups."""
+    """Enforce the mandatory target-backed registration lookups for the selected product.
+
+    The operation-TOS structural check runs for every product (object service is taken from
+    the profile). Account and platform checks are product-gated: when the profile disables
+    them (unresolved target evidence, e.g. RDB), an explicit unsupported WARN is emitted
+    instead of a CDB-shaped ERROR."""
+    if profile is None:
+        profile = CDB_SIMPLIFICADO_PROFILE
     cat = "Required lookup combinations"
     errors = dict(lookup_errors or {})
     lookup_hint = (
@@ -1883,7 +2460,7 @@ def check_required_lookup_frames(
                     "inner",
                 )
                 .where(
-                    (F.col("objeto_servico_id") == str(CDB_OBJETO_SERVICO))
+                    (F.col("objeto_servico_id") == str(profile.object_service_id))
                     & (F.col("identification_flag") == "S")
                     & (F.col("operation_type_code") == "1")
                 )
@@ -1912,7 +2489,8 @@ def check_required_lookup_frames(
                 column="NUM_ID_TIPO_OPER_OBJETO_SERV",
                 sample=_sample_keys(invalid_operations, operation_sample_cols, sample),
                 hint=(
-                    "Use a nonblank target TOS with NUM_ID_OBJETO_SERVICO=44, trimmed "
+                    "Use a nonblank target TOS with NUM_ID_OBJETO_SERVICO="
+                    f"{profile.object_service_id}, trimmed "
                     "IND_DISPONIVEL_IDENTIFICACAO='S', and joined "
                     "TIPO_OPERACAO.COD_TIPO_OPERACAO exactly '1' (not '2')."
                     if invalid_operation_count else ""
@@ -1954,6 +2532,22 @@ def check_required_lookup_frames(
             message="Target CDB object service must be enabled for the baixa platform.",
         )
 
+    if not profile.account_check_enabled:
+        account_finding = Finding(
+            "6.required.active_account", cat, SEV_WARN, CONTA_PARTICIPANTE_TABLE, False,
+            hint="Capture the RDB/target account-eligibility rule before enabling this check; "
+                 "do not reuse the CDB situacao/access/area/code literals.",
+            message=f"Account eligibility not validated for product {profile.name} "
+                    "(unresolved evidence).",
+        )
+    if not (profile.platform_check_enabled and profile.object_service_code):
+        platform_finding = Finding(
+            "6.required.cdb_platform", cat, SEV_WARN, V_OBJETOS_SERVICO_TABLE, False,
+            hint="Capture the target object-service platform code/flag for this product "
+                 "before enabling this check.",
+            message=f"Object-service platform not validated for product {profile.name} "
+                    "(unresolved COD_OBJETO_SERVICO/IND_PLATAFORMA_BAIXA).",
+        )
     return [account_finding, operation_finding, platform_finding]
 
 
@@ -1963,9 +2557,12 @@ def check_lookup_combo_frames(
     sic_df: Optional[DataFrame],
     tipo_operacao_df: Optional[DataFrame],
     sample: int,
+    profile: Optional["ValidationProfile"] = None,
     lookup_errors: Optional[Dict[str, str]] = None,
 ) -> List[Finding]:
     """Compare synthetic operations with already-loaded Oracle lookup rows."""
+    if profile is None:
+        profile = CDB_SIMPLIFICADO_PROFILE
     cat = "Lookup combinations"
     errors = dict(lookup_errors or {})
     tos_col = resolve(op_df, "NUM_ID_TIPO_OPER_OBJETO_SERV")
@@ -2096,8 +2693,8 @@ def check_lookup_combo_frames(
                 .alias("objeto_servico_id"),
             )
             .where(
-                (F.col("tipo_if") == str(CDB_TIPO_IF))
-                & (F.col("objeto_servico_id") == str(CDB_OBJETO_SERVICO))
+                (F.col("tipo_if") == str(profile.num_tipo_if))
+                & (F.col("objeto_servico_id") == str(profile.object_service_id))
             )
             .select("tos_id")
             .where(F.col("tos_id").isNotNull())
@@ -2112,14 +2709,23 @@ def check_lookup_combo_frames(
             column="NUM_ID_TIPO_OPER_OBJETO_SERV",
             sample=_sample_keys(incompatible, sample_cols, sample),
             hint=f"Use or preserve a TOS mapping exposed by target {V_PARAMETRO_SIC_TABLE} "
-                 f"for NUM_TIPO_IF={CDB_TIPO_IF} and "
-                 f"NUM_ID_OBJETO_SERVICO={CDB_OBJETO_SERVICO}, or prune unsupported source "
-                 "operations. Otherwise align the underlying QAB configuration; "
+                 f"for NUM_TIPO_IF={profile.num_tipo_if} and "
+                 f"NUM_ID_OBJETO_SERVICO={profile.object_service_id}, or prune unsupported "
+                 "source operations. Otherwise align the underlying QAB configuration; "
                  f"{V_PARAMETRO_SIC_TABLE} is a view and must not be updated directly.",
-            message="Resolved operation TOS mappings incompatible with CDB service configuration.",
+            message=f"Resolved operation TOS mappings incompatible with {profile.name} "
+                    "service configuration.",
         ))
 
-    if tipo_cols is None:
+    if profile.sem_modalidade_ids is None:
+        out.append(Finding(
+            "6.combo.sem_modalidade", cat, SEV_WARN, OPERACAO_TABLE, False,
+            hint="Confirm the sem-modalidade IDs for this product before enabling the check; "
+                 "do not reuse the CDB IDs.",
+            message=f"Sem-modalidade check not validated for product {profile.name} "
+                    "(unresolved modalidade IDs).",
+        ))
+    elif tipo_cols is None:
         out.append(Finding(
             "6.combo.sem_modalidade", cat, SEV_WARN, OPERACAO_TABLE, False,
             hint="Check Oracle JDBC credentials/schema, SELECT grants, and target view/table "
@@ -2135,7 +2741,7 @@ def check_lookup_combo_frames(
             .alias("sem_modalidade_flag"),
         ).dropDuplicates(["tipo_operacao_id"])
         sem_modalidade = resolved_ops.where(
-            F.col("modalidade_id").isin(*[str(value) for value in SEM_MODALIDADE_IDS])
+            F.col("modalidade_id").isin(*[str(value) for value in profile.sem_modalidade_ids])
         ).join(F.broadcast(tipo_operacao), "tipo_operacao_id", "left")
         invalid_sem_modalidade = sem_modalidade.where(
             F.coalesce(F.col("sem_modalidade_flag"), F.lit("")) != "S"
@@ -2147,9 +2753,10 @@ def check_lookup_combo_frames(
             OPERACAO_TABLE, invalid_sem_count == 0, count=invalid_sem_count,
             column="NUM_ID_MODALIDADE_LIQUIDACAO,IND_SEM_MODALIDADE_INFOHUB",
             sample=_sample_keys(invalid_sem_modalidade, sample_cols, sample),
-            hint=f"Do not renumber fixed modalidade IDs {SEM_MODALIDADE_IDS}. Preserve a "
-                 "source-compatible modalidade/type pair, or ask the QAB configuration owner "
-                 "to correct TIPO_OPERACAO.IND_SEM_MODALIDADE_INFOHUB only when valid.",
+            hint=f"Do not renumber fixed modalidade IDs {profile.sem_modalidade_ids}. "
+                 "Preserve a source-compatible modalidade/type pair, or ask the QAB "
+                 "configuration owner to correct TIPO_OPERACAO.IND_SEM_MODALIDADE_INFOHUB "
+                 "only when valid.",
             message="Sem-modalidade operation types are not enabled in TIPO_OPERACAO.",
         ))
 
@@ -2173,8 +2780,10 @@ def check_lookup_combo_frames(
 
 def check_lookup_combos(
     spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame], meta: Metadata, sample: int,
-    max_account_keys: int = 1_000_000,
+    max_account_keys: int = 1_000_000, profile: Optional["ValidationProfile"] = None,
 ) -> List[Finding]:
+    if profile is None:
+        profile = CDB_SIMPLIFICADO_PROFILE
     op_df = tables.get(OPERACAO_TABLE)
     if op_df is None:
         existing = [Finding(
@@ -2187,33 +2796,38 @@ def check_lookup_combos(
             hint="Configure and verify Oracle JDBC credentials/schema, SELECT grants, and "
                   "target view/table availability, then rerun against QAB.",
             message="No Oracle connection; cannot resolve valid "
-                    "(tipo_operacao, modalidade, servico) combinations for CDB.",
+                    f"(tipo_operacao, modalidade, servico) combinations for {profile.name}.",
         )]
     else:
         existing = []
 
+    # TOS and TIPO_OPERACAO are always needed (structural TOS existence check runs for every
+    # product). SIC compatibility and platform lookups are product-gated: RDB keeps them
+    # blocked until Task 8 evidence resolves object-service/platform semantics for tipo 50.
     queries = {
         TIPO_OPER_OBJETO_SERV_TABLE: (
             "SELECT NUM_ID_TIPO_OPER_OBJETO_SERV, NUM_ID_TIPO_OPERACAO, "
             "NUM_ID_OBJETO_SERVICO, IND_DISPONIVEL_IDENTIFICACAO "
             f"FROM {cfg.schema}.{TIPO_OPER_OBJETO_SERV_TABLE}"
         ),
-        V_PARAMETRO_SIC_TABLE: (
-            "SELECT DISTINCT NUM_ID_TIPO_OPER_OBJETO_SERV, NUM_TIPO_IF, "
-            f"NUM_ID_OBJETO_SERVICO FROM {cfg.schema}.{V_PARAMETRO_SIC_TABLE} "
-            f"WHERE NUM_TIPO_IF = {CDB_TIPO_IF} "
-            f"AND NUM_ID_OBJETO_SERVICO = {CDB_OBJETO_SERVICO}"
-        ),
         TIPO_OPERACAO_TABLE: (
             "SELECT NUM_ID_TIPO_OPERACAO, IND_SEM_MODALIDADE_INFOHUB, COD_TIPO_OPERACAO "
             f"FROM {cfg.schema}.{TIPO_OPERACAO_TABLE}"
         ),
-        V_OBJETOS_SERVICO_TABLE: (
+    }
+    if profile.sic_enabled:
+        queries[V_PARAMETRO_SIC_TABLE] = (
+            "SELECT DISTINCT NUM_ID_TIPO_OPER_OBJETO_SERV, NUM_TIPO_IF, "
+            f"NUM_ID_OBJETO_SERVICO FROM {cfg.schema}.{V_PARAMETRO_SIC_TABLE} "
+            f"WHERE NUM_TIPO_IF = {profile.num_tipo_if} "
+            f"AND NUM_ID_OBJETO_SERVICO = {profile.object_service_id}"
+        )
+    if profile.platform_check_enabled and profile.object_service_code:
+        queries[V_OBJETOS_SERVICO_TABLE] = (
             "SELECT COD_OBJETO_SERVICO, IND_PLATAFORMA_BAIXA "
             f"FROM {cfg.schema}.{V_OBJETOS_SERVICO_TABLE} "
-            "WHERE COD_OBJETO_SERVICO = 'CDB'"
-        ),
-    }
+            f"WHERE COD_OBJETO_SERVICO = {_sql_literal(profile.object_service_code)}"
+        )
     lookups: Dict[str, DataFrame] = {}
     errors: Dict[str, str] = {}
     if cfg.jdbc_url:
@@ -2229,7 +2843,7 @@ def check_lookup_combos(
     else:
         errors.update({table: "No Oracle connection" for table in queries})
 
-    account_sources_available = all(
+    account_sources_available = profile.account_check_enabled and all(
         tables.get(table) is not None and resolve(tables[table], column) is not None
         for table, column in ACCOUNT_REFERENCES
     )
@@ -2297,6 +2911,7 @@ def check_lookup_combos(
             lookups.get(V_PARAMETRO_SIC_TABLE),
             lookups.get(TIPO_OPERACAO_TABLE),
             sample,
+            profile,
             errors,
         )
 
@@ -2307,6 +2922,7 @@ def check_lookup_combos(
         lookups.get(TIPO_OPERACAO_TABLE),
         lookups.get(V_OBJETOS_SERVICO_TABLE),
         sample,
+        profile,
         errors,
     )
 
@@ -2355,14 +2971,16 @@ def _shape_active(df: DataFrame) -> DataFrame:
     return df.where(F.col(col).isNull()) if col else df
 
 
-def _shape_universe(tables: Dict[str, DataFrame]) -> Optional[DataFrame]:
+def _shape_universe(
+    tables: Dict[str, DataFrame], num_tipo_if: int = SHAPE_TIPO_IF
+) -> Optional[DataFrame]:
     root = tables.get(SHAPE_ROOT_TABLE)
     if root is None:
         return None
     tipo, key = resolve(root, "NUM_TIPO_IF"), resolve(root, SHAPE_ROOT_KEY)
     if not tipo or not key:
         return None
-    df = _shape_active(root.where(F.col(tipo).cast("long") == SHAPE_TIPO_IF))
+    df = _shape_active(root.where(F.col(tipo).cast("long") == num_tipo_if))
     return df.select(F.col(key).cast("long").alias(SHAPE_ROOT_KEY)).dropDuplicates()
 
 
@@ -2411,8 +3029,8 @@ def _shape_counts(
     return result, skipped
 
 
-def _load_shape_baseline(spark: SparkSession, path: str) -> Tuple[dict, List[str]]:
-    """Return ({signature: pct}, ordered metric names parsed from the signatures)."""
+def _load_shape_baseline(spark: SparkSession, path: str) -> Tuple[dict, List[str], dict]:
+    """Return ({signature: pct}, ordered metric names, full baseline dict)."""
     baseline = json.loads(read_text(spark, path))
     shapes = baseline.get("shapes") or []
     if not shapes:
@@ -2422,7 +3040,31 @@ def _load_shape_baseline(spark: SparkSession, path: str) -> Tuple[dict, List[str
             "Shape baseline %s was built WITHOUT --apply-filtros-fonte; the comparison "
             "conflates filter effects with generation distortions.", path)
     metric_names = [part.split("=", 1)[0] for part in shapes[0]["shape"].split("|")]
-    return {s["shape"]: float(s["pct"]) for s in shapes}, metric_names
+    return {s["shape"]: float(s["pct"]) for s in shapes}, metric_names, baseline
+
+
+def _baseline_incompatibility(baseline: dict, profile: ValidationProfile) -> Optional[str]:
+    """Reject a shape baseline that does not belong to the selected product/type.
+
+    A schema-v1 (untagged) baseline is only tolerated for cdb_simplificado, and only as a
+    legacy bridge; every other case is an error so an RDB baseline can never be consumed as
+    type 49 and a simplificado baseline can never validate full CDB/RDB.
+    """
+    version = baseline.get("schema_version")
+    if version is None:
+        if profile.name != "cdb_simplificado":
+            return ("legacy untagged baseline (schema_version missing) is only allowed for "
+                    "cdb_simplificado")
+        return None  # tolerated bridge for the deployed simplificado app
+    if int(version) < 2:
+        return f"unsupported baseline schema_version={version} (expected >= 2)"
+    b_product = baseline.get("product")
+    if b_product is not None and str(b_product) != profile.name:
+        return f"baseline product {b_product!r} != selected product {profile.name!r}"
+    b_type = baseline.get("num_tipo_if")
+    if b_type is not None and int(b_type) != profile.num_tipo_if:
+        return f"baseline num_tipo_if={b_type} != profile num_tipo_if={profile.num_tipo_if}"
+    return None
 
 
 def check_shapes(
@@ -2433,10 +3075,15 @@ def check_shapes(
     unseen_tol_pct: float,
     drift_tol: float,
     op_ratio_tol_pct: float,
+    profile: ValidationProfile,
 ) -> List[Finding]:
     out: List[Finding] = []
     cat = "Shape conformance"
-    universe = _shape_universe(tables)
+    if not profile.hard_shape_rules and not baseline_path:
+        return [Finding("7.shapes", cat, SEV_INFO, SHAPE_ROOT_TABLE, True,
+                        message=f"No shape rules enabled for product {profile.name}; "
+                                "shape checks skipped (see capability ledger).")]
+    universe = _shape_universe(tables, profile.num_tipo_if)
     if universe is None:
         return [Finding("7.shapes", cat, SEV_INFO, SHAPE_ROOT_TABLE, True,
                         message="INSTRUMENTO_FINANCEIRO not in output; shape checks skipped.")]
@@ -2445,11 +3092,20 @@ def check_shapes(
     metric_names = DEFAULT_SHAPE_METRICS
     if baseline_path:
         try:
-            baseline_pct, metric_names = _load_shape_baseline(spark, baseline_path)
+            baseline_pct, metric_names, baseline_raw = _load_shape_baseline(spark, baseline_path)
+            incompat = _baseline_incompatibility(baseline_raw, profile)
+            if incompat:
+                baseline_pct = None
+                out.append(Finding("7.baseline_incompatible", cat, SEV_ERROR,
+                                   SHAPE_ROOT_TABLE, False,
+                                   hint="Produce a baseline for THIS product with "
+                                        "profile_cdb_shapes.py --product "
+                                        f"{profile.name}.",
+                                   message=f"Incompatible shape baseline: {incompat}."))
         except Exception as exc:  # noqa: BLE001
             out.append(Finding("7.baseline", cat, SEV_WARN, SHAPE_ROOT_TABLE, False,
                                hint="Regenerate it with profile_cdb_shapes.py "
-                                    "--apply-filtros-fonte on the raw data.",
+                                    "--apply-filtros-fonte --product for this product.",
                                message=f"Could not load shape baseline {baseline_path}: {exc}"))
 
     counts, skipped = _shape_counts(universe, tables, metric_names)
@@ -2464,13 +3120,15 @@ def check_shapes(
     if total == 0:
         counts.unpersist()
         out.append(Finding("7.shapes", cat, SEV_WARN, SHAPE_ROOT_TABLE, False,
-                           message="No active CDB IFs (NUM_TIPO_IF=49) in the output."))
+                           message=f"No active IFs (NUM_TIPO_IF={profile.num_tipo_if}) in the "
+                                   "output."))
         return out
 
     # 7c - operation ratio invariant: DADO_OPERACAO = 2*OPERACAO, LANCAMENTO = OPERACAO.
     # Holds for ~99% of production IFs that have operations; a synthetic output that
     # binds these tables independently violates it almost everywhere.
-    if all(name in metric_names for name in ("OPERACAO", "DADO_OPERACAO", "LANCAMENTO")):
+    if (SHAPE_RULE_OP_RATIO in profile.hard_shape_rules
+            and all(name in metric_names for name in ("OPERACAO", "DADO_OPERACAO", "LANCAMENTO"))):
         with_ops = counts.where(F.col("OPERACAO") > 0)
         n_ops = with_ops.count()
         if n_ops:
@@ -2494,8 +3152,8 @@ def check_shapes(
             ))
 
     # 7d - RESGATE multiplicity: production has no IF with more than one resgate
-    # condition (0 exceptions in 67.2M IFs profiled).
-    if "RESGATE" in metric_names:
+    # condition (0 exceptions in 67.2M IFs profiled). Simplificado-only empirical rule.
+    if SHAPE_RULE_RESGATE_MAX in profile.hard_shape_rules and "RESGATE" in metric_names:
         multi = counts.where(F.col("RESGATE") > 1)
         c = multi.count()
         out.append(Finding(
@@ -2508,6 +3166,9 @@ def check_shapes(
         ))
 
     # 7a/7b - distribution checks against the baseline profile.
+    if SHAPE_RULE_DISTRIBUTION not in profile.hard_shape_rules:
+        counts.unpersist()
+        return out
     if baseline_pct is None:
         out.append(Finding(
             "7.baseline", cat, SEV_WARN, SHAPE_ROOT_TABLE, False,
@@ -2603,6 +3264,13 @@ REGISTRATION_CONSTANTS: Dict[str, Dict[str, object]] = {
     "EVENTO": {"NUM_ID_ESTADO_EVENTO": 1, "IND_INCORPORA": "N"},
 }
 
+# Bind the empirical (cetip.out-derived) registration profile to CDB simplificado only.
+# Full CDB and RDB deliberately leave registration_constants=None (simplificado-only).
+VALIDATION_PROFILES["cdb_simplificado"] = replace(
+    VALIDATION_PROFILES["cdb_simplificado"], registration_constants=REGISTRATION_CONSTANTS
+)
+CDB_SIMPLIFICADO_PROFILE = VALIDATION_PROFILES["cdb_simplificado"]
+
 
 def _cat8_unavailable(check_id: str, table: str, missing: List[str]) -> Finding:
     return Finding(
@@ -2642,7 +3310,7 @@ def _cat8_bad_rows(
     )
 
 
-def _cat8_active_cdb(tables: Dict[str, DataFrame], required: List[str]):
+def _cat8_active_cdb(tables: Dict[str, DataFrame], required: List[str], num_tipo_if: int = 49):
     table = "INSTRUMENTO_FINANCEIRO"
     df = tables.get(table)
     if df is None:
@@ -2652,7 +3320,7 @@ def _cat8_active_cdb(tables: Dict[str, DataFrame], required: List[str]):
     if missing:
         return None, missing
     return df.where(
-        (_norm_code(F.col(columns["NUM_TIPO_IF"])) == str(CDB_TIPO_IF))
+        (_norm_code(F.col(columns["NUM_TIPO_IF"])) == str(num_tipo_if))
         & F.col(columns["DAT_EXCLUSAO"]).isNull()
     ), []
 
@@ -2726,11 +3394,14 @@ def _cat8_type_mix(
 
 
 def check_log_invariants(
-    tables: Dict[str, DataFrame], sample: int, registration_profile: bool = False
+    tables: Dict[str, DataFrame], sample: int, registration_profile: bool = False,
+    profile: Optional["ValidationProfile"] = None,
 ) -> List[Finding]:
+    if profile is None:
+        profile = CDB_SIMPLIFICADO_PROFILE
     out: List[Finding] = []
     active, active_missing = _cat8_active_cdb(
-        tables, ["NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO", "COD_IF"]
+        tables, ["NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO", "COD_IF"], profile.num_tipo_if
     )
     if active is None:
         out.append(
@@ -2959,10 +3630,19 @@ def check_log_invariants(
         out.append(
             _cat8_unavailable("8b.cod_if_format", "INSTRUMENTO_FINANCEIRO", active_missing)
         )
+    elif profile.cod_if_pattern is None:
+        out.append(Finding(
+            "8b.cod_if_format", "Log-derived invariants", SEV_WARN,
+            "INSTRUMENTO_FINANCEIRO", False, column="COD_IF",
+            hint="Capture the target COD_IF registration format for this product before "
+                 "enabling the format check; do not promote an assumed pattern.",
+            message=f"COD_IF format not validated for product {profile.name} "
+                    "(unresolved registration format).",
+        ))
     else:
         num_if, cod_if = resolve(active, "NUM_IF"), resolve(active, "COD_IF")
         valid = F.coalesce(
-            F.col(cod_if).cast("string").rlike(r"^CDB[1-9A-C][0-9]{2}[0-9A-Z]{5}$"),
+            F.col(cod_if).cast("string").rlike(profile.cod_if_pattern),
             F.lit(False),
         )
         out.append(
@@ -2974,8 +3654,8 @@ def check_log_invariants(
                 [num_if, cod_if],
                 sample,
                 SEV_WARN,
-                "Generate COD_IF with the current CDB registration format.",
-                "Active CDB COD_IF values outside ^CDB[1-9A-C][0-9]{2}[0-9A-Z]{5}$.",
+                f"Generate COD_IF with the {profile.name} registration format.",
+                f"Active {profile.name} COD_IF values outside {profile.cod_if_pattern}.",
             )
         )
 
@@ -3008,7 +3688,7 @@ def check_log_invariants(
                 )
             )
 
-    for table, constants in REGISTRATION_CONSTANTS.items():
+    for table, constants in (profile.registration_constants or {}).items():
         df = tables.get(table)
         check_id = f"8c.registration_constants.{table.lower()}"
         if df is None:
@@ -3045,29 +3725,34 @@ def check_log_invariants(
             )
         )
 
-    profile_parents, profile_missing = _cat8_active_cdb(
-        tables, ["NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO"]
-    )
-    if profile_parents is None:
-        out.extend(
-            _cat8_unavailable(check_id, "INSTRUMENTO_FINANCEIRO", profile_missing)
-            for check_id in ("8c.condicao_type_mix", "8c.evento_type_mix")
+    # Condição/evento exact type-mixes are simplificado-only empirical shapes; a full CDB or
+    # RDB legitimately differs, so they run only when the profile carries the registration
+    # constants (i.e. cdb_simplificado). DADO_OPERACAO (502,503) stays enabled as an
+    # empirical WARN for every product.
+    if profile.registration_constants is not None:
+        profile_parents, profile_missing = _cat8_active_cdb(
+            tables, ["NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO"], profile.num_tipo_if
         )
-    else:
-        out.append(
-            _cat8_type_mix(
-                tables, "8c.condicao_type_mix", "INSTRUMENTO_FINANCEIRO", "NUM_IF",
-                "CONDICAO_IF", "NUM_IF", "COD_TIPO_CONDICAO_IF", ("3", "20"), sample,
-                profile_parents,
+        if profile_parents is None:
+            out.extend(
+                _cat8_unavailable(check_id, "INSTRUMENTO_FINANCEIRO", profile_missing)
+                for check_id in ("8c.condicao_type_mix", "8c.evento_type_mix")
             )
-        )
-        out.append(
-            _cat8_type_mix(
-                tables, "8c.evento_type_mix", "INSTRUMENTO_FINANCEIRO", "NUM_IF",
-                "EVENTO", "NUM_IF", "NUM_TIPO_EVENTO_LEGADO", ("83", "85"), sample,
-                profile_parents,
+        else:
+            out.append(
+                _cat8_type_mix(
+                    tables, "8c.condicao_type_mix", "INSTRUMENTO_FINANCEIRO", "NUM_IF",
+                    "CONDICAO_IF", "NUM_IF", "COD_TIPO_CONDICAO_IF", ("3", "20"), sample,
+                    profile_parents,
+                )
             )
-        )
+            out.append(
+                _cat8_type_mix(
+                    tables, "8c.evento_type_mix", "INSTRUMENTO_FINANCEIRO", "NUM_IF",
+                    "EVENTO", "NUM_IF", "NUM_TIPO_EVENTO_LEGADO", ("83", "85"), sample,
+                    profile_parents,
+                )
+            )
     out.append(
         _cat8_type_mix(
             tables, "8c.dado_operacao_type_mix", OPERACAO_TABLE, "NUM_ID_OPERACAO",
@@ -3082,22 +3767,42 @@ def check_log_invariants(
 # Report
 # ---------------------------------------------------------------------------
 def emit_report(spark: SparkSession, findings: List[Finding],
-                report_path: Optional[str], fail_severity: str) -> int:
+                report_path: Optional[str], fail_severity: str,
+                profile: ValidationProfile, resolved_input: str,
+                table_inventory: List[str], partial_reasons: List[str],
+                baseline_identity: Optional[dict] = None) -> int:
     fail_level = _SEV_ORDER[fail_severity.upper()]
     failing = [f for f in findings if (not f.passed) and _SEV_ORDER[f.severity] >= fail_level]
+
+    # Coverage verdict:
+    #   FAIL    -> any finding at/above fail-severity, or an identity/contract error;
+    #   PARTIAL -> no FAIL, but required coverage is incomplete (unsupported required
+    #              capability, diagnostic --tables subset, or skipped required checks);
+    #   PASS    -> every required check ran and passed.
+    unsupported_caps = list(profile.unsupported_required())
+    reasons = list(partial_reasons)
+    reasons += [f"unsupported required capability: {c}" for c in unsupported_caps]
+    if failing:
+        verdict = "FAIL"
+    elif reasons:
+        verdict = "PARTIAL"
+    else:
+        verdict = "PASS"
 
     by_cat: Dict[str, List[Finding]] = {}
     for f in findings:
         by_cat.setdefault(f.category, []).append(f)
 
     print("\n" + "=" * 78)
-    print("CDB-SIMPLIFICADO SYNTHETIC OUTPUT VALIDATION")
+    print(f"SYNTHETIC OUTPUT VALIDATION — product={profile.name} "
+          f"(NUM_TIPO_IF={profile.num_tipo_if})")
     print("=" * 78)
+    print(f"input: {resolved_input}")
     for cat in sorted(by_cat):
         print(f"\n### {cat}")
         for f in by_cat[cat]:
             status = "PASS" if f.passed else f.severity
-            head = f"  [{status:5}] {f.check_id:22} {f.table}"
+            head = f"  [{status:5}] {f.check_id:26} {f.table}"
             if f.column:
                 head += f".{f.column}"
             if f.count:
@@ -3114,14 +3819,30 @@ def emit_report(spark: SparkSession, findings: List[Finding],
     n_warn = sum(1 for f in findings if not f.passed and f.severity == SEV_WARN)
     print("\n" + "-" * 78)
     print(f"SUMMARY: {len(findings)} checks | {n_err} ERROR | {n_warn} WARN | "
-          f"{'FAIL' if failing else 'OK'} (fail-severity={fail_severity})")
+          f"VERDICT={verdict} (fail-severity={fail_severity})")
+    if reasons and verdict != "FAIL":
+        print("PARTIAL because:")
+        for r in reasons:
+            print(f"  - {r}")
     print("-" * 78)
 
     if report_path:
         payload = {
+            "schema_version": 2,
             "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "product": profile.name,
+            "num_tipo_if": profile.num_tipo_if,
+            "evidence_version": profile.evidence_version,
+            "resolved_input": resolved_input,
+            "table_inventory": sorted(table_inventory),
+            "baseline_identity": baseline_identity,
             "fail_severity": fail_severity,
-            "failed": bool(failing),
+            "verdict": verdict,
+            "failed": verdict == "FAIL",
+            "partial_reasons": reasons,
+            "required_capabilities": list(profile.required_capabilities),
+            "supported_capabilities": list(profile.supported_capabilities),
+            "unsupported_required_capabilities": unsupported_caps,
             "counts": {"error": n_err, "warn": n_warn, "total": len(findings)},
             "findings": [f.to_dict() for f in findings],
         }
@@ -3132,16 +3853,26 @@ def emit_report(spark: SparkSession, findings: List[Finding],
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not write report to %s: %s", report_path, exc)
 
-    return 1 if failing else 0
+    # A PARTIAL run is not a pass: return non-zero so CI cannot treat incomplete
+    # coverage as green.
+    return 0 if verdict == "PASS" else 1
 
 
 # ---------------------------------------------------------------------------
 # CLI / main
 # ---------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Validate the CDB-simplificado synthetic output.")
+    p = argparse.ArgumentParser(
+        description="Validate a synthetic CDB/RDB product output against application rules.")
+    p.add_argument("--product", required=True, choices=sorted(VALIDATION_PROFILES),
+                   help="Product profile to validate against (selects identity type, object "
+                        "service, domain, and which strict checks are supported).")
+    p.add_argument("--input-base", default=None,
+                   help="Explicit synthetic input tree (local or oci:// URI). Overrides "
+                        "DATAGEN_SYNTHETIC_BASE_URI + DATAGEN_CLONE_PREFIX / profile prefix.")
     p.add_argument("--tables", default=None,
-                   help="Comma-separated table list. Default: auto-discover under the base URI.")
+                   help="Comma-separated table list (DIAGNOSTIC ONLY: any explicit subset "
+                        "marks coverage partial and can never yield strict PASS).")
     p.add_argument("--report-path", default=None,
                    help="Write a JSON report to this path (local or oci:// URI).")
     p.add_argument("--shape-baseline", default=None,
@@ -3211,7 +3942,8 @@ def create_spark() -> SparkSession:
 def main() -> None:
     run_started = perf_counter()
     args = parse_args()
-    cfg = read_config(args.no_oracle)
+    profile = get_validation_profile(args.product)
+    cfg = read_config(args.no_oracle, profile, args.input_base)
     spark = create_spark()
     spark.sparkContext.setLogLevel("WARN")
 
@@ -3240,6 +3972,19 @@ def main() -> None:
         )
 
     findings: List[Finding] = []
+    # Coverage ledger: unsupported required capabilities (forces PARTIAL) and any diagnostic
+    # subset / skipped-required reasons.
+    partial_reasons: List[str] = []
+    findings += build_capability_findings(profile)
+    if only:
+        partial_reasons.append(
+            "diagnostic --tables subset restricts coverage (no strict PASS)")
+
+    # Product identity preflight — before any semantic check.
+    findings += _timed(
+        "category 0 identity",
+        lambda: check_product_identity(tables, profile, args.sample_size),
+    )
     findings += _timed(
         "category 1 polymorphism",
         lambda: check_polymorphism(tables, meta, args.sample_size),
@@ -3260,7 +4005,7 @@ def main() -> None:
         )
     findings += _timed(
         "category 2 domain",
-        lambda: check_domain(tables, meta, args.sample_size),
+        lambda: check_domain(tables, meta, args.sample_size, profile),
     )
     if args.max_parent_keys is not None:
         logger.warning("--max-parent-keys is deprecated and ignored; "
@@ -3273,6 +4018,14 @@ def main() -> None:
         ),
     )
     findings += ref_findings
+    findings += _timed(
+        "category 3b primary keys",
+        lambda: check_primary_keys(tables, meta, args.sample_size, args.no_oracle),
+    )
+    findings += _timed(
+        "category 3c clone map",
+        lambda: check_clone_map(tables, profile, args.sample_size),
+    )
     if args.emit_faltantes:
         _timed(
             "category 3 emit faltantes",
@@ -3293,30 +4046,39 @@ def main() -> None:
     findings += _timed(
         "category 6 lookup combinations",
         lambda: check_lookup_combos(
-            spark, cfg, tables, meta, args.sample_size, args.max_residual_keys,
+            spark, cfg, tables, meta, args.sample_size, args.max_residual_keys, profile,
         ),
     )
     findings += _timed(
         "category 7 shapes",
         lambda: check_shapes(
             spark, tables, args.shape_baseline, args.sample_size,
-            args.shape_unseen_tol, args.shape_drift_tol, args.shape_op_ratio_tol,
+            args.shape_unseen_tol, args.shape_drift_tol, args.shape_op_ratio_tol, profile,
         ),
     )
     findings += _timed(
         "category 8 log invariants",
         lambda: check_log_invariants(
-            tables, args.sample_size, args.registration_profile,
+            tables, args.sample_size, args.registration_profile, profile,
         ),
     )
 
     if args.skip_check:
-        findings = [f for f in findings
-                    if not any(f.check_id.startswith(s) for s in args.skip_check)]
+        skipped = [f for f in findings
+                   if any(f.check_id.startswith(s) for s in args.skip_check)]
+        findings = [f for f in findings if f not in skipped]
+        # A skipped REQUIRED check leaves coverage incomplete -> PARTIAL, never PASS.
+        if skipped:
+            partial_reasons.append(
+                f"--skip-check removed {len(skipped)} finding(s): "
+                f"{sorted(args.skip_check)}")
 
     code = _timed(
         "report emission",
-        lambda: emit_report(spark, findings, args.report_path, args.fail_severity),
+        lambda: emit_report(
+            spark, findings, args.report_path, args.fail_severity, profile,
+            cfg.synthetic_base, list(tables), partial_reasons,
+        ),
     )
     logger.info("[PERF] complete run elapsed=%.1fs", perf_counter() - run_started)
     spark.stop()

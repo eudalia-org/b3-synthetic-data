@@ -70,6 +70,20 @@ ROOT_TABLE = "INSTRUMENTO_FINANCEIRO"
 ROOT_KEY = "NUM_IF"
 CDB_TIPO_IF = 49
 
+# Baseline schema/versioning consumed by validate_cdb_simplificado.py to reject a baseline
+# that does not belong to the selected product/type or to an incompatible metric layout.
+BASELINE_SCHEMA_VERSION = 2
+DOMAIN_VERSION = 1
+METRIC_VERSION = 2
+
+# Explicit product selection — no inference. num_tipo_if per TipoIFDO.java (CDB=49, RDB=50);
+# `simplified` gates the SEM TABELA / non-escalonado domain predicates.
+PRODUCTS: Dict[str, Dict[str, object]] = {
+    "cdb_simplificado": {"num_tipo_if": 49, "simplified": True},
+    "cdb": {"num_tipo_if": 49, "simplified": False},
+    "rdb": {"num_tipo_if": 50, "simplified": False},
+}
+
 CONDICAO_IF_TABLE = "CONDICAO_IF"
 CONDICAO_IF_KEY = "NUM_CONDICAO_IF"
 CONDICAO_IF_TYPE = "COD_TIPO_CONDICAO_IF"
@@ -269,23 +283,28 @@ def _norm_code(col):
 # ---------------------------------------------------------------------------
 # Profile construction (pure DataFrame logic; testable without IO)
 # ---------------------------------------------------------------------------
-def build_domain_keys(tables: Dict[str, DataFrame], notes: List[str]) -> DataFrame:
-    """IF-level product domain (team FILTRO_BASE query, 2026-07-21): IFs whose
-    TITULO has no escalonamento AND that have >=1 active CONDICAO_IF with an
-    active RESGATE 'SEM TABELA'. Root predicates (tipo 49, active) are applied
-    by build_universe; this adds the exists-semi-joins."""
+def build_domain_keys(
+    tables: Dict[str, DataFrame], notes: List[str], simplified: bool = True
+) -> DataFrame:
+    """IF-level product domain. For cdb_simplificado: non-escalonado TITULO AND >=1 active
+    CONDICAO_IF with an active RESGATE 'SEM TABELA'. For full CDB / RDB the escalonamento and
+    'SEM TABELA' predicates are dropped (any escalonamento, any COD_COND_RESGATE), matching
+    tests/{cdb,rdb}.sql. Root predicates (num_tipo_if, active) are applied by build_universe."""
     for t in ("TITULO", "CONDICAO_IF", "RESGATE"):
         if t not in tables:
             raise SystemExit(f"--universe domain requires table {t} in the input.")
     tit = tables["TITULO"]
     esc = _ci(tit, "COD_TIPO_ESCALONAMENTO")
-    tit_ok = tit.where(F.col(esc).isNull()) if esc else tit
+    tit_ok = tit.where(F.col(esc).isNull()) if (esc and simplified) else tit
     tit_keys = tit_ok.select(F.col(_ci(tit, ROOT_KEY)).cast("long").alias(ROOT_KEY))
 
     cif = active_rows(tables["CONDICAO_IF"], notes, "CONDICAO_IF")
     res = active_rows(tables["RESGATE"], notes, "RESGATE")
     res_col = _ci(res, "COD_COND_RESGATE")
-    res_ok = res.where(F.upper(F.trim(F.col(res_col).cast("string"))) == "SEM TABELA")
+    if simplified and res_col:
+        res_ok = res.where(F.upper(F.trim(F.col(res_col).cast("string"))) == "SEM TABELA")
+    else:
+        res_ok = res
     res_keys = res_ok.select(
         F.col(_ci(res, CONDICAO_IF_KEY)).cast("long").alias(CONDICAO_IF_KEY)
     )
@@ -297,10 +316,16 @@ def build_domain_keys(tables: Dict[str, DataFrame], notes: List[str]) -> DataFra
         .join(res_keys, CONDICAO_IF_KEY, "leftsemi")
         .select(ROOT_KEY)
     )
-    notes.append(
-        "universe=domain: exists(active CONDICAO_IF with active RESGATE 'SEM TABELA') "
-        "AND TITULO.COD_TIPO_ESCALONAMENTO IS NULL"
-    )
+    if simplified:
+        notes.append(
+            "universe=domain: exists(active CONDICAO_IF with active RESGATE 'SEM TABELA') "
+            "AND TITULO.COD_TIPO_ESCALONAMENTO IS NULL"
+        )
+    else:
+        notes.append(
+            "universe=domain: exists(active CONDICAO_IF with active RESGATE) "
+            "(any escalonamento, any COD_COND_RESGATE)"
+        )
     return tit_keys.join(cif_with_res, ROOT_KEY, "leftsemi").dropDuplicates()
 
 
@@ -308,6 +333,7 @@ def build_universe(
     tables: Dict[str, DataFrame],
     notes: List[str],
     universe_keys: Optional[DataFrame] = None,
+    num_tipo_if: int = CDB_TIPO_IF,
 ) -> DataFrame:
     root = tables.get(ROOT_TABLE)
     if root is None:
@@ -316,7 +342,7 @@ def build_universe(
     key = _ci(root, ROOT_KEY)
     if not tipo or not key:
         raise SystemExit(f"{ROOT_TABLE} lacks NUM_TIPO_IF/{ROOT_KEY}.")
-    df = root.where(F.col(tipo).cast("long") == CDB_TIPO_IF)
+    df = root.where(F.col(tipo).cast("long") == num_tipo_if)
     df = active_rows(df, notes, ROOT_TABLE)
     universe = df.select(F.col(key).cast("long").alias(ROOT_KEY)).dropDuplicates()
     if universe_keys is not None:
@@ -712,6 +738,9 @@ def build_profile(
     apply_filtros: bool = False,
     universe_keys: Optional[DataFrame] = None,
     universe_mode: str = "all",
+    product: str = "cdb_simplificado",
+    num_tipo_if: int = CDB_TIPO_IF,
+    simplified: bool = True,
 ) -> dict:
     """Full profile over an in-memory dict of DataFrames. Pure of IO."""
     notes: List[str] = []
@@ -720,17 +749,23 @@ def build_profile(
         tables = apply_filtros_fonte(tables, notes)
 
     if universe_mode == "domain":
-        domain = build_domain_keys(tables, notes)
+        domain = build_domain_keys(tables, notes, simplified)
         universe_keys = (
             domain if universe_keys is None
             else universe_keys.join(domain, ROOT_KEY, "leftsemi")
         )
-    universe = build_universe(tables, notes, universe_keys)
+    universe = build_universe(tables, notes, universe_keys, num_tipo_if)
     counts, skipped = build_counts(universe, tables, notes)
     counts = add_simplificado_flag(counts, tables, notes)
     counts = counts.cache()
 
     profile = {
+        "schema_version": BASELINE_SCHEMA_VERSION,
+        "product": product,
+        "num_tipo_if": num_tipo_if,
+        "domain_version": DOMAIN_VERSION,
+        "metric_version": METRIC_VERSION,
+        "metrics": metric_names,
         "universe_size": counts.count(),
         "filtros_fonte_applied": apply_filtros,
         "metrics_skipped": skipped,
@@ -793,9 +828,11 @@ def compare_profiles(current: dict, other: dict, other_label: str) -> dict:
 # ---------------------------------------------------------------------------
 def print_report(profile: dict, label: str, top: int) -> None:
     print("\n" + "=" * 78)
-    print(f"CDB-SIMPLIFICADO SHAPE PROFILE — {label}")
+    print(f"CDB/RDB SHAPE PROFILE — {label} (product={profile.get('product')}, "
+          f"NUM_TIPO_IF={profile.get('num_tipo_if', CDB_TIPO_IF)})")
     print("=" * 78)
-    print(f"Universe (NUM_TIPO_IF={CDB_TIPO_IF}, active): {profile['universe_size']} IFs")
+    print(f"Universe (NUM_TIPO_IF={profile.get('num_tipo_if', CDB_TIPO_IF)}, active): "
+          f"{profile['universe_size']} IFs")
     if profile.get("filtros_fonte_applied"):
         print("FILTROS_FONTE row predicates APPLIED — this is the engorda-input image.")
     if profile["metrics_skipped"]:
@@ -1021,7 +1058,11 @@ def run_selftest(spark: SparkSession) -> None:
 # CLI / main
 # ---------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Profile per-IF cardinalities of the CDB domain.")
+    p = argparse.ArgumentParser(description="Profile per-IF cardinalities of a CDB/RDB domain.")
+    p.add_argument("--product", default="cdb_simplificado", choices=sorted(PRODUCTS),
+                   help="Product profile: selects NUM_TIPO_IF (CDB=49, RDB=50) and the "
+                        "domain predicates. The emitted baseline is tagged with it so the "
+                        "validator rejects a cross-product baseline.")
     p.add_argument("--base-uri", default=None,
                    help="Parquet base URI holding one folder per table (raw or synthetic).")
     p.add_argument("--self-test", action="store_true",
@@ -1085,7 +1126,13 @@ def main() -> None:
     tables = read_tables(spark, base, needed)
     logger.info("Read %d/%d tables from %s", len(tables), len(needed), base)
 
+    product_cfg = PRODUCTS[args.product]
+    num_tipo_if = int(product_cfg["num_tipo_if"])
+    simplified = bool(product_cfg["simplified"])
+
     universe_keys = None
+    source_key_count = None
+    source_key_fingerprint = None
     if args.universe_keys:
         kdf = spark.read.parquet(args.universe_keys)
         kcol = _ci(kdf, args.universe_keys_column)
@@ -1097,17 +1144,32 @@ def main() -> None:
         universe_keys = (
             kdf.select(F.col(kcol).cast("long").alias(ROOT_KEY)).dropDuplicates()
         )
+        # Deterministic provenance of the source key set, so a synthetic run and its
+        # baseline can be proven to have been built over exactly the same instruments
+        # (map_mode = exact-source-keys).
+        fp_rows = universe_keys.select(
+            F.count(F.lit(1)).alias("n"),
+            F.sha2(F.concat_ws(",", F.sort_array(F.collect_list(F.col(ROOT_KEY).cast("string")))),
+                   256).alias("fp"),
+        ).collect()[0]
+        source_key_count = int(fp_rows["n"])
+        source_key_fingerprint = fp_rows["fp"]
         logger.info(
             "Universe restricted to %d NUM_IF(s) from %s",
-            universe_keys.count(), args.universe_keys,
+            source_key_count, args.universe_keys,
         )
 
     profile = build_profile(
         tables, args.sample_size, args.apply_filtros_fonte, universe_keys,
-        args.universe,
+        args.universe, args.product, num_tipo_if, simplified,
     )
     profile["label"] = args.label
     profile["universe_mode"] = args.universe
+    profile["map_mode"] = "exact-source-keys" if args.universe_keys else "population"
+    profile["source_key_count"] = source_key_count
+    profile["source_key_fingerprint"] = source_key_fingerprint
+    profile["spark_version"] = spark.version
+    profile["aqe_enabled"] = spark.conf.get("spark.sql.adaptive.enabled", "false") == "true"
     if args.universe_keys:
         profile["universe_keys_source"] = args.universe_keys
     profile["base_uri"] = base
