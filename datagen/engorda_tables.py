@@ -322,6 +322,9 @@ class ProductProfile:
     business_keys: BusinessKeyPolicy
     static_tables: Tuple[str, ...] = ()
     date_strategy: Optional[str] = "standard"
+    # Filtro específico do cdb_simplificado nas contagens de diagnóstico do
+    # domínio: só conta instrumentos cujo RESGATE é 'SEM TABELA'.
+    contagens_filtro_resgate_sem_tabela: bool = False
 
 
 @dataclass(frozen=True)
@@ -357,6 +360,9 @@ REGRAS_PRODUTO: Dict[str, Dict[str, Any]] = {
         "prefixo_saida": f"{DEFAULT_CLONE_PREFIX}/cdb_simplificado",
         # None desliga os ajustes DAT_* deste produto.
         "ajuste_datas": "standard",
+        # Só o cdb_simplificado filtra RES.COD_COND_RESGATE = 'SEM TABELA'
+        # nas contagens de diagnóstico do domínio.
+        "contagens_filtro_resgate_sem_tabela": True,
         "tabelas_static": (),
         "integridade": {
             # None desliga a poda de subtipo.
@@ -414,12 +420,14 @@ REGRAS_PRODUTO["cdb"]["arquivo_sql"] = "cdb.sql"
 REGRAS_PRODUTO["cdb"]["prefixo_saida"] = (
     f"{DEFAULT_CLONE_PREFIX}/cdb_completo"
 )
+REGRAS_PRODUTO["cdb"]["contagens_filtro_resgate_sem_tabela"] = False
 
 REGRAS_PRODUTO["rdb"] = copy.deepcopy(REGRAS_PRODUTO["cdb_simplificado"])
 REGRAS_PRODUTO["rdb"]["arquivo_sql"] = "rdb.sql"
 REGRAS_PRODUTO["rdb"]["prefixo_saida"] = (
     f"{DEFAULT_CLONE_PREFIX}/rdb_completo"
 )
+REGRAS_PRODUTO["rdb"]["contagens_filtro_resgate_sem_tabela"] = False
 REGRAS_PRODUTO["rdb"]["chaves_negocio"]["cod_if"].update({
     "tipo_oracle": 50,
     "padrao": r"^RDB[1-9A-C][0-9]{2}[0-9A-Z]{5}$",
@@ -485,6 +493,7 @@ def _build_product_profile(name: str, raw: Mapping[str, Any]) -> ProductProfile:
     rules = _rule_mapping(raw, {
         "arquivo_sql", "prefixo_saida", "ajuste_datas",
         "tabelas_static", "integridade", "chaves_negocio",
+        "contagens_filtro_resgate_sem_tabela",
     }, f"REGRAS_PRODUTO[{name!r}]")
     integrity_raw = _rule_mapping(rules["integridade"], {
         "subtipo", "nulificar_colunas", "faltantes_seletivos",
@@ -624,6 +633,9 @@ def _build_product_profile(name: str, raw: Mapping[str, Any]) -> ProductProfile:
             )
         ),
         date_strategy=rules["ajuste_datas"],
+        contagens_filtro_resgate_sem_tabela=bool(
+            rules.get("contagens_filtro_resgate_sem_tabela", False)
+        ),
     )
 
 
@@ -2936,11 +2948,16 @@ _CONTAGENS_DOMINIO_COLS = (
 )
 
 
-def _monta_query_contagens_dominio(config: dict, num_tipo_if: int) -> str:
+def _monta_query_contagens_dominio(config: dict, num_tipo_if: int,
+                                   filtro_resgate_sem_tabela: bool = False) -> str:
     """Monta a query de contagens do domínio sobre os Parquets ENGORDADOS
     (saída sintética em clone_base_path). Só lê os sintéticos recém-gravados — não
     altera nada. O tipo de instrumento (NUM_TIPO_IF) vem do perfil do produto
-    (cod_if_oracle_type: 49 = CDB, 50 = RDB, etc.), tornando a query genérica."""
+    (cod_if_oracle_type: 49 = CDB, 50 = RDB, etc.), tornando a query genérica.
+    Os filtros TIT.COD_TIPO_ESCALONAMENTO IS NULL e RES.COD_COND_RESGATE =
+    'SEM TABELA' são específicos do cdb_simplificado e só entram quando
+    filtro_resgate_sem_tabela=True (no cdb completo / rdb nenhum dos dois
+    existe)."""
     base = clone_base_path(config)
     tipo_if = int(num_tipo_if)
 
@@ -2950,6 +2967,14 @@ def _monta_query_contagens_dominio(config: dict, num_tipo_if: int) -> str:
             raise ValueError(f"path do sintético de {table} contém crase e não é SQL-safe")
         return f"parquet.`{path}`"
 
+    # Filtros específicos do cdb_simplificado (escalonamento e resgate 'SEM
+    # TABELA'). No cdb completo / rdb nenhum dos dois pode existir.
+    filtros_cdb_simplificado = (
+        "\n      AND TIT.COD_TIPO_ESCALONAMENTO IS NULL"
+        "\n      AND RES.COD_COND_RESGATE = 'SEM TABELA'"
+        if filtro_resgate_sem_tabela else ""
+    )
+
     return f"""
 WITH FILTRO_BASE AS
 (
@@ -2958,9 +2983,7 @@ WITH FILTRO_BASE AS
          INNER JOIN {src("TITULO")} TIT ON TIT.NUM_IF = IFE.NUM_IF
          INNER JOIN {src("CONDICAO_IF")} CIF ON CIF.NUM_IF = IFE.NUM_IF
          INNER JOIN {src("RESGATE")} RES ON RES.NUM_CONDICAO_IF = CIF.NUM_CONDICAO_IF
-    WHERE IFE.NUM_TIPO_IF = {tipo_if}
-      AND TIT.COD_TIPO_ESCALONAMENTO IS NULL
-      AND RES.COD_COND_RESGATE = 'SEM TABELA'
+    WHERE IFE.NUM_TIPO_IF = {tipo_if}{filtros_cdb_simplificado}
       AND IFE.DAT_EXCLUSAO IS NULL
       AND CIF.DAT_EXCLUSAO IS NULL
       AND RES.DAT_EXCLUSAO IS NULL
@@ -3027,7 +3050,8 @@ CROSS JOIN AGREGADO_FLAGS F
 
 
 def _loga_contagens_dominio(spark, config: dict, num_tipo_if: int,
-                            dry_run: bool = False) -> None:
+                            dry_run: bool = False,
+                            filtro_resgate_sem_tabela: bool = False) -> None:
     """Roda a query de contagens do domínio nos Parquets ENGORDADOS (saída
     sintética) e escreve o resultado no log. É puramente diagnóstico: qualquer
     falha é logada como aviso e NÃO interrompe nem altera a sintetização. No
@@ -3038,7 +3062,8 @@ def _loga_contagens_dominio(spark, config: dict, num_tipo_if: int,
                     "— nada foi gravado.")
         return
     try:
-        sql = _monta_query_contagens_dominio(config, num_tipo_if)
+        sql = _monta_query_contagens_dominio(config, num_tipo_if,
+                                             filtro_resgate_sem_tabela)
         row = spark.sql(sql).first()
         logger.info("=" * 78)
         logger.info("CONTAGENS DO DOMÍNIO (dados engordados — diagnóstico):")
@@ -3345,7 +3370,8 @@ def executa_clonagem(spark, config, spec: dict, *,
                     ",".join(s.get("colunas_anuladas", [])) or "-")
     logger.info("=" * 78)
     _loga_contagens_dominio(spark, config,
-                            business_policy.cod_if_oracle_type, dry_run)
+                            business_policy.cod_if_oracle_type, dry_run,
+                            product_profile.contagens_filtro_resgate_sem_tabela)
     return stats
 
 
