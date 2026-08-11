@@ -443,17 +443,64 @@ def test_columns_are_resolved_case_insensitively(spark):
 
 
 def test_registration_profile_cli_flag(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["validate_cdb_simplificado.py", "--registration-profile"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["validate_cdb_simplificado.py", "--product", "cdb_simplificado",
+         "--registration-profile"],
+    )
 
     assert validator.parse_args().registration_profile is True
 
 
 def test_subtype_map_verification_is_opt_in(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["validate_cdb_simplificado.py"])
+    base = ["validate_cdb_simplificado.py", "--product", "cdb_simplificado"]
+    monkeypatch.setattr(sys, "argv", base)
     assert validator.parse_args().verify_subtype_map is False
 
-    monkeypatch.setattr(sys, "argv", ["validate_cdb_simplificado.py", "--verify-subtype-map"])
+    monkeypatch.setattr(sys, "argv", [*base, "--verify-subtype-map"])
     assert validator.parse_args().verify_subtype_map is True
+
+
+def test_rdb_profile_uses_type_50_without_cdb_registration_rules(spark):
+    tables = valid_tables(spark)
+    tables["INSTRUMENTO_FINANCEIRO"] = tables["INSTRUMENTO_FINANCEIRO"].withColumn(
+        "NUM_TIPO_IF", pyspark.sql.functions.lit(50)
+    )
+
+    findings = by_id(
+        validator.check_log_invariants(
+            tables,
+            sample=5,
+            registration_profile=True,
+            profile=validator.VALIDATION_PROFILES["rdb"],
+        )
+    )
+
+    assert findings["8b.cod_if_format"].passed
+    assert "8c.registration_constants.instrumento_financeiro" not in findings
+    assert "8c.condicao_type_mix" not in findings
+    assert findings["8c.dado_operacao_type_mix"].passed
+
+
+@pytest.mark.parametrize("cod_if", ["rdb101abcde", "RDB_ACENTUADO", "RDB123456789012"])
+def test_rdb_generic_cod_if_format_rejects_non_normalized_values(spark, cod_if):
+    tables = valid_tables(spark)
+    tables["INSTRUMENTO_FINANCEIRO"] = (
+        tables["INSTRUMENTO_FINANCEIRO"]
+        .withColumn("NUM_TIPO_IF", pyspark.sql.functions.lit(50))
+        .withColumn("COD_IF", pyspark.sql.functions.lit(cod_if))
+    )
+
+    finding = by_id(validator.check_log_invariants(
+        tables,
+        sample=5,
+        registration_profile=True,
+        profile=validator.VALIDATION_PROFILES["rdb"],
+    ))["8b.cod_if_format"]
+
+    assert not finding.passed
+    assert finding.severity == validator.SEV_WARN
 
 
 def test_precomputed_subtype_map_matches_curated_map():

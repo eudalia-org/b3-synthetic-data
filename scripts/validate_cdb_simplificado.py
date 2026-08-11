@@ -75,6 +75,7 @@ from typing import Dict, List, Optional, Tuple
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import NumericType
+from pyspark.sql.window import Window
 
 logging.basicConfig(
     level=logging.INFO,
@@ -277,8 +278,8 @@ _CDB_REQUIRED = (
     CAP_PLATFORM, CAP_ACCOUNT, CAP_MODALIDADE, CAP_COD_IF_FORMAT,
     CAP_COD_OPERACAO_FORMAT, CAP_MEU_NUMERO,
 )
-# RDB — strict structural mode only. Lookup/shape/registration remain BLOCKED (required but
-# unsupported) until Task 8 target evidence is captured; this forces PARTIAL.
+# RDB — strict structural mode only. Product-specific lookup, subtype allow-list,
+# shape, and registration semantics remain BLOCKED until target evidence is captured.
 _RDB_REQUIRED = (
     CAP_IDENTITY, CAP_DOMAIN, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
     CAP_CAPACITY, CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_LOOKUP_TOS,
@@ -288,9 +289,9 @@ _RDB_REQUIRED = (
     CAP_REGISTRATION_PROFILE,
 )
 _RDB_SUPPORTED = (
-    CAP_IDENTITY, CAP_DOMAIN, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
-    CAP_CAPACITY, CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_LOOKUP_TOS,
-    CAP_COD_OPERACAO_FORMAT, CAP_MEU_NUMERO,
+    CAP_IDENTITY, CAP_DOMAIN, CAP_REFERENTIAL, CAP_NOT_NULL, CAP_CAPACITY,
+    CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_COD_OPERACAO_FORMAT,
+    CAP_MEU_NUMERO,
 )
 
 VALIDATION_PROFILES: Dict[str, ValidationProfile] = {
@@ -324,9 +325,9 @@ VALIDATION_PROFILES: Dict[str, ValidationProfile] = {
         platform_check_enabled=True,
         account_check_enabled=True,
         sem_modalidade_ids=(6, 16),
-        # op_ratio (1:2:1 operation cluster) is a structural cluster rule, believed
-        # product-agnostic; simplificado-only resgate_max / distribution are NOT enforced.
-        hard_shape_rules=(SHAPE_RULE_OP_RATIO,),
+        # The operation cluster and one-resgate-parent maximum hold across all captured CDBs.
+        # Distribution remains simplificado-only.
+        hard_shape_rules=(SHAPE_RULE_OP_RATIO, SHAPE_RULE_RESGATE_MAX),
         registration_constants=None,
         required_capabilities=_CDB_REQUIRED,
         supported_capabilities=_CDB_REQUIRED,
@@ -339,7 +340,9 @@ VALIDATION_PROFILES: Dict[str, ValidationProfile] = {
         simplified_domain=False,
         object_service_id=45,  # ObjetoServicoDO.java:80 (NOT 44)
         object_service_code=None,  # UNKNOWN — do not assume 'RDB'
-        cod_if_pattern=None,  # UNKNOWN — do not promote ^RDB...$ from assumption
+        # Generic CodigoIF normalization only. The RDB prefix/allocator remains unknown,
+        # so CAP_COD_IF_FORMAT intentionally stays unsupported and forces PARTIAL.
+        cod_if_pattern=r"^[A-Z0-9 -]{1,14}$",
         sic_enabled=False,  # (50,45) SIC mapping unverified — Task 8
         platform_check_enabled=False,
         account_check_enabled=False,
@@ -1660,6 +1663,8 @@ def build_eligible_num_ifs(
 
     # TITULO existence (non-escalonado for simplificado).
     esc = resolve(titulo, "COD_TIPO_ESCALONAMENTO")
+    if profile.simplified_domain and not esc:
+        return None, ["TITULO.COD_TIPO_ESCALONAMENTO"]
     titulo_ok = titulo
     if profile.simplified_domain and esc:
         titulo_ok = titulo.where(F.col(esc).isNull())
@@ -1673,8 +1678,16 @@ def build_eligible_num_ifs(
     res = _active(resgate)
     res_key = resolve(res, CONDICAO_IF_PK)
     res_cond = resolve(res, "COD_COND_RESGATE")
-    if not all([cif_key, cif_if, res_key]):
-        return None, ["CONDICAO_IF/RESGATE key columns"]
+    key_requirements = [
+        (cif_key, "CONDICAO_IF.NUM_CONDICAO_IF"),
+        (cif_if, "CONDICAO_IF.NUM_IF"),
+        (res_key, "RESGATE.NUM_CONDICAO_IF"),
+    ]
+    missing_keys = [name for actual, name in key_requirements if not actual]
+    if missing_keys:
+        return None, missing_keys
+    if profile.simplified_domain and not res_cond:
+        return None, ["RESGATE.COD_COND_RESGATE"]
     res_ok = res
     if profile.simplified_domain and res_cond:
         res_ok = res.where(F.upper(F.trim(F.col(res_cond).cast("string"))) == "SEM TABELA")
@@ -1693,6 +1706,14 @@ def build_eligible_num_ifs(
         F.col(cif_if).cast("long").alias("NUM_IF"))
 
     dep_keys = _long_keys(deposito, SHAPE_ROOT_KEY, "NUM_IF")
+    missing_direct_keys = [
+        name for frame, name in (
+            (tit_keys, "TITULO.NUM_IF"),
+            (dep_keys, "DEPOSITO_AUTOMATICO_IF.NUM_IF"),
+        ) if frame is None
+    ]
+    if missing_direct_keys:
+        return None, missing_direct_keys
 
     # Operation cluster: OPERACAO with DADO_OPERACAO and LANCAMENTO.
     op_if = _long_keys(operacao, SHAPE_ROOT_KEY, "NUM_IF")
@@ -1764,6 +1785,669 @@ def check_domain(
         hint=hint if c else "",
         message=f"Active {profile.name} roots not eligible per IF-level EXISTS domain.",
     )]
+
+
+# ---------------------------------------------------------------------------
+# Category 2b - Full-CDB variant conformance
+# ---------------------------------------------------------------------------
+def check_cdb_variant_rules(
+    tables: Dict[str, DataFrame], sample: int, profile: ValidationProfile
+) -> List[Finding]:
+    """Validate resgate-table and issuance-escalation structures for full CDB only."""
+    if profile.name != "cdb":
+        return []
+
+    cat = "CDB variant conformance"
+    out: List[Finding] = []
+
+    def record(
+        check_id: str,
+        table: str,
+        column: str,
+        bad: DataFrame,
+        keys: List[str],
+        severity: str,
+        hint: str,
+        message: str,
+    ) -> None:
+        count = bad.count()
+        out.append(Finding(
+            check_id, cat, severity if count else SEV_INFO, table, count == 0,
+            count=count, column=column,
+            sample=_sample_keys(bad, keys, sample) if count else [],
+            hint=hint if count else "", message=message,
+        ))
+
+    def try_cast(column: str, sql_type: str):
+        escaped = column.replace("`", "``")
+        return F.expr(f"try_cast(`{escaped}` as {sql_type})")
+
+    root = tables.get("INSTRUMENTO_FINANCEIRO")
+    titulo = tables.get("TITULO")
+    condicao = tables.get("CONDICAO_IF")
+    resgate = tables.get("RESGATE")
+    missing_tables = [
+        name for name, frame in (
+            ("INSTRUMENTO_FINANCEIRO", root), ("TITULO", titulo),
+            ("CONDICAO_IF", condicao), ("RESGATE", resgate),
+        ) if frame is None
+    ]
+    if missing_tables:
+        return [Finding(
+            "2b.availability", cat, SEV_WARN, ",".join(missing_tables), False,
+            hint="Include the core CDB tables before validating product variants.",
+            message=f"CDB variant checks unavailable; missing: {missing_tables}.",
+        )]
+
+    root_cols = {
+        name: resolve(root, name) for name in (
+            "NUM_IF", "NUM_TIPO_IF", "DAT_EMISSAO", "DAT_VENCIMENTO",
+            "COD_SITUACAO_IF",
+        )
+    }
+    titulo_cols = {
+        name: resolve(titulo, name) for name in ("NUM_IF", "COD_TIPO_ESCALONAMENTO")
+    }
+    cond_cols = {
+        name: resolve(condicao, name) for name in (
+            "NUM_CONDICAO_IF", "NUM_IF", "COD_TIPO_CONDICAO_IF",
+            "DAT_INICIO_CONDICAO_IF",
+        )
+    }
+    res_cols = {
+        name: resolve(resgate, name)
+        for name in ("NUM_CONDICAO_IF", "COD_COND_RESGATE", "DAT_RESGATE")
+    }
+    required = {
+        **{f"INSTRUMENTO_FINANCEIRO.{name}": value for name, value in root_cols.items()
+           if name != "COD_SITUACAO_IF"},
+        **{f"TITULO.{name}": value for name, value in titulo_cols.items()},
+        **{f"CONDICAO_IF.{name}": value for name, value in cond_cols.items()
+           if name != "DAT_INICIO_CONDICAO_IF"},
+        **{f"RESGATE.{name}": value for name, value in res_cols.items()},
+    }
+    missing_columns = [name for name, value in required.items() if not value]
+    if missing_columns:
+        return [Finding(
+            "2b.availability", cat, SEV_WARN, ",".join(missing_columns), False,
+            hint="Include the required CDB variant columns in the validation input.",
+            message=f"CDB variant checks unavailable; missing: {missing_columns}.",
+        )]
+
+    roots = _active(root).where(
+        F.col(root_cols["NUM_TIPO_IF"]).cast("long") == profile.num_tipo_if
+    ).select(
+        F.col(root_cols["NUM_IF"]).cast("long").alias("NUM_IF"),
+        try_cast(root_cols["DAT_EMISSAO"], "date").alias("root_emission"),
+        try_cast(root_cols["DAT_VENCIMENTO"], "date").alias("root_maturity"),
+        *(
+            [_norm_code(F.col(root_cols["COD_SITUACAO_IF"])).alias("root_status")]
+            if root_cols["COD_SITUACAO_IF"] else []
+        ),
+    ).dropDuplicates(["NUM_IF"])
+    conditions = _active(condicao).select(
+        F.col(cond_cols["NUM_CONDICAO_IF"]).cast("long").alias("condition_key"),
+        F.col(cond_cols["NUM_IF"]).cast("long").alias("NUM_IF"),
+        _norm_code(F.col(cond_cols["COD_TIPO_CONDICAO_IF"])).alias("condition_type"),
+        *(
+            [try_cast(cond_cols["DAT_INICIO_CONDICAO_IF"], "date").alias("condition_start")]
+            if cond_cols["DAT_INICIO_CONDICAO_IF"] else []
+        ),
+    ).join(roots.select("NUM_IF"), "NUM_IF", "inner")
+    resgate_parents = conditions.where(F.col("condition_type") == "20").join(
+        _active(resgate).select(
+            F.col(res_cols["NUM_CONDICAO_IF"]).cast("long").alias("condition_key"),
+            _norm_code(F.col(res_cols["COD_COND_RESGATE"])).alias("resgate_mode"),
+            try_cast(res_cols["DAT_RESGATE"], "date").alias("resgate_date"),
+        ),
+        "condition_key", "inner",
+    )
+    com_tabela = resgate_parents.where(F.col("resgate_mode") == "COM TABELA")
+
+    schedule = tables.get("CONDICAO_RESGATE")
+    if schedule is None:
+        record(
+            "2b.resgate_schedule_coverage", "CONDICAO_RESGATE", "NUM_CONDICAO_IF",
+            com_tabela, ["NUM_IF", "condition_key"], SEV_ERROR,
+            "Include at least one active CONDICAO_RESGATE per COM TABELA.",
+            "COM TABELA resgates without an available redemption schedule.",
+        )
+    else:
+        schedule_cols = {
+            name: resolve(schedule, name) for name in (
+                "NUM_CONDICAO_IF", "IND_EXCLUIDO", "DAT_RESGATE", "VAL_PERCENTUAL",
+            )
+        }
+        schedule_required = [
+            name for name in ("NUM_CONDICAO_IF", "DAT_RESGATE", "VAL_PERCENTUAL")
+            if not schedule_cols[name]
+        ]
+        if schedule_required:
+            com_count = com_tabela.count()
+            schedule_count = schedule.count()
+            count = max(com_count, schedule_count)
+            sample_frame = schedule if schedule_count else com_tabela
+            out.append(Finding(
+                "2b.resgate_schedule_coverage", cat,
+                SEV_ERROR if count else SEV_INFO, "CONDICAO_RESGATE", count == 0,
+                count=count, column=",".join(schedule_required),
+                sample=_sample_keys(
+                    sample_frame,
+                    ["NUM_IF", "NUM_CONDICAO_IF", "condition_key"],
+                    sample,
+                )
+                if count else [],
+                hint="Include the required redemption schedule columns." if count else "",
+                message=f"Redemption schedule columns unavailable: {schedule_required}.",
+            ))
+        else:
+            active_schedule = schedule
+            if schedule_cols["IND_EXCLUIDO"]:
+                excluded = _norm_code(F.col(schedule_cols["IND_EXCLUIDO"])).isin(
+                    "S", "Y", "1"
+                )
+                active_schedule = schedule.where(F.coalesce(~excluded, F.lit(True)))
+            children = active_schedule.select(
+                F.col(schedule_cols["NUM_CONDICAO_IF"]).cast("long").alias("condition_key"),
+                try_cast(schedule_cols["DAT_RESGATE"], "date").alias("schedule_date"),
+                try_cast(schedule_cols["VAL_PERCENTUAL"], "double").alias(
+                    "schedule_percentage"
+                ),
+            )
+            child_keys = children.select("condition_key").dropDuplicates()
+            record(
+                "2b.resgate_schedule_coverage", "CONDICAO_RESGATE", "NUM_CONDICAO_IF",
+                com_tabela.join(child_keys, "condition_key", "leftanti"),
+                ["NUM_IF", "condition_key"], SEV_ERROR,
+                "Generate at least one active schedule row per COM TABELA.",
+                "COM TABELA resgates without active redemption schedule rows.",
+            )
+            record(
+                "2b.resgate_schedule_parent", "CONDICAO_RESGATE", "NUM_CONDICAO_IF",
+                children.join(
+                    com_tabela.select("condition_key").dropDuplicates(),
+                    "condition_key", "leftanti",
+                ),
+                ["condition_key", "schedule_date"], SEV_ERROR,
+                "Attach schedules only to active type-20 COM TABELA resgates.",
+                "Active schedule rows with invalid, inactive, or SEM TABELA parents.",
+            )
+            record(
+                "2b.resgate_schedule_values", "CONDICAO_RESGATE",
+                "DAT_RESGATE,VAL_PERCENTUAL",
+                children.where(
+                    F.col("schedule_date").isNull()
+                    | F.col("schedule_percentage").isNull()
+                    | F.isnan(F.col("schedule_percentage"))
+                    | (F.abs(F.col("schedule_percentage")) == F.lit(float("inf")))
+                ),
+                ["condition_key", "schedule_date"], SEV_ERROR,
+                "Populate a parseable date and percentage; percentages may exceed 100.",
+                "Active schedule rows with null/invalid date or percentage.",
+            )
+            duplicate_dates = children.where(F.col("schedule_date").isNotNull()).groupBy(
+                "condition_key", "schedule_date"
+            ).count().where(F.col("count") > 1)
+            record(
+                "2b.resgate_schedule_unique_dates", "CONDICAO_RESGATE", "DAT_RESGATE",
+                duplicate_dates, ["condition_key", "schedule_date"], SEV_ERROR,
+                "Use each redemption date at most once per resgate condition.",
+                "Duplicate active redemption dates under the same resgate condition.",
+            )
+            bounded = children.join(
+                com_tabela.select("condition_key", "NUM_IF", "resgate_date"),
+                "condition_key", "inner",
+            ).join(roots, "NUM_IF", "inner")
+            record(
+                "2b.resgate_schedule_dates", "CONDICAO_RESGATE", "DAT_RESGATE",
+                bounded.where(
+                    F.col("schedule_date").isNotNull()
+                    & (
+                        (F.col("root_emission").isNotNull()
+                         & (F.col("schedule_date") < F.col("root_emission")))
+                        | (F.col("root_maturity").isNotNull()
+                           & (F.col("schedule_date") > F.col("root_maturity")))
+                        | (F.col("resgate_date").isNotNull()
+                           & (F.col("schedule_date") > F.col("resgate_date")))
+                    )
+                ),
+                ["NUM_IF", "condition_key", "schedule_date"], SEV_ERROR,
+                "Keep schedule dates between issuance and redemption/maturity.",
+                "Active redemption schedule rows outside the instrument date bounds.",
+            )
+
+    escal_titles = _active(titulo).where(
+        _norm_code(F.col(titulo_cols["COD_TIPO_ESCALONAMENTO"])) == "EMISSAO"
+    ).select(F.col(titulo_cols["NUM_IF"]).cast("long").alias("NUM_IF")).join(
+        roots.select("NUM_IF"), "NUM_IF", "inner"
+    ).dropDuplicates()
+    escal_count = escal_titles.count()
+    juros = tables.get("JUROS_FLUTUANTE")
+    if escal_count and (not cond_cols["DAT_INICIO_CONDICAO_IF"] or juros is None):
+        out.append(Finding(
+            "2b.escalonamento_coverage", cat, SEV_ERROR, "CONDICAO_IF,JUROS_FLUTUANTE",
+            False, count=escal_count, column="DAT_INICIO_CONDICAO_IF,NUM_CONDICAO_IF",
+            sample=_sample_keys(escal_titles, ["NUM_IF"], sample),
+            hint="Include dated active type-3 conditions and JUROS_FLUTUANTE rows.",
+            message="EMISSAO escalonamento has no complete segment data.",
+        ))
+    elif escal_count and juros is not None and cond_cols["DAT_INICIO_CONDICAO_IF"]:
+        juros_key = resolve(juros, "NUM_CONDICAO_IF")
+        escal_conditions = conditions.where(F.col("condition_type") == "3").join(
+            escal_titles, "NUM_IF", "inner"
+        )
+        if not juros_key:
+            incomplete = escal_titles
+            segments = None
+        else:
+            juros_counts = juros.select(
+                F.col(juros_key).cast("long").alias("condition_key")
+            ).groupBy("condition_key").count().withColumnRenamed("count", "juros_count")
+            covered = escal_conditions.join(juros_counts, "condition_key", "left").fillna(
+                0, ["juros_count"]
+            )
+            incomplete = escal_titles.join(
+                escal_conditions.select("NUM_IF").dropDuplicates(), "NUM_IF", "leftanti"
+            ).unionByName(
+                covered.where(F.col("juros_count") < 1).select("NUM_IF")
+            ).dropDuplicates()
+            segments = covered.where(F.col("juros_count") >= 1)
+        record(
+            "2b.escalonamento_coverage", "CONDICAO_IF,JUROS_FLUTUANTE",
+            "COD_TIPO_CONDICAO_IF,NUM_CONDICAO_IF", incomplete, ["NUM_IF"], SEV_ERROR,
+            "Generate active dated type-3 segments, each with an interest row.",
+            "EMISSAO titles without a complete floating-interest segment set.",
+        )
+        if segments is not None:
+            dated = segments.join(roots, "NUM_IF", "inner")
+            invalid_dates = dated.where(
+                F.col("condition_start").isNull()
+                | (F.col("root_emission").isNotNull()
+                   & (F.col("condition_start") < F.col("root_emission")))
+                | (F.col("root_maturity").isNotNull()
+                   & (F.col("condition_start") > F.col("root_maturity")))
+            ).select("NUM_IF")
+            wrong_first = dated.groupBy("NUM_IF").agg(
+                F.min("condition_start").alias("first_start"),
+                F.min("root_emission").alias("root_emission"),
+            ).where(
+                F.col("first_start").isNull()
+                | F.col("root_emission").isNull()
+                | (F.col("first_start") != F.col("root_emission"))
+            ).select("NUM_IF")
+            record(
+                "2b.escalonamento_dates", "CONDICAO_IF", "DAT_INICIO_CONDICAO_IF",
+                invalid_dates.union(wrong_first).dropDuplicates(), ["NUM_IF"], SEV_ERROR,
+                "Keep starts within IF dates and start EMISSAO at issuance.",
+                "EMISSAO instruments with invalid segment dates or first start.",
+            )
+            duplicate_starts = segments.where(F.col("condition_start").isNotNull()).groupBy(
+                "NUM_IF", "condition_start"
+            ).count().where(F.col("count") > 1)
+            record(
+                "2b.escalonamento_unique_dates", "CONDICAO_IF", "DAT_INICIO_CONDICAO_IF",
+                duplicate_starts, ["NUM_IF", "condition_start"], SEV_ERROR,
+                "Use each active segment start at most once per instrument.",
+                "Duplicate active escalonamento segment start dates.",
+            )
+
+            consistency_names = (
+                "NUM_INDICE_VALORIZACAO", "VAL_TAXA_JUROS_FLUTUANTE",
+                "IND_ANO_COMERCIAL", "IND_DIAS_CORRIDOS", "IND_INCORPORA_JUROS",
+                "NUM_ID_TIPO_INDICADOR", "NOM_AGENDA_PAGAMENTO",
+            )
+            consistency_cols = {name: resolve(juros, name) for name in consistency_names}
+            missing_consistency = [
+                name for name, value in consistency_cols.items() if not value
+            ]
+            if missing_consistency and escal_count:
+                out.append(Finding(
+                    "2b.escalonamento_consistency", cat, SEV_ERROR, "JUROS_FLUTUANTE",
+                    False, count=escal_count, column=",".join(missing_consistency),
+                    sample=_sample_keys(escal_titles, ["NUM_IF"], sample),
+                    hint="Include every base-rate configuration column.",
+                    message=f"Cannot compare segment configuration: {missing_consistency}.",
+                ))
+            else:
+                config = segments.select("NUM_IF", "condition_key").join(
+                    juros.select(
+                        F.col(juros_key).cast("long").alias("condition_key"),
+                        *[
+                            F.coalesce(F.trim(F.col(value).cast("string")), F.lit("<NULL>"))
+                            .alias(name)
+                            for name, value in consistency_cols.items()
+                        ],
+                    ),
+                    "condition_key", "inner",
+                )
+                counts = config.groupBy("NUM_IF").agg(*[
+                    F.countDistinct(F.col(name)).alias(name) for name in consistency_names
+                ])
+                inconsistent = counts.where(reduce(
+                    lambda left, right: left | right,
+                    [F.col(name) > 1 for name in consistency_names],
+                ))
+                record(
+                    "2b.escalonamento_consistency", "JUROS_FLUTUANTE",
+                    ",".join(consistency_names), inconsistent, ["NUM_IF"], SEV_ERROR,
+                    "Keep base rate/index configuration constant across active segments.",
+                    "EMISSAO segments with inconsistent base-rate configuration.",
+                )
+
+    pending = tables.get("PENDENCIA_IF")
+    if pending is not None:
+        pending_cols = {
+            name: resolve(pending, name) for name in (
+                "NUM_ID_PENDENCIA_IF", "NUM_IF", "NUM_ID_TIPO_PENDENCIA",
+                "DAT_INICIO_PENDENCIA", "DAT_FIM_PENDENCIA",
+            )
+        }
+        required_pending = [
+            name for name in (
+                "NUM_IF", "NUM_ID_TIPO_PENDENCIA", "DAT_INICIO_PENDENCIA",
+                "DAT_FIM_PENDENCIA",
+            ) if not pending_cols[name]
+        ]
+        if required_pending:
+            out.append(Finding(
+                "2b.pendencia_availability", cat, SEV_WARN, "PENDENCIA_IF", False,
+                column=",".join(required_pending),
+                hint="Include pending lifecycle columns to validate workflow history.",
+                message=f"Pending-history checks unavailable: {required_pending}.",
+            ))
+        else:
+            pending_rows = pending.select(
+                *(
+                    [F.col(pending_cols["NUM_ID_PENDENCIA_IF"]).alias("pending_key")]
+                    if pending_cols["NUM_ID_PENDENCIA_IF"] else []
+                ),
+                F.col(pending_cols["NUM_IF"]).cast("long").alias("NUM_IF"),
+                _norm_code(F.col(pending_cols["NUM_ID_TIPO_PENDENCIA"])).alias(
+                    "pending_type"
+                ),
+                try_cast(pending_cols["DAT_INICIO_PENDENCIA"], "date").alias(
+                    "pending_start"
+                ),
+                try_cast(pending_cols["DAT_FIM_PENDENCIA"], "date").alias("pending_end"),
+                (
+                    F.col(pending_cols["DAT_INICIO_PENDENCIA"]).isNotNull()
+                    & (F.trim(F.col(pending_cols["DAT_INICIO_PENDENCIA"]).cast("string")) != "")
+                ).alias("pending_start_present"),
+                (
+                    F.col(pending_cols["DAT_FIM_PENDENCIA"]).isNotNull()
+                    & (F.trim(F.col(pending_cols["DAT_FIM_PENDENCIA"]).cast("string")) != "")
+                ).alias("pending_end_present"),
+                (
+                    F.col(pending_cols["DAT_FIM_PENDENCIA"]).isNull()
+                    | (F.trim(F.col(pending_cols["DAT_FIM_PENDENCIA"]).cast("string")) == "")
+                ).alias("pending_open"),
+            )
+            pending_keys = (
+                ["pending_key"] if "pending_key" in pending_rows.columns else ["NUM_IF"]
+            )
+            record(
+                "2b.pendencia_dates", "PENDENCIA_IF",
+                "DAT_INICIO_PENDENCIA<=DAT_FIM_PENDENCIA",
+                pending_rows.where(
+                    (F.col("pending_start_present") & F.col("pending_start").isNull())
+                    | (F.col("pending_end_present") & F.col("pending_end").isNull())
+                    | (
+                        F.col("pending_start").isNotNull()
+                        & F.col("pending_end").isNotNull()
+                        & (F.col("pending_start") > F.col("pending_end"))
+                    )
+                ),
+                pending_keys, SEV_WARN,
+                "Close pending rows on or after their start date.",
+                "Pending-history rows whose end precedes their start.",
+            )
+            if root_cols["COD_SITUACAO_IF"]:
+                open_final = pending_rows.where(
+                    F.col("pending_type").isin("1", "29") & F.col("pending_open")
+                ).join(roots.select("NUM_IF", "root_status"), "NUM_IF", "inner").where(
+                    F.col("root_status") == "0"
+                )
+                record(
+                    "2b.pendencia_open_final", "PENDENCIA_IF",
+                    "DAT_FIM_PENDENCIA,COD_SITUACAO_IF", open_final,
+                    pending_keys, SEV_WARN,
+                    "Close type-1/type-29 pending rows before returning the IF to status 0.",
+                    "Final-status CDBs retaining an open registration pending row.",
+                )
+            else:
+                out.append(Finding(
+                    "2b.pendencia_open_final", cat, SEV_WARN,
+                    "INSTRUMENTO_FINANCEIRO,PENDENCIA_IF", False,
+                    column="COD_SITUACAO_IF,DAT_FIM_PENDENCIA",
+                    hint="Include COD_SITUACAO_IF to validate open pending rows.",
+                    message="Open final-status pending check unavailable without IF status.",
+                ))
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Category 2c - RDB resgate schedule conformance
+# ---------------------------------------------------------------------------
+def check_rdb_resgate_schedule_rules(
+    tables: Dict[str, DataFrame], sample: int, profile: ValidationProfile
+) -> List[Finding]:
+    """Validate the observed SEM TABELA/COM TABELA RDB schedule contract."""
+    if profile.name != "rdb":
+        return []
+
+    cat = "RDB resgate schedule conformance"
+    out: List[Finding] = []
+
+    def record(
+        check_id: str,
+        table: str,
+        column: str,
+        bad: DataFrame,
+        keys: List[str],
+        severity: str,
+        hint: str,
+        message: str,
+    ) -> None:
+        count = bad.count()
+        out.append(Finding(
+            check_id, cat, severity if count else SEV_INFO, table, count == 0,
+            count=count, column=column,
+            sample=_sample_keys(bad, keys, sample) if count else [],
+            hint=hint if count else "", message=message,
+        ))
+
+    def try_cast(column: str, sql_type: str):
+        escaped = column.replace("`", "``")
+        return F.expr(f"try_cast(`{escaped}` as {sql_type})")
+
+    root = tables.get("INSTRUMENTO_FINANCEIRO")
+    condicao = tables.get("CONDICAO_IF")
+    resgate = tables.get("RESGATE")
+    missing_tables = [
+        name for name, frame in (
+            ("INSTRUMENTO_FINANCEIRO", root),
+            ("CONDICAO_IF", condicao),
+            ("RESGATE", resgate),
+        ) if frame is None
+    ]
+    if missing_tables:
+        return [Finding(
+            "2c.rdb_resgate_schedule_availability", cat, SEV_WARN,
+            ",".join(missing_tables), False,
+            hint="Include the RDB root, condition, and resgate tables.",
+            message=f"RDB schedule checks unavailable; missing: {missing_tables}.",
+        )]
+
+    root_cols = {
+        name: resolve(root, name)
+        for name in ("NUM_IF", "NUM_TIPO_IF", "DAT_EMISSAO", "DAT_VENCIMENTO")
+    }
+    cond_cols = {
+        name: resolve(condicao, name)
+        for name in ("NUM_CONDICAO_IF", "NUM_IF", "COD_TIPO_CONDICAO_IF")
+    }
+    res_cols = {
+        name: resolve(resgate, name)
+        for name in ("NUM_CONDICAO_IF", "COD_COND_RESGATE", "DAT_RESGATE")
+    }
+    required = {
+        **{f"INSTRUMENTO_FINANCEIRO.{name}": value for name, value in root_cols.items()},
+        **{f"CONDICAO_IF.{name}": value for name, value in cond_cols.items()},
+        **{f"RESGATE.{name}": value for name, value in res_cols.items()},
+    }
+    missing_columns = [name for name, value in required.items() if not value]
+    if missing_columns:
+        return [Finding(
+            "2c.rdb_resgate_schedule_availability", cat, SEV_WARN,
+            ",".join(missing_columns), False,
+            hint="Include the columns required to resolve RDB schedule ownership and dates.",
+            message=f"RDB schedule checks unavailable; missing: {missing_columns}.",
+        )]
+
+    roots = _active(root).where(
+        F.col(root_cols["NUM_TIPO_IF"]).cast("long") == profile.num_tipo_if
+    ).select(
+        F.col(root_cols["NUM_IF"]).cast("long").alias("NUM_IF"),
+        try_cast(root_cols["DAT_EMISSAO"], "date").alias("root_emission"),
+        try_cast(root_cols["DAT_VENCIMENTO"], "date").alias("root_maturity"),
+    ).dropDuplicates(["NUM_IF"])
+    conditions = _active(condicao).select(
+        F.col(cond_cols["NUM_CONDICAO_IF"]).cast("long").alias("condition_key"),
+        F.col(cond_cols["NUM_IF"]).cast("long").alias("NUM_IF"),
+        _norm_code(F.col(cond_cols["COD_TIPO_CONDICAO_IF"])).alias("condition_type"),
+    ).join(roots.select("NUM_IF"), "NUM_IF", "inner")
+    parents = conditions.where(F.col("condition_type") == "20").join(
+        _active(resgate).select(
+            F.col(res_cols["NUM_CONDICAO_IF"]).cast("long").alias("condition_key"),
+            _norm_code(F.col(res_cols["COD_COND_RESGATE"])).alias("resgate_mode"),
+            try_cast(res_cols["DAT_RESGATE"], "date").alias("resgate_date"),
+        ),
+        "condition_key", "inner",
+    )
+    com_tabela = parents.where(F.col("resgate_mode") == "COM TABELA")
+
+    schedule = tables.get("CONDICAO_RESGATE")
+    if schedule is None:
+        record(
+            "2c.rdb_resgate_schedule_coverage", "CONDICAO_RESGATE", "NUM_CONDICAO_IF",
+            com_tabela, ["NUM_IF", "condition_key"], SEV_ERROR,
+            "Include at least one active schedule row per COM TABELA RDB.",
+            "COM TABELA RDBs without an available redemption schedule.",
+        )
+        return out
+
+    schedule_cols = {
+        name: resolve(schedule, name)
+        for name in ("NUM_CONDICAO_IF", "IND_EXCLUIDO", "DAT_RESGATE", "VAL_PERCENTUAL")
+    }
+    missing_schedule = [
+        name for name in ("NUM_CONDICAO_IF", "DAT_RESGATE", "VAL_PERCENTUAL")
+        if not schedule_cols[name]
+    ]
+    if missing_schedule:
+        count = max(com_tabela.count(), schedule.count())
+        return [Finding(
+            "2c.rdb_resgate_schedule_availability", cat,
+            SEV_ERROR if count else SEV_INFO, "CONDICAO_RESGATE", count == 0,
+            count=count, column=",".join(missing_schedule),
+            hint="Include the required schedule columns." if count else "",
+            message=f"RDB schedule columns unavailable: {missing_schedule}.",
+        )]
+
+    active_schedule = schedule
+    if schedule_cols["IND_EXCLUIDO"]:
+        excluded = _norm_code(F.col(schedule_cols["IND_EXCLUIDO"])).isin("S", "Y", "1")
+        active_schedule = schedule.where(F.coalesce(~excluded, F.lit(True)))
+    children = active_schedule.select(
+        F.col(schedule_cols["NUM_CONDICAO_IF"]).cast("long").alias("condition_key"),
+        try_cast(schedule_cols["DAT_RESGATE"], "date").alias("schedule_date"),
+        try_cast(schedule_cols["VAL_PERCENTUAL"], "double").alias("schedule_percentage"),
+    )
+    child_keys = children.select("condition_key").dropDuplicates()
+
+    record(
+        "2c.rdb_resgate_schedule_coverage", "CONDICAO_RESGATE", "NUM_CONDICAO_IF",
+        com_tabela.join(child_keys, "condition_key", "leftanti"),
+        ["NUM_IF", "condition_key"], SEV_ERROR,
+        "Generate at least one active schedule row per COM TABELA RDB.",
+        "COM TABELA RDBs without active redemption schedule rows.",
+    )
+    record(
+        "2c.rdb_resgate_schedule_parent", "CONDICAO_RESGATE", "NUM_CONDICAO_IF",
+        children.join(
+            com_tabela.select("condition_key").dropDuplicates(),
+            "condition_key", "leftanti",
+        ),
+        ["condition_key", "schedule_date"], SEV_ERROR,
+        "Attach active schedules only to type-20 COM TABELA RDB resgates.",
+        "Active RDB schedule rows attached to invalid or SEM TABELA parents.",
+    )
+    record(
+        "2c.rdb_resgate_schedule_values", "CONDICAO_RESGATE",
+        "DAT_RESGATE,VAL_PERCENTUAL",
+        children.where(
+            F.col("schedule_date").isNull()
+            | F.col("schedule_percentage").isNull()
+            | F.isnan(F.col("schedule_percentage"))
+            | (F.abs(F.col("schedule_percentage")) == F.lit(float("inf")))
+        ),
+        ["condition_key", "schedule_date"], SEV_ERROR,
+        "Populate a parseable date and percentage; percentages may exceed 100.",
+        "Active RDB schedule rows with null or invalid values.",
+    )
+
+    duplicate_dates = children.where(F.col("schedule_date").isNotNull()).groupBy(
+        "condition_key", "schedule_date"
+    ).count().where(F.col("count") > 1)
+    record(
+        "2c.rdb_resgate_schedule_unique_dates", "CONDICAO_RESGATE", "DAT_RESGATE",
+        duplicate_dates, ["condition_key", "schedule_date"], SEV_WARN,
+        "Review duplicate dates; captured RDB schedules use one row per date.",
+        "Duplicate active redemption dates under one RDB resgate condition.",
+    )
+
+    bounded = children.join(
+        com_tabela.select("condition_key", "NUM_IF", "resgate_date"),
+        "condition_key", "inner",
+    ).join(roots, "NUM_IF", "inner")
+    record(
+        "2c.rdb_resgate_schedule_dates", "CONDICAO_RESGATE", "DAT_RESGATE",
+        bounded.where(
+            F.col("schedule_date").isNotNull()
+            & (
+                (F.col("root_emission").isNotNull()
+                 & (F.col("schedule_date") < F.col("root_emission")))
+                | (F.col("root_maturity").isNotNull()
+                   & (F.col("schedule_date") > F.col("root_maturity")))
+                | (F.col("resgate_date").isNotNull()
+                   & (F.col("schedule_date") > F.col("resgate_date")))
+            )
+        ),
+        ["NUM_IF", "condition_key", "schedule_date"], SEV_WARN,
+        "Review schedule dates outside issuance and redemption/maturity bounds.",
+        "Active RDB schedule rows outside observed instrument date bounds.",
+    )
+
+    ordered = children.where(
+        F.col("schedule_date").isNotNull() & F.col("schedule_percentage").isNotNull()
+    ).withColumn(
+        "previous_percentage",
+        F.lag("schedule_percentage").over(
+            Window.partitionBy("condition_key").orderBy("schedule_date")
+        ),
+    )
+    record(
+        "2c.rdb_resgate_schedule_percentages", "CONDICAO_RESGATE", "VAL_PERCENTUAL",
+        ordered.where(
+            F.col("previous_percentage").isNotNull()
+            & (F.col("schedule_percentage") <= F.col("previous_percentage"))
+        ),
+        ["condition_key", "schedule_date"], SEV_WARN,
+        "Review non-increasing percentages; all captured schedules increase by date.",
+        "RDB schedule percentages that do not increase with redemption date.",
+    )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -2371,7 +3055,9 @@ def check_required_lookup_frames(
                         "target account whose trimmed code has the required .40/.10 shape.",
             )
 
-    op_df = tables.get(OPERACAO_TABLE)
+    tos_semantics_supported = CAP_LOOKUP_TOS in profile.supported_capabilities
+    # Do not evaluate RDB rows with CDB's identification='S'/operation-type='1' literals.
+    op_df = tables.get(OPERACAO_TABLE) if tos_semantics_supported else None
     op_tos_col = resolve(op_df, "NUM_ID_TIPO_OPER_OBJETO_SERV") if op_df is not None else None
     if op_df is None or op_tos_col is None:
         missing = (
@@ -2498,6 +3184,16 @@ def check_required_lookup_frames(
                 message="Every synthetic operation must resolve to the approved CDB TOS.",
             )
 
+    if not tos_semantics_supported:
+        operation_finding = Finding(
+            "6.required.operation_tos", cat, SEV_WARN, OPERACAO_TABLE, False,
+            column="NUM_ID_TIPO_OPER_OBJETO_SERV",
+            hint="Capture RDB TIPO_OPER_OBJETO_SERV rows and their operation type and "
+                 "identification flags before enabling this check; do not reuse CDB literals.",
+            message=f"TOS operation type and identification semantics are not validated for "
+                    f"product {profile.name} (unresolved target evidence).",
+        )
+
     cdb_cols = target_columns(
         cdb_object_df,
         V_OBJETOS_SERVICO_TABLE,
@@ -2564,6 +3260,14 @@ def check_lookup_combo_frames(
     if profile is None:
         profile = CDB_SIMPLIFICADO_PROFILE
     cat = "Lookup combinations"
+    if CAP_LOOKUP_TOS not in profile.supported_capabilities:
+        return [Finding(
+            "6.combo.unsupported", cat, SEV_WARN, OPERACAO_TABLE, False,
+            hint="Capture RDB TOS, operation-type, identification, and modalidade rows before "
+                 "enabling lookup-combination validation.",
+            message=f"Lookup-combination semantics are unsupported for product {profile.name}; "
+                    "CDB literals were not evaluated.",
+        )]
     errors = dict(lookup_errors or {})
     tos_col = resolve(op_df, "NUM_ID_TIPO_OPER_OBJETO_SERV")
     mod_col = resolve(op_df, "NUM_ID_MODALIDADE_LIQUIDACAO")
@@ -2801,20 +3505,20 @@ def check_lookup_combos(
     else:
         existing = []
 
-    # TOS and TIPO_OPERACAO are always needed (structural TOS existence check runs for every
-    # product). SIC compatibility and platform lookups are product-gated: RDB keeps them
-    # blocked until Task 8 evidence resolves object-service/platform semantics for tipo 50.
-    queries = {
-        TIPO_OPER_OBJETO_SERV_TABLE: (
-            "SELECT NUM_ID_TIPO_OPER_OBJETO_SERV, NUM_ID_TIPO_OPERACAO, "
-            "NUM_ID_OBJETO_SERVICO, IND_DISPONIVEL_IDENTIFICACAO "
-            f"FROM {cfg.schema}.{TIPO_OPER_OBJETO_SERV_TABLE}"
-        ),
-        TIPO_OPERACAO_TABLE: (
-            "SELECT NUM_ID_TIPO_OPERACAO, IND_SEM_MODALIDADE_INFOHUB, COD_TIPO_OPERACAO "
-            f"FROM {cfg.schema}.{TIPO_OPERACAO_TABLE}"
-        ),
-    }
+    lookup_tos_supported = CAP_LOOKUP_TOS in profile.supported_capabilities
+    queries = {}
+    if lookup_tos_supported:
+        queries.update({
+            TIPO_OPER_OBJETO_SERV_TABLE: (
+                "SELECT NUM_ID_TIPO_OPER_OBJETO_SERV, NUM_ID_TIPO_OPERACAO, "
+                "NUM_ID_OBJETO_SERVICO, IND_DISPONIVEL_IDENTIFICACAO "
+                f"FROM {cfg.schema}.{TIPO_OPER_OBJETO_SERV_TABLE}"
+            ),
+            TIPO_OPERACAO_TABLE: (
+                "SELECT NUM_ID_TIPO_OPERACAO, IND_SEM_MODALIDADE_INFOHUB, COD_TIPO_OPERACAO "
+                f"FROM {cfg.schema}.{TIPO_OPERACAO_TABLE}"
+            ),
+        })
     if profile.sic_enabled:
         queries[V_PARAMETRO_SIC_TABLE] = (
             "SELECT DISTINCT NUM_ID_TIPO_OPER_OBJETO_SERV, NUM_TIPO_IF, "
@@ -2904,7 +3608,7 @@ def check_lookup_combos(
     elif account_keys:
         errors[CONTA_PARTICIPANTE_TABLE] = "No Oracle connection"
 
-    if op_df is not None and cfg.jdbc_url:
+    if op_df is not None and cfg.jdbc_url and lookup_tos_supported:
         existing = check_lookup_combo_frames(
             op_df,
             lookups.get(TIPO_OPER_OBJETO_SERV_TABLE),
@@ -3151,19 +3855,27 @@ def check_shapes(
                         f"{op_ratio_tol_pct}%).",
             ))
 
-    # 7d - RESGATE multiplicity: production has no IF with more than one resgate
-    # condition (0 exceptions in 67.2M IFs profiled). Simplificado-only empirical rule.
+    # 7d - RESGATE multiplicity: production and all captured CDB variants have at most one
+    # resgate parent per IF; table rows represent schedules below that parent, not new parents.
     if SHAPE_RULE_RESGATE_MAX in profile.hard_shape_rules and "RESGATE" in metric_names:
-        multi = counts.where(F.col("RESGATE") > 1)
-        c = multi.count()
-        out.append(Finding(
-            "7d.resgate_multiplicity", cat,
-            SEV_ERROR if c else SEV_INFO, "RESGATE", c == 0, count=c, column="RESGATE",
-            sample=_sample_keys(multi.select(SHAPE_ROOT_KEY), [SHAPE_ROOT_KEY], sample),
-            hint="Production CDBs never have more than one RESGATE condition; bind at "
-                 "most one resgate-condição per IF.",
-            message="IFs with more than one RESGATE row.",
-        ))
+        if profile.name == "cdb" and "RESGATE" in skipped:
+            out.append(Finding(
+                "7d.resgate_multiplicity", cat, SEV_ERROR, "RESGATE", False,
+                column="RESGATE",
+                hint="Include RESGATE and its CONDICAO_IF bridge in the validation input.",
+                message="Full-CDB resgate multiplicity could not be evaluated.",
+            ))
+        else:
+            multi = counts.where(F.col("RESGATE") > 1)
+            c = multi.count()
+            out.append(Finding(
+                "7d.resgate_multiplicity", cat,
+                SEV_ERROR if c else SEV_INFO, "RESGATE", c == 0, count=c, column="RESGATE",
+                sample=_sample_keys(multi.select(SHAPE_ROOT_KEY), [SHAPE_ROOT_KEY], sample),
+                hint="Production CDBs never have more than one RESGATE condition; bind at "
+                     "most one resgate-condição per IF.",
+                message="IFs with more than one RESGATE row.",
+            ))
 
     # 7a/7b - distribution checks against the baseline profile.
     if SHAPE_RULE_DISTRIBUTION not in profile.hard_shape_rules:
@@ -4006,6 +4718,14 @@ def main() -> None:
     findings += _timed(
         "category 2 domain",
         lambda: check_domain(tables, meta, args.sample_size, profile),
+    )
+    findings += _timed(
+        "category 2b CDB variants",
+        lambda: check_cdb_variant_rules(tables, args.sample_size, profile),
+    )
+    findings += _timed(
+        "category 2c RDB resgate schedules",
+        lambda: check_rdb_resgate_schedule_rules(tables, args.sample_size, profile),
     )
     if args.max_parent_keys is not None:
         logger.warning("--max-parent-keys is deprecated and ignored; "

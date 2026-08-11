@@ -790,6 +790,18 @@ def build_profile(
     return profile
 
 
+def source_key_provenance(universe_keys: DataFrame) -> tuple[int, str]:
+    """Return a deterministic count and SHA-256 fingerprint for distinct source keys."""
+    row = universe_keys.agg(
+        F.count(F.lit(1)).alias("n"),
+        F.sha2(
+            F.concat_ws(",", F.sort_array(F.collect_list(F.col(ROOT_KEY).cast("string")))),
+            256,
+        ).alias("fp"),
+    ).first()
+    return int(row["n"]), row["fp"]
+
+
 # ---------------------------------------------------------------------------
 # Comparison
 # ---------------------------------------------------------------------------
@@ -1059,7 +1071,7 @@ def run_selftest(spark: SparkSession) -> None:
 # ---------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Profile per-IF cardinalities of a CDB/RDB domain.")
-    p.add_argument("--product", default="cdb_simplificado", choices=sorted(PRODUCTS),
+    p.add_argument("--product", required=True, choices=sorted(PRODUCTS),
                    help="Product profile: selects NUM_TIPO_IF (CDB=49, RDB=50) and the "
                         "domain predicates. The emitted baseline is tagged with it so the "
                         "validator rejects a cross-product baseline.")
@@ -1147,13 +1159,7 @@ def main() -> None:
         # Deterministic provenance of the source key set, so a synthetic run and its
         # baseline can be proven to have been built over exactly the same instruments
         # (map_mode = exact-source-keys).
-        fp_rows = universe_keys.select(
-            F.count(F.lit(1)).alias("n"),
-            F.sha2(F.concat_ws(",", F.sort_array(F.collect_list(F.col(ROOT_KEY).cast("string")))),
-                   256).alias("fp"),
-        ).collect()[0]
-        source_key_count = int(fp_rows["n"])
-        source_key_fingerprint = fp_rows["fp"]
+        source_key_count, source_key_fingerprint = source_key_provenance(universe_keys)
         logger.info(
             "Universe restricted to %d NUM_IF(s) from %s",
             source_key_count, args.universe_keys,

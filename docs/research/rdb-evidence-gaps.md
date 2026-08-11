@@ -5,13 +5,28 @@ Status: **RDB is validated in structural-only mode.** The `rdb` `ValidationProfi
 unsupported**, which forces every RDB run to report **PARTIAL** (non-zero exit) until each
 item is closed with primary-source target evidence. Do **not** fill these with CDB defaults.
 
-Proven RDB values already encoded (do not re-derive):
+Update from the August 2026 traces: `rdb_com_resgate.log` now supplies route-specific evidence
+for platform `RDB`/`S`, account roles and status `1|2`, default modalidade group `0`, operation
+modalidade `6`, registration TOS `5177`, service `45`, operation code `1`, identification `S`,
+and the `COM TABELA` resgate schedule. See
+[`rdb-log-derived-rules-and-engorda-scope.md`](rdb-log-derived-rules-and-engorda-scope.md).
+These broad capabilities remain marked unsupported until the validator scopes those rules to
+the observed registration route rather than applying them to every historical RDB operation.
+The replacement `rdb_inclusao.log` is a valid plain-RDB trace. It confirms the same platform,
+account, modalidade, TOS, and registration core, with `RESGATE='SEM TABELA'` and no
+`CONDICAO_RESGATE`/`PENDENCIA_IF` rows.
+
+Application-source values already encoded:
 
 | value | evidence |
 |---|---|
 | `NUM_TIPO_IF = 50` | `framework/dados/.../instrumentofinanceiro/TipoIFDO.java:56` (`RDB = new Id("50")`) |
 | object service `45` | `framework/dados/.../sca/ObjetoServicoDO.java:80` (`TIPO_IF_RDB = new Id("45")`) |
-| COD_IF allocator | `CETIP.PKG_CODIGO.F_GETCODIGONOVOIF21(50, <date>)` (`datagen/engorda_tables.py:2235`, `:432`) |
+| generic COD_IF normalization | uppercase letters, digits, spaces, or hyphen; maximum 14 characters (`atributos/.../identificador/CodigoIF.java:17-30,68-74`) |
+
+The generator calls `CETIP.PKG_CODIGO.F_GETCODIGONOVOIF21(50, <date>)`, but no RDB
+application registration path or package implementation was found. That call is not evidence
+for an RDB prefix or complete allocator format.
 
 ## Open items (each blocks one capability)
 
@@ -32,17 +47,20 @@ Proven RDB values already encoded (do not re-derive):
    `NUM_ID_AREA_ATUACAO`, and the `.40/.10` code shape) is identical to CDB or capture the
    RDB-specific rule. Set `account_check_enabled=True` only then.
 
-4. **`cod_if_format`** — capture a real RDB registration (p6spy/`cetip.out`-style) and read
-   `INSTRUMENTO_FINANCEIRO.COD_IF`. Only then set `rdb.cod_if_pattern`. The generator's
-   assumed `^RDB[1-9A-C][0-9]{2}[0-9A-Z]{5}$` (`engorda_tables.py:433`) is **not** promoted.
+4. **`cod_if_format`** — generic `CodigoIF` normalization is enforced, but capture a real RDB
+   registration and read `INSTRUMENTO_FINANCEIRO.COD_IF` before defining an RDB prefix or
+   allocator rule. The generator's assumed `^RDB[1-9A-C][0-9]{2}[0-9A-Z]{5}$` is **not**
+   promoted, so this broad capability remains unsupported.
 
-5. **SIC compatibility** — confirm `V_PARAMETRO_SIC` exposes `(NUM_TIPO_IF=50,
-   NUM_ID_OBJETO_SERVICO=45)`.
+5. **`lookup_tos` / SIC compatibility** — confirm `V_PARAMETRO_SIC` exposes
+   `(NUM_TIPO_IF=50, NUM_ID_OBJETO_SERVICO=45)` and capture the RDB
+   `TIPO_OPER_OBJETO_SERV` rows. Application source does not confirm CDB's
+   `IND_DISPONIVEL_IDENTIFICACAO='S'` or operation type code `1` for RDB.
    ```sql
    SELECT DISTINCT NUM_ID_TIPO_OPER_OBJETO_SERV, NUM_TIPO_IF, NUM_ID_OBJETO_SERVICO
    FROM CETIP.V_PARAMETRO_SIC WHERE NUM_TIPO_IF = 50;
    ```
-   Set `sic_enabled=True` only after confirmation.
+   Set `sic_enabled=True` and support `lookup_tos` only after confirmation.
 
 6. **`shape`** — produce and review an exact-source-key type-50 baseline:
    ```bash
@@ -56,6 +74,11 @@ Proven RDB values already encoded (do not re-derive):
    `registration_constants=None`. If a persisted-profile check is wanted for RDB, re-derive
    the constants from a real RDB registration; do not reuse the simplificado (`cetip.out`)
    values.
+
+8. **`polymorphism` RDB allow-list** — generic shared-key consistency remains checked, but
+   application source does not establish which condition codes RDB registration permits.
+   Keep the broad capability unsupported until RDB registrations and physical subtype rows
+   are observed.
 
 ## CONDICAO_IF subtype completeness (all products)
 

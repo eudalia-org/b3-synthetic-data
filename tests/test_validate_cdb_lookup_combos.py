@@ -111,9 +111,10 @@ def required_frames(
 
 
 def required_findings(spark, **kwargs):
+    profile = kwargs.pop("profile", None)
     tables, account_df, tos_df, tipo_df, cdb_object_df = required_frames(spark, **kwargs)
     return validator.check_required_lookup_frames(
-        tables, account_df, tos_df, tipo_df, cdb_object_df, sample=5
+        tables, account_df, tos_df, tipo_df, cdb_object_df, sample=5, profile=profile
     )
 
 
@@ -745,3 +746,56 @@ def test_empty_account_references_pass_without_account_jdbc_rows(spark, monkeypa
         )
     )
     assert direct_findings["6.required.active_account"].passed
+
+
+def test_rdb_tos_semantics_remain_unsupported_without_cdb_assumptions(spark):
+    profile = validator.VALIDATION_PROFILES["rdb"]
+    findings = by_id(required_findings(
+        spark,
+        profile=profile,
+        tos=[("100", "10", "45", "S")],
+    ))
+
+    assert findings["6.required.operation_tos"].severity == validator.SEV_WARN
+    assert "operation type" in findings["6.required.operation_tos"].message
+    assert findings["6.required.active_account"].severity == validator.SEV_WARN
+    assert findings["6.required.cdb_platform"].severity == validator.SEV_WARN
+
+    wrong_service = by_id(required_findings(
+        spark,
+        profile=profile,
+        tos=[("100", "10", "44", "S")],
+    ))
+    assert wrong_service["6.required.operation_tos"].severity == validator.SEV_WARN
+
+
+def test_rdb_lookup_does_not_query_or_evaluate_unproven_tos(spark, monkeypatch):
+    profile = validator.VALIDATION_PROFILES["rdb"]
+    inputs = frames(
+        spark,
+        operations=[(1, 100, 6)],
+        tos=[(100, 10, 45, "S")],
+        sic=[(100, 50, 45)],
+        tipos=[(10, "S")],
+    )
+    direct = validator.check_lookup_combo_frames(*inputs, sample=5, profile=profile)
+    assert [finding.check_id for finding in direct] == ["6.combo.unsupported"]
+
+    calls = []
+    monkeypatch.setattr(
+        validator,
+        "_jdbc",
+        lambda *_args: calls.append(_args) or pytest.fail("RDB lookup must not query CDB rules"),
+    )
+    cfg = validator.Config("unused", "jdbc:oracle:test", "user", "password", "CETIP")
+    findings = by_id(validator.check_lookup_combos(
+        spark,
+        cfg,
+        {"OPERACAO": inputs[0]},
+        validator.Metadata(set(), {}, {}, {}, {}),
+        sample=5,
+        profile=profile,
+    ))
+
+    assert calls == []
+    assert findings["6.required.operation_tos"].severity == validator.SEV_WARN
