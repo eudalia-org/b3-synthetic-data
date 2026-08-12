@@ -5,7 +5,7 @@ engorda_instrumentos.py — motor multi-produto de sintetização por entidade.
 Em vez de sintetizar tabela a tabela (bootstrap do engorda_tables.py, que
 perde o fan-out por instrumento e recombina colunas em combinações de negócio
 inválidas), este job sintetiza INSTRUMENTOS INTEIROS: seleciona N valores de
-NUM_IF do domínio definido pela query SQL do perfil (ou por override), copia
+NUM_IF do domínio definido pela query SQL do produto (ou por override), copia
 todas as linhas do fecho
 referencial que pertencem a esses instrumentos e reescreve APENAS chaves:
 
@@ -23,11 +23,37 @@ ficam intocadas — é isso que preserva as combinações de negócio e o
 polimorfismo Hibernate de CONDICAO_IF (a linha-subtipo é copiada junto, na
 tabela certa, por construção; nada é recombinado).
 
-DIRIGIDO por ProductProfile, query SQL e spec_config.json. Todo perfil declara
-como gerar o COD_IF novo; a geração de COD_OPERACAO, meu-número e o preflight
-de OPERACAO são etapas opcionais da política do produto.
+===========================================================================
+MULTI-PRODUTO SEM EDITAR CÓDIGO
+===========================================================================
+Um produto novo NÃO exige mudança neste arquivo. O que o define é, por inteiro:
 
-POLÍTICAS COMUNS (as demais pertencem explicitamente ao perfil do produto):
+  * o .sql de domínio     -> --query-num-if-sql (default: <produto>.sql)
+  * o spec do fecho       -> --specs (define QUAIS tabelas são engordadas:
+                             o motor engorda exatamente as tabelas não-static
+                             do spec)
+  * o prefixo de saída    -> --clone-prefix (default:
+                             sintetizacao_multiproduto/<produto>)
+  * o rótulo do run       -> --produto (texto livre [a-z][a-z0-9_]*)
+
+O TIPO DO INSTRUMENTO (NUM_TIPO_IF, ex.: 49=CDB, 50=RDB) NÃO É MAIS CONSTANTE
+NO CÓDIGO nem parâmetro obrigatório: ele é DERIVADO das próprias linhas do lote
+em INSTRUMENTO_FINANCEIRO, logo após a seleção dos NUM_IF e ANTES de qualquer
+alocação no Oracle. Como o lote é o resultado do SQL do produto, o tipo usado
+para alocar COD_IF é, por construção, o tipo dos instrumentos sintetizados —
+o que torna IMPOSSÍVEL alocar código de um produto para instrumento de outro.
+
+  * lote com mais de um NUM_TIPO_IF distinto -> ABORTA (o SQL do produto deve
+    restringir o domínio a um tipo);
+  * --tipo-oracle N (opcional) -> confere contra o derivado e ABORTA se
+    divergir. Num lote legitimamente multi-tipo, é a saída manual explícita.
+
+DIRIGIDO por REGRAS_SCHEMA_CETIP (perfil ÚNICO do schema, comum a todos os
+produtos), query SQL e spec_config.json. Todo run gera COD_IF pelo alocador
+oficial do Oracle; a geração de COD_OPERACAO, meu-número e o preflight de
+OPERACAO são etapas da política de chaves de negócio do schema.
+
+POLÍTICAS COMUNS (as demais pertencem explicitamente ao perfil do schema):
 
   * FK para tabela sintetizada: reescreve SE o registro referenciado está no lote
     de sintetização; senão MANTÉM o valor original (que continua existindo no
@@ -43,9 +69,9 @@ POLÍTICAS COMUNS (as demais pertencem explicitamente ao perfil do produto):
     próprio acima do max real (com --pk-safety-band). PK com componente de FK
     para pai sintetizado -> segue o pai. PK sem regra possível -> ABORTA listando
     as tabelas (use --tratar-como-static para excluí-las da sintetização).
-  * Se ativadas no perfil, COD_IF e COD_OPERACAO são alocados pelas funções
-    oficiais do Oracle para TODO sintético (inclusive K=1). Controles P1/P2 são
-    gerados localmente com prefixo obrigatório e preflight no destino.
+  * COD_IF e COD_OPERACAO são alocados pelas funções oficiais do Oracle para
+    TODO sintético (inclusive K=1). Controles P1/P2 são gerados localmente com
+    prefixo obrigatório e preflight no destino.
   * Tabelas static do spec: não são sintetizadas nem escritas; FKs para elas
     mantêm o valor original (o pai static continua existindo).
 
@@ -58,17 +84,17 @@ VALIDAÇÕES PRÉ-ESCRITA (abortam o job, nada é gravado parcial por tabela):
 SAÍDA: Parquet por tabela em
     {DATAGEN_SYNTHETIC_BASE_URI}/{DATAGEN_CLONE_PREFIX}/{TABELA}
 (mesmo layout de saída do engorda — o processo de carga existente lê e faz o
-append no Oracle). Sempre grava MAPA_CLONE_NUM_IF; mapas de códigos dependem do
-perfil. Com --dry-run nada é gravado nem
-alocado no Oracle: usa placeholders locais só para validação. Fora do dry-run,
-toda a árvore é validada em staging irmão antes de substituir a saída anterior.
+append no Oracle). Sempre grava MAPA_CLONE_NUM_IF, MAPA_CLONE_COD_IF e
+MAPA_CLONE_COD_OPERACAO. Com --dry-run nada é gravado nem alocado no Oracle:
+usa placeholders locais só para validação. Fora do dry-run, toda a árvore é
+validada em staging irmão antes de substituir a saída anterior.
 A publicação por rename NÃO é atômica em object storage: se o processo cair
 entre os renames, restaure manualmente o backup `<destino>.__previous_*` para
 o caminho fixo `<destino>` antes de consumir a saída.
 
 USO RECOMENDADO:
-    escolha PRODUTO_A_EXECUTAR em executar_engorda_multiproduto.py e execute:
-    spark-submit --py-files engorda_instrumentos_multiproduto.py \
+    escolha os parâmetros em executar_engorda_multiproduto.py e execute:
+    spark-submit --py-files engorda_instrumentos.py \
       --files cdb_simplificado.sql,cdb.sql,rdb.sql \
       executar_engorda_multiproduto.py
 
@@ -78,14 +104,19 @@ CLI DIRETA (OCI Data Flow — mesmas envs do engorda_tables.py):
           DATAGEN_SOURCE_DB_PASSWORD (nomes legados: apontam para o Oracle
           receptor; as três últimas são dispensadas no --dry-run)
           (+ opcionais DATAGEN_RAW_PREFIX, DATAGEN_SYNTHETIC_PREFIX,
-           DATAGEN_CLONE_PREFIX — default específico do perfil)
+           DATAGEN_CLONE_PREFIX — default derivado do nome do produto)
     argumentos:
-      --produto cdb_simplificado     # ou cdb ou rdb
+      --produto cdb_simplificado    # rótulo livre; dá nome ao app e aos defaults
       --num-ifs 12345,67890         # lista explícita (aceita 1 só), OU
       --n-instrumentos 5 --seed 42  # amostra do domínio definido no SQL
-      --query-num-if-sql cdb_simplificado.sql  # override opcional do perfil
+      --query-num-if-sql cdb_simplificado.sql  # default: <produto>.sql
+      --specs oci://.../spec_cdb.json  # define as tabelas engordadas
+      --clone-prefix sintetizacao_multiproduto/cdb  # default: .../<produto>
       --fator-k 3                   # sintéticos por instrumento (default 1)
-      --meu-numero-prefix 321       # obrigatório nos três perfis
+      --meu-numero-prefix 321       # obrigatório enquanto houver OPERACAO
+      --tipo-oracle 49              # OPCIONAL: confere contra o derivado
+      --cod-if-padrao '^CDB[1-9A-C][0-9]{2}[0-9A-Z]{5}$'  # OPCIONAL: aperta
+      --cod-if-dry-prefix CDB100    # OPCIONAL: prefixo do placeholder dry-run
       --oracle-code-batch-size 50000  # códigos por round-trip Oracle
       --dry-run                     # valida e loga, não grava
       --pk-safety-band 100000       # folga acima do max real (default 0)
@@ -100,26 +131,26 @@ CLI DIRETA (OCI Data Flow — mesmas envs do engorda_tables.py):
                                     #   allowlist nullable, anula só sintéticos casados
       --faltantes-parquet oci://.../faltantes  # idem, TABELA/COLUNA/VALOR (listas grandes)
       --anular-cols 'TAB.COL,COL2;...'  # item 2 (extra): colunas nullable a anular
-      --specs oci://.../spec_config.json  # override de DATAGEN_SPECS_URI
 
-REGRAS POR PRODUTO:
-  O dicionário REGRAS_PRODUTO é a fonte única de configuração do motor. Para
-  desligar uma regra opcional, use o valor neutro indicado ao lado dela:
-  ajuste_datas=None, subtipo=None,
-  nulificar_colunas={}, faltantes_seletivos=() ou operacao=None.
-  A geração segura de COD_IF é obrigatória em todo produto e não pode ser
-  desligada; cada produto precisa declarar sua estratégia em chaves_negocio.
+REGRAS DO SCHEMA:
+  O dicionário REGRAS_SCHEMA_CETIP é a fonte única de configuração técnica do
+  motor e é COMUM A TODOS OS PRODUTOS (antes era REGRAS_PRODUTO, com uma entrada
+  por produto — as entradas eram deepcopy umas das outras, variando só em campos
+  que hoje são derivados do dado ou parâmetros de CLI). Para desligar uma regra
+  opcional, use o valor neutro indicado ao lado dela: ajuste_datas=None,
+  subtipo=None, nulificar_colunas={}, faltantes_seletivos=() ou operacao=None.
+  A geração segura de COD_IF é obrigatória e não pode ser desligada.
 
-CORREÇÕES DOS PERFIS CDB/RDB (saída carregável por construção):
+CORREÇÕES DE INTEGRIDADE (saída carregável por construção):
   1. CONDICAO_IF dangling (Cat 1): poda do domínio os NUM_IF cujo subtipo não
      existe na origem; a amostragem repõe até fechar N (--sem-poda-subtipo desliga).
   2. NUM_ID_TRANSF_ARQ_P1/P2 órfãos: anulados nos sintéticos de OPERACAO (nullable) —
-     ver REGRAS_PRODUTO / --anular-cols.
+     ver REGRAS_SCHEMA_CETIP / --anular-cols.
   3/4. Chaves inexistentes no destino: por padrão, poda do domínio os NUM_IF que
-     as referenciam. A regra faltantes_seletivos do produto preserva
-     o instrumento e anula somente os valores listados nos sintéticos.
+     as referenciam. A regra faltantes_seletivos preserva o instrumento e anula
+     somente os valores listados nos sintéticos.
 
-API: from engorda_instrumentos_multiproduto import EngordaJob, executar_job.
+API: from engorda_instrumentos import EngordaJob, executar_job.
 
 Comentários e logs em português; helpers copiados do engorda_tables.py estão
 marcados como tal (arquivo único e autocontido, como o Data Flow espera).
@@ -129,6 +160,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import dataclasses
 import json
 import logging
 import os
@@ -138,7 +170,6 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from types import MappingProxyType
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from pyspark import SparkFiles
@@ -162,6 +193,12 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 TABELA_RAIZ = "INSTRUMENTO_FINANCEIRO"
 COL_NUM_IF = "NUM_IF"
+# Coluna do TIPO do instrumento na tabela raiz. É dela que sai o argumento do
+# alocador oficial de COD_IF no Oracle — DERIVADO do lote, nunca constante no
+# código (ver _deriva_tipo_oracle e o cabeçalho do módulo).
+COL_NUM_TIPO_IF = "NUM_TIPO_IF"
+# Quantos tipos distintos o diagnóstico de lote heterogêneo lista no erro.
+MAX_TIPOS_DIAGNOSTICO = 10
 
 # ---------------------------------------------------------------------------
 # Poda de domínio (itens 1, 3 e 4) — instrumentos que o sintético NÃO conseguiria
@@ -171,7 +208,7 @@ COL_NUM_IF = "NUM_IF"
 #
 # Item 1 — polimorfismo CONDICAO_IF. COD_TIPO_CONDICAO_IF -> tabela-subtipo
 # física (joined-subclass do Hibernate), conforme tabelas_por_tipo no
-# REGRAS_PRODUTO. Uma CONDICAO_IF ativa SEM a linha na sua
+# REGRAS_SCHEMA_CETIP. Uma CONDICAO_IF ativa SEM a linha na sua
 # tabela-subtipo fica "dangling": o Hibernate não consegue tipar a classe e o
 # batch estoura ClassCastException (Cat 1 do validador). Como NUM_CONDICAO_IF é
 # a PK de CONDICAO_IF (globalmente única), uma chave só pode viver na
@@ -179,6 +216,12 @@ COL_NUM_IF = "NUM_IF"
 # fontes-subtipo sintetizáveis. As fontes são RAW; a poda restringe explicitamente
 # apenas o pai CONDICAO_IF às linhas ativas, pois essa é uma guarda de integridade
 # do carregamento e não um filtro de negócio do fecho sintetizado.
+#
+# ATENÇÃO ao rodar produto novo: _subtipos_clonaveis só considera tabelas-subtipo
+# PRESENTES e NÃO-STATIC no spec. Se o fecho do produto não trouxer, por exemplo,
+# JUROS_FLUTUANTE, toda CONDICAO_IF daquele tipo vira dangling e os NUM_IF saem
+# do domínio. O job avisa (log abaixo) e, se o domínio esvaziar, aborta em
+# seleciona_instrumentos com a contagem — não há perda silenciosa.
 # ---------------------------------------------------------------------------
 CONDICAO_IF_TABLE = "CONDICAO_IF"
 CONDICAO_IF_PK = "NUM_CONDICAO_IF"
@@ -188,12 +231,11 @@ CONDICAO_IF_TIPO_COL = "COD_TIPO_CONDICAO_IF"
 # TRANSFERENCIA_ARQUIVO inexistentes no destino. Como são nullable (não estão em
 # not_null_cols), anular remove o órfão de FK sem perder a operação — a maioria
 # das operações já as tem nulas. Declarativo {TABELA: (col, ...)}; --anular-cols
-# acrescenta entradas em tempo de execução. Esta política pertence ao perfil CDB
-# e está declarada somente em REGRAS_PRODUTO.
+# acrescenta entradas em tempo de execução.
 
 # Exceção exata à poda por faltantes: metadados Oracle/QAB confirmam que esta
 # FK filha é nullable. O contrato é revalidado contra o spec em todo startup;
-# a exceção fica em faltantes_seletivos no dicionário do produto.
+# a exceção fica em faltantes_seletivos no dicionário do schema.
 FALTANTES_SELECTIVE_KEY_COL = "__faltante_seletiva_key"
 FALTANTES_SELECTIVE_MARKER_COL = "__faltante_seletiva_match"
 
@@ -268,14 +310,39 @@ MAPA_COD_OPERACAO_TABLE = "MAPA_CLONE_COD_OPERACAO"
 DEFAULT_ORACLE_CODE_BATCH_SIZE = 50_000
 MAX_MEU_NUMERO_ORDINAL = 9_999_999
 MEU_PREFIX_PATTERN = re.compile(r"^[1-9][0-9]{2}$")
+PRODUTO_NOME_RE = re.compile(r"[a-z][a-z0-9_]*")
 RAW_SOURCE_PLACEHOLDER_RE = re.compile(
     r"\{\{RAW_([A-Z][A-Z0-9_]*)\}\}", re.IGNORECASE
 )
 SQL_PLACEHOLDER_RE = re.compile(r"\{\{[^{}]+\}\}")
 
 # ---------------------------------------------------------------------------
-# Perfis de produto. REGRAS_PRODUTO é editável e declarativo; ProductProfile é
-# a representação interna validada usada pelo motor. Não há inferência pelo SQL.
+# Pattern de COD_IF: guarda ESTRUTURAL, não de produto.
+#
+# O Oracle devolve o COD_IF a partir do tipo que o job passou para
+# F_GETCODIGONOVOIF21. Um pattern com prefixo de produto (ex.: ^CDB...) só
+# casaria se o tipo já estivesse correto — logo, ele NUNCA foi capaz de detectar
+# tipo trocado; a proteção real contra isso é a DERIVAÇÃO do tipo a partir do
+# lote (_deriva_tipo_oracle). A função efetiva do pattern, nos três pontos onde
+# é aplicado (_iter_oracle_code_batches, _materialize_code_map e
+# _validate_business_keys), é rejeitar retorno VAZIO ou MALFORMADO do Oracle —
+# ver a própria mensagem de erro "código vazio/malformado".
+#
+# Por isso o default é estrutural e agnóstico de produto. Quem quiser rigor
+# adicional num run específico usa --cod-if-padrao (e --cod-if-dry-prefix, cuja
+# compatibilidade com o pattern é validada no startup).
+# ---------------------------------------------------------------------------
+DEFAULT_COD_IF_PATTERN = r"^[0-9A-Z]{6,20}$"
+DEFAULT_COD_IF_DRY_PREFIX = "SYN100"
+DEFAULT_COD_OPERACAO_PATTERN = r"^[0-9]{16}$"
+
+
+# ---------------------------------------------------------------------------
+# Perfil do SCHEMA. REGRAS_SCHEMA_CETIP é editável e declarativo; ProductProfile
+# é a representação interna validada usada pelo motor. Não há inferência pelo SQL
+# e não há mais um dicionário por produto: o que variava entre cdb /
+# cdb_simplificado / rdb virou (a) valor derivado do dado — tipo do instrumento —
+# ou (b) parâmetro de CLI — query, spec, prefixo de saída, pattern.
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class SubtypePolicy:
@@ -307,9 +374,12 @@ class OperationKeyPolicy:
 @dataclass(frozen=True)
 class BusinessKeyPolicy:
     cod_if_allocator: str
-    cod_if_oracle_type: int
     cod_if_pattern: str
     cod_if_dry_prefix: str
+    # None = ainda NÃO resolvido. O valor concreto é derivado do lote em
+    # _deriva_tipo_oracle e injetado por _resolve_business_policy antes de
+    # qualquer round-trip de alocação no Oracle.
+    cod_if_oracle_type: Optional[int] = None
     operation: Optional[OperationKeyPolicy] = None
 
 
@@ -322,9 +392,6 @@ class ProductProfile:
     business_keys: BusinessKeyPolicy
     static_tables: Tuple[str, ...] = ()
     date_strategy: Optional[str] = "standard"
-    # Filtro específico do cdb_simplificado nas contagens de diagnóstico do
-    # domínio: só conta instrumentos cujo RESGATE é 'SEM TABELA'.
-    contagens_filtro_resgate_sem_tabela: bool = False
 
 
 @dataclass(frozen=True)
@@ -352,87 +419,64 @@ class EngordaJob:
     dry_run: bool = False
     specs_uri: Optional[str] = None
     clone_prefix: Optional[str] = None
+    # Confere (não define) o tipo derivado do lote. Ver _deriva_tipo_oracle.
+    tipo_oracle: Optional[int] = None
+    # Overrides estruturais do COD_IF; None = defaults agnósticos de produto.
+    cod_if_pattern: Optional[str] = None
+    cod_if_dry_prefix: Optional[str] = None
 
 
-REGRAS_PRODUTO: Dict[str, Dict[str, Any]] = {
-    "cdb_simplificado": {
-        "arquivo_sql": "cdb_simplificado.sql",
-        "prefixo_saida": f"{DEFAULT_CLONE_PREFIX}/cdb_simplificado",
-        # None desliga os ajustes DAT_* deste produto.
-        "ajuste_datas": "standard",
-        # Só o cdb_simplificado filtra RES.COD_COND_RESGATE = 'SEM TABELA'
-        # nas contagens de diagnóstico do domínio.
-        "contagens_filtro_resgate_sem_tabela": True,
-        "tabelas_static": (),
-        "integridade": {
-            # None desliga a poda de subtipo.
-            "subtipo": {
-                "tabela_condicao": CONDICAO_IF_TABLE,
-                "pk_condicao": CONDICAO_IF_PK,
-                "coluna_tipo": CONDICAO_IF_TIPO_COL,
-                "coluna_ativa": "DAT_EXCLUSAO",
-                "tabelas_por_tipo": {
-                    "1": "AMORTIZACAO", "2": "JUROS_FIXO",
-                    "3": "JUROS_FLUTUANTE", "4": "ATUALIZACAO_POS",
-                    "5": "SPREAD", "6": "PARTICIPACAO_LUCROS",
-                    "7": "PREMIO", "14": "ATUALIZACAO_PRE",
-                    "15": "PREMIO_OPCAO", "16": "TERMO",
-                    "17": "PARAMETRO_LIMITE", "20": "RESGATE",
-                    "21": "PREMIO_CONTRATO", "22": "OPCAO",
-                    "23": "RESET", "24": "DESDOBRAMENTO",
-                },
+# Perfil ÚNICO do schema CETIP, comum a todos os produtos.
+REGRAS_SCHEMA_CETIP: Dict[str, Any] = {
+    # None desliga os ajustes DAT_*.
+    "ajuste_datas": "standard",
+    "tabelas_static": (),
+    "integridade": {
+        # None desliga a poda de subtipo.
+        "subtipo": {
+            "tabela_condicao": CONDICAO_IF_TABLE,
+            "pk_condicao": CONDICAO_IF_PK,
+            "coluna_tipo": CONDICAO_IF_TIPO_COL,
+            "coluna_ativa": "DAT_EXCLUSAO",
+            "tabelas_por_tipo": {
+                "1": "AMORTIZACAO", "2": "JUROS_FIXO",
+                "3": "JUROS_FLUTUANTE", "4": "ATUALIZACAO_POS",
+                "5": "SPREAD", "6": "PARTICIPACAO_LUCROS",
+                "7": "PREMIO", "14": "ATUALIZACAO_PRE",
+                "15": "PREMIO_OPCAO", "16": "TERMO",
+                "17": "PARAMETRO_LIMITE", "20": "RESGATE",
+                "21": "PREMIO_CONTRATO", "22": "OPCAO",
+                "23": "RESET", "24": "DESDOBRAMENTO",
             },
-            # {} desliga as nulificações integrais do perfil.
-            "nulificar_colunas": {
-                "OPERACAO": (
-                    "NUM_ID_TRANSF_ARQ_P1", "NUM_ID_TRANSF_ARQ_P2",
-                ),
-            },
-            # () desliga as nulificações seletivas de faltantes.
-            "faltantes_seletivos": (
-                ("OPERACAO", "NUM_ID_CTX_MSG_P2"),
+        },
+        # {} desliga as nulificações integrais.
+        "nulificar_colunas": {
+            "OPERACAO": (
+                "NUM_ID_TRANSF_ARQ_P1", "NUM_ID_TRANSF_ARQ_P2",
             ),
         },
-        "chaves_negocio": {
-            # COD_IF é obrigatório em todo produto e não possui flag enabled.
-            "cod_if": {
-                "alocador": "oracle_if21",
-                "tipo_oracle": 49,
-                "padrao": r"^CDB[1-9A-C][0-9]{2}[0-9A-Z]{5}$",
-                "prefixo_dry_run": "CDB100",
-            },
-            # None desliga toda a estratégia específica de OPERACAO.
-            "operacao": {
-                "estrategia": "cetip_operacao_v1",
-                "tabela": "OPERACAO",
-                "padrao_codigo": r"^[0-9]{16}$",
-                "gerar_meu_numero": True,
-            },
+        # () desliga as nulificações seletivas de faltantes.
+        "faltantes_seletivos": (
+            ("OPERACAO", "NUM_ID_CTX_MSG_P2"),
+        ),
+    },
+    "chaves_negocio": {
+        # COD_IF é obrigatório e não possui flag enabled. tipo_oracle NÃO
+        # aparece aqui: é derivado do lote em tempo de execução.
+        "cod_if": {
+            "alocador": "oracle_if21",
+            "padrao": DEFAULT_COD_IF_PATTERN,
+            "prefixo_dry_run": DEFAULT_COD_IF_DRY_PREFIX,
+        },
+        # None desliga toda a estratégia específica de OPERACAO.
+        "operacao": {
+            "estrategia": "cetip_operacao_v1",
+            "tabela": "OPERACAO",
+            "padrao_codigo": DEFAULT_COD_OPERACAO_PATTERN,
+            "gerar_meu_numero": True,
         },
     },
 }
-
-# Os três produtos usam a mesma política técnica de sintetização. O arquivo SQL
-# define o domínio de NUM_IF; o perfil também informa ao Oracle qual tipo de
-# instrumento deve ser usado para gerar um COD_IF novo.
-REGRAS_PRODUTO["cdb"] = copy.deepcopy(REGRAS_PRODUTO["cdb_simplificado"])
-REGRAS_PRODUTO["cdb"]["arquivo_sql"] = "cdb.sql"
-REGRAS_PRODUTO["cdb"]["prefixo_saida"] = (
-    f"{DEFAULT_CLONE_PREFIX}/cdb_completo"
-)
-REGRAS_PRODUTO["cdb"]["contagens_filtro_resgate_sem_tabela"] = False
-
-REGRAS_PRODUTO["rdb"] = copy.deepcopy(REGRAS_PRODUTO["cdb_simplificado"])
-REGRAS_PRODUTO["rdb"]["arquivo_sql"] = "rdb.sql"
-REGRAS_PRODUTO["rdb"]["prefixo_saida"] = (
-    f"{DEFAULT_CLONE_PREFIX}/rdb_completo"
-)
-REGRAS_PRODUTO["rdb"]["contagens_filtro_resgate_sem_tabela"] = False
-REGRAS_PRODUTO["rdb"]["chaves_negocio"]["cod_if"].update({
-    "tipo_oracle": 50,
-    "padrao": r"^RDB[1-9A-C][0-9]{2}[0-9A-Z]{5}$",
-    "prefixo_dry_run": "RDB100",
-})
 
 
 def _rule_mapping(value: Any, expected: Set[str], context: str) -> Mapping[str, Any]:
@@ -489,15 +533,41 @@ def _normalize_clone_prefix(value: str) -> str:
     return prefix
 
 
-def _build_product_profile(name: str, raw: Mapping[str, Any]) -> ProductProfile:
+def _normalize_produto(name: Any) -> str:
+    """Rótulo do produto: texto livre validado, sem lista fechada.
+
+    O nome NÃO seleciona configuração (o perfil do schema é único). Ele dá nome
+    ao app no Data Flow, rastreia o run no log e alimenta os DEFAULTS de
+    --query-num-if-sql (<produto>.sql) e --clone-prefix
+    (sintetizacao_multiproduto/<produto>)."""
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("produto precisa ser texto não vazio")
+    normalized = name.strip().lower()
+    if not PRODUTO_NOME_RE.fullmatch(normalized):
+        raise ValueError(
+            f"nome de produto inválido: {name!r} (use [a-z][a-z0-9_]*)")
+    return normalized
+
+
+def _build_product_profile(
+    name: str,
+    raw: Mapping[str, Any],
+    *,
+    query_filename: Optional[str] = None,
+    clone_prefix: Optional[str] = None,
+    cod_if_pattern: Optional[str] = None,
+    cod_if_dry_prefix: Optional[str] = None,
+    tipo_oracle: Optional[int] = None,
+) -> ProductProfile:
+    """Compila o perfil do schema para um rótulo de produto, aplicando os
+    overrides de CLI. Sem overrides, tudo cai nos defaults derivados do nome."""
+    produto = _normalize_produto(name)
     rules = _rule_mapping(raw, {
-        "arquivo_sql", "prefixo_saida", "ajuste_datas",
-        "tabelas_static", "integridade", "chaves_negocio",
-        "contagens_filtro_resgate_sem_tabela",
-    }, f"REGRAS_PRODUTO[{name!r}]")
+        "ajuste_datas", "tabelas_static", "integridade", "chaves_negocio",
+    }, "REGRAS_SCHEMA_CETIP")
     integrity_raw = _rule_mapping(rules["integridade"], {
         "subtipo", "nulificar_colunas", "faltantes_seletivos",
-    }, f"{name}.integridade")
+    }, "integridade")
 
     subtype_raw = integrity_raw["subtipo"]
     subtype = None
@@ -505,58 +575,56 @@ def _build_product_profile(name: str, raw: Mapping[str, Any]) -> ProductProfile:
         subtype_cfg = _rule_mapping(subtype_raw, {
             "tabela_condicao", "pk_condicao", "coluna_tipo", "coluna_ativa",
             "tabelas_por_tipo",
-        }, f"{name}.integridade.subtipo")
+        }, "integridade.subtipo")
         subtype_tables = subtype_cfg["tabelas_por_tipo"]
         if not isinstance(subtype_tables, Mapping):
-            raise ValueError(f"{name}.integridade.subtipo.tabelas_por_tipo inválido")
+            raise ValueError("integridade.subtipo.tabelas_por_tipo inválido")
         subtype_pairs: List[Tuple[str, str]] = []
         for raw_type, raw_table in subtype_tables.items():
             if not isinstance(raw_type, str) or not raw_type.strip():
-                raise ValueError(
-                    f"{name}.integridade.subtipo contém tipo inválido"
-                )
+                raise ValueError("integridade.subtipo contém tipo inválido")
             subtype_pairs.append((
                 raw_type.strip(),
                 _normalize_rule_identifier(
                     raw_table,
-                    f"{name}.integridade.subtipo.tabelas_por_tipo[{raw_type!r}]",
+                    f"integridade.subtipo.tabelas_por_tipo[{raw_type!r}]",
                     table=True,
                 ),
             ))
         subtype = SubtypePolicy(
             condition_table=_normalize_rule_identifier(
                 subtype_cfg["tabela_condicao"],
-                f"{name}.integridade.subtipo.tabela_condicao",
+                "integridade.subtipo.tabela_condicao",
                 table=True,
             ),
             condition_pk=_normalize_rule_identifier(
                 subtype_cfg["pk_condicao"],
-                f"{name}.integridade.subtipo.pk_condicao",
+                "integridade.subtipo.pk_condicao",
             ),
             condition_type_column=_normalize_rule_identifier(
                 subtype_cfg["coluna_tipo"],
-                f"{name}.integridade.subtipo.coluna_tipo",
+                "integridade.subtipo.coluna_tipo",
             ),
             active_column=_normalize_rule_identifier(
                 subtype_cfg["coluna_ativa"],
-                f"{name}.integridade.subtipo.coluna_ativa",
+                "integridade.subtipo.coluna_ativa",
             ),
             subtype_by_type=tuple(subtype_pairs),
         )
 
     nullify_raw = integrity_raw["nulificar_colunas"]
     if not isinstance(nullify_raw, Mapping):
-        raise ValueError(f"{name}.integridade.nulificar_colunas inválido")
+        raise ValueError("integridade.nulificar_colunas inválido")
     normalized_nullify: Dict[str, List[str]] = {}
     for raw_table, raw_columns in nullify_raw.items():
         table = _normalize_rule_identifier(
-            raw_table, f"{name}.integridade.nulificar_colunas", table=True
+            raw_table, "integridade.nulificar_colunas", table=True
         )
         target = normalized_nullify.setdefault(table, [])
         for raw_column in _rule_sequence(
-                raw_columns, f"{name}.{table}.nulificar_colunas"):
+                raw_columns, f"{table}.nulificar_colunas"):
             column = _normalize_rule_identifier(
-                raw_column, f"{name}.{table}.nulificar_colunas"
+                raw_column, f"{table}.nulificar_colunas"
             )
             if column not in target:
                 target.append(column)
@@ -568,50 +636,61 @@ def _build_product_profile(name: str, raw: Mapping[str, Any]) -> ProductProfile:
     normalized_selective: Set[Tuple[str, str]] = set()
     for item in _rule_sequence(
             integrity_raw["faltantes_seletivos"],
-            f"{name}.integridade.faltantes_seletivos"):
-        pair = _rule_sequence(item, f"{name}.faltantes_seletivos")
+            "integridade.faltantes_seletivos"):
+        pair = _rule_sequence(item, "faltantes_seletivos")
         if len(pair) != 2:
             raise ValueError(
-                f"{name}.faltantes_seletivos precisa conter pares "
-                "(TABELA, COLUNA)"
+                "faltantes_seletivos precisa conter pares (TABELA, COLUNA)"
             )
         normalized_selective.add((
             _normalize_rule_identifier(
-                pair[0], f"{name}.faltantes_seletivos.tabela", table=True
+                pair[0], "faltantes_seletivos.tabela", table=True
             ),
             _normalize_rule_identifier(
-                pair[1], f"{name}.faltantes_seletivos.coluna"
+                pair[1], "faltantes_seletivos.coluna"
             ),
         ))
     selective_missing = frozenset(normalized_selective)
 
     business_raw = _rule_mapping(rules["chaves_negocio"], {
         "cod_if", "operacao",
-    }, f"{name}.chaves_negocio")
+    }, "chaves_negocio")
     cod_if = _rule_mapping(business_raw["cod_if"], {
-        "alocador", "tipo_oracle", "padrao", "prefixo_dry_run",
-    }, f"{name}.chaves_negocio.cod_if")
+        "alocador", "padrao", "prefixo_dry_run",
+    }, "chaves_negocio.cod_if")
     operation_raw = business_raw["operacao"]
     operation = None
     if operation_raw is not None:
         operation_cfg = _rule_mapping(operation_raw, {
             "estrategia", "tabela", "padrao_codigo", "gerar_meu_numero",
-        }, f"{name}.chaves_negocio.operacao")
+        }, "chaves_negocio.operacao")
         operation = OperationKeyPolicy(
             strategy=operation_cfg["estrategia"],
             table=_normalize_rule_identifier(
                 operation_cfg["tabela"],
-                f"{name}.chaves_negocio.operacao.tabela",
+                "chaves_negocio.operacao.tabela",
                 table=True,
             ),
             code_pattern=operation_cfg["padrao_codigo"],
             generate_meu_numero=operation_cfg["gerar_meu_numero"],
         )
 
+    if cod_if_pattern is not None and (
+            not isinstance(cod_if_pattern, str) or not cod_if_pattern.strip()):
+        raise ValueError("cod_if_pattern precisa ser texto não vazio")
+    if cod_if_dry_prefix is not None and (
+            not isinstance(cod_if_dry_prefix, str)
+            or not cod_if_dry_prefix.strip()):
+        raise ValueError("cod_if_dry_prefix precisa ser texto não vazio")
+
     return ProductProfile(
-        name=name,
-        query_filename=rules["arquivo_sql"],
-        default_clone_prefix=_normalize_clone_prefix(rules["prefixo_saida"]),
+        name=produto,
+        query_filename=(query_filename.strip()
+                        if isinstance(query_filename, str) and query_filename.strip()
+                        else f"{produto}.sql"),
+        default_clone_prefix=_normalize_clone_prefix(
+            clone_prefix if clone_prefix else f"{DEFAULT_CLONE_PREFIX}/{produto}"
+        ),
         integrity=IntegrityPolicy(
             subtype=subtype,
             nullify_columns=nullify_columns,
@@ -619,38 +698,27 @@ def _build_product_profile(name: str, raw: Mapping[str, Any]) -> ProductProfile:
         ),
         business_keys=BusinessKeyPolicy(
             cod_if_allocator=cod_if["alocador"],
-            cod_if_oracle_type=cod_if["tipo_oracle"],
-            cod_if_pattern=cod_if["padrao"],
-            cod_if_dry_prefix=cod_if["prefixo_dry_run"],
+            cod_if_pattern=(cod_if_pattern.strip() if cod_if_pattern
+                            else cod_if["padrao"]),
+            cod_if_dry_prefix=(cod_if_dry_prefix.strip() if cod_if_dry_prefix
+                               else cod_if["prefixo_dry_run"]),
+            cod_if_oracle_type=tipo_oracle,
             operation=operation,
         ),
         static_tables=tuple(
             _normalize_rule_identifier(
-                table, f"{name}.tabelas_static", table=True
+                table, "tabelas_static", table=True
             )
             for table in _rule_sequence(
-                rules["tabelas_static"], f"{name}.tabelas_static"
+                rules["tabelas_static"], "tabelas_static"
             )
         ),
         date_strategy=rules["ajuste_datas"],
-        contagens_filtro_resgate_sem_tabela=bool(
-            rules.get("contagens_filtro_resgate_sem_tabela", False)
-        ),
     )
 
 
-# Compilado uma vez no import. Edite REGRAS_PRODUTO antes de iniciar o job.
-PRODUCT_PROFILES: Mapping[str, ProductProfile] = MappingProxyType({
-    name: _build_product_profile(name, rules)
-    for name, rules in REGRAS_PRODUTO.items()
-})
-CDB_SIMPLIFICADO_PROFILE = PRODUCT_PROFILES["cdb_simplificado"]
-
-
 def _validate_product_profile(profile: ProductProfile) -> None:
-    if (not isinstance(profile.name, str)
-            or not re.fullmatch(r"[a-z][a-z0-9_]*", profile.name)):
-        raise ValueError(f"nome de produto inválido: {profile.name!r}")
+    _normalize_produto(profile.name)
     if (not isinstance(profile.query_filename, str)
             or not profile.query_filename.strip().lower().endswith(".sql")):
         raise ValueError(f"{profile.name}: query_filename precisa apontar para .sql")
@@ -724,16 +792,24 @@ def _validate_product_profile(profile: ProductProfile) -> None:
             f"{profile.name}: alocador COD_IF desconhecido "
             f"{policy.cod_if_allocator!r}"
         )
-    if type(policy.cod_if_oracle_type) is not int or policy.cod_if_oracle_type < 1:
+    # None é legítimo ANTES da derivação; se vier preenchido (--tipo-oracle ou
+    # policy já resolvida), tem que ser inteiro positivo.
+    if policy.cod_if_oracle_type is not None and (
+            type(policy.cod_if_oracle_type) is not int
+            or policy.cod_if_oracle_type < 1):
         raise ValueError(
             f"{profile.name}: cod_if_oracle_type deve ser inteiro positivo"
         )
+    if not policy.cod_if_pattern:
+        raise ValueError(f"{profile.name}: padrão de COD_IF é obrigatório")
     re.compile(policy.cod_if_pattern)
     dry_sample = policy.cod_if_dry_prefix + "00001"
     if not re.fullmatch(policy.cod_if_pattern, dry_sample):
         raise ValueError(
             f"{profile.name}: prefixo dry-run {policy.cod_if_dry_prefix!r} "
-            "não produz COD_IF compatível com o pattern"
+            f"não produz COD_IF compatível com o pattern "
+            f"{policy.cod_if_pattern!r} (amostra: {dry_sample!r}). Ajuste "
+            "--cod-if-dry-prefix junto com --cod-if-padrao."
         )
     operation = policy.operation
     if operation is not None:
@@ -767,22 +843,47 @@ def _validate_product_profile(profile: ProductProfile) -> None:
             )
 
 
-def get_product_profile(name: str) -> ProductProfile:
-    _validate_product_registry()
-    normalized = str(name).strip().lower()
-    try:
-        profile = PRODUCT_PROFILES[normalized]
-    except KeyError as exc:
-        raise ValueError(
-            f"produto desconhecido {name!r}; disponíveis: {sorted(PRODUCT_PROFILES)}"
-        ) from exc
-    if profile.name != normalized:
-        raise ValueError(
-            f"registro de produto inconsistente: chave {normalized!r}, "
-            f"perfil {profile.name!r}"
-        )
+def get_product_profile(
+    name: str,
+    *,
+    query_filename: Optional[str] = None,
+    clone_prefix: Optional[str] = None,
+    cod_if_pattern: Optional[str] = None,
+    cod_if_dry_prefix: Optional[str] = None,
+    tipo_oracle: Optional[int] = None,
+) -> ProductProfile:
+    """Compila e valida o perfil para QUALQUER rótulo de produto.
+
+    Não há mais lista fechada de produtos: o perfil técnico é único
+    (REGRAS_SCHEMA_CETIP) e tudo que variava por produto virou parâmetro ou
+    valor derivado do dado."""
+    profile = _build_product_profile(
+        name, REGRAS_SCHEMA_CETIP,
+        query_filename=query_filename,
+        clone_prefix=clone_prefix,
+        cod_if_pattern=cod_if_pattern,
+        cod_if_dry_prefix=cod_if_dry_prefix,
+        tipo_oracle=tipo_oracle,
+    )
     _validate_product_profile(profile)
     return profile
+
+
+def _resolve_business_policy(policy: BusinessKeyPolicy,
+                             tipo_oracle: int) -> BusinessKeyPolicy:
+    """Injeta o tipo DERIVADO do lote na política de chaves de negócio.
+
+    Chamado uma única vez por run, depois da seleção dos instrumentos e antes de
+    qualquer round-trip de alocação. A partir daqui cod_if_oracle_type é um
+    inteiro concreto e _allocation_sql pode montar a chamada do Oracle."""
+    if type(tipo_oracle) is not int or tipo_oracle < 1:
+        raise ValueError("tipo derivado deve ser inteiro positivo")
+    if (policy.cod_if_oracle_type is not None
+            and int(policy.cod_if_oracle_type) != int(tipo_oracle)):
+        raise ValueError(
+            f"tipo já fixado ({policy.cod_if_oracle_type}) diverge do derivado "
+            f"({tipo_oracle})")
+    return dataclasses.replace(policy, cod_if_oracle_type=int(tipo_oracle))
 
 
 # Coluna temporária com o índice do sintético (1..K). Sufixo improvável de
@@ -795,27 +896,6 @@ K_COL = "__clone_k"
 # ---------------------------------------------------------------------------
 def table_path_name(table: str) -> str:
     return table.split(".", 1)[1] if "." in table else table
-
-
-def _validate_product_registry() -> None:
-    prefixes: Dict[str, str] = {}
-    for key, profile in PRODUCT_PROFILES.items():
-        if key != profile.name:
-            raise ValueError(
-                f"registro de produto inconsistente: chave {key!r}, "
-                f"perfil {profile.name!r}"
-            )
-        _validate_product_profile(profile)
-        prefix = _normalize_clone_prefix(
-            profile.default_clone_prefix
-        ).lower()
-        previous = prefixes.get(prefix)
-        if previous is not None:
-            raise ValueError(
-                "perfis não podem compartilhar default_clone_prefix: "
-                f"{previous!r} e {profile.name!r}"
-            )
-        prefixes[prefix] = profile.name
 
 
 def raw_path(config: dict[str, str], table: str) -> str:
@@ -874,7 +954,7 @@ def _read_num_if_query_text(spark: SparkSession,
     """Lê uma única query SQL local ou em URI suportada pelo Spark."""
     selected_path = query_path or default_filename
     if selected_path is None:
-        raise ValueError("query de NUM_IF não informada e perfil sem arquivo SQL")
+        raise ValueError("query de NUM_IF não informada e produto sem arquivo SQL")
     path = selected_path.strip()
     if not path:
         raise ValueError("caminho da query de NUM_IF está vazio")
@@ -981,7 +1061,11 @@ def normalize_specs(specs: dict) -> dict:
 
 
 def load_specs(spark: SparkSession, specs_uri: str) -> dict:
-    """Cópia de engorda_tables.load_specs (specs.json único via wholeTextFiles)."""
+    """Cópia de engorda_tables.load_specs (specs.json único via wholeTextFiles).
+
+    O spec É a definição do conjunto de tabelas engordadas: o motor sintetiza
+    exatamente as tabelas não-static presentes aqui. Produto novo = spec do
+    fecho daquele produto, via --specs."""
     records = spark.sparkContext.wholeTextFiles(specs_uri).collect()
     if len(records) != 1:
         raise ValueError(
@@ -1272,6 +1356,9 @@ def monta_plano(spark, config, spec: dict, estaticas_extra: Set[str],
     """Classifica cada tabela sintetizável e define a regra de PK. Aborta (com
     lista completa) se alguma tabela ficar sem regra — nada de chute.
 
+    O CONJUNTO de tabelas engordadas é, por definição, {tabelas do spec} menos
+    {static}. Trocar o --specs troca o conjunto, sem tocar no código.
+
     Duas folgas independentes na PK nova (ambas só valem para OFFSET_PROPRIO;
     VIA_PAI apenas segue o mapeamento do pai):
       pk_band  -> distância entre o max REAL da tabela e a primeira PK nova;
@@ -1404,7 +1491,9 @@ def _dominio_num_if_produto(spark, config, profile: ProductProfile,
 
     O SQL deve ser um único SELECT e expor exatamente uma coluna chamada NUM_IF.
     Placeholders {{RAW_TABELA}} são resolvidos para o Parquet RAW correspondente.
-    Nenhum filtro de produto é aplicado pelo Python depois dessa consulta.
+    Nenhum filtro de produto é aplicado pelo Python depois dessa consulta — é
+    aqui que moram NUM_TIPO_IF, COD_COND_RESGATE, COD_TIPO_ESCALONAMENTO e
+    qualquer outro predicado de negócio do produto.
     """
     _validate_product_profile(profile)
     sql_text, resolved_path = _read_num_if_query_text(
@@ -1483,12 +1572,30 @@ def _pred_faltante_seletivo(selective_keys: frozenset[Tuple[str, str]]):
 
 def _subtipos_clonaveis(spec: dict,
                         policy: SubtypePolicy) -> List[Tuple[str, str]]:
-    """Pares (tipo, tabela-subtipo) que a sintetização realmente produz."""
-    return [
+    """Pares (tipo, tabela-subtipo) que a sintetização realmente produz.
+
+    Loga os tipos SEM tabela-subtipo no spec: num produto novo, um subtipo fora
+    do fecho faz toda CONDICAO_IF daquele tipo virar dangling e derruba os
+    NUM_IF correspondentes na poda. Sem este aviso a causa fica invisível e o
+    sintoma aparece só como "domínio válido menor que N"."""
+    disponiveis = [
         (str(tipo), tabela)
         for tipo, tabela in policy.subtype_by_type
         if tabela in spec and not spec[tabela].get("static")
     ]
+    ausentes = sorted(
+        f"{tipo}->{tabela}"
+        for tipo, tabela in policy.subtype_by_type
+        if tabela not in spec or spec[tabela].get("static")
+    )
+    if ausentes:
+        logger.warning(
+            "poda subtipo: tipo(s) sem tabela-subtipo sintetizável no spec: %s. "
+            "Toda %s desses tipos será tratada como dangling e os NUM_IF "
+            "correspondentes saem do domínio. Se o produto usa esses tipos, "
+            "inclua as tabelas no --specs.",
+            ausentes, policy.condition_table)
+    return disponiveis
 
 
 def _num_if_inconsistentes_subtipo(spark, config, spec, dominio: DataFrame,
@@ -1864,11 +1971,104 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
             raise ValueError(
                 f"Domínio VÁLIDO após a poda (subtipo/destino) tem só "
                 f"{len(valores)} instrumento(s); pedi {n}. Afrouxe os filtros "
-                "(--sem-poda-subtipo / menos faltantes) ou reduza --n-instrumentos.")
+                "(--sem-poda-subtipo / menos faltantes), reduza --n-instrumentos "
+                "ou verifique os avisos de 'tipo(s) sem tabela-subtipo no spec'.")
         valores = sorted(valores)
     logger.info("Lote: %d instrumento(s) NUM_IF=%s", len(valores),
                 valores if len(valores) <= 20 else f"{valores[:20]}... (+{len(valores)-20})")
     return valores
+
+
+def _deriva_tipo_oracle(spark, config, num_if_valores: List,
+                        tipo_oracle_cli: Optional[int] = None) -> int:
+    """Deriva o TIPO do instrumento (NUM_TIPO_IF) das próprias linhas do lote.
+
+    Por que derivar em vez de configurar: o valor alimenta
+    F_GETCODIGONOVOIF21(<tipo>, ...), que é quem decide QUAL código o Oracle
+    aloca. Se o tipo viesse de um literal por produto (o antigo REGRAS_PRODUTO)
+    ou de um flag digitado, um --produto trocado em relação ao SQL alocaria
+    código do produto errado passando por TODAS as validações — o pattern de
+    COD_IF não pega isso, porque ele valida a saída de uma função cujo input já
+    estava errado. Lendo o tipo das linhas que o SQL do produto selecionou, o
+    código alocado é o do produto sintetizado POR CONSTRUÇÃO.
+
+    Semântica do --tipo-oracle (opcional):
+      * ausente  -> deriva; mais de um tipo distinto no lote ABORTA;
+      * presente -> confere contra o derivado e ABORTA se divergir. Num lote
+                    legitimamente multi-tipo, é a escolha manual explícita.
+    """
+    src = _read_source(spark, config, TABELA_RAIZ)
+    if COL_NUM_TIPO_IF not in src.columns:
+        if tipo_oracle_cli is None:
+            raise ValueError(
+                f"{TABELA_RAIZ} não expõe a coluna {COL_NUM_TIPO_IF}: não há como "
+                "derivar o tipo do lote. Informe --tipo-oracle explicitamente.")
+        logger.warning(
+            "%s sem coluna %s; usando --tipo-oracle=%d SEM conferência contra o "
+            "dado.", TABELA_RAIZ, COL_NUM_TIPO_IF, int(tipo_oracle_cli))
+        return int(tipo_oracle_cli)
+
+    sel = spark.createDataFrame([(v,) for v in num_if_valores], [COL_NUM_IF])
+    sel = sel.select(F.col(COL_NUM_IF).cast(src.schema[COL_NUM_IF].dataType))
+    brutos = [
+        row["__tipo"] for row in
+        (src.join(F.broadcast(sel), on=COL_NUM_IF, how="left_semi")
+         .select(F.col(COL_NUM_TIPO_IF).alias("__tipo"))
+         .dropDuplicates()
+         .orderBy("__tipo")
+         .limit(MAX_TIPOS_DIAGNOSTICO + 1)
+         .collect())
+    ]
+    if not brutos:
+        raise ValueError(
+            f"lote sem linhas em {TABELA_RAIZ}: não há {COL_NUM_TIPO_IF} a derivar.")
+    if any(valor is None for valor in brutos):
+        raise ValueError(
+            f"{TABELA_RAIZ}.{COL_NUM_TIPO_IF} nulo em linha(s) do lote; corrija o "
+            "domínio da query do produto.")
+
+    tipos: List[int] = []
+    for valor in brutos:
+        try:
+            tipo = int(valor)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{TABELA_RAIZ}.{COL_NUM_TIPO_IF} não é inteiro no lote: {valor!r}"
+            ) from exc
+        if tipo < 1:
+            raise ValueError(
+                f"{TABELA_RAIZ}.{COL_NUM_TIPO_IF} inválido no lote: {tipo}")
+        tipos.append(tipo)
+    tipos = sorted(set(tipos))
+
+    if len(tipos) > 1:
+        listados = (tipos if len(tipos) <= MAX_TIPOS_DIAGNOSTICO
+                    else f"{tipos[:MAX_TIPOS_DIAGNOSTICO]}... (+)")
+        if tipo_oracle_cli is None:
+            raise ValueError(
+                f"Lote heterogêneo: {COL_NUM_TIPO_IF} distinto(s) {listados} nas "
+                f"linhas selecionadas de {TABELA_RAIZ}. O tipo define qual COD_IF "
+                "o Oracle aloca, então o SQL do produto precisa restringir o "
+                "domínio a UM tipo. Se o lote for legitimamente multi-tipo, "
+                "informe --tipo-oracle para escolher o tipo da alocação.")
+        logger.warning(
+            "Lote heterogêneo (%s=%s); alocando COD_IF com --tipo-oracle=%d por "
+            "decisão explícita do operador.",
+            COL_NUM_TIPO_IF, listados, int(tipo_oracle_cli))
+        return int(tipo_oracle_cli)
+
+    derivado = tipos[0]
+    if tipo_oracle_cli is not None and int(tipo_oracle_cli) != derivado:
+        raise ValueError(
+            f"--tipo-oracle={int(tipo_oracle_cli)} diverge do {COL_NUM_TIPO_IF} "
+            f"do lote ({derivado}). Isso indica query/produto trocados; corrija "
+            "antes de alocar COD_IF no Oracle.")
+    logger.info(
+        "Tipo do instrumento DERIVADO do lote: %s=%d (%s).",
+        COL_NUM_TIPO_IF, derivado,
+        "confirmado por --tipo-oracle" if tipo_oracle_cli is not None
+        else "sem override na CLI")
+    return derivado
 
 
 # ---------------------------------------------------------------------------
@@ -2230,6 +2430,12 @@ def _allocation_sql(code_kind: str, batch_count: int,
         if policy.cod_if_allocator != "oracle_if21":
             raise ValueError(
                 f"alocador COD_IF não implementado: {policy.cod_if_allocator!r}"
+            )
+        # Defensivo: a policy só chega aqui depois de _resolve_business_policy.
+        if policy.cod_if_oracle_type is None:
+            raise ValueError(
+                "tipo do instrumento não resolvido para a alocação de COD_IF "
+                "(chame _resolve_business_policy com o tipo derivado do lote)"
             )
         expression = (
             "CETIP.PKG_CODIGO.F_GETCODIGONOVOIF21("
@@ -2635,9 +2841,10 @@ def _validate_disabled_operation_output(
     _, source_rows = operation_output
     if source_rows:
         raise ValueError(
-            "O produto desliga chaves_negocio.operacao, mas o lote contém "
-            f"{source_rows} linha(s) de OPERACAO. Configure a estratégia no "
-            "REGRAS_PRODUTO ou exclua OPERACAO da sintetização em tabelas_static."
+            "A política de chaves de negócio desliga OPERACAO, mas o lote contém "
+            f"{source_rows} linha(s) dessa tabela. Configure a estratégia em "
+            "REGRAS_SCHEMA_CETIP ou exclua OPERACAO da sintetização com "
+            "--tratar-como-static."
         )
 
 
@@ -2905,7 +3112,11 @@ def _valida_destino(config: dict) -> str:
     A saída anterior permanece publicada durante alocação, preflight, escrita e
     readback; só depois o staging validado é promovido como uma árvore completa.
     Por isso o destino NÃO pode ser vazio, nem conter/estar contido na área
-    raw, nem conter a área de saída do engorda."""
+    raw, nem conter a área de saída do engorda.
+
+    Multi-produto: cada produto precisa do SEU prefixo (default
+    sintetizacao_multiproduto/<produto>). Dois produtos com o mesmo
+    --clone-prefix se sobrescrevem — o segundo run publica por cima do primeiro."""
     prefix = (config.get("DATAGEN_CLONE_PREFIX") or "").strip("/")
     if not prefix:
         raise ValueError(
@@ -2939,27 +3150,32 @@ def _valida_destino(config: dict) -> str:
 
 # ---------------------------------------------------------------------------
 # Contagens de diagnóstico do domínio (log-only; não altera a sintetização).
+#
+# O domínio da volumetria é o MAPA_CLONE_NUM_IF publicado pelo próprio run.
+# Portanto NUM_TIPO_IF, COD_COND_RESGATE, COD_TIPO_ESCALONAMENTO e qualquer
+# outro filtro de negócio permanecem exclusivamente no SQL de entrada. O mapa
+# transporta para a saída exatamente os NUM_IF selecionados por esse SQL, sem
+# tentar reconstruir ou interpretar seus predicados no Python.
 # ---------------------------------------------------------------------------
 # Colunas do SELECT final da query de contagens, na ordem em que são logadas.
 _CONTAGENS_DOMINIO_COLS = (
     "QIFE", "QTIT", "QCRE", "QC20",
     "QC01", "QC02", "QC03", "QC04", "QC05", "QC14",
     "QRES", "QJFL", "QJFI", "QE83", "QE85",
+    "QDEP", "QCOM", "QCPA", "QOPE",
+    "QDOP", "QESP", "QECO", "QLAN",
 )
 
 
-def _monta_query_contagens_dominio(config: dict, num_tipo_if: int,
-                                   filtro_resgate_sem_tabela: bool = False) -> str:
+def _monta_query_contagens_dominio(config: dict) -> str:
     """Monta a query de contagens do domínio sobre os Parquets ENGORDADOS
-    (saída sintética em clone_base_path). Só lê os sintéticos recém-gravados — não
-    altera nada. O tipo de instrumento (NUM_TIPO_IF) vem do perfil do produto
-    (cod_if_oracle_type: 49 = CDB, 50 = RDB, etc.), tornando a query genérica.
-    Os filtros TIT.COD_TIPO_ESCALONAMENTO IS NULL e RES.COD_COND_RESGATE =
-    'SEM TABELA' são específicos do cdb_simplificado e só entram quando
-    filtro_resgate_sem_tabela=True (no cdb completo / rdb nenhum dos dois
-    existe)."""
+    (saída sintética em clone_base_path). Só lê os sintéticos recém-gravados e
+    não altera nada.
+
+    FILTRO_BASE nasce dos NUM_IF_NOVO distintos gravados em MAPA_CLONE_NUM_IF.
+    Esse mapa é a parametrização exata do domínio definido pelo SQL de entrada:
+    não há filtros de produto duplicados nesta query."""
     base = clone_base_path(config)
-    tipo_if = int(num_tipo_if)
 
     def src(table: str) -> str:
         path = f"{base}/{table_path_name(table)}"
@@ -2967,24 +3183,17 @@ def _monta_query_contagens_dominio(config: dict, num_tipo_if: int,
             raise ValueError(f"path do sintético de {table} contém crase e não é SQL-safe")
         return f"parquet.`{path}`"
 
-    # Filtros específicos do cdb_simplificado (escalonamento e resgate 'SEM
-    # TABELA'). No cdb completo / rdb nenhum dos dois pode existir.
-    filtros_cdb_simplificado = (
-        "\n      AND TIT.COD_TIPO_ESCALONAMENTO IS NULL"
-        "\n      AND RES.COD_COND_RESGATE = 'SEM TABELA'"
-        if filtro_resgate_sem_tabela else ""
-    )
-
     return f"""
 WITH FILTRO_BASE AS
 (
     SELECT DISTINCT IFE.NUM_IF
-    FROM {src("INSTRUMENTO_FINANCEIRO")} IFE
+    FROM {src(MAPA_NUM_IF_TABLE)} MIF
+         INNER JOIN {src("INSTRUMENTO_FINANCEIRO")} IFE
+                 ON IFE.NUM_IF = MIF.NUM_IF_NOVO
          INNER JOIN {src("TITULO")} TIT ON TIT.NUM_IF = IFE.NUM_IF
          INNER JOIN {src("CONDICAO_IF")} CIF ON CIF.NUM_IF = IFE.NUM_IF
          INNER JOIN {src("RESGATE")} RES ON RES.NUM_CONDICAO_IF = CIF.NUM_CONDICAO_IF
-    WHERE IFE.NUM_TIPO_IF = {tipo_if}{filtros_cdb_simplificado}
-      AND IFE.DAT_EXCLUSAO IS NULL
+    WHERE IFE.DAT_EXCLUSAO IS NULL
       AND CIF.DAT_EXCLUSAO IS NULL
       AND RES.DAT_EXCLUSAO IS NULL
 ),
@@ -3036,6 +3245,66 @@ AGREGADO_FLAGS AS
       FROM FILTRO_BASE FB
       LEFT JOIN FLAGS_IF F ON F.NUM_IF = FB.NUM_IF
       LEFT JOIN EVENTOS_IF E ON E.NUM_IF = FB.NUM_IF
+),
+DEP_IF AS
+(
+    SELECT COUNT(DISTINCT DP.NUM_IF) QDEP
+      FROM {src("DEPOSITO_AUTOMATICO_IF")} DP
+           JOIN FILTRO_BASE FB ON FB.NUM_IF = DP.NUM_IF
+),
+COM_IF AS
+(
+    SELECT COUNT(DISTINCT CM.NUM_IF) QCOM
+      FROM {src("CARTEIRA_COMITENTE")} CM
+           JOIN FILTRO_BASE FB ON FB.NUM_IF = CM.NUM_IF
+     WHERE CM.QTD_CARTEIRA_COMITENTE > 0
+),
+CPA_IF AS
+(
+    SELECT COUNT(DISTINCT CP.NUM_IF) QCPA
+      FROM {src("CARTEIRA_PARTICIPANTE")} CP
+           JOIN FILTRO_BASE FB ON FB.NUM_IF = CP.NUM_IF
+     WHERE CP.QTD_CARTEIRA_PARTICIPANTE > 0
+),
+OPE_IF AS
+(
+    SELECT COUNT(DISTINCT OPE.NUM_IF) QOPE
+      FROM {src("OPERACAO")} OPE
+           JOIN FILTRO_BASE FB ON FB.NUM_IF = OPE.NUM_IF
+),
+DOP_IF AS
+(
+    SELECT COUNT(DISTINCT OPE.NUM_IF) QDOP
+      FROM {src("DADO_OPERACAO")} DOP
+           JOIN {src("OPERACAO")} OPE
+             ON OPE.NUM_ID_OPERACAO = DOP.NUM_ID_OPERACAO
+           JOIN FILTRO_BASE FB ON FB.NUM_IF = OPE.NUM_IF
+),
+ESP_IF AS
+(
+    SELECT COUNT(DISTINCT OPE.NUM_IF) QESP
+      FROM {src("ESPECIFICACAO")} ESP
+           JOIN {src("OPERACAO")} OPE
+             ON OPE.NUM_ID_OPERACAO = ESP.NUM_ID_OPERACAO
+           JOIN FILTRO_BASE FB ON FB.NUM_IF = OPE.NUM_IF
+),
+ECO_IF AS
+(
+    SELECT COUNT(DISTINCT OPE.NUM_IF) QECO
+      FROM {src("ESPECIFICACAO_COMITENTE")} ECO
+           JOIN {src("ESPECIFICACAO")} ESP
+             ON ESP.NUM_ID_ESPECIFICACAO = ECO.NUM_ID_ESPECIFICACAO
+           JOIN {src("OPERACAO")} OPE
+             ON OPE.NUM_ID_OPERACAO = ESP.NUM_ID_OPERACAO
+           JOIN FILTRO_BASE FB ON FB.NUM_IF = OPE.NUM_IF
+),
+LAN_IF AS
+(
+    SELECT COUNT(DISTINCT OPE.NUM_IF) QLAN
+      FROM {src("LANCAMENTO")} LAN
+           JOIN {src("OPERACAO")} OPE
+             ON OPE.NUM_ID_OPERACAO = LAN.NUM_ID_OPERACAO
+           JOIN FILTRO_BASE FB ON FB.NUM_IF = OPE.NUM_IF
 )
 SELECT B.QTDE_BASE AS QIFE,
        B.QTDE_BASE AS QTIT,
@@ -3043,30 +3312,38 @@ SELECT B.QTDE_BASE AS QIFE,
        B.QTDE_BASE AS QC20,
        F.QC01, F.QC02, F.QC03, F.QC04, F.QC05, F.QC14,
        B.QTDE_BASE AS QRES,
-       F.QJFL, F.QJFI, F.QE83, F.QE85
+       F.QJFL, F.QJFI, F.QE83, F.QE85,
+       DAI.QDEP, COM.QCOM, CPA.QCPA, OPE.QOPE,
+       DOP.QDOP, ESP.QESP, ECO.QECO, LAN.QLAN
   FROM AGREGADO_BASE B
 CROSS JOIN AGREGADO_FLAGS F
+CROSS JOIN DEP_IF DAI
+CROSS JOIN COM_IF COM
+CROSS JOIN CPA_IF CPA
+CROSS JOIN OPE_IF OPE
+CROSS JOIN DOP_IF DOP
+CROSS JOIN ESP_IF ESP
+CROSS JOIN ECO_IF ECO
+CROSS JOIN LAN_IF LAN
 """
 
 
-def _loga_contagens_dominio(spark, config: dict, num_tipo_if: int,
-                            dry_run: bool = False,
-                            filtro_resgate_sem_tabela: bool = False) -> None:
+def _loga_contagens_dominio(spark, config: dict,
+                            dry_run: bool = False) -> None:
     """Roda a query de contagens do domínio nos Parquets ENGORDADOS (saída
     sintética) e escreve o resultado no log. É puramente diagnóstico: qualquer
     falha é logada como aviso e NÃO interrompe nem altera a sintetização. No
-    --dry-run nada foi gravado, então as contagens são puladas. O tipo de
-    instrumento (NUM_TIPO_IF) vem do perfil, deixando a query genérica."""
+    --dry-run nada foi gravado, então as contagens são puladas."""
     if dry_run:
         logger.info("--dry-run: contagens do domínio (dados engordados) puladas "
                     "— nada foi gravado.")
         return
     try:
-        sql = _monta_query_contagens_dominio(config, num_tipo_if,
-                                             filtro_resgate_sem_tabela)
+        sql = _monta_query_contagens_dominio(config)
         row = spark.sql(sql).first()
         logger.info("=" * 78)
-        logger.info("CONTAGENS DO DOMÍNIO (dados engordados — diagnóstico):")
+        logger.info("CONTAGENS DO DOMÍNIO (dados engordados — diagnóstico; "
+                    "domínio do SQL de entrada via %s):", MAPA_NUM_IF_TABLE)
         if row is None:
             logger.info("  (query não retornou linhas)")
         else:
@@ -3101,6 +3378,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                      poda_subtipo: bool = True,
                      anular_cols: Optional[Mapping[str, Sequence[str]]] = None,
                      oracle_code_batch_size: int = DEFAULT_ORACLE_CODE_BATCH_SIZE,
+                     tipo_oracle: Optional[int] = None,
                      dry_run: bool = False) -> Dict[str, dict]:
     """Roda a sintetização fim a fim; devolve {tabela: estatísticas} (para uso em
     notebook). Aborta sem gravar NADA se qualquer validação falhar.
@@ -3111,8 +3389,10 @@ def executa_clonagem(spark, config, spec: dict, *,
       * faltantes_arg/parquet (itens 3/4): tira os NUM_IF que referenciam chaves
         inexistentes no destino (QAB), sem conexão Oracle, exceto a allowlist
         nullable, que anula somente os sintéticos com valores listados.
-    As regras de domínio, integridade e chaves de negócio vêm explicitamente de
-    product_profile; a query SQL pode apenas sobrescrever o arquivo do perfil."""
+
+    O TIPO do instrumento é derivado do lote logo após a seleção e ANTES de
+    qualquer alocação no Oracle (ver _deriva_tipo_oracle); tipo_oracle é apenas
+    conferência opcional."""
     inicio = time.perf_counter()
     _validate_product_profile(product_profile)
     if (num_ifs is None) == (n_instrumentos is None):
@@ -3148,6 +3428,9 @@ def executa_clonagem(spark, config, spec: dict, *,
     else:
         logger.info("Produto %s não altera colunas de data.", product_profile.name)
     spec = normalize_specs(spec)
+    logger.info("Spec carregado: %d tabela(s); engordáveis (não-static) antes dos "
+                "parâmetros: %d.", len(spec),
+                sum(1 for cfg in spec.values() if not cfg.get("static")))
     _valida_contrato_nulificacao_seletiva(
         spec, product_profile.integrity.selective_missing_keys
     )
@@ -3175,6 +3458,13 @@ def executa_clonagem(spark, config, spec: dict, *,
                                      query_num_if_path=query_num_if_path,
                                      faltantes=faltantes,
                                      poda_subtipo=poda_subtipo)
+
+    # Tipo do instrumento DERIVADO do lote — antes de qualquer round-trip Oracle.
+    # É isto que substitui o antigo literal por produto e o que impede alocar
+    # COD_IF de um produto para instrumento de outro.
+    tipo_derivado = _deriva_tipo_oracle(spark, config, valores, tipo_oracle)
+    business_policy = _resolve_business_policy(business_policy, tipo_derivado)
+    operation_policy = business_policy.operation
 
     # n_clones_estimado: só alimenta o AVISO de capacidade da PK (fan-out por
     # instrumento é desconhecido antes do lote; 1000 linhas/instrumento é um
@@ -3260,7 +3550,8 @@ def executa_clonagem(spark, config, spec: dict, *,
             and operation_policy.table not in resultados):
         raise ValueError(
             "política de chaves de negócio exige a tabela "
-            f"{operation_policy.table}"
+            f"{operation_policy.table} no spec (inclua-a no fecho do produto ou "
+            "desligue a política em REGRAS_SCHEMA_CETIP)"
         )
 
     def _prepare_outputs(output_base: Optional[str], is_dry_run: bool) -> None:
@@ -3356,9 +3647,10 @@ def executa_clonagem(spark, config, spec: dict, *,
         logger.info("Staging validado e publicado em %s.", save_base)
 
     logger.info("=" * 78)
-    logger.info("RESUMO DA SINTETIZAÇÃO (%.1fs) — %d instrumento(s) × K=%d, "
-                "data de engorda %s, %s",
-                time.perf_counter() - inicio, len(valores), fator_k,
+    logger.info("RESUMO DA SINTETIZAÇÃO (%.1fs) — produto %s, %s=%d, "
+                "%d instrumento(s) × K=%d, data de engorda %s, %s",
+                time.perf_counter() - inicio, product_profile.name,
+                COL_NUM_TIPO_IF, tipo_derivado, len(valores), fator_k,
                 engorda_ts.isoformat(sep=" "),
                 "DRY-RUN (nada gravado)" if dry_run else f"gravado em {save_base}")
     for t in ordem:
@@ -3369,9 +3661,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                     ",".join(s.get("colunas_data", [])) or "-",
                     ",".join(s.get("colunas_anuladas", [])) or "-")
     logger.info("=" * 78)
-    _loga_contagens_dominio(spark, config,
-                            business_policy.cod_if_oracle_type, dry_run,
-                            product_profile.contagens_filtro_resgate_sem_tabela)
+    _loga_contagens_dominio(spark, config, dry_run)
     return stats
 
 
@@ -3421,9 +3711,29 @@ def create_spark_session(app_name: str) -> SparkSession:
 def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
     if not isinstance(job, EngordaJob):
         raise TypeError("job precisa ser uma instância de EngordaJob")
-    if not isinstance(job.produto, str) or not job.produto.strip():
-        raise ValueError("produto precisa ser texto não vazio")
-    profile = get_product_profile(job.produto)
+    for field_name in ("query_num_if_path", "specs_uri", "clone_prefix",
+                       "cod_if_pattern", "cod_if_dry_prefix"):
+        value = getattr(job, field_name)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"{field_name} precisa ser texto não vazio")
+    if job.cod_if_pattern is not None:
+        try:
+            re.compile(job.cod_if_pattern)
+        except re.error as exc:
+            raise ValueError(f"cod_if_pattern inválido: {exc}") from exc
+    if job.tipo_oracle is not None and (
+            type(job.tipo_oracle) is not int or job.tipo_oracle < 1):
+        raise ValueError("tipo_oracle deve ser inteiro >= 1")
+    # O perfil é construído já com os overrides: assim a compatibilidade
+    # pattern × prefixo dry-run falha no startup, e não no meio do run.
+    profile = get_product_profile(
+        job.produto,
+        query_filename=job.query_num_if_path,
+        clone_prefix=job.clone_prefix,
+        cod_if_pattern=job.cod_if_pattern,
+        cod_if_dry_prefix=job.cod_if_dry_prefix,
+        tipo_oracle=job.tipo_oracle,
+    )
     if (job.num_ifs is None) == (job.n_instrumentos is None):
         raise ValueError(
             "informe exatamente um entre num_ifs e n_instrumentos"
@@ -3456,10 +3766,6 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
         value = getattr(job, field_name)
         if value is not None and (type(value) is not int or value < 1):
             raise ValueError(f"{field_name} deve ser inteiro >= 1")
-    for field_name in ("query_num_if_path", "specs_uri"):
-        value = getattr(job, field_name)
-        if value is not None and (not isinstance(value, str) or not value.strip()):
-            raise ValueError(f"{field_name} precisa ser texto não vazio")
     if not isinstance(job.tratar_como_static, (tuple, list, set)) or any(
             not isinstance(table, str) or not table.strip()
             for table in job.tratar_como_static):
@@ -3477,14 +3783,13 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
         raise ValueError(f"tabela(s) obrigatória(s) não podem ser static: {forbidden}")
     if job.engorda_ts is not None and not isinstance(job.engorda_ts, datetime):
         raise ValueError("engorda_ts precisa ser datetime")
-    if type(job.poda_subtipo) is not bool or type(job.dry_run) is not bool:
-        raise ValueError("poda_subtipo e dry_run precisam ser booleanos")
+    for field_name in ("poda_subtipo", "dry_run"):
+        if type(getattr(job, field_name)) is not bool:
+            raise ValueError(f"{field_name} precisa ser booleano")
     if job.anular_cols is not None:
         _merge_nullification_mappings(
             profile.integrity.nullify_mapping(), job.anular_cols
         )
-    if job.clone_prefix is not None:
-        _normalize_clone_prefix(job.clone_prefix)
     if operation_policy is not None and operation_policy.generate_meu_numero:
         try:
             _validate_meu_numero_prefix(job.meu_numero_prefix)
@@ -3508,10 +3813,13 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
             config["DATAGEN_CLONE_PREFIX"]
         )
     logger.info(
-        "Job produto=%s query=%s destino_prefixo=%s dry_run=%s",
+        "Job produto=%s query=%s specs=%s destino_prefixo=%s tipo_oracle=%s "
+        "dry_run=%s",
         profile.name,
         job.query_num_if_path or profile.query_filename,
+        job.specs_uri or config["DATAGEN_SPECS_URI"],
         config["DATAGEN_CLONE_PREFIX"],
+        job.tipo_oracle if job.tipo_oracle is not None else "derivado do lote",
         job.dry_run,
     )
 
@@ -3543,6 +3851,7 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
                 profile.integrity.nullify_mapping(), job.anular_cols
             ),
             oracle_code_batch_size=job.oracle_code_batch_size,
+            tipo_oracle=job.tipo_oracle,
             dry_run=job.dry_run,
         )
     finally:
@@ -3579,6 +3888,25 @@ def nonneg_int(value: str) -> int:
     return parsed
 
 
+def _parse_produto(value: str) -> str:
+    """Rótulo livre validado; não há mais lista fechada de produtos."""
+    try:
+        return _normalize_produto(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _parse_regex(value: str) -> str:
+    texto = value.strip()
+    if not texto:
+        raise argparse.ArgumentTypeError("padrão não pode ser vazio")
+    try:
+        re.compile(texto)
+    except re.error as exc:
+        raise argparse.ArgumentTypeError(f"regex inválida: {exc}") from exc
+    return texto
+
+
 def _parse_data_engorda(txt: str) -> datetime:
     """Data/hora do run: 'YYYY-MM-DD' (meia-noite) ou 'YYYY-MM-DD HH:MM:SS'.
     Existe para tornar o run REPRODUZÍVEL (rodar de novo e obter exatamente as
@@ -3595,11 +3923,16 @@ def _parse_data_engorda(txt: str) -> datetime:
 
 def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Motor multi-produto de sintetização por entidade (synthesize-and-remap), "
-                    "dirigido por perfil, query SQL e spec_config.json.")
+        description="Motor multi-produto de sintetização por entidade "
+                    "(synthesize-and-remap), dirigido por query SQL, "
+                    "spec_config.json e parâmetros. Produto novo NÃO exige "
+                    "alteração de código.")
     parser.add_argument(
-        "--produto", required=True, choices=sorted(PRODUCT_PROFILES),
-        help="Perfil técnico do produto; o domínio de NUM_IF vem do arquivo SQL.",
+        "--produto", required=True, type=_parse_produto,
+        help="Rótulo do run ([a-z][a-z0-9_]*). Não seleciona configuração: "
+             "define o nome do app e os DEFAULTS de --query-num-if-sql "
+             "(<produto>.sql) e --clone-prefix "
+             f"({DEFAULT_CLONE_PREFIX}/<produto>).",
     )
     grupo = parser.add_mutually_exclusive_group(required=True)
     grupo.add_argument("--num-ifs", type=_parse_num_ifs, default=None,
@@ -3608,14 +3941,31 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                        help="Sorteia N instrumentos do domínio definido pela "
                             "query SQL; usa --seed.")
     parser.add_argument("--query-num-if-sql", dest="query_num_if_path", default=None,
-                        help="Override do arquivo Spark SQL do perfil. Deve retornar "
-                             "NUM_IF e pode ser caminho local ou URI.")
+                        help="Arquivo Spark SQL que define o domínio do produto "
+                             "(NUM_TIPO_IF, COD_COND_RESGATE, escalonamento e "
+                             "demais filtros de negócio moram AQUI). Deve retornar "
+                             "NUM_IF; caminho local ou URI. Default: <produto>.sql.")
     parser.add_argument("--fator-k", type=positive_int, default=1,
                         help="Sintéticos por instrumento (default 1).")
     parser.add_argument("--meu-numero-prefix", type=_validate_meu_numero_prefix,
                         default=None,
-                        help="Prefixo de 3 dígitos (primeiro 1-9); obrigatório apenas "
-                             "para perfis que geram meu-número.")
+                        help="Prefixo de 3 dígitos (primeiro 1-9); obrigatório "
+                             "enquanto a política de OPERACAO gerar meu-número.")
+    parser.add_argument("--tipo-oracle", type=positive_int, default=None,
+                        help=f"OPCIONAL. O {COL_NUM_TIPO_IF} é DERIVADO das linhas "
+                             "do lote; informe apenas para CONFERIR (diverge -> "
+                             "aborta) ou para escolher o tipo da alocação num lote "
+                             "legitimamente multi-tipo.")
+    parser.add_argument("--cod-if-padrao", dest="cod_if_pattern",
+                        type=_parse_regex, default=None,
+                        help="OPCIONAL. Aperta a validação estrutural do COD_IF "
+                             f"(default {DEFAULT_COD_IF_PATTERN!r}, agnóstico de "
+                             "produto). Ajuste --cod-if-dry-prefix junto.")
+    parser.add_argument("--cod-if-dry-prefix", dest="cod_if_dry_prefix",
+                        default=None,
+                        help="OPCIONAL. Prefixo do placeholder de COD_IF no "
+                             f"--dry-run (default {DEFAULT_COD_IF_DRY_PREFIX!r}). "
+                             "Precisa casar com --cod-if-padrao.")
     parser.add_argument("--oracle-code-batch-size", type=positive_int,
                         default=DEFAULT_ORACLE_CODE_BATCH_SIZE,
                         help="Códigos Oracle por round-trip (default 50000).")
@@ -3667,15 +4017,19 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--anular-cols", default=None,
                         help="Item 2 (override/extra): colunas nullable a ANULAR "
                              "nos sintéticos, formato 'TABELA.COL,COL2;TAB2.COL3'. "
-                             "Somam-se às colunas declaradas pelo perfil.")
+                             "Somam-se às colunas declaradas pelo schema.")
     parser.add_argument(
         "--clone-prefix", default=None,
-        help="Prefixo exclusivo de saída. Precedência: argumento, env, perfil.",
+        help="Prefixo exclusivo de saída. Precedência: argumento, env, "
+             f"default {DEFAULT_CLONE_PREFIX}/<produto>. Dois produtos NÃO podem "
+             "compartilhar o mesmo prefixo — o segundo run publica por cima.",
     )
     parser.add_argument("--dry-run", action="store_true",
                         help="Valida e loga; não grava nada.")
     parser.add_argument("--specs", default=None,
-                        help="Override de DATAGEN_SPECS_URI (specs.json único).")
+                        help="Override de DATAGEN_SPECS_URI (specs.json único). "
+                             "É o spec que DEFINE quais tabelas são engordadas: "
+                             "as não-static presentes nele.")
     return parser.parse_args(argv)
 
 
@@ -3703,9 +4057,8 @@ def _merge_anular_cols(base: Mapping[str, Sequence[str]],
 
 def main() -> None:
     args = parse_arguments()
-    profile = get_product_profile(args.produto)
     executar_job(EngordaJob(
-        produto=profile.name,
+        produto=args.produto,
         num_ifs=tuple(args.num_ifs) if args.num_ifs is not None else None,
         n_instrumentos=args.n_instrumentos,
         fator_k=args.fator_k,
@@ -3730,10 +4083,21 @@ def main() -> None:
             if args.anular_cols else None
         ),
         oracle_code_batch_size=args.oracle_code_batch_size,
+        tipo_oracle=args.tipo_oracle,
+        cod_if_pattern=args.cod_if_pattern,
+        cod_if_dry_prefix=args.cod_if_dry_prefix,
         dry_run=args.dry_run,
         specs_uri=args.specs,
         clone_prefix=args.clone_prefix,
     ))
+
+
+# ---------------------------------------------------------------------------
+# Validação FAIL-AT-IMPORT: o perfil canônico é compilado e validado assim que o
+# módulo carrega. Um erro em REGRAS_SCHEMA_CETIP quebra o import, não o meio do
+# run — mesma garantia que existia com o registro por produto.
+# ---------------------------------------------------------------------------
+CDB_SIMPLIFICADO_PROFILE = get_product_profile("cdb_simplificado")
 
 
 if __name__ == "__main__":
