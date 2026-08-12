@@ -44,10 +44,10 @@ Root cause, confirmed in code (2026-07-25):
    Pruning the domain via faltantes changes row order, so even with the same seed the
    batch shifts wholesale — and pruned IFs are *replaced* to keep N. Each new batch
    carries the domain's ~constant drift rate → a new ~400–600-key faltantes every run.
-2. **Known-bad keys are forgotten.** `emit_faltantes` writes `mode("overwrite")` to the
-   same URI (`scripts/validate_cdb_simplificado.py:826`), so each run's prune list
-   replaces (not extends) the previous one; IFs referencing older bad keys re-enter
-   the eligible domain.
+2. **Known-bad keys were formerly forgotten.** `emit_faltantes` now reads the existing
+   output and appends only new keys (`scripts/validate_products.py`, function
+   `emit_faltantes`). Before that fix, each run replaced the previous prune list and IFs
+   referencing older bad keys could re-enter the eligible domain.
 
 Discovery rate per iteration ≈ the batch's share of the 17.9M-IF domain, so the loop
 would need hundreds of iterations. Exits, in order of preference:
@@ -96,7 +96,7 @@ pattern with the QAB owner before scheduling long runs.
 ## The closed-loop workflow (the thing to remember)
 
 ```
-validate_cdb_simplificado.py --emit-faltantes X   -> orphan keys (TABELA/COLUNA/VALOR)
+validate_products.py --product cdb_simplificado --emit-faltantes X -> orphan keys
 engorda_instrumentos.py --faltantes-parquet X     -> regenerate, pruning affected IFs
 validate again                                     -> clean, or fresh faltantes
 ```
@@ -110,6 +110,7 @@ Bucket/namespace: `oci-st-blc-engordai-qab-n@gr97zovfhcmu`. Reports under
 `DATAGEN_SYNTHETIC_PREFIX=clones_instrumentos`):
 
 ```
+--product cdb_simplificado
 --shape-baseline oci://oci-st-blc-engordai-qab-n@gr97zovfhcmu/reports/cdb-shapes/profile_raw_clone_domain_v2.json
 --report-path    oci://oci-st-blc-engordai-qab-n@gr97zovfhcmu/reports/cdb-shapes/validate_clones_instrumentos.json
 --emit-faltantes oci://oci-st-blc-engordai-qab-n@gr97zovfhcmu/reports/cdb-shapes/faltantes_qab.parquet
@@ -117,12 +118,14 @@ Bucket/namespace: `oci-st-blc-engordai-qab-n@gr97zovfhcmu`. Reports under
 --sample-size 20
 ```
 
-`--no-oracle` runs Cats 1/2/5/7 only (shape gate works offline; Cats 3/4/6 skipped).
+`--no-oracle` limits Oracle-backed checks and always reports `PARTIAL`; structural and shape
+checks still run offline.
 
 **Profiler app** (no JDBC, no private endpoint). Baseline for a clone run = profile raw
 restricted to exactly the sampled sources:
 
 ```
+--product cdb_simplificado
 --base-uri oci://oci-st-blc-engordai-qab-n@gr97zovfhcmu/onprem-export-full
 --universe-keys <clones-path>/MAPA_CLONE_NUM_IF --universe-keys-column NUM_IF_ORIG
 --label raw_clone_domain --report-path <...>.json --sample-size 20
@@ -150,7 +153,7 @@ disjoint signatures).
   2 EVENTO (1×tipo83 + 1×tipo85) : 1 OPERACAO : 2 DADO_OPERACAO : 1 LANCAMENTO :
   1 DEPOSITO_AUTOMATICO_IF : 1 CARTEIRA_COMITENTE : 1 CARTEIRA_PARTICIPANTE`.
 - Hard invariants: `DADO_OPERACAO = 2×OPERACAO`, `LANCAMENTO = OPERACAO` (~99%, Cat 7c
-  tolerance 5%); `RESGATE ≤ 1` per IF (0 exceptions in 67.2M — Cat 7d); every domain IF
+  tolerance 5%); simplificado `RESGATE ≤ 1` per IF (0 exceptions in 67.2M — Cat 7d); every domain IF
   has evento tipo 85, ~96% also tipo 83; `QJFL == QC03` and `QJFI == QC02` exactly
   (polymorphism holds 100% in prod).
 - Team domain (FILTRO_BASE): IF-level exists(active SEM TABELA resgate) + non-escalonado
@@ -164,9 +167,9 @@ disjoint signatures).
 - `scripts/profile_cdb_shapes.py` — shape profiler, 18 metrics, self-contained,
   `--self-test`. Key commits: 0e203f3, cc2d3fd (`--apply-filtros-fonte`), 242ddf7
   (subtypes + EVENTO_TIPO83/85 + `--universe domain` + `--universe-keys`).
-- `scripts/validate_cdb_simplificado.py` — 7-category gate. Cat 7 = shape conformance
-  (7a unseen vs baseline, 7b TVD ≤0.15, 7c op ratio, 7d resgate multiplicity; metric list
-  parsed FROM the baseline JSON). Cat 3 inverted: anti-join synthetic then residual
+- `scripts/validate_products.py` — 8-category gate. Cat 7 = shape conformance
+  (7a unseen vs baseline, 7b TVD ≤0.15, 7c op ratio, simplificado-only 7d resgate
+  multiplicity; schema-v2 metrics are validated explicitly). Cat 3 inverted: anti-join synthetic then residual
   IN-lists into Oracle (batch 1000, `--max-residual-keys` default 1M) — no parent
   downloads; Oracle outage mid-run degrades to per-FK WARNs, never aborts.
   `--emit-faltantes` writes union-verified orphans only. `--report-path`/baselines accept

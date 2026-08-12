@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-validate_cdb_simplificado.py
-============================
+validate_products.py
+====================
 
-Descriptive validator for the CDB-simplificado synthetic dataset produced by
-`engorda_tables.py`. It runs on the ENGORDA OUTPUT (the synthetic Parquet under
+Descriptive validator for CDB-simplificado, full CDB, and RDB synthetic datasets
+produced by `engorda_tables.py`. It runs on the ENGORDA OUTPUT (the synthetic Parquet under
 DATAGEN_SYNTHETIC_BASE_URI) and checks it against the ACTUAL application rules of
 the CETIP/NoMe platform, so structural/domain violations are caught BEFORE the
 Oracle append and before the daily/operational batch runs on top of the data.
@@ -16,7 +16,7 @@ Authoritative rules (PK / FK graph / NOT NULL / column types and capacities) are
 Oracle data dictionary (ALL_* views) over JDBC. An optional application-capacity
 contract supplies global code-level limits. A few semantic rules that are
 NOT expressible in schema metadata (the CONDICAO_IF polymorphic subtype map and
-the CDB-simplificado product predicates) are curated below and, where possible,
+product predicates) are curated below and, where possible,
 verified against production data.
 
 The eight check categories map directly to the failures observed in the
@@ -37,12 +37,13 @@ Category 7 compares the per-instrument cardinality distribution ("shapes") of
 the synthetic output against a baseline profile produced by
 scripts/profile_cdb_shapes.py on the FILTERED raw data:
 
-  spark-submit profile_cdb_shapes.py --base-uri <raw> --apply-filtros-fonte \
+  spark-submit profile_cdb_shapes.py --product cdb_simplificado \
+      --base-uri <raw> --apply-filtros-fonte \
       --label raw_filtered --report-path oci://.../profile_raw_filtered.json
 
-Pass that JSON via --shape-baseline. Without it, only the baseline-free hard
-invariants run (OPERACAO:DADO_OPERACAO:LANCAMENTO = 1:2:1, RESGATE <= 1 per IF)
-and the distribution checks are skipped with a WARN.
+Pass that JSON via --shape-baseline. Without it, only profile-enabled baseline-free
+invariants run (for example, the operation ratio and simplificado resgate maximum),
+and distribution checks are skipped with a WARN.
 
 Environment variables
 ---------------------
@@ -55,8 +56,9 @@ Environment variables
 
 Usage
 -----
-  spark-submit --jars ojdbc8.jar validate_cdb_simplificado.py \
-      --report-path report.json --fail-severity error --validate-against union
+  spark-submit --jars ojdbc8.jar validate_products.py \
+      --product cdb_simplificado --report-path report.json \
+      --fail-severity error --validate-against union
 """
 from __future__ import annotations
 
@@ -83,7 +85,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
     stream=sys.stdout,
 )
-logger = logging.getLogger("validate_cdb")
+logger = logging.getLogger("validate_products")
 
 
 def _timed(label: str, operation):
@@ -94,6 +96,30 @@ def _timed(label: str, operation):
         return operation()
     finally:
         logger.info("[PERF] end %s elapsed=%.1fs", label, perf_counter() - started)
+
+
+def _check_is_skipped(check_id: str, skip_prefixes: List[str]) -> bool:
+    return any(check_id.startswith(prefix) for prefix in skip_prefixes)
+
+
+def _check_group_is_skipped(check_prefixes: Tuple[str, ...],
+                            skip_prefixes: List[str]) -> bool:
+    return bool(check_prefixes) and all(
+        any(prefix.startswith(skip) for skip in skip_prefixes)
+        for prefix in check_prefixes
+    )
+
+
+def _run_check_group(label: str, check_prefixes: Tuple[str, ...],
+                     skip_prefixes: List[str], operation) -> List["Finding"]:
+    """Skip a whole check group before Spark work when every check is excluded."""
+    if _check_group_is_skipped(check_prefixes, skip_prefixes):
+        logger.info("Skipped %s before execution (--skip-check).", label)
+        return []
+    return [
+        finding for finding in _timed(label, operation)
+        if not _check_is_skipped(finding.check_id, skip_prefixes)
+    ]
 
 ORACLE_DRIVER = "oracle.jdbc.OracleDriver"
 
@@ -278,6 +304,9 @@ _CDB_REQUIRED = (
     CAP_PLATFORM, CAP_ACCOUNT, CAP_MODALIDADE, CAP_COD_IF_FORMAT,
     CAP_COD_OPERACAO_FORMAT, CAP_MEU_NUMERO,
 )
+_CDB_SUPPORTED = tuple(
+    capability for capability in _CDB_REQUIRED if capability != CAP_POLYMORPHISM
+)
 # RDB — strict structural mode only. Product-specific lookup, subtype allow-list,
 # shape, and registration semantics remain BLOCKED until target evidence is captured.
 _RDB_REQUIRED = (
@@ -325,12 +354,12 @@ VALIDATION_PROFILES: Dict[str, ValidationProfile] = {
         platform_check_enabled=True,
         account_check_enabled=True,
         sem_modalidade_ids=(6, 16),
-        # The operation cluster and one-resgate-parent maximum hold across all captured CDBs.
-        # Distribution remains simplificado-only.
-        hard_shape_rules=(SHAPE_RULE_OP_RATIO, SHAPE_RULE_RESGATE_MAX),
+        hard_shape_rules=(SHAPE_RULE_OP_RATIO,),
         registration_constants=None,
         required_capabilities=_CDB_REQUIRED,
-        supported_capabilities=_CDB_REQUIRED,
+        # Full-product polymorphism remains partial until every application type code has a
+        # reviewed physical-table mapping.
+        supported_capabilities=_CDB_SUPPORTED,
         evidence_version=1,
     ),
     "rdb": ValidationProfile(
@@ -1288,8 +1317,9 @@ def check_polymorphism(
     out: List[Finding] = []
     cond = tables.get(CONDICAO_IF_TABLE)
     if cond is None:
-        return [Finding("1.polymorphism", "CONDICAO_IF polymorphism", SEV_INFO,
-                        CONDICAO_IF_TABLE, True, message="CONDICAO_IF not in output; skipped.")]
+        return [Finding("1.polymorphism", "CONDICAO_IF polymorphism", SEV_WARN,
+                        CONDICAO_IF_TABLE, False,
+                        message="CONDICAO_IF not in output; polymorphism check unavailable.")]
 
     nci = resolve(cond, CONDICAO_IF_PK)
     tipo = resolve(cond, CONDICAO_IF_TIPO_COL)
@@ -1509,15 +1539,22 @@ def verify_subtype_map_from_baseline(
     try:
         baseline = json.loads(read_text(spark, baseline_path))
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Could not load baseline subtype-map snapshot: %s", exc)
-        return []
+        return [Finding(
+            "1.map_snapshot", "CONDICAO_IF polymorphism", SEV_WARN,
+            CONDICAO_IF_TABLE, False,
+            hint="Repair or regenerate the shape baseline before strict validation.",
+            message=f"Subtype-map snapshot unavailable because the baseline could not be "
+                    f"loaded: {exc}",
+        )]
     snapshot = baseline.get("subtype_map")
     if snapshot is None:
-        logger.warning(
-            "Shape baseline %s has no subtype_map; regenerate it with the current profiler.",
-            baseline_path,
-        )
-        return []
+        return [Finding(
+            "1.map_snapshot", "CONDICAO_IF polymorphism", SEV_WARN,
+            CONDICAO_IF_TABLE, False,
+            hint="Regenerate the shape baseline with the current profile_cdb_shapes.py.",
+            message=f"Subtype-map snapshot unavailable: baseline {baseline_path} has no "
+                    "subtype_map.",
+        )]
     source = baseline.get("base_uri") or baseline_path
     return check_subtype_map_snapshot(snapshot, str(source))
 
@@ -2631,6 +2668,7 @@ def _residual_in_oracle(
 def check_referential(
     spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame], meta: Metadata,
     sample: int, validate_against: str, max_residual_keys: int,
+    skip_prefixes: Optional[List[str]] = None,
 ) -> Tuple[List[Finding], List[Tuple[str, str, str]]]:
     """Returns (findings, faltantes): faltantes is one (child_table, fk_column,
     missing_value) row per Oracle-verified single-column orphan — the exact
@@ -2644,8 +2682,29 @@ def check_referential(
             F.regexp_replace(col, r"(\.\d*?)0+$", "$1"), r"\.$", "")
         return F.when(col.rlike(r"^-?\d+\.\d*0*$"), stripped).otherwise(col)
 
+    skip_prefixes = skip_prefixes or []
+    skip_fk = _check_is_skipped("3.fk_", skip_prefixes)
+    skip_orphan = _check_is_skipped("3.fk_orphan", skip_prefixes)
+    skip_shared = _check_is_skipped("3.shared_key", skip_prefixes)
     out: List[Finding] = []
     faltantes: List[Tuple[str, str, str]] = []
+
+    def append_shared_key_check(table: str, df: DataFrame, fk: ForeignKey,
+                                child_actual: List[str]) -> None:
+        if skip_shared or not meta.is_shared_key_fk(fk):
+            return
+        total = df.select(*child_actual).count()
+        distinct = df.select(*child_actual).dropDuplicates().count()
+        dup = total - distinct
+        out.append(Finding(
+            "3.shared_key_dup", "Referential integrity",
+            SEV_ERROR if dup else SEV_INFO, table, dup == 0, count=dup,
+            column=",".join(fk.child_cols),
+            hint="Shared-key (PK==FK) 1:1 child has duplicate keys; "
+                 "bind_shared_key_children should pair 1:1 with distinct parent keys.",
+            message=f"Duplicate shared-key values in {table}.",
+        ))
+
     for table, df in tables.items():
         for fk in meta.fks.get(table, []):
             fk_label = (
@@ -2655,6 +2714,9 @@ def check_referential(
             child_actual = [resolve(df, c) for c in fk.child_cols]
             if any(a is None for a in child_actual):
                 continue  # FK columns not all present in the output
+            if skip_fk:
+                append_shared_key_check(table, df, fk, child_actual)
+                continue
 
             not_null_all = reduce(lambda a, b: a & b,
                                   [F.col(a).isNotNull() for a in child_actual])
@@ -2714,7 +2776,7 @@ def check_referential(
                     note = " (checked against synthetic ∪ Oracle)"
                     # Oracle-verified misses on a single-column FK feed the
                     # generator's domain pruning (--faltantes-parquet).
-                    if residual and len(fk.child_cols) == 1:
+                    if residual and len(fk.child_cols) == 1 and not skip_orphan:
                         faltantes.extend(
                             (table, fk.child_cols[0], t[0]) for t in residual)
                 except Exception as exc:  # noqa: BLE001
@@ -2738,30 +2800,20 @@ def check_referential(
                 continue
 
             c = len(residual)
-            out.append(Finding(
-                "3.fk_orphan", "Referential integrity",
-                SEV_ERROR if c else SEV_INFO, table, c == 0, count=c,
-                column=",".join(fk.child_cols),
-                sample=[t[0] if len(t) == 1 else list(t) for t in residual[:sample]],
-                hint="Orphan FK: child value not present in the synthetic output nor in "
-                     "the target Oracle. Check FK remap / fecho / null_orphan_fks.",
-                message=f"FK {table}.{list(fk.child_cols)} -> "
-                        f"{fk.parent_table}.{list(fk.parent_cols)}{note}",
-            ))
+            if not skip_orphan:
+                out.append(Finding(
+                    "3.fk_orphan", "Referential integrity",
+                    SEV_ERROR if c else SEV_INFO, table, c == 0, count=c,
+                    column=",".join(fk.child_cols),
+                    sample=[t[0] if len(t) == 1 else list(t) for t in residual[:sample]],
+                    hint="Orphan FK: child value not present in the synthetic output nor in "
+                         "the target Oracle. Check FK remap / fecho / null_orphan_fks.",
+                    message=f"FK {table}.{list(fk.child_cols)} -> "
+                            f"{fk.parent_table}.{list(fk.parent_cols)}{note}",
+                ))
 
             # Shared-key 1:1 cardinality (PK == FK).
-            if meta.is_shared_key_fk(fk):
-                total = df.select(*child_actual).count()
-                distinct = df.select(*child_actual).dropDuplicates().count()
-                dup = total - distinct
-                out.append(Finding(
-                    "3.shared_key_dup", "Referential integrity",
-                    SEV_ERROR if dup else SEV_INFO, table, dup == 0, count=dup,
-                    column=",".join(fk.child_cols),
-                    hint="Shared-key (PK==FK) 1:1 child has duplicate keys; "
-                         "bind_shared_key_children should pair 1:1 with distinct parent keys.",
-                    message=f"Duplicate shared-key values in {table}.",
-                ))
+            append_shared_key_check(table, df, fk, child_actual)
     return out, faltantes
 
 
@@ -2903,6 +2955,7 @@ def check_required_lookup_frames(
     sample: int,
     profile: Optional["ValidationProfile"] = None,
     lookup_errors: Optional[Dict[str, str]] = None,
+    skip_prefixes: Optional[List[str]] = None,
 ) -> List[Finding]:
     """Enforce the mandatory target-backed registration lookups for the selected product.
 
@@ -2912,6 +2965,10 @@ def check_required_lookup_frames(
     instead of a CDB-shaped ERROR."""
     if profile is None:
         profile = CDB_SIMPLIFICADO_PROFILE
+    skip_prefixes = skip_prefixes or []
+    run_account = not _check_is_skipped("6.required.active_account", skip_prefixes)
+    run_operation = not _check_is_skipped("6.required.operation_tos", skip_prefixes)
+    run_platform = not _check_is_skipped("6.required.cdb_platform", skip_prefixes)
     cat = "Required lookup combinations"
     errors = dict(lookup_errors or {})
     lookup_hint = (
@@ -2949,7 +3006,9 @@ def check_required_lookup_frames(
             )
         )
 
-    if missing_refs:
+    if not run_account:
+        account_finding = None
+    elif missing_refs:
         account_finding = Finding(
             "6.required.active_account", cat, SEV_ERROR, CONTA_PARTICIPANTE_TABLE, False,
             count=len(missing_refs), column=",".join(missing_refs), sample=missing_refs[:sample],
@@ -3059,7 +3118,9 @@ def check_required_lookup_frames(
     # Do not evaluate RDB rows with CDB's identification='S'/operation-type='1' literals.
     op_df = tables.get(OPERACAO_TABLE) if tos_semantics_supported else None
     op_tos_col = resolve(op_df, "NUM_ID_TIPO_OPER_OBJETO_SERV") if op_df is not None else None
-    if op_df is None or op_tos_col is None:
+    if not run_operation:
+        operation_finding = None
+    elif op_df is None or op_tos_col is None:
         missing = (
             OPERACAO_TABLE
             if op_df is None
@@ -3184,7 +3245,7 @@ def check_required_lookup_frames(
                 message="Every synthetic operation must resolve to the approved CDB TOS.",
             )
 
-    if not tos_semantics_supported:
+    if run_operation and not tos_semantics_supported:
         operation_finding = Finding(
             "6.required.operation_tos", cat, SEV_WARN, OPERACAO_TABLE, False,
             column="NUM_ID_TIPO_OPER_OBJETO_SERV",
@@ -3194,12 +3255,17 @@ def check_required_lookup_frames(
                     f"product {profile.name} (unresolved target evidence).",
         )
 
-    cdb_cols = target_columns(
-        cdb_object_df,
-        V_OBJETOS_SERVICO_TABLE,
-        ["COD_OBJETO_SERVICO", "IND_PLATAFORMA_BAIXA"],
+    cdb_cols = (
+        target_columns(
+            cdb_object_df,
+            V_OBJETOS_SERVICO_TABLE,
+            ["COD_OBJETO_SERVICO", "IND_PLATAFORMA_BAIXA"],
+        )
+        if run_platform else None
     )
-    if cdb_cols is None:
+    if not run_platform:
+        platform_finding = None
+    elif cdb_cols is None:
         platform_finding = Finding(
             "6.required.cdb_platform", cat, SEV_ERROR, V_OBJETOS_SERVICO_TABLE, False,
             hint=lookup_hint,
@@ -3228,7 +3294,7 @@ def check_required_lookup_frames(
             message="Target CDB object service must be enabled for the baixa platform.",
         )
 
-    if not profile.account_check_enabled:
+    if run_account and not profile.account_check_enabled:
         account_finding = Finding(
             "6.required.active_account", cat, SEV_WARN, CONTA_PARTICIPANTE_TABLE, False,
             hint="Capture the RDB/target account-eligibility rule before enabling this check; "
@@ -3236,7 +3302,7 @@ def check_required_lookup_frames(
             message=f"Account eligibility not validated for product {profile.name} "
                     "(unresolved evidence).",
         )
-    if not (profile.platform_check_enabled and profile.object_service_code):
+    if run_platform and not (profile.platform_check_enabled and profile.object_service_code):
         platform_finding = Finding(
             "6.required.cdb_platform", cat, SEV_WARN, V_OBJETOS_SERVICO_TABLE, False,
             hint="Capture the target object-service platform code/flag for this product "
@@ -3244,7 +3310,10 @@ def check_required_lookup_frames(
             message=f"Object-service platform not validated for product {profile.name} "
                     "(unresolved COD_OBJETO_SERVICO/IND_PLATAFORMA_BAIXA).",
         )
-    return [account_finding, operation_finding, platform_finding]
+    return [
+        finding for finding in (account_finding, operation_finding, platform_finding)
+        if finding is not None
+    ]
 
 
 def check_lookup_combo_frames(
@@ -3255,10 +3324,20 @@ def check_lookup_combo_frames(
     sample: int,
     profile: Optional["ValidationProfile"] = None,
     lookup_errors: Optional[Dict[str, str]] = None,
+    skip_prefixes: Optional[List[str]] = None,
 ) -> List[Finding]:
     """Compare synthetic operations with already-loaded Oracle lookup rows."""
     if profile is None:
         profile = CDB_SIMPLIFICADO_PROFILE
+    skip_prefixes = skip_prefixes or []
+    run_tos = not _check_is_skipped("6.combo.tos_fk", skip_prefixes)
+    run_compatibility = not _check_is_skipped("6.combo.cdb_compatibility", skip_prefixes)
+    run_sem_modalidade = not _check_is_skipped("6.combo.sem_modalidade", skip_prefixes)
+    run_identification = not _check_is_skipped(
+        "6.combo.identification_availability", skip_prefixes
+    )
+    if not any((run_tos, run_compatibility, run_sem_modalidade, run_identification)):
+        return []
     cat = "Lookup combinations"
     if CAP_LOOKUP_TOS not in profile.supported_capabilities:
         return [Finding(
@@ -3325,15 +3404,21 @@ def check_lookup_combo_frames(
             "IND_DISPONIVEL_IDENTIFICACAO",
         ],
     )
-    sic_cols = target_columns(
-        sic_df,
-        V_PARAMETRO_SIC_TABLE,
-        ["NUM_ID_TIPO_OPER_OBJETO_SERV", "NUM_TIPO_IF", "NUM_ID_OBJETO_SERVICO"],
+    sic_cols = (
+        target_columns(
+            sic_df,
+            V_PARAMETRO_SIC_TABLE,
+            ["NUM_ID_TIPO_OPER_OBJETO_SERV", "NUM_TIPO_IF", "NUM_ID_OBJETO_SERVICO"],
+        )
+        if run_compatibility else None
     )
-    tipo_cols = target_columns(
-        tipo_operacao_df,
-        TIPO_OPERACAO_TABLE,
-        ["NUM_ID_TIPO_OPERACAO", "IND_SEM_MODALIDADE_INFOHUB"],
+    tipo_cols = (
+        target_columns(
+            tipo_operacao_df,
+            TIPO_OPERACAO_TABLE,
+            ["NUM_ID_TIPO_OPERACAO", "IND_SEM_MODALIDADE_INFOHUB"],
+        )
+        if run_sem_modalidade else None
     )
 
     if tos_cols is None:
@@ -3354,6 +3439,7 @@ def check_lookup_combo_frames(
                 ("6.combo.sem_modalidade", "Sem-modalidade check"),
                 ("6.combo.identification_availability", "Identification availability check"),
             )
+            if not _check_is_skipped(check_id, skip_prefixes)
         ]
 
     tos = tos_df.select(
@@ -3364,22 +3450,25 @@ def check_lookup_combo_frames(
         .alias("identificacao_flag"),
     ).where(F.col("tos_id").isNotNull()).dropDuplicates(["tos_id"])
 
-    missing_tos = operations.join(F.broadcast(tos.select("tos_id")), "tos_id", "left_anti")
-    missing_tos_count = missing_tos.count()
-    out = [Finding(
-        "6.combo.tos_fk", cat, SEV_ERROR if missing_tos_count else SEV_INFO,
-        OPERACAO_TABLE, missing_tos_count == 0, count=missing_tos_count,
-        column="NUM_ID_TIPO_OPER_OBJETO_SERV",
-        sample=_sample_keys(missing_tos, sample_cols, sample),
-        hint="Preserve or recover the transaction's exact static TOS FK, or prune source "
-             "operations unsupported by the target; otherwise ask the QAB configuration "
-             "owner to seed that exact mapping. Do not bind to an arbitrary valid TOS row.",
-        message=f"Synthetic non-null TOS IDs absent from target {TIPO_OPER_OBJETO_SERV_TABLE}.",
-    )]
+    out: List[Finding] = []
+    if run_tos:
+        missing_tos = operations.join(F.broadcast(tos.select("tos_id")), "tos_id", "left_anti")
+        missing_tos_count = missing_tos.count()
+        out.append(Finding(
+            "6.combo.tos_fk", cat, SEV_ERROR if missing_tos_count else SEV_INFO,
+            OPERACAO_TABLE, missing_tos_count == 0, count=missing_tos_count,
+            column="NUM_ID_TIPO_OPER_OBJETO_SERV",
+            sample=_sample_keys(missing_tos, sample_cols, sample),
+            hint="Preserve or recover the transaction's exact static TOS FK, or prune source "
+                 "operations unsupported by the target; otherwise ask the QAB configuration "
+                 "owner to seed that exact mapping. Do not bind to an arbitrary valid TOS row.",
+            message=f"Synthetic non-null TOS IDs absent from target "
+                    f"{TIPO_OPER_OBJETO_SERV_TABLE}.",
+        ))
 
     resolved_ops = operations.join(F.broadcast(tos), "tos_id", "inner")
 
-    if sic_cols is None:
+    if run_compatibility and sic_cols is None:
         out.append(Finding(
             "6.combo.cdb_compatibility", cat, SEV_WARN, OPERACAO_TABLE, False,
             hint="Check Oracle JDBC credentials/schema, SELECT grants, and target view/table "
@@ -3387,7 +3476,7 @@ def check_lookup_combo_frames(
             message=f"CDB compatibility check unavailable: {V_PARAMETRO_SIC_TABLE} "
                     f"{errors[V_PARAMETRO_SIC_TABLE]}.",
         ))
-    else:
+    elif run_compatibility:
         valid_cdb_tos = (
             sic_df.select(
                 _norm_code(F.col(sic_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
@@ -3421,7 +3510,7 @@ def check_lookup_combo_frames(
                     "service configuration.",
         ))
 
-    if profile.sem_modalidade_ids is None:
+    if run_sem_modalidade and profile.sem_modalidade_ids is None:
         out.append(Finding(
             "6.combo.sem_modalidade", cat, SEV_WARN, OPERACAO_TABLE, False,
             hint="Confirm the sem-modalidade IDs for this product before enabling the check; "
@@ -3429,7 +3518,7 @@ def check_lookup_combo_frames(
             message=f"Sem-modalidade check not validated for product {profile.name} "
                     "(unresolved modalidade IDs).",
         ))
-    elif tipo_cols is None:
+    elif run_sem_modalidade and tipo_cols is None:
         out.append(Finding(
             "6.combo.sem_modalidade", cat, SEV_WARN, OPERACAO_TABLE, False,
             hint="Check Oracle JDBC credentials/schema, SELECT grants, and target view/table "
@@ -3437,7 +3526,7 @@ def check_lookup_combo_frames(
             message=f"Sem-modalidade check unavailable: {TIPO_OPERACAO_TABLE} "
                     f"{errors[TIPO_OPERACAO_TABLE]}.",
         ))
-    else:
+    elif run_sem_modalidade:
         tipo_operacao = tipo_operacao_df.select(
             _norm_code(F.col(tipo_cols["NUM_ID_TIPO_OPERACAO"]))
             .alias("tipo_operacao_id"),
@@ -3464,32 +3553,51 @@ def check_lookup_combo_frames(
             message="Sem-modalidade operation types are not enabled in TIPO_OPERACAO.",
         ))
 
-    unavailable = resolved_ops.where(
-        F.coalesce(F.col("identificacao_flag"), F.lit("")) != "S"
-    )
-    unavailable_count = unavailable.count()
-    out.append(Finding(
-        "6.combo.identification_availability", cat,
-        SEV_WARN if unavailable_count else SEV_INFO,
-        OPERACAO_TABLE, unavailable_count == 0, count=unavailable_count,
-        column="IND_DISPONIVEL_IDENTIFICACAO",
-        sample=_sample_keys(unavailable, sample_cols, sample),
-        hint="Use or preserve a target CDB TOS row with "
-             "IND_DISPONIVEL_IDENTIFICACAO='S', or ask the QAB configuration owner to align "
-             "target static configuration; do not arbitrarily rewrite transaction FKs.",
-        message="Resolved TOS mappings are unavailable for identification.",
-    ))
+    if run_identification:
+        unavailable = resolved_ops.where(
+            F.coalesce(F.col("identificacao_flag"), F.lit("")) != "S"
+        )
+        unavailable_count = unavailable.count()
+        out.append(Finding(
+            "6.combo.identification_availability", cat,
+            SEV_WARN if unavailable_count else SEV_INFO,
+            OPERACAO_TABLE, unavailable_count == 0, count=unavailable_count,
+            column="IND_DISPONIVEL_IDENTIFICACAO",
+            sample=_sample_keys(unavailable, sample_cols, sample),
+            hint="Use or preserve a target CDB TOS row with "
+                 "IND_DISPONIVEL_IDENTIFICACAO='S', or ask the QAB configuration owner to "
+                 "align target static configuration; do not arbitrarily rewrite transaction "
+                 "FKs.",
+            message="Resolved TOS mappings are unavailable for identification.",
+        ))
     return out
 
 
 def check_lookup_combos(
     spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame], meta: Metadata, sample: int,
     max_account_keys: int = 1_000_000, profile: Optional["ValidationProfile"] = None,
+    skip_prefixes: Optional[List[str]] = None,
 ) -> List[Finding]:
     if profile is None:
         profile = CDB_SIMPLIFICADO_PROFILE
+    skip_prefixes = skip_prefixes or []
+    run_combo = not _check_is_skipped("6.combo", skip_prefixes)
+    run_required = not _check_is_skipped("6.required", skip_prefixes)
+    run_required_account = run_required and not _check_is_skipped(
+        "6.required.active_account", skip_prefixes
+    )
+    run_required_operation = run_required and not _check_is_skipped(
+        "6.required.operation_tos", skip_prefixes
+    )
+    run_required_platform = run_required and not _check_is_skipped(
+        "6.required.cdb_platform", skip_prefixes
+    )
+    if not (run_combo or run_required):
+        return []
     op_df = tables.get(OPERACAO_TABLE)
-    if op_df is None:
+    if not run_combo:
+        existing = []
+    elif op_df is None:
         existing = [Finding(
             "6.combo", "Lookup combinations", SEV_INFO, OPERACAO_TABLE, True,
             message="OPERACAO not in output; combo check skipped.",
@@ -3507,7 +3615,7 @@ def check_lookup_combos(
 
     lookup_tos_supported = CAP_LOOKUP_TOS in profile.supported_capabilities
     queries = {}
-    if lookup_tos_supported:
+    if lookup_tos_supported and (run_combo or run_required_operation):
         queries.update({
             TIPO_OPER_OBJETO_SERV_TABLE: (
                 "SELECT NUM_ID_TIPO_OPER_OBJETO_SERV, NUM_ID_TIPO_OPERACAO, "
@@ -3519,14 +3627,14 @@ def check_lookup_combos(
                 f"FROM {cfg.schema}.{TIPO_OPERACAO_TABLE}"
             ),
         })
-    if profile.sic_enabled:
+    if run_combo and profile.sic_enabled:
         queries[V_PARAMETRO_SIC_TABLE] = (
             "SELECT DISTINCT NUM_ID_TIPO_OPER_OBJETO_SERV, NUM_TIPO_IF, "
             f"NUM_ID_OBJETO_SERVICO FROM {cfg.schema}.{V_PARAMETRO_SIC_TABLE} "
             f"WHERE NUM_TIPO_IF = {profile.num_tipo_if} "
             f"AND NUM_ID_OBJETO_SERVICO = {profile.object_service_id}"
         )
-    if profile.platform_check_enabled and profile.object_service_code:
+    if run_required_platform and profile.platform_check_enabled and profile.object_service_code:
         queries[V_OBJETOS_SERVICO_TABLE] = (
             "SELECT COD_OBJETO_SERVICO, IND_PLATAFORMA_BAIXA "
             f"FROM {cfg.schema}.{V_OBJETOS_SERVICO_TABLE} "
@@ -3547,7 +3655,7 @@ def check_lookup_combos(
     else:
         errors.update({table: "No Oracle connection" for table in queries})
 
-    account_sources_available = profile.account_check_enabled and all(
+    account_sources_available = run_required_account and profile.account_check_enabled and all(
         tables.get(table) is not None and resolve(tables[table], column) is not None
         for table, column in ACCOUNT_REFERENCES
     )
@@ -3608,7 +3716,7 @@ def check_lookup_combos(
     elif account_keys:
         errors[CONTA_PARTICIPANTE_TABLE] = "No Oracle connection"
 
-    if op_df is not None and cfg.jdbc_url and lookup_tos_supported:
+    if run_combo and op_df is not None and cfg.jdbc_url and lookup_tos_supported:
         existing = check_lookup_combo_frames(
             op_df,
             lookups.get(TIPO_OPER_OBJETO_SERV_TABLE),
@@ -3617,18 +3725,24 @@ def check_lookup_combos(
             sample,
             profile,
             errors,
+            skip_prefixes,
         )
 
-    return existing + check_required_lookup_frames(
-        tables,
-        lookups.get(CONTA_PARTICIPANTE_TABLE),
-        lookups.get(TIPO_OPER_OBJETO_SERV_TABLE),
-        lookups.get(TIPO_OPERACAO_TABLE),
-        lookups.get(V_OBJETOS_SERVICO_TABLE),
-        sample,
-        profile,
-        errors,
+    required = (
+        check_required_lookup_frames(
+            tables,
+            lookups.get(CONTA_PARTICIPANTE_TABLE),
+            lookups.get(TIPO_OPER_OBJETO_SERV_TABLE),
+            lookups.get(TIPO_OPERACAO_TABLE),
+            lookups.get(V_OBJETOS_SERVICO_TABLE),
+            sample,
+            profile,
+            errors,
+            skip_prefixes,
+        )
+        if run_required else []
     )
+    return existing + required
 
 
 # ---------------------------------------------------------------------------
@@ -3636,9 +3750,8 @@ def check_lookup_combos(
 # ---------------------------------------------------------------------------
 # Counting core kept in sync with scripts/profile_cdb_shapes.py: same universe
 # (NUM_TIPO_IF=49, DAT_EXCLUSAO IS NULL), same active-row rule, same shape
-# signature format ("TABLE=n|TABLE=n|..."). The metric list and its ORDER are
-# parsed from the baseline JSON's own signatures, so the two scripts cannot
-# silently drift apart: an incompatible baseline simply fails to match.
+# signature format ("TABLE=n|TABLE=n|..."). Schema-v2 metric names and order are
+# validated against DEFAULT_SHAPE_METRICS before any shape action.
 SHAPE_ROOT_TABLE = "INSTRUMENTO_FINANCEIRO"
 SHAPE_ROOT_KEY = "NUM_IF"
 SHAPE_TIPO_IF = 49
@@ -3668,6 +3781,8 @@ DEFAULT_SHAPE_METRICS: List[str] = [
     "OPERACAO", "DADO_OPERACAO", "LANCAMENTO", "DEPOSITO_AUTOMATICO_IF",
     "CARTEIRA_COMITENTE", "CARTEIRA_PARTICIPANTE",
 ]
+BASELINE_DOMAIN_VERSION = 1
+BASELINE_METRIC_VERSION = 2
 
 
 def _shape_active(df: DataFrame) -> DataFrame:
@@ -3733,8 +3848,8 @@ def _shape_counts(
     return result, skipped
 
 
-def _load_shape_baseline(spark: SparkSession, path: str) -> Tuple[dict, List[str], dict]:
-    """Return ({signature: pct}, ordered metric names, full baseline dict)."""
+def _load_shape_baseline(spark: SparkSession, path: str) -> dict:
+    """Load a baseline without deriving metrics from an untrusted shape signature."""
     baseline = json.loads(read_text(spark, path))
     shapes = baseline.get("shapes") or []
     if not shapes:
@@ -3743,12 +3858,48 @@ def _load_shape_baseline(spark: SparkSession, path: str) -> Tuple[dict, List[str
         logger.warning(
             "Shape baseline %s was built WITHOUT --apply-filtros-fonte; the comparison "
             "conflates filter effects with generation distortions.", path)
-    metric_names = [part.split("=", 1)[0] for part in shapes[0]["shape"].split("|")]
-    return {s["shape"]: float(s["pct"]) for s in shapes}, metric_names, baseline
+    return baseline
 
 
-def _baseline_incompatibility(baseline: dict, profile: ValidationProfile) -> Optional[str]:
-    """Reject a shape baseline that does not belong to the selected product/type.
+def _current_baseline_identity(tables: Dict[str, DataFrame]) -> dict:
+    """Derive source-key provenance from the clone map using the profiler algorithm."""
+    clone_map = tables.get(MAPA_CLONE_NUM_IF_TABLE)
+    if clone_map is None:
+        return {
+            "map_mode": "population",
+            "source_key_count": None,
+            "source_key_fingerprint": None,
+        }
+    source_key = resolve(clone_map, "NUM_IF_ORIG")
+    if not source_key:
+        return {
+            "map_mode": "invalid-clone-map",
+            "source_key_count": None,
+            "source_key_fingerprint": None,
+        }
+    keys = clone_map.select(
+        F.col(source_key).cast("long").alias(SHAPE_ROOT_KEY)
+    ).where(F.col(SHAPE_ROOT_KEY).isNotNull()).dropDuplicates()
+    row = keys.agg(
+        F.count(F.lit(1)).alias("n"),
+        F.sha2(
+            F.concat_ws(",", F.sort_array(F.collect_list(F.col(SHAPE_ROOT_KEY).cast("string")))),
+            256,
+        ).alias("fingerprint"),
+    ).first()
+    return {
+        "map_mode": "exact-source-keys",
+        "source_key_count": int(row["n"]),
+        "source_key_fingerprint": row["fingerprint"],
+    }
+
+
+def _baseline_incompatibility(
+    baseline: dict,
+    profile: ValidationProfile,
+    current_identity: Optional[dict] = None,
+) -> Optional[str]:
+    """Reject a baseline whose product, metric contract, or provenance is incompatible.
 
     A schema-v1 (untagged) baseline is only tolerated for cdb_simplificado, and only as a
     legacy bridge; every other case is an error so an RDB baseline can never be consumed as
@@ -3760,14 +3911,34 @@ def _baseline_incompatibility(baseline: dict, profile: ValidationProfile) -> Opt
             return ("legacy untagged baseline (schema_version missing) is only allowed for "
                     "cdb_simplificado")
         return None  # tolerated bridge for the deployed simplificado app
-    if int(version) < 2:
-        return f"unsupported baseline schema_version={version} (expected >= 2)"
+    if int(version) != 2:
+        return f"unsupported baseline schema_version={version} (expected 2)"
     b_product = baseline.get("product")
     if b_product is not None and str(b_product) != profile.name:
         return f"baseline product {b_product!r} != selected product {profile.name!r}"
     b_type = baseline.get("num_tipo_if")
     if b_type is not None and int(b_type) != profile.num_tipo_if:
         return f"baseline num_tipo_if={b_type} != profile num_tipo_if={profile.num_tipo_if}"
+    required = (
+        "product", "num_tipo_if", "domain_version", "metric_version", "metrics",
+        "map_mode", "source_key_count", "source_key_fingerprint",
+    )
+    missing = [field for field in required if field not in baseline]
+    if missing:
+        return f"baseline identity field(s) missing: {missing}"
+    if int(baseline["domain_version"]) != BASELINE_DOMAIN_VERSION:
+        return (f"baseline domain_version={baseline['domain_version']} != validator "
+                f"domain_version={BASELINE_DOMAIN_VERSION}")
+    if int(baseline["metric_version"]) != BASELINE_METRIC_VERSION:
+        return (f"baseline metric_version={baseline['metric_version']} != validator "
+                f"metric_version={BASELINE_METRIC_VERSION}")
+    if baseline["metrics"] != DEFAULT_SHAPE_METRICS:
+        return "baseline metrics do not match the validator metric contract"
+    if current_identity is not None:
+        for field in ("map_mode", "source_key_count", "source_key_fingerprint"):
+            if baseline[field] != current_identity.get(field):
+                return (f"baseline {field}={baseline[field]!r} != synthetic output "
+                        f"{field}={current_identity.get(field)!r}")
     return None
 
 
@@ -3780,7 +3951,19 @@ def check_shapes(
     drift_tol: float,
     op_ratio_tol_pct: float,
     profile: ValidationProfile,
+    skip_prefixes: Optional[List[str]] = None,
 ) -> List[Finding]:
+    skip_prefixes = skip_prefixes or []
+    run_unseen = not _check_is_skipped("7a.unseen_shapes", skip_prefixes)
+    run_drift = not _check_is_skipped("7b.distribution_drift", skip_prefixes)
+    run_op_ratio = (
+        SHAPE_RULE_OP_RATIO in profile.hard_shape_rules
+        and not _check_is_skipped("7c.op_ratio", skip_prefixes)
+    )
+    run_resgate_max = (
+        SHAPE_RULE_RESGATE_MAX in profile.hard_shape_rules
+        and not _check_is_skipped("7d.resgate_multiplicity", skip_prefixes)
+    )
     out: List[Finding] = []
     cat = "Shape conformance"
     if not profile.hard_shape_rules and not baseline_path:
@@ -3796,21 +3979,50 @@ def check_shapes(
     metric_names = DEFAULT_SHAPE_METRICS
     if baseline_path:
         try:
-            baseline_pct, metric_names, baseline_raw = _load_shape_baseline(spark, baseline_path)
-            incompat = _baseline_incompatibility(baseline_raw, profile)
+            baseline_raw = _load_shape_baseline(spark, baseline_path)
+            current_identity = _current_baseline_identity(tables)
+            incompat = _baseline_incompatibility(baseline_raw, profile, current_identity)
             if incompat:
-                baseline_pct = None
                 out.append(Finding("7.baseline_incompatible", cat, SEV_ERROR,
                                    SHAPE_ROOT_TABLE, False,
                                    hint="Produce a baseline for THIS product with "
                                         "profile_cdb_shapes.py --product "
                                         f"{profile.name}.",
-                                   message=f"Incompatible shape baseline: {incompat}."))
+                                    message=f"Incompatible shape baseline: {incompat}."))
+                return out
+            shapes = baseline_raw["shapes"]
+            baseline_pct = {shape["shape"]: float(shape["pct"]) for shape in shapes}
+            if baseline_raw.get("schema_version") is None:
+                metric_names = [
+                    part.split("=", 1)[0] for part in shapes[0]["shape"].split("|")
+                ]
+                out.append(Finding(
+                    "7.baseline_legacy", cat, SEV_WARN, SHAPE_ROOT_TABLE, False,
+                    hint="Regenerate this baseline with schema v2 source-key provenance.",
+                    message="Legacy untagged baseline accepted only for cdb_simplificado; "
+                            "strict shape coverage is unavailable.",
+                ))
+            else:
+                metric_names = list(baseline_raw["metrics"])
         except Exception as exc:  # noqa: BLE001
-            out.append(Finding("7.baseline", cat, SEV_WARN, SHAPE_ROOT_TABLE, False,
+            out.append(Finding("7.baseline", cat, SEV_ERROR, SHAPE_ROOT_TABLE, False,
                                hint="Regenerate it with profile_cdb_shapes.py "
                                     "--apply-filtros-fonte --product for this product.",
                                message=f"Could not load shape baseline {baseline_path}: {exc}"))
+            return out
+
+    run_distribution = (
+        SHAPE_RULE_DISTRIBUTION in profile.hard_shape_rules
+        and (run_unseen or run_drift)
+    )
+    if not (run_op_ratio or run_resgate_max or run_distribution):
+        return out
+    if baseline_path is None:
+        metric_names = []
+        if run_op_ratio:
+            metric_names.extend(("OPERACAO", "DADO_OPERACAO", "LANCAMENTO"))
+        if run_resgate_max:
+            metric_names.append("RESGATE")
 
     counts, skipped = _shape_counts(universe, tables, metric_names)
     if skipped:
@@ -3831,7 +4043,7 @@ def check_shapes(
     # 7c - operation ratio invariant: DADO_OPERACAO = 2*OPERACAO, LANCAMENTO = OPERACAO.
     # Holds for ~99% of production IFs that have operations; a synthetic output that
     # binds these tables independently violates it almost everywhere.
-    if (SHAPE_RULE_OP_RATIO in profile.hard_shape_rules
+    if (run_op_ratio
             and all(name in metric_names for name in ("OPERACAO", "DADO_OPERACAO", "LANCAMENTO"))):
         with_ops = counts.where(F.col("OPERACAO") > 0)
         n_ops = with_ops.count()
@@ -3855,30 +4067,23 @@ def check_shapes(
                         f"{op_ratio_tol_pct}%).",
             ))
 
-    # 7d - RESGATE multiplicity: production and all captured CDB variants have at most one
-    # resgate parent per IF; table rows represent schedules below that parent, not new parents.
-    if SHAPE_RULE_RESGATE_MAX in profile.hard_shape_rules and "RESGATE" in metric_names:
-        if profile.name == "cdb" and "RESGATE" in skipped:
-            out.append(Finding(
-                "7d.resgate_multiplicity", cat, SEV_ERROR, "RESGATE", False,
-                column="RESGATE",
-                hint="Include RESGATE and its CONDICAO_IF bridge in the validation input.",
-                message="Full-CDB resgate multiplicity could not be evaluated.",
-            ))
-        else:
-            multi = counts.where(F.col("RESGATE") > 1)
-            c = multi.count()
-            out.append(Finding(
-                "7d.resgate_multiplicity", cat,
-                SEV_ERROR if c else SEV_INFO, "RESGATE", c == 0, count=c, column="RESGATE",
-                sample=_sample_keys(multi.select(SHAPE_ROOT_KEY), [SHAPE_ROOT_KEY], sample),
-                hint="Production CDBs never have more than one RESGATE condition; bind at "
-                     "most one resgate-condição per IF.",
-                message="IFs with more than one RESGATE row.",
-            ))
+    # 7d - CDB simplificado RESGATE multiplicity: schedule rows belong below one parent.
+    if run_resgate_max and "RESGATE" in metric_names:
+        multi = counts.where(F.col("RESGATE") > 1)
+        c = multi.count()
+        out.append(Finding(
+            "7d.resgate_multiplicity", cat,
+            SEV_ERROR if c else SEV_INFO, "RESGATE", c == 0, count=c, column="RESGATE",
+            sample=_sample_keys(multi.select(SHAPE_ROOT_KEY), [SHAPE_ROOT_KEY], sample),
+            hint="CDB simplificado expects at most one RESGATE condition per IF.",
+            message="IFs with more than one RESGATE row.",
+        ))
 
     # 7a/7b - distribution checks against the baseline profile.
     if SHAPE_RULE_DISTRIBUTION not in profile.hard_shape_rules:
+        counts.unpersist()
+        return out
+    if not (run_unseen or run_drift):
         counts.unpersist()
         return out
     if baseline_pct is None:
@@ -3902,46 +4107,48 @@ def check_shapes(
     syn_pct = {r["shape"]: 100.0 * r["n"] / total for r in dist_rows}
     syn_ids = {r["shape"]: [int(x) for x in (r["ids"] or [])] for r in dist_rows}
 
-    unseen = sorted(
-        ((s, p) for s, p in syn_pct.items() if s not in baseline_pct),
-        key=lambda kv: -kv[1],
-    )
-    unseen_mass = sum(p for _, p in unseen)
-    out.append(Finding(
-        "7a.unseen_shapes", cat,
-        SEV_ERROR if unseen_mass > unseen_tol_pct else SEV_INFO,
-        SHAPE_ROOT_TABLE, unseen_mass <= unseen_tol_pct,
-        count=len(unseen), column="shape",
-        sample=[{"shape": s, "pct": round(p, 3), "sample_num_if": syn_ids[s][:5]}
-                for s, p in unseen[:sample]],
-        hint="These per-IF cardinality combinations never occur in the (filtered) "
-             "production data — the generator invented them. Per-IF cluster sampling "
-             "eliminates this class by construction.",
-        message=f"{unseen_mass:.1f}% of synthetic IFs have a shape absent from the "
-                f"baseline (tolerance {unseen_tol_pct}%).",
-    ))
+    if run_unseen:
+        unseen = sorted(
+            ((s, p) for s, p in syn_pct.items() if s not in baseline_pct),
+            key=lambda kv: -kv[1],
+        )
+        unseen_mass = sum(p for _, p in unseen)
+        out.append(Finding(
+            "7a.unseen_shapes", cat,
+            SEV_ERROR if unseen_mass > unseen_tol_pct else SEV_INFO,
+            SHAPE_ROOT_TABLE, unseen_mass <= unseen_tol_pct,
+            count=len(unseen), column="shape",
+            sample=[{"shape": s, "pct": round(p, 3), "sample_num_if": syn_ids[s][:5]}
+                    for s, p in unseen[:sample]],
+            hint="These per-IF cardinality combinations never occur in the (filtered) "
+                 "production data — the generator invented them. Per-IF cluster sampling "
+                 "eliminates this class by construction.",
+            message=f"{unseen_mass:.1f}% of synthetic IFs have a shape absent from the "
+                    f"baseline (tolerance {unseen_tol_pct}%).",
+        ))
 
-    tvd = 0.5 * sum(
-        abs(syn_pct.get(s, 0.0) - baseline_pct.get(s, 0.0))
-        for s in set(syn_pct) | set(baseline_pct)
-    ) / 100.0
-    drifted = sorted(
-        set(syn_pct) | set(baseline_pct),
-        key=lambda s: -abs(syn_pct.get(s, 0.0) - baseline_pct.get(s, 0.0)),
-    )
-    out.append(Finding(
-        "7b.distribution_drift", cat,
-        SEV_ERROR if tvd > drift_tol else SEV_INFO,
-        SHAPE_ROOT_TABLE, tvd <= drift_tol, column="shape",
-        sample=[{"shape": s,
-                 "synthetic_pct": round(syn_pct.get(s, 0.0), 3),
-                 "baseline_pct": round(baseline_pct.get(s, 0.0), 3)}
-                for s in drifted[:sample]],
-        hint="The synthetic shape distribution should converge to the filtered-raw "
-             "baseline. See docs/cdb-shapes-findings.md for the full analysis.",
-        message=f"Total variation distance between synthetic and baseline shape "
-                f"distributions = {tvd:.3f} (tolerance {drift_tol}).",
-    ))
+    if run_drift:
+        tvd = 0.5 * sum(
+            abs(syn_pct.get(s, 0.0) - baseline_pct.get(s, 0.0))
+            for s in set(syn_pct) | set(baseline_pct)
+        ) / 100.0
+        drifted = sorted(
+            set(syn_pct) | set(baseline_pct),
+            key=lambda s: -abs(syn_pct.get(s, 0.0) - baseline_pct.get(s, 0.0)),
+        )
+        out.append(Finding(
+            "7b.distribution_drift", cat,
+            SEV_ERROR if tvd > drift_tol else SEV_INFO,
+            SHAPE_ROOT_TABLE, tvd <= drift_tol, column="shape",
+            sample=[{"shape": s,
+                     "synthetic_pct": round(syn_pct.get(s, 0.0), 3),
+                     "baseline_pct": round(baseline_pct.get(s, 0.0), 3)}
+                    for s in drifted[:sample]],
+            hint="The synthetic shape distribution should converge to the filtered-raw "
+                 "baseline. See docs/cdb-shapes-findings.md for the full analysis.",
+            message=f"Total variation distance between synthetic and baseline shape "
+                    f"distributions = {tvd:.3f} (tolerance {drift_tol}).",
+        ))
 
     counts.unpersist()
     return out
@@ -4479,10 +4686,11 @@ def check_log_invariants(
 # Report
 # ---------------------------------------------------------------------------
 def emit_report(spark: SparkSession, findings: List[Finding],
-                report_path: Optional[str], fail_severity: str,
-                profile: ValidationProfile, resolved_input: str,
-                table_inventory: List[str], partial_reasons: List[str],
-                baseline_identity: Optional[dict] = None) -> int:
+                 report_path: Optional[str], fail_severity: str,
+                 profile: ValidationProfile, resolved_input: str,
+                 table_inventory: List[str], partial_reasons: List[str],
+                 baseline_identity: Optional[dict] = None,
+                 runtime_identity: Optional[dict] = None) -> int:
     fail_level = _SEV_ORDER[fail_severity.upper()]
     failing = [f for f in findings if (not f.passed) and _SEV_ORDER[f.severity] >= fail_level]
 
@@ -4494,6 +4702,12 @@ def emit_report(spark: SparkSession, findings: List[Finding],
     unsupported_caps = list(profile.unsupported_required())
     reasons = list(partial_reasons)
     reasons += [f"unsupported required capability: {c}" for c in unsupported_caps]
+    reasons += [
+        f"non-passing warning: {finding.check_id}"
+        for finding in findings
+        if not finding.passed and finding.severity == SEV_WARN
+    ]
+    reasons = list(dict.fromkeys(reasons))
     if failing:
         verdict = "FAIL"
     elif reasons:
@@ -4548,6 +4762,8 @@ def emit_report(spark: SparkSession, findings: List[Finding],
             "resolved_input": resolved_input,
             "table_inventory": sorted(table_inventory),
             "baseline_identity": baseline_identity,
+            "spark_version": (runtime_identity or {}).get("spark_version"),
+            "aqe_enabled": (runtime_identity or {}).get("aqe_enabled"),
             "fail_severity": fail_severity,
             "verdict": verdict,
             "failed": verdict == "FAIL",
@@ -4641,7 +4857,7 @@ def parse_args() -> argparse.Namespace:
 
 def create_spark() -> SparkSession:
     spark = (SparkSession.builder
-             .appName("validate_cdb_simplificado")
+             .appName("validate_products")
              .getOrCreate())
     # Spark 3.5.0 (OCI Data Flow) + AQE + cached DataFrames silently LOSES JOIN
     # ROWS (SPARK-45282, fixed in 3.5.1). This validator caches every synthetic
@@ -4655,18 +4871,27 @@ def main() -> None:
     run_started = perf_counter()
     args = parse_args()
     profile = get_validation_profile(args.product)
+    skip_prefixes = [prefix.strip() for prefix in args.skip_check if prefix.strip()]
+    if _check_is_skipped("0.identity", skip_prefixes):
+        raise SystemExit("Product identity is non-skippable; remove its --skip-check prefix.")
+    if args.shape_baseline and _check_is_skipped("7.baseline", skip_prefixes):
+        raise SystemExit("A supplied baseline contract is non-skippable.")
     cfg = read_config(args.no_oracle, profile, args.input_base)
     spark = create_spark()
     spark.sparkContext.setLogLevel("WARN")
 
     # A supplied contract is an input to the validation run, so fail before
     # expensive synthetic reads if it cannot be read or parsed.
-    application_capacities = _timed(
-        "setup application capacity contract",
-        lambda: load_application_capacity_contract(
-            spark, args.application_capacity_contract,
-        ),
-    )
+    if _check_group_is_skipped(("4.capacity",), skip_prefixes):
+        application_capacities = {}
+        logger.info("Skipped application capacity contract setup (--skip-check).")
+    else:
+        application_capacities = _timed(
+            "setup application capacity contract",
+            lambda: load_application_capacity_contract(
+                spark, args.application_capacity_contract,
+            ),
+        )
 
     only = [t.strip().upper() for t in args.tables.split(",")] if args.tables else None
     tables = _timed(
@@ -4691,113 +4916,140 @@ def main() -> None:
     if only:
         partial_reasons.append(
             "diagnostic --tables subset restricts coverage (no strict PASS)")
+    if args.no_oracle:
+        partial_reasons.append(
+            "--no-oracle disables required Oracle-backed metadata checks")
+    if skip_prefixes:
+        partial_reasons.append(
+            f"--skip-check restricts coverage: {sorted(skip_prefixes)}")
 
     # Product identity preflight — before any semantic check.
     findings += _timed(
         "category 0 identity",
         lambda: check_product_identity(tables, profile, args.sample_size),
     )
-    findings += _timed(
-        "category 1 polymorphism",
+    findings += _run_check_group(
+        "category 1 polymorphism", ("1.", "1a.", "1b.", "1c."), skip_prefixes,
         lambda: check_polymorphism(tables, meta, args.sample_size),
     )
     if args.shape_baseline:
-        findings += _timed(
-            "category 1 baseline subtype verification",
+        findings += _run_check_group(
+            "category 1 baseline subtype verification", ("1.map_snapshot",), skip_prefixes,
             lambda: verify_subtype_map_from_baseline(spark, args.shape_baseline),
         )
     if not args.no_oracle and args.verify_subtype_map:
-        findings += _timed(
-            "category 1 Oracle subtype verification",
+        findings += _run_check_group(
+            "category 1 Oracle subtype verification", ("1.map_verify",), skip_prefixes,
             lambda: verify_subtype_map_against_production(spark, cfg),
         )
     elif not args.no_oracle:
         logger.info(
             "Production subtype-map audit skipped; use --verify-subtype-map to run it."
         )
-    findings += _timed(
-        "category 2 domain",
+    findings += _run_check_group(
+        "category 2 domain", ("2.domain",), skip_prefixes,
         lambda: check_domain(tables, meta, args.sample_size, profile),
     )
-    findings += _timed(
-        "category 2b CDB variants",
+    findings += _run_check_group(
+        "category 2b CDB variants", ("2b.",), skip_prefixes,
         lambda: check_cdb_variant_rules(tables, args.sample_size, profile),
     )
-    findings += _timed(
-        "category 2c RDB resgate schedules",
+    findings += _run_check_group(
+        "category 2c RDB resgate schedules", ("2c.",), skip_prefixes,
         lambda: check_rdb_resgate_schedule_rules(tables, args.sample_size, profile),
     )
     if args.max_parent_keys is not None:
         logger.warning("--max-parent-keys is deprecated and ignored; "
                        "see --max-residual-keys.")
-    ref_findings, faltantes = _timed(
-        "category 3 referential",
-        lambda: check_referential(
-            spark, cfg, tables, meta, args.sample_size,
-            args.validate_against, args.max_residual_keys,
-        ),
-    )
+    referential_prefixes = ("3.fk_", "3.shared_key")
+    if _check_group_is_skipped(referential_prefixes, skip_prefixes):
+        ref_findings, faltantes = [], []
+        logger.info("Skipped category 3 referential before execution (--skip-check).")
+    else:
+        ref_findings, faltantes = _timed(
+            "category 3 referential",
+            lambda: check_referential(
+                spark, cfg, tables, meta, args.sample_size,
+                args.validate_against, args.max_residual_keys, skip_prefixes,
+            ),
+        )
+        ref_findings = [
+            finding for finding in ref_findings
+            if not _check_is_skipped(finding.check_id, skip_prefixes)
+        ]
     findings += ref_findings
-    findings += _timed(
-        "category 3b primary keys",
+    findings += _run_check_group(
+        "category 3b primary keys", ("3b.",), skip_prefixes,
         lambda: check_primary_keys(tables, meta, args.sample_size, args.no_oracle),
     )
-    findings += _timed(
-        "category 3c clone map",
+    findings += _run_check_group(
+        "category 3c clone map", ("3c.",), skip_prefixes,
         lambda: check_clone_map(tables, profile, args.sample_size),
     )
-    if args.emit_faltantes:
+    if args.emit_faltantes and not _check_is_skipped("3.fk_orphan", skip_prefixes):
         _timed(
             "category 3 emit faltantes",
             lambda: emit_faltantes(spark, args.emit_faltantes, faltantes),
         )
-    findings += _timed(
-        "category 4 not null",
+    findings += _run_check_group(
+        "category 4 not null", ("4.not_null",), skip_prefixes,
         lambda: check_not_null(tables, meta, args.sample_size),
     )
-    findings += _timed(
-        "category 4 capacity",
+    findings += _run_check_group(
+        "category 4 capacity", ("4.capacity",), skip_prefixes,
         lambda: check_capacity(tables, meta, application_capacities, args.sample_size),
     )
-    findings += _timed(
-        "category 5 dates",
+    findings += _run_check_group(
+        "category 5 dates", ("5.",), skip_prefixes,
         lambda: check_dates(tables, meta, args.sample_size),
     )
-    findings += _timed(
-        "category 6 lookup combinations",
+    findings += _run_check_group(
+        "category 6 lookup combinations", ("6.required", "6.combo"), skip_prefixes,
         lambda: check_lookup_combos(
             spark, cfg, tables, meta, args.sample_size, args.max_residual_keys, profile,
+            skip_prefixes,
         ),
     )
-    findings += _timed(
-        "category 7 shapes",
+    findings += _run_check_group(
+        "category 7 shapes", ("7.", "7a.", "7b.", "7c.", "7d."), skip_prefixes,
         lambda: check_shapes(
             spark, tables, args.shape_baseline, args.sample_size,
             args.shape_unseen_tol, args.shape_drift_tol, args.shape_op_ratio_tol, profile,
+            skip_prefixes,
         ),
     )
-    findings += _timed(
-        "category 8 log invariants",
+    findings += _run_check_group(
+        "category 8 log invariants", ("8",), skip_prefixes,
         lambda: check_log_invariants(
             tables, args.sample_size, args.registration_profile, profile,
         ),
     )
 
-    if args.skip_check:
-        skipped = [f for f in findings
-                   if any(f.check_id.startswith(s) for s in args.skip_check)]
-        findings = [f for f in findings if f not in skipped]
-        # A skipped REQUIRED check leaves coverage incomplete -> PARTIAL, never PASS.
-        if skipped:
-            partial_reasons.append(
-                f"--skip-check removed {len(skipped)} finding(s): "
-                f"{sorted(args.skip_check)}")
+    baseline_identity = None
+    if args.shape_baseline:
+        try:
+            baseline = json.loads(read_text(spark, args.shape_baseline))
+            identity_fields = (
+                "schema_version", "product", "num_tipo_if", "domain_version",
+                "metric_version", "map_mode", "source_key_count", "source_key_fingerprint",
+            )
+            baseline_identity = {
+                "path": args.shape_baseline,
+                **{field: baseline.get(field) for field in identity_fields},
+            }
+        except Exception as exc:  # noqa: BLE001
+            baseline_identity = {"path": args.shape_baseline, "load_error": str(exc)}
+    runtime_identity = {
+        "spark_version": spark.version,
+        "aqe_enabled": spark.conf.get("spark.sql.adaptive.enabled", "false") == "true",
+    }
 
     code = _timed(
         "report emission",
         lambda: emit_report(
             spark, findings, args.report_path, args.fail_severity, profile,
             cfg.synthetic_base, list(tables), partial_reasons,
+            baseline_identity, runtime_identity,
         ),
     )
     logger.info("[PERF] complete run elapsed=%.1fs", perf_counter() - run_started)

@@ -6,7 +6,7 @@ import pytest
 pyspark = pytest.importorskip("pyspark")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from scripts import validate_cdb_simplificado as validator  # noqa: E402
+from scripts import validate_products as validator  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -446,7 +446,7 @@ def test_registration_profile_cli_flag(monkeypatch):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["validate_cdb_simplificado.py", "--product", "cdb_simplificado",
+        ["validate_products.py", "--product", "cdb_simplificado",
          "--registration-profile"],
     )
 
@@ -454,7 +454,7 @@ def test_registration_profile_cli_flag(monkeypatch):
 
 
 def test_subtype_map_verification_is_opt_in(monkeypatch):
-    base = ["validate_cdb_simplificado.py", "--product", "cdb_simplificado"]
+    base = ["validate_products.py", "--product", "cdb_simplificado"]
     monkeypatch.setattr(sys, "argv", base)
     assert validator.parse_args().verify_subtype_map is False
 

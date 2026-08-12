@@ -2,7 +2,7 @@
 
 Copy everything below the line into the agent that has the NoMe/CETIP Java source checked out
 (`dados/`, `atributos/`, `input/`). The agent's JSON output feeds a new check category in
-`scripts/validate_cdb_simplificado.py` (see "How the output is consumed" at the bottom).
+`scripts/validate_products.py` (see "How the output is consumed" at the bottom).
 
 ---
 
@@ -170,9 +170,9 @@ Rules for the output:
 
 ## How the output is consumed (context for the b3-synthetic-data side, not part of the agent prompt)
 
-The `relationships[].suggested_rule` entries become a curated map in
-`validate_cdb_simplificado.py` — a new check category ("Cat 7 — batch-derived NOT NULL") that
-evaluates each `predicate_sql` against the named source table in the synthetic output, exactly like
-`DOMAIN_RULES` / `check_domain` does today, with the finding's hint pointing at the downstream
-`target_table.target_column` and writer class. Entries with `not_null_evidence: "unknown"` are
+The `relationships[].suggested_rule` entries can become a future batch-derived NOT NULL check in
+`validate_products.py`. It would evaluate each `predicate_sql` against the named source table in
+the synthetic output using the same product-aware finding pattern as `check_domain`, with the
+finding's hint pointing at the downstream `target_table.target_column` and writer class. Entries
+with `not_null_evidence: "unknown"` are
 cross-checked against `ALL_TAB_COLUMNS` (`NULLABLE='N'`) before being enforced.

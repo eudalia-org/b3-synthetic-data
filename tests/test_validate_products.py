@@ -1,12 +1,13 @@
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 pyspark = pytest.importorskip("pyspark")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from scripts import validate_cdb_simplificado as validator  # noqa: E402
+from scripts import validate_products as validator  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -74,6 +75,7 @@ def test_profiles_are_explicit_and_rdb_does_not_inherit_cdb_defaults():
     assert rdb.object_service_code is None
     assert rdb.cod_if_pattern == r"^[A-Z0-9 -]{1,14}$"
     assert rdb.sem_modalidade_ids is None
+    assert cdb.unsupported_required() == (validator.CAP_POLYMORPHISM,)
     assert set(rdb.unsupported_required()) == {
         validator.CAP_POLYMORPHISM,
         validator.CAP_LOOKUP_TOS,
@@ -124,12 +126,12 @@ def test_legacy_input_prefix_is_rejected_for_rdb(monkeypatch):
 
 
 def test_validator_cli_requires_product(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["validate_cdb_simplificado.py"])
+    monkeypatch.setattr(sys, "argv", ["validate_products.py"])
     with pytest.raises(SystemExit):
         validator.parse_args()
 
     monkeypatch.setattr(
-        sys, "argv", ["validate_cdb_simplificado.py", "--product", "rdb"]
+        sys, "argv", ["validate_products.py", "--product", "rdb"]
     )
     assert validator.parse_args().product == "rdb"
 
@@ -249,9 +251,16 @@ def test_report_exit_codes_distinguish_pass_partial_and_fail(capsys):
     failure = validator.Finding(
         "0.identity", "Product identity", validator.SEV_ERROR, "ROOT", False
     )
+    unavailable = validator.Finding(
+        "2.domain.availability", "Domain conformance", validator.SEV_WARN, "TITULO", False,
+        message="Domain eligibility unavailable.",
+    )
 
     assert validator.emit_report(None, [], None, "error", simplificado, "/input", [], []) == 0
     assert validator.emit_report(None, [], None, "error", rdb, "/input", [], []) == 1
+    assert validator.emit_report(
+        None, [unavailable], None, "error", simplificado, "/input", [], []
+    ) == 1
     assert validator.emit_report(
         None, [failure], None, "error", simplificado, "/input", [], []
     ) == 1
@@ -259,3 +268,52 @@ def test_report_exit_codes_distinguish_pass_partial_and_fail(capsys):
     assert "VERDICT=PASS" in output
     assert "VERDICT=PARTIAL" in output
     assert "VERDICT=FAIL" in output
+
+
+def test_fully_skipped_group_is_not_executed():
+    executed = False
+
+    def operation():
+        nonlocal executed
+        executed = True
+        return []
+
+    assert validator._run_check_group("category 7", ("7.",), ["7."], operation) == []
+    assert not executed
+
+
+def test_required_lookup_group_skip_avoids_frame_access():
+    assert validator.check_required_lookup_frames(
+        {}, None, None, None, None, 5,
+        validator.VALIDATION_PROFILES["cdb_simplificado"],
+        skip_prefixes=["6.required"],
+    ) == []
+
+
+def test_supplied_baseline_contract_is_non_skippable(monkeypatch):
+    monkeypatch.setattr(
+        validator,
+        "parse_args",
+        lambda: SimpleNamespace(
+            product="cdb_simplificado",
+            skip_check=["7"],
+            shape_baseline="baseline.json",
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="baseline contract is non-skippable"):
+        validator.main()
+
+
+def test_fk_group_skip_avoids_referential_actions(spark):
+    child = spark.createDataFrame([(1,)], "PARENT_ID long")
+    fk = validator.ForeignKey("FK_CHILD", "CHILD", ("PARENT_ID",), "PARENT", ("ID",))
+    meta = validator.Metadata({"CHILD"}, {}, {}, {}, {"CHILD": [fk]})
+    cfg = validator.Config("/input", None, None, "", "CETIP")
+
+    findings, faltantes = validator.check_referential(
+        spark, cfg, {"CHILD": child}, meta, 5, "union", 100, ["3.fk_"]
+    )
+
+    assert findings == []
+    assert faltantes == []

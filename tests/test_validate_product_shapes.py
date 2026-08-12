@@ -9,7 +9,7 @@ pytest.importorskip("pyspark")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts import profile_cdb_shapes as profiler  # noqa: E402
-from scripts import validate_cdb_simplificado as validator  # noqa: E402
+from scripts import validate_products as validator  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -28,6 +28,22 @@ def spark():
 
 def by_id(findings):
     return {finding.check_id: finding for finding in findings}
+
+
+def baseline_identity(**overrides):
+    baseline = {
+        "schema_version": 2,
+        "product": "cdb_simplificado",
+        "num_tipo_if": 49,
+        "domain_version": validator.BASELINE_DOMAIN_VERSION,
+        "metric_version": validator.BASELINE_METRIC_VERSION,
+        "metrics": validator.DEFAULT_SHAPE_METRICS,
+        "map_mode": "exact-source-keys",
+        "source_key_count": 2,
+        "source_key_fingerprint": "abc123",
+    }
+    baseline.update(overrides)
+    return baseline
 
 
 def operation_shape_tables(spark, num_tipo_if=49, dado_rows=2, lancamento_rows=1):
@@ -95,6 +111,7 @@ def test_source_key_fingerprint_is_order_independent_and_deduplicated(spark):
     [
         ({}, "rdb", "legacy untagged baseline"),
         ({"schema_version": 1}, "cdb_simplificado", "schema_version=1"),
+        ({"schema_version": 3}, "cdb_simplificado", "schema_version=3"),
         ({"schema_version": 2, "product": "cdb"}, "rdb", "product 'cdb'"),
         ({"schema_version": 2, "num_tipo_if": 49}, "rdb", "num_tipo_if=49"),
     ],
@@ -115,6 +132,35 @@ def test_legacy_baseline_is_only_tolerated_for_simplificado():
     ) is None
 
 
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"domain_version": 999}, "domain_version=999"),
+        ({"metric_version": 999}, "metric_version=999"),
+        ({"metrics": ["OPERACAO"]}, "metrics do not match"),
+        ({"map_mode": "population"}, "map_mode='population'"),
+        ({"source_key_count": 3}, "source_key_count=3"),
+        ({"source_key_fingerprint": "wrong"}, "source_key_fingerprint"),
+    ],
+)
+def test_baseline_identity_rejects_version_metric_and_provenance_mismatches(
+    overrides, message
+):
+    current = {
+        "map_mode": "exact-source-keys",
+        "source_key_count": 2,
+        "source_key_fingerprint": "abc123",
+    }
+
+    incompatibility = validator._baseline_incompatibility(
+        baseline_identity(**overrides),
+        validator.VALIDATION_PROFILES["cdb_simplificado"],
+        current,
+    )
+
+    assert message in incompatibility
+
+
 def test_rdb_without_shape_evidence_skips_before_touching_spark():
     findings = validator.check_shapes(
         None,
@@ -133,7 +179,7 @@ def test_rdb_without_shape_evidence_skips_before_touching_spark():
 
 
 @pytest.mark.parametrize(("dado_rows", "expected_pass"), [(2, True), (1, False)])
-def test_full_cdb_enforces_operation_cluster_ratio_and_resgate_max(
+def test_full_cdb_enforces_only_operation_cluster_ratio(
     spark, dado_rows, expected_pass
 ):
     findings = by_id(validator.check_shapes(
@@ -148,11 +194,11 @@ def test_full_cdb_enforces_operation_cluster_ratio_and_resgate_max(
     ))
 
     assert findings["7c.op_ratio"].passed is expected_pass
-    assert findings["7d.resgate_multiplicity"].passed
+    assert "7d.resgate_multiplicity" not in findings
     assert "7.baseline" not in findings
 
 
-def test_full_cdb_enforces_resgate_multiplicity(spark):
+def test_full_cdb_allows_multiple_resgate_conditions(spark):
     tables = {
         "INSTRUMENTO_FINANCEIRO": spark.createDataFrame(
             [(1, 49, None)], "NUM_IF long, NUM_TIPO_IF long, DAT_EXCLUSAO string"
@@ -170,7 +216,7 @@ def test_full_cdb_enforces_resgate_multiplicity(spark):
         validator.VALIDATION_PROFILES["cdb"],
     ))
 
-    assert findings["7d.resgate_multiplicity"].severity == validator.SEV_ERROR
+    assert "7d.resgate_multiplicity" not in findings
 
 
 def test_simplificado_enforces_resgate_multiplicity_and_requires_baseline(spark):
@@ -216,3 +262,46 @@ def test_supplied_cross_product_baseline_is_rejected(spark, tmp_path):
     ))
 
     assert findings["7.baseline_incompatible"].severity == validator.SEV_ERROR
+
+
+def test_unreadable_baseline_fails_before_shape_counts(spark, tmp_path):
+    baseline_path = tmp_path / "broken.json"
+    baseline_path.write_text("not-json")
+    tables = {
+        "INSTRUMENTO_FINANCEIRO": spark.createDataFrame(
+            [(1, 49, None)], "NUM_IF long, NUM_TIPO_IF long, DAT_EXCLUSAO string"
+        )
+    }
+
+    findings = validator.check_shapes(
+        spark, tables, str(baseline_path), 5, 1.0, 0.15, 5.0,
+        validator.VALIDATION_PROFILES["cdb_simplificado"],
+    )
+
+    assert len(findings) == 1
+    assert findings[0].check_id == "7.baseline"
+    assert findings[0].severity == validator.SEV_ERROR
+
+
+def test_fine_grained_shape_skip_omits_resgate_check(spark):
+    findings = by_id(validator.check_shapes(
+        spark,
+        operation_shape_tables(spark),
+        None,
+        5,
+        1.0,
+        0.15,
+        5.0,
+        validator.VALIDATION_PROFILES["cdb_simplificado"],
+        ["7d.resgate_multiplicity"],
+    ))
+
+    assert "7d.resgate_multiplicity" not in findings
+
+
+def test_fully_skipped_lookup_combo_avoids_frame_access():
+    assert validator.check_lookup_combo_frames(
+        None, None, None, None, 5,
+        validator.VALIDATION_PROFILES["cdb_simplificado"],
+        skip_prefixes=["6.combo"],
+    ) == []

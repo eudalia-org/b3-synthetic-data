@@ -1,7 +1,7 @@
 # RDB Evidence Gaps — Blocking Items Before Strict Semantic Validation
 
 Status: **RDB is validated in structural-only mode.** The `rdb` `ValidationProfile` in
-`scripts/validate_cdb_simplificado.py` marks the capabilities below as **required but
+`scripts/validate_products.py` marks the capabilities below as **required but
 unsupported**, which forces every RDB run to report **PARTIAL** (non-zero exit) until each
 item is closed with primary-source target evidence. Do **not** fill these with CDB defaults.
 

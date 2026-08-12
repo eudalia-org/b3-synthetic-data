@@ -22,7 +22,7 @@ analysis of batch logs:
 |---|---|---|
 | `"nao foi encontrado o servico_ft"` | `docs/cdb-simplificado-ingestion-analysis.md:81-87` | Operation state machine `ProcessaEstimulo` (estado 479) could not resolve the serviço (ObjetoServico) mapping for the operation's (tipo IF, tipo operação, modalidade de liquidação) combination. |
 | `"CDB:53:SEM MODALIDADE"` | `docs/cdb-simplificado-ingestion-analysis.md:81-87` | Same root cause: the lookup for the service/object combination returned no row. |
-| `Cat 6 Lookup combinations -> "SEM MODALIDADE / servico_ft nao encontrado"` | `scripts/validate_cdb_simplificado.py:29` | The pre-load validator's Category 6 is named after this error. |
+| `Cat 6 Lookup combinations -> "SEM MODALIDADE / servico_ft nao encontrado"` | `scripts/validate_products.py` (`check_lookup_combos`) | The pre-load validator's Category 6 is named after this error. |
 
 The observed failing parameters from the batch log: `TIPO_OPERACAO=1381` + `MODALIDADE_LIQUIDACAO=6`
 (`docs/cdb-simplificado-ingestion-analysis.md:83-84`).
@@ -232,8 +232,8 @@ SELECT operacaodo0_.NUM_ID_OPERACAO,
 
 ### f.1 Simple anti-join (tipo_operacao × modalidade × objeto_servico)
 
-This is the validator's current best-effort approach at
-`scripts/validate_cdb_simplificado.py:998-1006`:
+This is the validator's current best-effort approach in
+`scripts/validate_products.py` (`check_lookup_combo_frames`):
 
 ```sql
 -- Find OPERACAO rows whose (NUM_ID_TIPO_OPERACAO, NUM_ID_MODALIDADE_LIQUIDACAO)
@@ -281,7 +281,7 @@ expressed in the schema.
 
 ### f.2 Complete anti-join (best-effort approximation for the validator)
 
-The existing Cat 6 check in `validate_cdb_simplificado.py:998-1006` performs the simplest
+The existing Cat 6 check in `validate_products.py` (`check_lookup_combo_frames`) performs the simplest
 valid-combination anti-join:
 
 ```sql
@@ -438,7 +438,7 @@ depends on:
 4. **Whether MODALIDADE_LIQUIDACAO participates in the TIPO_OPER_OBJETO_SERV lookup directly
    or indirectly** (e.g., through an intermediate mapping table, through
    `PARAMETRIZACAO_REGIME_MERCADO`, or through the state machine dispatch logic itself). The
-   current `validate_cdb_simplificado.py` Cat 6 assumes it does, but the schema has no direct
+   current `validate_products.py` Cat 6 assumes it does, but the schema has no direct
    column for it — the modalidade constraint is enforced elsewhere.
 
 5. **Whether the batch caches the service mapping in a HashMap at startup** (a common pattern).

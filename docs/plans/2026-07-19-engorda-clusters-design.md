@@ -31,7 +31,7 @@ the business answers land — IF-level only, never row-level.
 Clones are exact copies of their sources except keys and dates, so the expected shape
 distribution equals the source universe's. Wiring: teach `profile_cdb_shapes.py` to accept
 the same `--product` config for its filter (superseding `--apply-filtros-fonte`), then
-baseline = profiler(raw, product config) and gate = `validate_cdb_simplificado.py
+baseline = profiler(raw, product config) and gate = `validate_products.py
 --shape-baseline <baseline>` (Categories 1–7) on the output. One predicate definition,
 three consumers.
 

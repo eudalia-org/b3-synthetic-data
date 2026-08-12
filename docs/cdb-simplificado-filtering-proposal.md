@@ -20,7 +20,7 @@ filtered production image (the exact input engorda consumes):
   `CONDICAO_IF` (tipo 20). Result: **16.5% of the filtered universe** is
   `CONDICAO_IF=2, RESGATE=0` — condições with no subtype row. That is the same
   polymorphism violation (Hibernate cannot type the condição) that Category 1 of
-  `validate_cdb_simplificado.py` flags in the *output*, already present in the *input*.
+  `validate_products.py` flags in the *output*, already present in the *input*.
 - `TITULO: COD_TIPO_ESCALONAMENTO IS NULL` drops the titulo row of 5.2M IFs (7.7%) but
   keeps everything else of those instruments (`TITULO=0` shapes in the baseline).
 - `CARTEIRA_*: QTD > 0` similarly removes position rows from otherwise-in-scope IFs.
@@ -69,7 +69,7 @@ Regenerate and run the gate:
 spark-submit profile_cdb_shapes.py --product cdb_simplificado --base-uri <raw> \
     --apply-filtros-fonte --label raw_filtered --report-path <baseline.json>
 
-spark-submit --jars ojdbc8.jar validate_cdb_simplificado.py \
+spark-submit --jars ojdbc8.jar validate_products.py \
     --product cdb_simplificado \
     --shape-baseline <baseline.json> --report-path <report.json>
 ```

@@ -86,4 +86,4 @@ subtype mixes and the 1:2:1 operação ratio then hold **by construction**.
 **Acceptance test (already automated):** rerun the profiler on the regenerated output with
 `--compare-with profile_raw_filtered.json`. Pass = shape distribution converges to the
 baseline and "shapes only in synthetic" ≈ 0. This can be added as Category 7 of
-`validate_cdb_simplificado.py` to gate every future run.
+`validate_products.py` to gate every future run.

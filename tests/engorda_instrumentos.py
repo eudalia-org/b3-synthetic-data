@@ -181,7 +181,7 @@ FILTROS_FONTE: dict[str, list[tuple[str, str, object]]] = {
 #
 # Item 1 — polimorfismo CONDICAO_IF. COD_TIPO_CONDICAO_IF -> tabela-subtipo
 # física (joined-subclass do Hibernate), igual ao SUBTYPE_BY_TIPO do
-# validate_cdb_simplificado.py. Uma CONDICAO_IF ativa SEM a linha na sua
+# validate_products.py. Uma CONDICAO_IF ativa SEM a linha na sua
 # tabela-subtipo fica "dangling": o Hibernate não consegue tipar a classe e o
 # batch estoura ClassCastException (Cat 1 do validador). Como NUM_CONDICAO_IF é
 # a PK de CONDICAO_IF (globalmente única), uma chave só pode viver na

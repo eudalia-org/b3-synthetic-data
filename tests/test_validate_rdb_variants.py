@@ -7,7 +7,7 @@ pytest.importorskip("pyspark")
 from pyspark.sql import functions as F  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from scripts import validate_cdb_simplificado as validator  # noqa: E402
+from scripts import validate_products as validator  # noqa: E402
 
 
 @pytest.fixture(scope="module")

@@ -70,7 +70,7 @@ ROOT_TABLE = "INSTRUMENTO_FINANCEIRO"
 ROOT_KEY = "NUM_IF"
 CDB_TIPO_IF = 49
 
-# Baseline schema/versioning consumed by validate_cdb_simplificado.py to reject a baseline
+# Baseline schema/versioning consumed by validate_products.py to reject a baseline
 # that does not belong to the selected product/type or to an incompatible metric layout.
 BASELINE_SCHEMA_VERSION = 2
 DOMAIN_VERSION = 1

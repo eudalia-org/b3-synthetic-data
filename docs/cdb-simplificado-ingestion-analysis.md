@@ -134,10 +134,10 @@ rejects but assumptions the engine makes at load/processing time.
 - `assert_not_null_ok` (3967) — NOT-NULL gate (**incomplete**: spec-only, ignores `''`, see §2.2).
 - `_warn_filtros_fonte_sem_not_null` (2988) — warns when the product filter can cause silent ORA-01400.
 
-### 3.3 New pre-load validator — `validate_cdb_simplificado.py`
+### 3.3 New pre-load validator — `validate_products.py`
 
 Self-contained PySpark job that runs on the **synthetic Parquet output** and reads authoritative
-**PK / FK / NOT NULL** from Oracle (`ALL_*` views over JDBC). Six categories, each finding carries a fix
+**PK / FK / NOT NULL** from Oracle (`ALL_*` views over JDBC). Eight categories, each finding carries a fix
 hint:
 
 | Cat | Function | Catches |
@@ -148,10 +148,12 @@ hint:
 | 4 | `check_not_null` | NOT-NULL incl. **empty string** → **ORA-01400** |
 | 5 | `check_dates` | emissão ≤ vencimento, registro ≤ vencimento, condição início ≤ fim |
 | 6 | `check_lookup_combos` | operação × modalidade × serviço combos → **SEM MODALIDADE** |
+| 7 | `check_shapes` | per-IF cardinality invariants and trusted baseline distribution |
+| 8 | `check_log_invariants` | product-aware identifiers, uniqueness, and registration rules |
 
 Run (multi-product; `--product` is required — `cdb_simplificado`, `cdb`, or `rdb`):
 ```
-spark-submit --jars ojdbc8.jar validate_cdb_simplificado.py \
+spark-submit --jars ojdbc8.jar validate_products.py \
     --product cdb_simplificado \
     --report-path report.json --fail-severity error --validate-against union
 ```
@@ -255,7 +257,7 @@ CARTEIRA_PARTICIPANTE  : QTD_CARTEIRA_PARTICIPANTE > 0
 3. **Seed/constrain operation reference combos (fixes 2.3).** Ensure synthetic `OPERACAO`/`DADO_OPERACAO`
    reference a valid `(tipo IF, tipo_operação, modalidade_liquidação, objeto_serviço)` combination for CDB.
 
-4. **Gate every run with `validate_cdb_simplificado.py`** before the Oracle append (CI: fail on ERROR).
+4. **Gate every run with `validate_products.py`** before the Oracle append (CI: fail on ERROR).
 
 ---
 
@@ -267,4 +269,4 @@ CARTEIRA_PARTICIPANTE  : QTD_CARTEIRA_PARTICIPANTE > 0
 - `dados/.../depositaria/DetalheTransferenciaSemFinanceiroDO.java:38` — `COD_MOTIVO` (ORA-01400).
 - `engorda_tables.py`: `FILTROS_FONTE` (221), `bind_shared_key_children` (3731), `assert_not_null_ok`
   (3967), `_fk_is_whole_pk` (3023), `compute_pk_maxes`/`_set_unique_pk_column` (1238).
-- `validate_cdb_simplificado.py` — the pre-load validator described in §3.3.
+- `validate_products.py` — the pre-load validator described in §3.3.

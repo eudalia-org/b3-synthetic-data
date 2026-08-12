@@ -9,7 +9,7 @@
 -- enable spark.sql.variable.substitute, and execute this file with the OCI Hadoop
 -- connector/configuration that makes oci:// Parquet paths readable.
 --
--- IMPORTANT: THIS QUERY DOES NOT CLAIM FULL PARITY WITH validate_cdb_simplificado.py.
+-- IMPORTANT: THIS QUERY DOES NOT CLAIM FULL PARITY WITH validate_products.py.
 -- It intentionally omits all checks that require unavailable views, Oracle metadata,
 -- a production connection, a baseline, or application code:
 --   * V_FAMILIA_CONTAS area/access checks;

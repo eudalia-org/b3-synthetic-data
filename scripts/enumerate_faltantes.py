@@ -2,7 +2,7 @@
 """Enumerate the COMPLETE set of raw->target drift keys ("faltantes") for the
 CDB Simplificado clone pipeline, in one pass.
 
-Why: validate_cdb_simplificado.py only finds orphans among the keys that the
+Why: validate_products.py only finds orphans among the keys that the
 sampled batch happens to reference, and engorda_instrumentos.py redraws the
 batch on every run (orderBy(rand(seed)) over a domain that the pruning itself
 changes). The reactive prune/regenerate loop therefore never converges

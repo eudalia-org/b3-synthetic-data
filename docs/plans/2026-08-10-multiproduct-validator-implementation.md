@@ -2,7 +2,7 @@
 
 > **For agentic workers:** implement task-by-task with tests first. Do not enable a product-specific check unless its profile contains evidence-backed values; unresolved rules must emit an explicit unsupported/WARN finding, never inherit CDB defaults silently.
 
-**Goal:** Convert `scripts/validate_cdb_simplificado.py` and `scripts/profile_cdb_shapes.py` into reliable validation tooling for `cdb_simplificado`, full `cdb`, and `rdb`, while preserving the self-contained single-file OCI Data Flow deployment model.
+**Goal:** Convert `scripts/validate_products.py` and `scripts/profile_cdb_shapes.py` into reliable validation tooling for `cdb_simplificado`, full `cdb`, and `rdb`, while preserving the self-contained single-file OCI Data Flow deployment model.
 
 **VDI constraints:** The implementation environment has no Git repository or Git executable. Do not run or request `git status`, `git diff`, commits, branches, tags, pushes, or pull requests. Edit and test the copied files directly. Track touched paths manually.
 
@@ -29,14 +29,14 @@ New files:
 
 ## Non-Goals
 
-- Renaming `scripts/validate_cdb_simplificado.py`; existing Data Flow applications reference this filename.
+- Preserving the legacy validator filename or adding a compatibility wrapper; callers must migrate to the generic filename.
 - Importing `datagen/engorda_tables.py` or another project module from the validator/profiler; both jobs remain independently deployable single files.
 - Inventing RDB values for `COD_IF` format, platform code, modalidade, account, registration constants, or shape/type mixes.
 - Treating empirical shape distributions as application invariants.
 
 ## File Structure
 
-- **Modify:** `scripts/validate_cdb_simplificado.py` - product profiles, input resolution, identity preflight, IF-level domain, product-aware Categories 6-8, PK/map checks, report v2.
+- **Modify:** `scripts/validate_products.py` - product profiles, input resolution, identity preflight, IF-level domain, product-aware Categories 6-8, PK/map checks, report v2.
 - **Modify:** `scripts/profile_cdb_shapes.py` - explicit product selection, profile-aware universe, baseline schema v2, source-map provenance.
 - **Modify:** `tests/test_validate_cdb_lookup_combos.py` - CDB/RDB profile-aware lookup fixtures.
 - **Modify:** `tests/test_validate_cdb_log_invariants.py` - product-aware Cat 8 fixtures.
@@ -67,7 +67,7 @@ If the project virtualenv is elsewhere, preserve Java 11 and run the same test m
 
 **Files:**
 
-- Modify: `scripts/validate_cdb_simplificado.py`
+- Modify: `scripts/validate_products.py`
 - Create: `tests/test_validate_products.py`
 
 **Estimate:** 3-4 hours.
@@ -121,7 +121,7 @@ class ValidationProfile:
 
 **Files:**
 
-- Modify: `scripts/validate_cdb_simplificado.py`
+- Modify: `scripts/validate_products.py`
 - Test: `tests/test_validate_products.py`
 
 **Estimate:** 3-4 hours.
@@ -158,7 +158,7 @@ class ValidationProfile:
 
 **Files:**
 
-- Modify: `scripts/validate_cdb_simplificado.py`
+- Modify: `scripts/validate_products.py`
 - Test: `tests/test_validate_products.py`
 
 **Estimate:** 3-4 hours.
@@ -183,7 +183,7 @@ class ValidationProfile:
 
 **Files:**
 
-- Modify: `scripts/validate_cdb_simplificado.py`
+- Modify: `scripts/validate_products.py`
 - Modify: `tests/test_validate_cdb_lookup_combos.py`
 
 **Estimate:** 3-4 hours.
@@ -205,7 +205,7 @@ class ValidationProfile:
 **Files:**
 
 - Modify: `scripts/profile_cdb_shapes.py`
-- Modify: `scripts/validate_cdb_simplificado.py`
+- Modify: `scripts/validate_products.py`
 - Create: `tests/test_validate_product_shapes.py`
 
 **Estimate:** 4-6 hours.
@@ -249,7 +249,7 @@ class ValidationProfile:
 
 **Files:**
 
-- Modify: `scripts/validate_cdb_simplificado.py`
+- Modify: `scripts/validate_products.py`
 - Modify: `tests/test_validate_cdb_log_invariants.py`
 
 **Estimate:** 2-3 hours.
@@ -269,7 +269,7 @@ class ValidationProfile:
 
 **Files:**
 
-- Modify: `scripts/validate_cdb_simplificado.py`
+- Modify: `scripts/validate_products.py`
 - Test: `tests/test_validate_products.py`
 
 **Estimate:** 2-3 hours.
