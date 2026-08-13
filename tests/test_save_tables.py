@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 import pytest
 
 from datagen import save_tables
@@ -143,6 +145,23 @@ class TestBuildConnectionProperties:
         assert properties["password"] == "secret"
         assert properties["driver"] == "oracle.jdbc.OracleDriver"
         assert properties["oracle.jdbc.useFetchSizeWithLongColumn"] == "true"
+
+
+class TestGetNumericBounds:
+    def test_normalizes_integral_decimal_bounds(self, monkeypatch):
+        monkeypatch.setattr(
+            save_tables,
+            "read_single_value",
+            lambda *args: (
+                Decimal("5.0000000000"),
+                Decimal("159134885450.0000000000"),
+            ),
+        )
+
+        assert save_tables.get_numeric_bounds(None, {}, "CETIP.HISTORY", "ID") == (
+            "5",
+            "159134885450",
+        )
 
 
 class TestFetchRowidPredicates:

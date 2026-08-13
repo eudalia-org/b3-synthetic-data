@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -411,6 +412,16 @@ def fetch_rowid_predicates(
     return build_rowid_predicates(chunks)
 
 
+def normalize_numeric_bound(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else value
+    return value
+
+
 def get_numeric_bounds(
     spark: SparkSession,
     properties: dict[str, str],
@@ -428,7 +439,7 @@ def get_numeric_bounds(
         return None
     if row[0] == row[1]:
         return None
-    return str(row[0]), str(row[1])
+    return str(normalize_numeric_bound(row[0])), str(normalize_numeric_bound(row[1]))
 
 
 def load_source_dataframe(
