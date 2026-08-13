@@ -255,6 +255,11 @@ CAP_COD_OPERACAO_FORMAT = "cod_operacao_format"
 CAP_MEU_NUMERO = "meu_numero"
 CAP_SHAPE = "shape"
 CAP_REGISTRATION_PROFILE = "registration_profile"
+CAP_CREDITO_SCR_GRAPH = "credito_scr_graph"
+CAP_CREDITO_SCR_LOOKUPS = "credito_scr_lookups"
+CAP_IPOC_UNIQUENESS = "ipoc_uniqueness"
+CAP_DICRE_GRAPH = "dicre_graph"
+CAP_DICRE_TARGET_ELIGIBILITY = "dicre_target_eligibility"
 
 ALL_CAPABILITIES: Tuple[str, ...] = (
     CAP_IDENTITY, CAP_DOMAIN, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
@@ -287,6 +292,7 @@ class ValidationProfile:
     required_capabilities: Tuple[str, ...]
     supported_capabilities: Tuple[str, ...]
     evidence_version: int
+    pipeline: str = "instrumento_financeiro"
 
     def unsupported_required(self) -> Tuple[str, ...]:
         supported = set(self.supported_capabilities)
@@ -321,6 +327,16 @@ _RDB_SUPPORTED = (
     CAP_IDENTITY, CAP_DOMAIN, CAP_REFERENTIAL, CAP_NOT_NULL, CAP_CAPACITY,
     CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_COD_OPERACAO_FORMAT,
     CAP_MEU_NUMERO,
+)
+_CREDITO_SCR_REQUIRED = (
+    CAP_IDENTITY, CAP_REFERENTIAL, CAP_NOT_NULL, CAP_CAPACITY, CAP_DATES,
+    CAP_PRIMARY_KEYS, CAP_CREDITO_SCR_GRAPH, CAP_CREDITO_SCR_LOOKUPS,
+    CAP_IPOC_UNIQUENESS, CAP_REGISTRATION_PROFILE,
+)
+_DICRE_REQUIRED = (
+    CAP_IDENTITY, CAP_REFERENTIAL, CAP_NOT_NULL, CAP_CAPACITY, CAP_DATES,
+    CAP_PRIMARY_KEYS, CAP_DICRE_GRAPH, CAP_DICRE_TARGET_ELIGIBILITY,
+    CAP_IPOC_UNIQUENESS, CAP_REGISTRATION_PROFILE,
 )
 
 VALIDATION_PROFILES: Dict[str, ValidationProfile] = {
@@ -381,6 +397,46 @@ VALIDATION_PROFILES: Dict[str, ValidationProfile] = {
         required_capabilities=_RDB_REQUIRED,
         supported_capabilities=_RDB_SUPPORTED,
         evidence_version=1,
+    ),
+    "credito_scr": ValidationProfile(
+        name="credito_scr",
+        # 143 is observed in one Lastro-LCI batch, not used as product identity.
+        num_tipo_if=143,
+        default_clone_prefix="sintetizacao_multiproduto/credito_scr",
+        simplified_domain=False,
+        object_service_id=-1,
+        object_service_code=None,
+        cod_if_pattern=None,
+        sic_enabled=False,
+        platform_check_enabled=False,
+        account_check_enabled=False,
+        sem_modalidade_ids=None,
+        hard_shape_rules=(),
+        registration_constants=None,
+        required_capabilities=_CREDITO_SCR_REQUIRED,
+        supported_capabilities=_CREDITO_SCR_REQUIRED,
+        evidence_version=1,
+        pipeline="credito_scr",
+    ),
+    "dicre": ValidationProfile(
+        name="dicre",
+        # DICRE identity is CREDITO_DC, not any one subtype NUM_TIPO_IF.
+        num_tipo_if=-1,
+        default_clone_prefix="sintetizacao_multiproduto/dicre",
+        simplified_domain=False,
+        object_service_id=-1,
+        object_service_code=None,
+        cod_if_pattern=None,
+        sic_enabled=False,
+        platform_check_enabled=False,
+        account_check_enabled=False,
+        sem_modalidade_ids=None,
+        hard_shape_rules=(),
+        registration_constants=None,
+        required_capabilities=_DICRE_REQUIRED,
+        supported_capabilities=_DICRE_REQUIRED,
+        evidence_version=1,
+        pipeline="dicre",
     ),
 }
 
@@ -2484,6 +2540,1962 @@ def check_rdb_resgate_schedule_rules(
         "Review non-increasing percentages; all captured schedules increase by date.",
         "RDB schedule percentages that do not increase with redemption date.",
     )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Category 2d/6d/8d - Credito SCR graph and insertion-route evidence
+# ---------------------------------------------------------------------------
+CREDITO_SCR_TABLE = "CREDITO_SCR"
+HISTORICO_CREDITO_SCR_TABLE = "HISTORICO_CREDITO_SCR"
+LOTE_TABLE = "LOTE"
+
+
+def _credito_scr_unavailable(check_id: str, missing: List[str], severity: str) -> Finding:
+    return Finding(
+        check_id, "Credito SCR", severity, ",".join(sorted({m.split('.')[0] for m in missing})),
+        False, hint="Export the complete Credito SCR graph and rerun with target metadata.",
+        message=f"Check unavailable; missing required input: {', '.join(missing)}.",
+    )
+
+
+def _credito_scr_columns(
+    tables: Dict[str, DataFrame], requirements: Dict[str, Tuple[str, ...]]
+) -> Tuple[Dict[str, Dict[str, str]], List[str]]:
+    resolved: Dict[str, Dict[str, str]] = {}
+    missing: List[str] = []
+    for table, names in requirements.items():
+        df = tables.get(table)
+        if df is None:
+            missing.append(table)
+            continue
+        resolved[table] = {name: resolve(df, name) for name in names}
+        missing.extend(
+            f"{table}.{name}" for name, actual in resolved[table].items() if not actual
+        )
+    return resolved, missing
+
+
+def _normalized_history_action(column):
+    ascii_text = F.translate(
+        F.upper(F.trim(column.cast("string"))),
+        "ÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇ",
+        "AAAAAEEEEIIIIOOOOOUUUUC",
+    )
+    return F.regexp_replace(ascii_text, "[^A-Z0-9]", "")
+
+
+def _credito_scr_text(column):
+    return F.trim(column.cast("string"))
+
+
+def _credito_scr_active(df: DataFrame) -> DataFrame:
+    excluded = resolve(df, "DAT_EXCLUSAO")
+    if not excluded:
+        return df
+    value = F.col(excluded)
+    return df.where(value.isNull() | (F.trim(value.cast("string")) == ""))
+
+
+def check_credito_scr_identity(
+    tables: Dict[str, DataFrame], profile: ValidationProfile, sample: int
+) -> List[Finding]:
+    if profile.pipeline != "credito_scr":
+        return []
+    credit = tables.get(CREDITO_SCR_TABLE)
+    if credit is None:
+        return [_credito_scr_unavailable("0.identity.root", [CREDITO_SCR_TABLE], SEV_ERROR)]
+    key = resolve(credit, "NUM_ID_CREDITO_SCR")
+    if not key:
+        return [_credito_scr_unavailable(
+            "0.identity.root", [f"{CREDITO_SCR_TABLE}.NUM_ID_CREDITO_SCR"], SEV_ERROR
+        )]
+    active = _credito_scr_active(credit)
+    count = active.count()
+    return [Finding(
+        "0.identity.root", "Product identity", SEV_INFO if count else SEV_ERROR,
+        CREDITO_SCR_TABLE, count > 0, count=count, column="NUM_ID_CREDITO_SCR",
+        sample=_sample_keys(active, [key], sample) if count else [],
+        hint="Export at least one active CREDITO_SCR row." if not count else "",
+        message="Active CREDITO_SCR rows define the credito_scr product universe.",
+    )]
+
+
+def check_credito_scr_metadata(
+    meta: Metadata, no_oracle: bool, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "credito_scr":
+        return []
+    if no_oracle:
+        return [Finding(
+            "0.credito_scr_metadata", "Coverage", SEV_INFO, "Oracle metadata", True,
+            message="Authoritative Credito SCR metadata deferred under --no-oracle; "
+                    "the run is already marked PARTIAL.",
+        )]
+    required = (LOTE_TABLE, CREDITO_SCR_TABLE, HISTORICO_CREDITO_SCR_TABLE)
+    missing = [table for table in required if table not in meta.tables]
+    missing_pk = [table for table in required if table in meta.tables and not meta.pk.get(table)]
+    failed = bool(missing or missing_pk)
+    return [Finding(
+        "0.credito_scr_metadata", "Coverage", SEV_ERROR if failed else SEV_INFO,
+        ",".join(required), not failed, count=len(missing) + len(missing_pk),
+        hint="Extract metadata from the receiving Oracle schema; do not infer constraints "
+             "from the insertion log." if failed else "",
+        message=f"Missing Oracle table metadata={missing}; missing PK metadata={missing_pk}."
+                if failed else "Authoritative Oracle table and PK metadata are available.",
+    )]
+
+
+def check_credito_scr_graph(
+    tables: Dict[str, DataFrame], sample: int, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "credito_scr":
+        return []
+    requirements = {
+        LOTE_TABLE: (
+            "NUM_ID_LOTE", "NOME_LOTE", "NUM_CONTA_PARTICIPANTE", "NUM_ID_TIPO_LOTE",
+            "DAT_EXCLUSAO",
+        ),
+        CREDITO_SCR_TABLE: (
+            "NUM_ID_CREDITO_SCR", "COD_CREDITO_SCR", "NUM_ID_LOTE", "DAT_EXCLUSAO",
+        ),
+        HISTORICO_CREDITO_SCR_TABLE: (
+            "NUM_ID_HISTORICO_CREDITO_SCR", "NUM_ID_CREDITO_SCR", "COD_CREDITO_SCR",
+            "NUM_ID_LOTE", "NUM_CONTA_PARTICIPANTE", "TXT_DESCRICAO",
+        ),
+    }
+    columns, missing = _credito_scr_columns(tables, requirements)
+    if missing:
+        return [_credito_scr_unavailable("2d.graph.availability", missing, SEV_ERROR)]
+
+    lot_cols = columns[LOTE_TABLE]
+    credit_cols = columns[CREDITO_SCR_TABLE]
+    history_cols = columns[HISTORICO_CREDITO_SCR_TABLE]
+    lots = _credito_scr_active(tables[LOTE_TABLE]).select(
+        _canon_key_col(F.col(lot_cols["NUM_ID_LOTE"])).alias("lot_id"),
+        _credito_scr_text(F.col(lot_cols["NOME_LOTE"])).alias("lot_name"),
+        _canon_key_col(F.col(lot_cols["NUM_CONTA_PARTICIPANTE"])).alias("lot_account"),
+        _canon_key_col(F.col(lot_cols["NUM_ID_TIPO_LOTE"])).alias("lot_type"),
+    )
+    credits = _credito_scr_active(tables[CREDITO_SCR_TABLE]).select(
+        _canon_key_col(F.col(credit_cols["NUM_ID_CREDITO_SCR"])).alias("credit_id"),
+        _credito_scr_text(F.col(credit_cols["COD_CREDITO_SCR"])).alias("credit_code"),
+        _canon_key_col(F.col(credit_cols["NUM_ID_LOTE"])).alias("credit_lot_id"),
+    )
+    histories = tables[HISTORICO_CREDITO_SCR_TABLE].select(
+        _canon_key_col(F.col(history_cols["NUM_ID_HISTORICO_CREDITO_SCR"])).alias("history_id"),
+        _canon_key_col(F.col(history_cols["NUM_ID_CREDITO_SCR"])).alias("history_credit_id"),
+        _credito_scr_text(F.col(history_cols["COD_CREDITO_SCR"])).alias("history_credit_code"),
+        _canon_key_col(F.col(history_cols["NUM_ID_LOTE"])).alias("history_lot_id"),
+        _canon_key_col(F.col(history_cols["NUM_CONTA_PARTICIPANTE"])).alias("history_account"),
+        _normalized_history_action(F.col(history_cols["TXT_DESCRICAO"])).alias("action"),
+    )
+    inclusions = histories.where(F.col("action") == "INCLUSAO")
+    out: List[Finding] = []
+
+    duplicate_lots = lots.groupBy("lot_name", "lot_account", "lot_type").count().where(
+        F.col("count") > 1
+    )
+    count = duplicate_lots.count()
+    out.append(Finding(
+        "2d.active_lot_natural_key", "Credito SCR graph",
+        SEV_ERROR if count else SEV_INFO, LOTE_TABLE, count == 0, count=count,
+        column="NOME_LOTE,NUM_CONTA_PARTICIPANTE,NUM_ID_TIPO_LOTE",
+        sample=_sample_keys(duplicate_lots, ["lot_name", "lot_account", "lot_type"], sample),
+        hint="Keep at most one active lot for the serialized application natural key."
+             if count else "",
+        message="Duplicate active lot natural keys.",
+    ))
+
+    lot_counts = lots.groupBy("lot_id").count().withColumnRenamed("count", "lot_count")
+    bad_lot_links = credits.join(
+        lot_counts, credits.credit_lot_id == lot_counts.lot_id, "left"
+    ).where(F.coalesce(F.col("lot_count"), F.lit(0)) != 1)
+    count = bad_lot_links.count()
+    out.append(Finding(
+        "2d.credit_active_lot", "Credito SCR graph", SEV_ERROR if count else SEV_INFO,
+        CREDITO_SCR_TABLE, count == 0, count=count, column="NUM_ID_LOTE",
+        sample=_sample_keys(bad_lot_links, ["credit_id", "credit_lot_id"], sample),
+        hint="Point every active credit to exactly one active lot." if count else "",
+        message="Active credits without exactly one active lot.",
+    ))
+
+    coded = credits.withColumn(
+        "code_count", F.count(F.lit(1)).over(Window.partitionBy("credit_code"))
+    )
+    bad_codes = coded.where(
+        F.col("credit_code").isNull() | (F.col("credit_code") == "")
+        | (F.col("code_count") > 1)
+    )
+    count = bad_codes.count()
+    out.append(Finding(
+        "2d.credit_code_unique", "Credito SCR graph", SEV_ERROR if count else SEV_INFO,
+        CREDITO_SCR_TABLE, count == 0, count=count, column="COD_CREDITO_SCR",
+        sample=_sample_keys(bad_codes, ["credit_id", "credit_code"], sample),
+        hint="Generate a nonblank unique active COD_CREDITO_SCR; do not infer its regex."
+             if count else "",
+        message="Active credits with blank or duplicate business codes.",
+    ))
+
+    inclusion_counts = inclusions.groupBy("history_credit_id").count().withColumnRenamed(
+        "count", "inclusion_count"
+    )
+    bad_history_counts = credits.join(
+        inclusion_counts, credits.credit_id == inclusion_counts.history_credit_id, "left"
+    ).where(F.coalesce(F.col("inclusion_count"), F.lit(0)) != 1)
+    count = bad_history_counts.count()
+    out.append(Finding(
+        "2d.inclusion_history", "Credito SCR graph", SEV_ERROR if count else SEV_INFO,
+        HISTORICO_CREDITO_SCR_TABLE, count == 0, count=count, column="TXT_DESCRICAO",
+        sample=_sample_keys(bad_history_counts, ["credit_id", "inclusion_count"], sample),
+        hint="Preserve exactly one history action normalized to INCLUSAO per active credit."
+             if count else "",
+        message="Active credits without exactly one inclusion history row.",
+    ))
+
+    inclusion_identity = inclusions.join(
+        credits, inclusions.history_credit_id == credits.credit_id, "inner"
+    ).join(lots, F.col("credit_lot_id") == lots.lot_id, "left")
+    bad_identity = inclusion_identity.where(
+        ~F.col("history_credit_code").eqNullSafe(F.col("credit_code"))
+        | ~F.col("history_lot_id").eqNullSafe(F.col("credit_lot_id"))
+        | ~F.col("history_account").eqNullSafe(F.col("lot_account"))
+    )
+    count = bad_identity.count()
+    out.append(Finding(
+        "2d.inclusion_identity", "Credito SCR graph", SEV_ERROR if count else SEV_INFO,
+        HISTORICO_CREDITO_SCR_TABLE, count == 0, count=count,
+        column="NUM_ID_CREDITO_SCR,COD_CREDITO_SCR,NUM_ID_LOTE,NUM_CONTA_PARTICIPANTE",
+        sample=_sample_keys(bad_identity, ["history_id", "credit_id"], sample),
+        hint="Keep inclusion identity/ownership equal to the active credit and its lot."
+             if count else "",
+        message="Inclusion histories with mismatching identity or ownership.",
+    ))
+    return out
+
+
+def check_credito_scr_target_frames(
+    tables: Dict[str, DataFrame], modalidade: Optional[DataFrame],
+    eligible_bases: Optional[DataFrame], feature_toggle: Optional[DataFrame], sample: int,
+    profile: ValidationProfile, lookup_errors: Optional[Dict[str, str]] = None,
+    account_profile: Optional[DataFrame] = None, registration_profile: bool = False,
+    existing_ipocs: Optional[DataFrame] = None,
+) -> List[Finding]:
+    if profile.pipeline != "credito_scr":
+        return []
+    lookup_errors = lookup_errors or {}
+    requirements = {
+        LOTE_TABLE: ("NUM_ID_LOTE", "NUM_CONTA_PARTICIPANTE", "DAT_EXCLUSAO"),
+        CREDITO_SCR_TABLE: (
+            "NUM_ID_CREDITO_SCR", "NUM_ID_LOTE", "NUM_ID_MODALIDADE_CREDITO",
+            "NUM_ID_BASE_CREDITO", "COD_IPOC", "DAT_SALDO_REMANESCENTE", "DAT_EXCLUSAO",
+        ),
+    }
+    columns, missing = _credito_scr_columns(tables, requirements)
+    if missing:
+        return [_credito_scr_unavailable("6d.lookup.availability", missing, SEV_WARN)]
+    lot_cols, credit_cols = columns[LOTE_TABLE], columns[CREDITO_SCR_TABLE]
+    lots = _credito_scr_active(tables[LOTE_TABLE]).select(
+        _canon_key_col(F.col(lot_cols["NUM_ID_LOTE"])).alias("lot_id"),
+        _canon_key_col(F.col(lot_cols["NUM_CONTA_PARTICIPANTE"])).alias("lot_account"),
+    )
+    credits = _credito_scr_active(tables[CREDITO_SCR_TABLE]).select(
+        _canon_key_col(F.col(credit_cols["NUM_ID_CREDITO_SCR"])).alias("credit_id"),
+        _canon_key_col(F.col(credit_cols["NUM_ID_LOTE"])).alias("credit_lot_id"),
+        _canon_key_col(F.col(credit_cols["NUM_ID_MODALIDADE_CREDITO"])).alias("modalidade_id"),
+        _canon_key_col(F.col(credit_cols["NUM_ID_BASE_CREDITO"])).alias("base_id"),
+        _credito_scr_text(F.col(credit_cols["COD_IPOC"])).alias("ipoc"),
+        F.to_date(F.col(credit_cols["DAT_SALDO_REMANESCENTE"])).alias("reference_date"),
+    )
+    out: List[Finding] = []
+
+    if modalidade is None:
+        out.append(_credito_scr_unavailable(
+            "6d.lookup.modalidade", [lookup_errors.get("MODALIDADE_CREDITO", "MODALIDADE_CREDITO")],
+            SEV_WARN,
+        ))
+    else:
+        mid = resolve(modalidade, "NUM_ID_MODALIDADE_CREDITO")
+        mcode = resolve(modalidade, "COD_MODALIDADE_CREDITO")
+        if not mid or not mcode:
+            out.append(_credito_scr_unavailable(
+                "6d.lookup.modalidade", ["MODALIDADE_CREDITO required columns"], SEV_WARN
+            ))
+        else:
+            modes = modalidade.select(
+                _canon_key_col(F.col(mid)).alias("lookup_modalidade_id"),
+                _credito_scr_text(F.col(mcode)).alias("modalidade_code"),
+            ).dropDuplicates(["lookup_modalidade_id"])
+            bad = credits.join(
+                modes, credits.modalidade_id == modes.lookup_modalidade_id, "left"
+            ).where(F.col("lookup_modalidade_id").isNull() | (F.col("modalidade_code") == "9999"))
+            count = bad.count()
+            out.append(Finding(
+                "6d.lookup.modalidade", "Credito SCR target lookups",
+                SEV_ERROR if count else SEV_INFO, CREDITO_SCR_TABLE, count == 0, count=count,
+                column="NUM_ID_MODALIDADE_CREDITO", sample=_sample_keys(
+                    bad, ["credit_id", "modalidade_id", "modalidade_code"], sample
+                ),
+                hint="Use a target modalidade that resolves and whose code is not 9999."
+                     if count else "",
+                message="Credits with missing or application-excluded modalidade.",
+            ))
+
+    if eligible_bases is None:
+        out.append(_credito_scr_unavailable(
+            "6d.lookup.base_eligibility",
+            [lookup_errors.get("PARAMETRO_BASE_CREDITO", "PARAMETRO_BASE_CREDITO")], SEV_WARN,
+        ))
+    else:
+        account = resolve(eligible_bases, "NUM_CONTA_PARTICIPANTE")
+        base = resolve(eligible_bases, "NUM_ID_BASE_CREDITO")
+        if not account or not base:
+            out.append(_credito_scr_unavailable(
+                "6d.lookup.base_eligibility", ["eligible base required columns"], SEV_WARN
+            ))
+        else:
+            eligible = eligible_bases.select(
+                _canon_key_col(F.col(account)).alias("eligible_account"),
+                _canon_key_col(F.col(base)).alias("eligible_base"),
+            ).dropDuplicates()
+            credit_bases = credits.join(
+                lots, credits.credit_lot_id == lots.lot_id, "left"
+            ).join(
+                F.broadcast(eligible),
+                (F.col("lot_account") == F.col("eligible_account"))
+                & (F.col("base_id") == F.col("eligible_base")),
+                "left",
+            )
+            bad = credit_bases.where(F.col("eligible_base").isNull())
+            count = bad.count()
+            out.append(Finding(
+                "6d.lookup.base_eligibility", "Credito SCR target lookups",
+                SEV_ERROR if count else SEV_INFO, CREDITO_SCR_TABLE, count == 0, count=count,
+                column="NUM_ID_BASE_CREDITO,NUM_CONTA_PARTICIPANTE",
+                sample=_sample_keys(bad, ["credit_id", "lot_account", "base_id"], sample),
+                hint="Use a type-1 credit base authorized for the lot participant."
+                     if count else "",
+                message="Credits whose base is not eligible for the lot participant.",
+            ))
+
+    if feature_toggle is None:
+        out.append(_credito_scr_unavailable(
+            "6d.lookup.ipoc_unique",
+            [lookup_errors.get("TCTPFEATURE_TOGGLE", "TCTPFEATURE_TOGGLE")], SEV_WARN,
+        ))
+    else:
+        start = resolve(feature_toggle, "DATA_INIC_VIG_FTRE")
+        end = resolve(feature_toggle, "DATA_FIM_VIG_FTRE")
+        enabled = resolve(feature_toggle, "IND_FTRE_HAB")
+        if not start or not end or not enabled:
+            out.append(_credito_scr_unavailable(
+                "6d.lookup.ipoc_unique", ["feature toggle required columns"], SEV_WARN
+            ))
+        else:
+            periods = feature_toggle.where(_norm_code(F.col(enabled)) == "S").select(
+                F.to_date(F.col(start)).alias("toggle_start"),
+                F.to_date(F.col(end)).alias("toggle_end"),
+            )
+            enabled_credits = credits.join(
+                F.broadcast(periods),
+                (F.col("reference_date") >= F.col("toggle_start"))
+                & (F.col("reference_date") <= F.col("toggle_end")),
+                "left_semi",
+            )
+            enabled_count = enabled_credits.limit(1).count()
+            if not enabled_count:
+                out.append(Finding(
+                    "6d.lookup.ipoc_unique", "Credito SCR target lookups", SEV_INFO,
+                    CREDITO_SCR_TABLE, True, column="COD_IPOC",
+                    message="IPOC uniqueness toggle is disabled for all synthetic "
+                            "credit reference dates.",
+                ))
+            elif existing_ipocs is None:
+                out.append(_credito_scr_unavailable(
+                    "6d.lookup.ipoc_unique",
+                    [lookup_errors.get("CREDITO_SCR_TARGET", "target CREDITO_SCR IPOCs")],
+                    SEV_WARN,
+                ))
+            else:
+                target_ipoc_column = resolve(existing_ipocs, "COD_IPOC")
+                if not target_ipoc_column:
+                    out.append(_credito_scr_unavailable(
+                        "6d.lookup.ipoc_unique", ["target CREDITO_SCR.COD_IPOC"], SEV_WARN
+                    ))
+                else:
+                    duplicate_ipocs = credits.where(
+                        F.col("ipoc").isNotNull() & (F.col("ipoc") != "")
+                    ).groupBy("ipoc").count().where(F.col("count") > 1).select("ipoc")
+                    target_ipocs = existing_ipocs.select(
+                        _credito_scr_text(F.col(target_ipoc_column)).alias("ipoc")
+                    ).where(
+                        F.col("ipoc").isNotNull() & (F.col("ipoc") != "")
+                    ).dropDuplicates()
+                    conflicting_ipocs = duplicate_ipocs.unionByName(
+                        target_ipocs
+                    ).dropDuplicates()
+                    bad = enabled_credits.join(conflicting_ipocs, "ipoc", "inner")
+                    count = bad.count()
+                    out.append(Finding(
+                        "6d.lookup.ipoc_unique", "Credito SCR target lookups",
+                        SEV_ERROR if count else SEV_INFO, CREDITO_SCR_TABLE,
+                        count == 0, count=count, column="COD_IPOC",
+                        sample=_sample_keys(bad, ["credit_id", "ipoc"], sample),
+                        hint="Regenerate IPOCs duplicated in the output or active target when "
+                             "HAB_VALIDACAO_UNIC_IPOC_SCR is active." if count else "",
+                        message="Toggle-enabled synthetic credits with duplicate IPOCs.",
+                    ))
+
+    if registration_profile:
+        if account_profile is None:
+            out.append(_credito_scr_unavailable(
+                "8d.profile.account_eligibility",
+                [lookup_errors.get("CONTA_PARTICIPANTE", "CONTA_PARTICIPANTE")], SEV_WARN,
+            ))
+        else:
+            account_columns = {
+                name: resolve(account_profile, name)
+                for name in (
+                    "NUM_CONTA_PARTICIPANTE", "NUM_ID_SITUACAO_CONTA",
+                    "COD_CONTA_PARTICIPANTE", "NUM_ID_AREA_ATUACAO", "COD_TIPO_ACESSO",
+                )
+            }
+            missing_account = [
+                name for name, actual in account_columns.items() if not actual
+            ]
+            if missing_account:
+                out.append(_credito_scr_unavailable(
+                    "8d.profile.account_eligibility",
+                    [f"CONTA_PARTICIPANTE.{name}" for name in missing_account], SEV_WARN,
+                ))
+            else:
+                eligible_accounts = account_profile.where(
+                    _norm_code(F.col(account_columns["NUM_ID_SITUACAO_CONTA"])).isin("1", "2")
+                    & F.col(account_columns["COD_CONTA_PARTICIPANTE"])
+                    .cast("string").rlike(r"^[0-9]{5}\.40-[0-9]$")
+                    & (_norm_code(F.col(account_columns["NUM_ID_AREA_ATUACAO"])) == "1")
+                    & (_norm_code(F.col(account_columns["COD_TIPO_ACESSO"])) == "L")
+                ).select(
+                    _canon_key_col(F.col(account_columns["NUM_CONTA_PARTICIPANTE"]))
+                    .alias("eligible_account")
+                ).dropDuplicates()
+                bad = lots.join(
+                    F.broadcast(eligible_accounts),
+                    lots.lot_account == eligible_accounts.eligible_account,
+                    "left_anti",
+                )
+                count = bad.count()
+                out.append(Finding(
+                    "8d.profile.account_eligibility",
+                    "Credito SCR observed insertion profile", SEV_WARN if count else SEV_INFO,
+                    LOTE_TABLE, count == 0, count=count, column="NUM_CONTA_PARTICIPANTE",
+                    sample=_sample_keys(bad, ["lot_id", "lot_account"], sample),
+                    hint="Capture other Credito SCR routes before promoting these account "
+                         "predicates to hard validation." if count else "",
+                    message="Active lot accounts outside the observed Lastro-LCI role profile.",
+                ))
+    return out
+
+
+def load_credito_scr_target_frames(
+    spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame],
+    registration_profile: bool = False,
+) -> Tuple[Dict[str, DataFrame], Dict[str, str]]:
+    queries = {
+        "MODALIDADE_CREDITO": (
+            "SELECT NUM_ID_MODALIDADE_CREDITO, COD_MODALIDADE_CREDITO "
+            f"FROM {cfg.schema}.MODALIDADE_CREDITO"
+        ),
+        "TCTPFEATURE_TOGGLE": (
+            "SELECT IND_FTRE_HAB, DATA_INIC_VIG_FTRE, DATA_FIM_VIG_FTRE "
+            f"FROM {cfg.schema}.TCTPFEATURE_TOGGLE "
+            "WHERE COD_FTRE_TOG='HAB_VALIDACAO_UNIC_IPOC_SCR'"
+        ),
+    }
+    frames: Dict[str, DataFrame] = {}
+    errors: Dict[str, str] = {}
+    for name, query in queries.items():
+        try:
+            remote = _jdbc(spark, cfg, query)
+            rows = remote.collect()
+            frames[name] = spark.createDataFrame(rows, remote.schema)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Credito SCR target lookup failed for %s: %s", name, exc)
+            errors[name] = str(exc)
+
+    lot = tables.get(LOTE_TABLE)
+    credit = tables.get(CREDITO_SCR_TABLE)
+    lot_id = resolve(lot, "NUM_ID_LOTE") if lot is not None else None
+    lot_account = resolve(lot, "NUM_CONTA_PARTICIPANTE") if lot is not None else None
+    credit_lot = resolve(credit, "NUM_ID_LOTE") if credit is not None else None
+    credit_base = resolve(credit, "NUM_ID_BASE_CREDITO") if credit is not None else None
+    if not all((lot_id, lot_account, credit_lot, credit_base)):
+        errors["PARAMETRO_BASE_CREDITO"] = "credit/lot base-key columns unavailable"
+    else:
+        pairs = _credito_scr_active(credit).select(
+            _canon_key_col(F.col(credit_lot)).alias("lot_id"),
+            _canon_key_col(F.col(credit_base)).alias("base_id"),
+        ).join(
+            _credito_scr_active(lot).select(
+                _canon_key_col(F.col(lot_id)).alias("lot_id"),
+                _canon_key_col(F.col(lot_account)).alias("account_id"),
+            ),
+            "lot_id", "inner",
+        ).select("account_id", "base_id").where(
+            F.col("account_id").isNotNull() & F.col("base_id").isNotNull()
+        ).dropDuplicates().limit(100_001).collect()
+        if len(pairs) > 100_000:
+            errors["PARAMETRO_BASE_CREDITO"] = "more than 100000 synthetic account/base pairs"
+        else:
+            base_rows = []
+            base_schema = None
+            try:
+                for offset in range(0, len(pairs), 500):
+                    predicates = " OR ".join(
+                        "(pb.NUM_CONTA_PARTICIPANTE=" + _sql_literal(row["account_id"])
+                        + " AND pb.NUM_ID_BASE_CREDITO=" + _sql_literal(row["base_id"]) + ")"
+                        for row in pairs[offset:offset + 500]
+                    )
+                    query = (
+                        "SELECT DISTINCT pb.NUM_CONTA_PARTICIPANTE, pb.NUM_ID_BASE_CREDITO "
+                        f"FROM {cfg.schema}.PARAMETRO_BASE_CREDITO pb "
+                        f"JOIN {cfg.schema}.BASE_CREDITO b "
+                        "ON b.NUM_ID_BASE_CREDITO=pb.NUM_ID_BASE_CREDITO "
+                        f"JOIN {cfg.schema}.TIPO_BASE_CREDITO tb "
+                        "ON tb.NUM_ID_TIPO_BASE_CREDITO=b.NUM_ID_TIPO_BASE_CREDITO "
+                        "WHERE TRIM(tb.COD_TIPO_BASE_CREDITO)='1' AND (" + predicates + ")"
+                    )
+                    remote = _jdbc(spark, cfg, query)
+                    rows = remote.collect()
+                    base_schema = base_schema or remote.schema
+                    base_rows.extend(rows)
+                frames["PARAMETRO_BASE_CREDITO"] = (
+                    spark.createDataFrame(base_rows, base_schema)
+                    if base_schema is not None else spark.createDataFrame(
+                        [], "NUM_CONTA_PARTICIPANTE string, NUM_ID_BASE_CREDITO string"
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Credito SCR base eligibility lookup failed: %s", exc)
+                errors["PARAMETRO_BASE_CREDITO"] = str(exc)
+
+    ipoc_column = resolve(credit, "COD_IPOC") if credit is not None else None
+    if not ipoc_column:
+        errors["CREDITO_SCR_TARGET"] = "CREDITO_SCR.COD_IPOC unavailable"
+    else:
+        ipocs = [
+            row["ipoc"] for row in _credito_scr_active(credit).select(
+                _credito_scr_text(F.col(ipoc_column)).alias("ipoc")
+            ).where(F.col("ipoc").isNotNull() & (F.col("ipoc") != ""))
+            .dropDuplicates().limit(100_001).collect()
+        ]
+        if len(ipocs) > 100_000:
+            errors["CREDITO_SCR_TARGET"] = "more than 100000 distinct synthetic IPOCs"
+        else:
+            target_rows = []
+            target_schema = None
+            try:
+                for offset in range(0, len(ipocs), 1000):
+                    literals = ", ".join(
+                        _sql_literal(value) for value in ipocs[offset:offset + 1000]
+                    )
+                    query = (
+                        "SELECT COD_IPOC "
+                        f"FROM {cfg.schema}.CREDITO_SCR WHERE DAT_EXCLUSAO IS NULL "
+                        f"AND TRIM(COD_IPOC) IN ({literals})"
+                    )
+                    remote = _jdbc(spark, cfg, query)
+                    rows = remote.collect()
+                    target_schema = target_schema or remote.schema
+                    target_rows.extend(rows)
+                frames["CREDITO_SCR_TARGET"] = (
+                    spark.createDataFrame(target_rows, target_schema)
+                    if target_schema is not None else spark.createDataFrame([], "COD_IPOC string")
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Credito SCR target IPOC lookup failed: %s", exc)
+                errors["CREDITO_SCR_TARGET"] = str(exc)
+    if registration_profile:
+        account_column = resolve(lot, "NUM_CONTA_PARTICIPANTE") if lot is not None else None
+        if not account_column:
+            errors["CONTA_PARTICIPANTE"] = "LOTE.NUM_CONTA_PARTICIPANTE unavailable"
+        else:
+            account_keys = [
+                _canon_key(row["account"])
+                for row in _credito_scr_active(lot).select(
+                    _canon_key_col(F.col(account_column)).alias("account")
+                ).where(F.col("account").isNotNull()).dropDuplicates().limit(1_000_001).collect()
+            ]
+            if len(account_keys) > 1_000_000:
+                errors["CONTA_PARTICIPANTE"] = "more than 1000000 distinct lot accounts"
+            elif not account_keys:
+                errors["CONTA_PARTICIPANTE"] = "no active lot accounts"
+            else:
+                account_rows = []
+                account_schema = None
+                try:
+                    for offset in range(0, len(account_keys), 1000):
+                        literals = ", ".join(
+                            _sql_literal(value) for value in account_keys[offset:offset + 1000]
+                        )
+                        query = (
+                            "SELECT cp.NUM_CONTA_PARTICIPANTE, cp.NUM_ID_SITUACAO_CONTA, "
+                            "cp.COD_CONTA_PARTICIPANTE, vf.NUM_ID_AREA_ATUACAO, "
+                            "vf.COD_TIPO_ACESSO "
+                            f"FROM {cfg.schema}.CONTA_PARTICIPANTE cp "
+                            f"LEFT JOIN {cfg.schema}.V_FAMILIA_CONTAS vf "
+                            "ON cp.COD_CONTA_PARTICIPANTE=vf.COD_CONTA_MEMBRO "
+                            f"WHERE cp.NUM_CONTA_PARTICIPANTE IN ({literals})"
+                        )
+                        remote = _jdbc(spark, cfg, query)
+                        rows = remote.collect()
+                        account_schema = account_schema or remote.schema
+                        account_rows.extend(rows)
+                    frames["CONTA_PARTICIPANTE"] = spark.createDataFrame(
+                        account_rows, account_schema
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Credito SCR account lookup failed: %s", exc)
+                    errors["CONTA_PARTICIPANTE"] = str(exc)
+    return frames, errors
+
+
+def check_credito_scr_registration_profile(
+    tables: Dict[str, DataFrame], sample: int, registration_profile: bool,
+    profile: ValidationProfile,
+) -> List[Finding]:
+    if profile.pipeline != "credito_scr" or not registration_profile:
+        return []
+    requirements = {
+        LOTE_TABLE: ("NUM_ID_LOTE", "IND_REVOLVENCIA", "DAT_EXCLUSAO"),
+        CREDITO_SCR_TABLE: (
+            "NUM_ID_CREDITO_SCR", "NUM_TIPO_IF", "COD_TIPO_PESSOA", "IND_MULTIPLO_IPOC",
+            "NUM_ID_BASE_CREDITO", "NUM_ID_TIPO_CREDITO", "NUM_ID_MODALIDADE_CREDITO",
+            "NUM_ID_INDEXADOR_CREDITO", "VAL_SALDO_REMANESCENTE", "VAL_CONTRATADO",
+            "DAT_CONTRATACAO", "DAT_VENCIMENTO", "DAT_EXCLUSAO", "NUM_IF", "QTD_CREDITO",
+            "DAT_SALDO_REMANESCENTE", "COD_CONTRATO_SCR",
+            "COD_REFERENCIA_EXTERNA_DEVEDOR", "VAL_PERCENTUAL_INDEXADOR",
+            "VAL_PERCENTUAL_TAXA_ANUAL", "COD_IPOC",
+        ),
+        HISTORICO_CREDITO_SCR_TABLE: (
+            "NUM_ID_HISTORICO_CREDITO_SCR", "NUM_ID_CREDITO_SCR", "TXT_DESCRICAO",
+            "COD_ID_CANAL", "NUM_TIPO_IF", "COD_TIPO_PESSOA", "IND_MULTIPLO_IPOC",
+            "NUM_ID_LOTE", "VAL_SALDO_REMANESCENTE", "VAL_CONTRATADO",
+            "DAT_CONTRATACAO", "DAT_VENCIMENTO", "NUM_IF_CREDITO", "QTD_CREDITO",
+            "DAT_SALDO_REMANESCENTE", "COD_CONTRATO_SCR", "NUM_ID_TIPO_CREDITO",
+            "NUM_ID_MODALIDADE_CREDITO", "NUM_ID_INDEXADOR_CREDITO",
+            "COD_REFERENCIA_EXTERNA_DEVEDOR", "VAL_PERCENTUAL_INDEXADOR",
+            "VAL_PERCENTUAL_TAXA_ANUAL", "COD_IPOC",
+        ),
+    }
+    columns, missing = _credito_scr_columns(tables, requirements)
+    if missing:
+        return [_credito_scr_unavailable("8d.profile.availability", missing, SEV_WARN)]
+    lot_cols = columns[LOTE_TABLE]
+    credit_cols = columns[CREDITO_SCR_TABLE]
+    history_cols = columns[HISTORICO_CREDITO_SCR_TABLE]
+    lots = _credito_scr_active(tables[LOTE_TABLE])
+    credits = _credito_scr_active(tables[CREDITO_SCR_TABLE])
+    inclusion = tables[HISTORICO_CREDITO_SCR_TABLE].where(
+        _normalized_history_action(F.col(history_cols["TXT_DESCRICAO"])) == "INCLUSAO"
+    )
+    out: List[Finding] = []
+
+    constant_sets = (
+        ("8d.profile.lot_constants", LOTE_TABLE, lots, lot_cols, {"IND_REVOLVENCIA": "N"},
+         [lot_cols["NUM_ID_LOTE"]]),
+        ("8d.profile.credit_constants", CREDITO_SCR_TABLE, credits, credit_cols,
+         {"NUM_TIPO_IF": "143", "COD_TIPO_PESSOA": "PF", "IND_MULTIPLO_IPOC": "N",
+          "NUM_ID_BASE_CREDITO": "505"}, [credit_cols["NUM_ID_CREDITO_SCR"]]),
+        ("8d.profile.history_constants", HISTORICO_CREDITO_SCR_TABLE, inclusion, history_cols,
+         {"COD_ID_CANAL": "6"}, [history_cols["NUM_ID_HISTORICO_CREDITO_SCR"]]),
+    )
+    for check_id, table, frame, cols, expected, keys in constant_sets:
+        mismatch = reduce(
+            lambda left, right: left | right,
+            [~F.coalesce(_norm_code(F.col(cols[name])) == value, F.lit(False))
+             for name, value in expected.items()],
+        )
+        bad = frame.where(mismatch)
+        count = bad.count()
+        out.append(Finding(
+            check_id, "Credito SCR observed insertion profile",
+            SEV_WARN if count else SEV_INFO, table, count == 0, count=count,
+            column=",".join(expected), sample=_sample_keys(bad, keys, sample),
+            hint="Review against additional inclusion samples before promoting this profile."
+                 if count else "",
+            message="Rows differing from one-batch Lastro-LCI insertion constants.",
+        ))
+
+    variants = credits.select(
+        _canon_key_col(F.col(credit_cols["NUM_ID_CREDITO_SCR"])).alias("credit_id"),
+        _canon_key_col(F.col(credit_cols["NUM_ID_TIPO_CREDITO"])).alias("credit_type"),
+        _canon_key_col(F.col(credit_cols["NUM_ID_MODALIDADE_CREDITO"])).alias("modalidade"),
+        _canon_key_col(F.col(credit_cols["NUM_ID_INDEXADOR_CREDITO"])).alias("indexer"),
+    )
+    observed = (
+        ("17", "46", "2"), ("18", "47", "5"), ("18", "47", "1"),
+        ("19", "12", "2"), ("20", "12", "2"),
+    )
+    observed_predicate = reduce(
+        lambda left, right: left | right,
+        [
+            (F.col("credit_type") == credit_type)
+            & (F.col("modalidade") == modalidade)
+            & (F.col("indexer") == indexer)
+            for credit_type, modalidade, indexer in observed
+        ],
+    )
+    bad_variants = variants.where(~F.coalesce(observed_predicate, F.lit(False)))
+    count = bad_variants.count()
+    out.append(Finding(
+        "8d.profile.variant_drift", "Credito SCR observed insertion profile",
+        SEV_WARN if count else SEV_INFO, CREDITO_SCR_TABLE, count == 0, count=count,
+        column="NUM_ID_TIPO_CREDITO,NUM_ID_MODALIDADE_CREDITO,NUM_ID_INDEXADOR_CREDITO",
+        sample=_sample_keys(
+            bad_variants, ["credit_id", "credit_type", "modalidade", "indexer"], sample
+        ),
+        hint="Confirm new combinations against target lookups and additional route samples."
+             if count else "",
+        message="Combinations outside the five observed insertion variants.",
+    ))
+
+    financial = credits.select(
+        F.col(credit_cols["NUM_ID_CREDITO_SCR"]).alias("credit_id"),
+        F.expr(f"try_cast(`{credit_cols['VAL_SALDO_REMANESCENTE']}` as decimal(38,10))")
+        .alias("balance"),
+        F.expr(f"try_cast(`{credit_cols['VAL_CONTRATADO']}` as decimal(38,10))")
+        .alias("contracted"),
+        F.expr(f"try_cast(`{credit_cols['DAT_CONTRATACAO']}` as date)").alias("contract_date"),
+        F.expr(f"try_cast(`{credit_cols['DAT_VENCIMENTO']}` as date)").alias("maturity"),
+    )
+    bad_financial = financial.where(
+        (F.col("balance").isNotNull() & F.col("contracted").isNotNull()
+         & (F.col("balance") > F.col("contracted")))
+        | (F.col("contract_date").isNotNull() & F.col("maturity").isNotNull()
+           & (F.col("contract_date") > F.col("maturity")))
+    )
+    count = bad_financial.count()
+    out.append(Finding(
+        "8d.profile.financial_plausibility", "Credito SCR observed insertion profile",
+        SEV_WARN if count else SEV_INFO, CREDITO_SCR_TABLE, count == 0, count=count,
+        column="VAL_SALDO_REMANESCENTE,VAL_CONTRATADO,DAT_CONTRATACAO,DAT_VENCIMENTO",
+        sample=_sample_keys(bad_financial, ["credit_id"], sample),
+        hint="Review this plausible relationship; the insertion log contains no counterexample."
+             if count else "",
+        message="Rows outside financial/date relationships observed in one successful batch.",
+    ))
+
+    detail_pairs = (
+        ("NUM_TIPO_IF", "NUM_TIPO_IF"), ("NUM_IF", "NUM_IF_CREDITO"),
+        ("VAL_SALDO_REMANESCENTE", "VAL_SALDO_REMANESCENTE"),
+        ("DAT_SALDO_REMANESCENTE", "DAT_SALDO_REMANESCENTE"),
+        ("COD_CONTRATO_SCR", "COD_CONTRATO_SCR"), ("QTD_CREDITO", "QTD_CREDITO"),
+        ("NUM_ID_TIPO_CREDITO", "NUM_ID_TIPO_CREDITO"),
+        ("VAL_CONTRATADO", "VAL_CONTRATADO"), ("DAT_CONTRATACAO", "DAT_CONTRATACAO"),
+        ("DAT_VENCIMENTO", "DAT_VENCIMENTO"),
+        ("NUM_ID_MODALIDADE_CREDITO", "NUM_ID_MODALIDADE_CREDITO"),
+        ("NUM_ID_INDEXADOR_CREDITO", "NUM_ID_INDEXADOR_CREDITO"),
+        ("COD_TIPO_PESSOA", "COD_TIPO_PESSOA"),
+        ("COD_REFERENCIA_EXTERNA_DEVEDOR", "COD_REFERENCIA_EXTERNA_DEVEDOR"),
+        ("VAL_PERCENTUAL_INDEXADOR", "VAL_PERCENTUAL_INDEXADOR"),
+        ("VAL_PERCENTUAL_TAXA_ANUAL", "VAL_PERCENTUAL_TAXA_ANUAL"),
+        ("COD_IPOC", "COD_IPOC"), ("IND_MULTIPLO_IPOC", "IND_MULTIPLO_IPOC"),
+    )
+    current = credits.select(
+        _canon_key_col(F.col(credit_cols["NUM_ID_CREDITO_SCR"])).alias("credit_id"),
+        *[F.col(credit_cols[name]).alias(f"credit_{name}") for name, _ in detail_pairs],
+    )
+    snapshots = inclusion.select(
+        _canon_key_col(F.col(history_cols["NUM_ID_CREDITO_SCR"])).alias("history_credit_id"),
+        F.col(history_cols["NUM_ID_HISTORICO_CREDITO_SCR"]).alias("history_id"),
+        *[F.col(history_cols[history_name]).alias(f"history_{history_name}")
+          for _, history_name in detail_pairs],
+    )
+    compared = current.join(snapshots, current.credit_id == snapshots.history_credit_id, "inner")
+    detail_mismatch = reduce(
+        lambda left, right: left | right,
+        [~F.col(f"credit_{credit_name}").eqNullSafe(F.col(f"history_{history_name}"))
+         for credit_name, history_name in detail_pairs],
+    )
+    bad_details = compared.where(detail_mismatch)
+    count = bad_details.count()
+    out.append(Finding(
+        "8d.profile.history_details", "Credito SCR observed insertion profile",
+        SEV_WARN if count else SEV_INFO, HISTORICO_CREDITO_SCR_TABLE, count == 0, count=count,
+        column=",".join(name for name, _ in detail_pairs),
+        sample=_sample_keys(bad_details, ["credit_id", "history_id"], sample),
+        hint="Confirm whether differences are legitimate post-inclusion lifecycle updates."
+             if count else "",
+        message="Inclusion details differing from current credit values.",
+    ))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Category 2f/6f/8f - DICRE graph and registration-route evidence
+# ---------------------------------------------------------------------------
+CREDITO_DC_TABLE = "CREDITO_DC"
+HISTORICO_CREDITO_DC_TABLE = "HISTORICO_CREDITO_DC"
+TCTPCHAV_IROP_ATIV_TABLE = "TCTPCHAV_IROP_ATIV"
+TCTPDET_CHAV_IROP_CCB_TABLE = "TCTPDET_CHAV_IROP_CCB"
+TCTPDET_CHAV_IROP_CMER_TABLE = "TCTPDET_CHAV_IROP_CMER"
+TCTPIROP_ATIV_TABLE = "TCTPIROP_ATIV"
+TCTPSOLI_IROP_ATIV_TABLE = "TCTPSOLI_IROP_ATIV"
+DICRE_GRAPH_TABLES = (
+    LOTE_TABLE,
+    CREDITO_DC_TABLE,
+    HISTORICO_CREDITO_DC_TABLE,
+    TCTPCHAV_IROP_ATIV_TABLE,
+    TCTPDET_CHAV_IROP_CCB_TABLE,
+    TCTPDET_CHAV_IROP_CMER_TABLE,
+    TCTPIROP_ATIV_TABLE,
+    TCTPSOLI_IROP_ATIV_TABLE,
+)
+DICRE_IPOC_TOGGLE = "VALIDADOR_UNICIDADE_IPOC_LCA"
+
+
+def _dicre_unavailable(check_id: str, missing: List[str], severity: str) -> Finding:
+    return Finding(
+        check_id, "DICRE", severity,
+        ",".join(sorted({value.split(".")[0] for value in missing})), False,
+        hint="Export the complete DICRE graph and make the bounded target lookup available.",
+        message=f"Check unavailable; missing required input: {', '.join(missing)}.",
+    )
+
+
+def _dicre_text(column):
+    """Exact textual business-key semantics: trim only, preserving case and '.0'."""
+    return F.trim(column.cast("string"))
+
+
+def check_dicre_identity(
+    tables: Dict[str, DataFrame], profile: ValidationProfile, sample: int
+) -> List[Finding]:
+    if profile.pipeline != "dicre":
+        return []
+    root = tables.get(CREDITO_DC_TABLE)
+    if root is None:
+        return [_dicre_unavailable("0.identity.root", [CREDITO_DC_TABLE], SEV_ERROR)]
+    key = resolve(root, "NUM_ID_CREDITO_DC")
+    if not key:
+        return [_dicre_unavailable(
+            "0.identity.root", [f"{CREDITO_DC_TABLE}.NUM_ID_CREDITO_DC"], SEV_ERROR
+        )]
+    count = root.count()
+    return [Finding(
+        "0.identity.root", "Product identity", SEV_INFO if count else SEV_ERROR,
+        CREDITO_DC_TABLE, count > 0, count=count, column="NUM_ID_CREDITO_DC",
+        sample=_sample_keys(root, [key], sample) if count else [],
+        hint="Export at least one CREDITO_DC row." if not count else "",
+        message="All exported CREDITO_DC rows define the DICRE semantic universe; "
+                "DAT_EXCLUSAO does not filter the root.",
+    )]
+
+
+def check_dicre_metadata(
+    meta: Metadata, no_oracle: bool, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "dicre":
+        return []
+    if no_oracle:
+        return [Finding(
+            "0.dicre_metadata", "Coverage", SEV_INFO, "Oracle metadata", True,
+            message="Authoritative DICRE metadata deferred under --no-oracle; local checks "
+                    "still run and the verdict remains PARTIAL.",
+        )]
+    missing = [table for table in DICRE_GRAPH_TABLES if table not in meta.tables]
+    missing_pk = [
+        table for table in DICRE_GRAPH_TABLES if table in meta.tables and not meta.pk.get(table)
+    ]
+    failed = bool(missing or missing_pk)
+    return [Finding(
+        "0.dicre_metadata", "Coverage", SEV_ERROR if failed else SEV_INFO,
+        ",".join(DICRE_GRAPH_TABLES), not failed, count=len(missing) + len(missing_pk),
+        hint="Read table and PK metadata for all eight DICRE graph tables from Oracle."
+             if failed else "",
+        message=(f"Missing Oracle table metadata={missing}; missing PK metadata={missing_pk}."
+                 if failed else
+                 "Authoritative Oracle table and PK metadata cover the complete DICRE graph."),
+    )]
+
+
+def check_dicre_graph(
+    tables: Dict[str, DataFrame], sample: int, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "dicre":
+        return []
+    requirements = {
+        LOTE_TABLE: (
+            "NUM_ID_LOTE", "NOME_LOTE", "NUM_CONTA_PARTICIPANTE",
+            "NUM_ID_TIPO_LOTE", "NUM_TIPO_IF", "DAT_EXCLUSAO",
+        ),
+        CREDITO_DC_TABLE: (
+            "NUM_ID_CREDITO_DC", "COD_CREDITO_DC", "NUM_ID_LOTE", "DAT_EXCLUSAO",
+        ),
+        HISTORICO_CREDITO_DC_TABLE: (
+            "NUM_ID_HISTORICO_CREDITO_DC", "COD_CREDITO_DC", "NUM_ID_LOTE",
+            "NUM_ID_TIPO_ACAO_HIST_CREDITO",
+        ),
+    }
+    columns, missing = _credito_scr_columns(tables, requirements)
+    if missing:
+        return [_dicre_unavailable("2f.graph.availability", missing, SEV_ERROR)]
+
+    lot_cols = columns[LOTE_TABLE]
+    root_cols = columns[CREDITO_DC_TABLE]
+    history_cols = columns[HISTORICO_CREDITO_DC_TABLE]
+    lots = _credito_scr_active(tables[LOTE_TABLE]).select(
+        _canon_key_col(F.col(lot_cols["NUM_ID_LOTE"])).alias("lot_id"),
+        _dicre_text(F.col(lot_cols["NOME_LOTE"])).alias("lot_name"),
+        _dicre_text(F.col(lot_cols["NUM_CONTA_PARTICIPANTE"])).alias("lot_account_exact"),
+        _dicre_text(F.col(lot_cols["NUM_ID_TIPO_LOTE"])).alias("lot_type_exact"),
+        _dicre_text(F.col(lot_cols["NUM_TIPO_IF"])).alias("lot_if_type_exact"),
+    )
+    roots = tables[CREDITO_DC_TABLE].select(
+        _canon_key_col(F.col(root_cols["NUM_ID_CREDITO_DC"])).alias("credit_id"),
+        _dicre_text(F.col(root_cols["COD_CREDITO_DC"])).alias("credit_code"),
+        _canon_key_col(F.col(root_cols["NUM_ID_LOTE"])).alias("credit_lot_id"),
+    )
+    histories = tables[HISTORICO_CREDITO_DC_TABLE].select(
+        _canon_key_col(F.col(history_cols["NUM_ID_HISTORICO_CREDITO_DC"])).alias("history_id"),
+        _dicre_text(F.col(history_cols["COD_CREDITO_DC"])).alias("history_code"),
+        _canon_key_col(F.col(history_cols["NUM_ID_LOTE"])).alias("history_lot_id"),
+        _canon_key_col(F.col(history_cols["NUM_ID_TIPO_ACAO_HIST_CREDITO"])).alias("action"),
+    )
+    inclusions = histories.where(F.col("action") == "1")
+    out: List[Finding] = []
+
+    duplicate_lots = lots.groupBy(
+        "lot_name", "lot_account_exact", "lot_type_exact", "lot_if_type_exact"
+    ).count().where(F.col("count") > 1)
+    count = duplicate_lots.count()
+    out.append(Finding(
+        "2f.active_lot_natural_key", "DICRE graph", SEV_ERROR if count else SEV_INFO,
+        LOTE_TABLE, count == 0, count=count,
+        column="NOME_LOTE,NUM_CONTA_PARTICIPANTE,NUM_ID_TIPO_LOTE,NUM_TIPO_IF",
+        sample=_sample_keys(
+            duplicate_lots,
+            ["lot_name", "lot_account_exact", "lot_type_exact", "lot_if_type_exact"], sample,
+        ),
+        hint="Keep at most one active lot for the exact-trimmed four-column key."
+             if count else "",
+        message="Duplicate active DICRE lot business keys.",
+    ))
+
+    lot_counts = lots.groupBy("lot_id").count().withColumnRenamed("count", "lot_count")
+    bad_lots = roots.join(
+        lot_counts, roots.credit_lot_id == lot_counts.lot_id, "left"
+    ).where(F.coalesce(F.col("lot_count"), F.lit(0)) != 1)
+    count = bad_lots.count()
+    out.append(Finding(
+        "2f.credit_active_lot", "DICRE graph", SEV_ERROR if count else SEV_INFO,
+        CREDITO_DC_TABLE, count == 0, count=count, column="NUM_ID_LOTE",
+        sample=_sample_keys(bad_lots, ["credit_id", "credit_lot_id"], sample),
+        hint="Point every exported CREDITO_DC row to exactly one active LOTE."
+             if count else "",
+        message="DICRE roots without exactly one active lot.",
+    ))
+
+    coded = roots.withColumn(
+        "code_count", F.count(F.lit(1)).over(Window.partitionBy("credit_code"))
+    )
+    bad_codes = coded.where(
+        F.col("credit_code").isNull() | (F.col("credit_code") == "")
+        | (F.col("code_count") > 1)
+    )
+    count = bad_codes.count()
+    out.append(Finding(
+        "2f.credit_code_unique", "DICRE graph", SEV_ERROR if count else SEV_INFO,
+        CREDITO_DC_TABLE, count == 0, count=count, column="COD_CREDITO_DC",
+        sample=_sample_keys(bad_codes, ["credit_id", "credit_code"], sample),
+        hint="Generate nonblank, unique exact-trimmed COD_CREDITO_DC values."
+             if count else "",
+        message="DICRE roots with blank or duplicate business codes.",
+    ))
+
+    inclusion_counts = inclusions.groupBy(
+        "history_code", "history_lot_id"
+    ).count().withColumnRenamed("count", "inclusion_count")
+    bad_history = roots.join(
+        inclusion_counts,
+        (roots.credit_code == inclusion_counts.history_code)
+        & (roots.credit_lot_id == inclusion_counts.history_lot_id),
+        "left",
+    ).where(F.coalesce(F.col("inclusion_count"), F.lit(0)) != 1)
+    count = bad_history.count()
+    out.append(Finding(
+        "2f.inclusion_history", "DICRE graph", SEV_ERROR if count else SEV_INFO,
+        HISTORICO_CREDITO_DC_TABLE, count == 0, count=count,
+        column="COD_CREDITO_DC,NUM_ID_LOTE,NUM_ID_TIPO_ACAO_HIST_CREDITO",
+        sample=_sample_keys(bad_history, ["credit_id", "credit_code", "credit_lot_id"], sample),
+        hint="Keep exactly one action 1 history per exact code + canonical lot root identity."
+             if count else "",
+        message="DICRE roots without exactly one inclusion history action.",
+    ))
+
+    root_identity = roots.select(
+        F.col("credit_code").alias("history_code"),
+        F.col("credit_lot_id").alias("history_lot_id"),
+    ).dropDuplicates()
+    orphan_history = inclusions.join(
+        root_identity, ["history_code", "history_lot_id"], "left_anti"
+    )
+    count = orphan_history.count()
+    out.append(Finding(
+        "2f.inclusion_history_orphan", "DICRE graph",
+        SEV_ERROR if count else SEV_INFO, HISTORICO_CREDITO_DC_TABLE,
+        count == 0, count=count, column="COD_CREDITO_DC,NUM_ID_LOTE",
+        sample=_sample_keys(
+            orphan_history, ["history_id", "history_code", "history_lot_id"], sample
+        ),
+        hint="Link action 1 history by exact code and canonical lot only." if count else "",
+        message="Inclusion histories not linked to a DICRE root identity.",
+    ))
+    return out
+
+
+def _dicre_edge_finding(
+    check_id: str, child: DataFrame, parent: DataFrame, join_columns: List[str],
+    table: str, column: str, sample_columns: List[str], sample: int,
+) -> Finding:
+    bad = child.join(parent.dropDuplicates(join_columns), join_columns, "left_anti")
+    count = bad.count()
+    return Finding(
+        check_id, "DICRE IROP graph", SEV_ERROR if count else SEV_INFO,
+        table, count == 0, count=count, column=column,
+        sample=_sample_keys(bad, sample_columns, sample),
+        hint="Remove the orphan edge or export its referenced DICRE graph row."
+             if count else "",
+        message="Orphan DICRE IROP edge.",
+    )
+
+
+def _dicre_duplicate_edge_finding(
+    check_id: str, frame: DataFrame, edge_columns: List[str], table: str,
+    column: str, sample: int,
+) -> Finding:
+    duplicate = frame.groupBy(*edge_columns).count().where(F.col("count") > 1)
+    count = duplicate.count()
+    return Finding(
+        check_id, "DICRE IROP graph", SEV_ERROR if count else SEV_INFO,
+        table, count == 0, count=count, column=column,
+        sample=_sample_keys(duplicate, edge_columns, sample),
+        hint="Keep each exported IROP business edge unambiguous." if count else "",
+        message="Duplicate DICRE IROP business edges.",
+    )
+
+
+def check_dicre_irop_graph(
+    tables: Dict[str, DataFrame], sample: int, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "dicre":
+        return []
+    requirements = {
+        CREDITO_DC_TABLE: ("NUM_ID_CREDITO_DC",),
+        TCTPCHAV_IROP_ATIV_TABLE: ("NUM_CHAV_IROP",),
+        TCTPDET_CHAV_IROP_CCB_TABLE: ("NUM_CHAV_IROP",),
+        TCTPDET_CHAV_IROP_CMER_TABLE: ("NUM_CHAV_IROP",),
+        TCTPIROP_ATIV_TABLE: (
+            "NUM_IROP_ATIV", "NUM_IDT_CRE_DC", "NUM_CHAV_IROP",
+        ),
+        TCTPSOLI_IROP_ATIV_TABLE: ("NUM_IROP_ATIV",),
+    }
+    columns, missing = _credito_scr_columns(tables, requirements)
+    if missing:
+        return [_dicre_unavailable("2f.irop.availability", missing, SEV_ERROR)]
+
+    roots = tables[CREDITO_DC_TABLE].select(
+        _canon_key_col(F.col(columns[CREDITO_DC_TABLE]["NUM_ID_CREDITO_DC"]))
+        .alias("credit_id")
+    )
+    keys = tables[TCTPCHAV_IROP_ATIV_TABLE].select(
+        _canon_key_col(F.col(columns[TCTPCHAV_IROP_ATIV_TABLE]["NUM_CHAV_IROP"]))
+        .alias("irop_key")
+    )
+    irops = tables[TCTPIROP_ATIV_TABLE].select(
+        _canon_key_col(F.col(columns[TCTPIROP_ATIV_TABLE]["NUM_IROP_ATIV"]))
+        .alias("irop_id"),
+        _canon_key_col(F.col(columns[TCTPIROP_ATIV_TABLE]["NUM_IDT_CRE_DC"]))
+        .alias("credit_id"),
+        _canon_key_col(F.col(columns[TCTPIROP_ATIV_TABLE]["NUM_CHAV_IROP"]))
+        .alias("irop_key"),
+    )
+    ccb = tables[TCTPDET_CHAV_IROP_CCB_TABLE].select(
+        _canon_key_col(F.col(columns[TCTPDET_CHAV_IROP_CCB_TABLE]["NUM_CHAV_IROP"]))
+        .alias("irop_key")
+    )
+    cmer = tables[TCTPDET_CHAV_IROP_CMER_TABLE].select(
+        _canon_key_col(F.col(columns[TCTPDET_CHAV_IROP_CMER_TABLE]["NUM_CHAV_IROP"]))
+        .alias("irop_key")
+    )
+    requests = tables[TCTPSOLI_IROP_ATIV_TABLE].select(
+        _canon_key_col(F.col(columns[TCTPSOLI_IROP_ATIV_TABLE]["NUM_IROP_ATIV"]))
+        .alias("irop_id")
+    )
+    out = [
+        _dicre_edge_finding(
+            "2f.irop.credit_edge", irops, roots, ["credit_id"], TCTPIROP_ATIV_TABLE,
+            "NUM_IDT_CRE_DC", ["irop_id", "credit_id"], sample,
+        ),
+        _dicre_edge_finding(
+            "2f.irop.key_edge", irops, keys, ["irop_key"], TCTPIROP_ATIV_TABLE,
+            "NUM_CHAV_IROP", ["irop_id", "irop_key"], sample,
+        ),
+        _dicre_edge_finding(
+            "2f.irop.ccb_key_edge", ccb, keys, ["irop_key"],
+            TCTPDET_CHAV_IROP_CCB_TABLE, "NUM_CHAV_IROP", ["irop_key"], sample,
+        ),
+        _dicre_edge_finding(
+            "2f.irop.cmer_key_edge", cmer, keys, ["irop_key"],
+            TCTPDET_CHAV_IROP_CMER_TABLE, "NUM_CHAV_IROP", ["irop_key"], sample,
+        ),
+        _dicre_edge_finding(
+            "2f.irop.request_edge", requests, irops.select("irop_id"), ["irop_id"],
+            TCTPSOLI_IROP_ATIV_TABLE, "NUM_IROP_ATIV", ["irop_id"], sample,
+        ),
+        _dicre_duplicate_edge_finding(
+            "2f.irop.credit_key_unique", irops, ["credit_id", "irop_key"],
+            TCTPIROP_ATIV_TABLE, "NUM_IDT_CRE_DC,NUM_CHAV_IROP", sample,
+        ),
+        _dicre_duplicate_edge_finding(
+            "2f.irop.ccb_key_unique", ccb, ["irop_key"],
+            TCTPDET_CHAV_IROP_CCB_TABLE, "NUM_CHAV_IROP", sample,
+        ),
+        _dicre_duplicate_edge_finding(
+            "2f.irop.cmer_key_unique", cmer, ["irop_key"],
+            TCTPDET_CHAV_IROP_CMER_TABLE, "NUM_CHAV_IROP", sample,
+        ),
+        _dicre_duplicate_edge_finding(
+            "2f.irop.request_unique", requests, ["irop_id"],
+            TCTPSOLI_IROP_ATIV_TABLE, "NUM_IROP_ATIV", sample,
+        ),
+    ]
+    return out
+
+
+def _dicre_lookup_columns(
+    frame: Optional[DataFrame], names: Tuple[str, ...]
+) -> Tuple[Dict[str, str], List[str]]:
+    if frame is None:
+        return {}, list(names)
+    columns = {name: resolve(frame, name) for name in names}
+    return columns, [name for name, actual in columns.items() if not actual]
+
+
+def _dicre_enabled_credits(roots: DataFrame, toggle: DataFrame) -> Optional[DataFrame]:
+    start = resolve(toggle, "DATA_INIC_VIG_FTRE")
+    end = resolve(toggle, "DATA_FIM_VIG_FTRE")
+    enabled = resolve(toggle, "IND_FTRE_HAB")
+    if not start or not end or not enabled:
+        return None
+    periods = toggle
+    code = resolve(toggle, "COD_FTRE_TOG")
+    if code:
+        periods = periods.where(_dicre_text(F.col(code)) == DICRE_IPOC_TOGGLE)
+    periods = periods.where(_dicre_text(F.col(enabled)) == "S").select(
+        F.to_date(F.col(start)).alias("toggle_start"),
+        F.to_date(F.col(end)).alias("toggle_end"),
+    )
+    return roots.join(
+        F.broadcast(periods),
+        (F.col("inclusion_date") >= F.col("toggle_start"))
+        & (F.col("inclusion_date") <= F.col("toggle_end")),
+        "left_semi",
+    )
+
+
+def check_dicre_target_frames(
+    tables: Dict[str, DataFrame], lookup_frames: Dict[str, DataFrame], sample: int,
+    profile: ValidationProfile, lookup_errors: Optional[Dict[str, str]] = None,
+) -> List[Finding]:
+    if profile.pipeline != "dicre":
+        return []
+    lookup_errors = lookup_errors or {}
+    requirements = {
+        LOTE_TABLE: (
+            "NUM_ID_LOTE", "NUM_CONTA_PARTICIPANTE", "NUM_ID_TIPO_LOTE",
+            "NUM_TIPO_IF", "DAT_EXCLUSAO",
+        ),
+        CREDITO_DC_TABLE: (
+            "NUM_ID_CREDITO_DC", "NUM_ID_LOTE", "NUM_TIPO_IF",
+            "NUM_CONTA_CUSTODIANTE", "NUM_ID_BASE_CREDITO", "DAT_INCLUSAO", "COD_IPOC",
+            "NUM_ID_QUALIF_FINALIDADE", "NUM_ID_QUALIF_JUROS_A_CADA",
+            "NUM_ID_QUALIF_AMORT_A_CADA", "NUM_ID_QUALIF_GARANTIA_ESPEC",
+        ),
+    }
+    columns, missing = _credito_scr_columns(tables, requirements)
+    if missing:
+        return [_dicre_unavailable("6f.lookup.availability", missing, SEV_ERROR)]
+    lot_cols, root_cols = columns[LOTE_TABLE], columns[CREDITO_DC_TABLE]
+    lots = _credito_scr_active(tables[LOTE_TABLE]).select(
+        _canon_key_col(F.col(lot_cols["NUM_ID_LOTE"])).alias("lot_id"),
+        _canon_key_col(F.col(lot_cols["NUM_CONTA_PARTICIPANTE"])).alias("emitter_account"),
+        _canon_key_col(F.col(lot_cols["NUM_ID_TIPO_LOTE"])).alias("lot_type"),
+        _canon_key_col(F.col(lot_cols["NUM_TIPO_IF"])).alias("guaranteed_if_type"),
+    )
+    roots = tables[CREDITO_DC_TABLE].select(
+        _canon_key_col(F.col(root_cols["NUM_ID_CREDITO_DC"])).alias("credit_id"),
+        _canon_key_col(F.col(root_cols["NUM_ID_LOTE"])).alias("credit_lot_id"),
+        _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])).alias("credit_if_type"),
+        _canon_key_col(F.col(root_cols["NUM_CONTA_CUSTODIANTE"])).alias("custodian_account"),
+        _canon_key_col(F.col(root_cols["NUM_ID_BASE_CREDITO"])).alias("base_id"),
+        F.to_date(F.col(root_cols["DAT_INCLUSAO"])).alias("inclusion_date"),
+        _dicre_text(F.col(root_cols["COD_IPOC"])).alias("ipoc"),
+        *[
+            _canon_key_col(F.col(root_cols[column])).alias(alias)
+            for column, alias in (
+                ("NUM_ID_QUALIF_FINALIDADE", "qualification_20"),
+                ("NUM_ID_QUALIF_JUROS_A_CADA", "qualification_21"),
+                ("NUM_ID_QUALIF_AMORT_A_CADA", "qualification_22"),
+                ("NUM_ID_QUALIF_GARANTIA_ESPEC", "qualification_23"),
+            )
+        ],
+    ).join(lots, F.col("credit_lot_id") == lots.lot_id, "left")
+    out: List[Finding] = []
+
+    account_frame = lookup_frames.get("DICRE_ACCOUNTS")
+    account_names = (
+        "NUM_CONTA_PARTICIPANTE", "NUM_ID_SITUACAO_CONTA", "COD_TIPO_ACESSO",
+        "NUM_ID_AREA_ATUACAO", "NOM_SIMPLIFICADO",
+    )
+    account_cols, account_missing = _dicre_lookup_columns(account_frame, account_names)
+    if account_missing:
+        out.append(_dicre_unavailable(
+            "6f.lookup.accounts",
+            [lookup_errors.get("DICRE_ACCOUNTS", "DICRE_ACCOUNTS")]
+            if account_frame is None else
+            [f"DICRE_ACCOUNTS.{name}" for name in account_missing],
+            SEV_WARN,
+        ))
+    else:
+        accounts = account_frame.select(
+            _canon_key_col(F.col(account_cols["NUM_CONTA_PARTICIPANTE"])).alias("account_id"),
+            _canon_key_col(F.col(account_cols["NUM_ID_SITUACAO_CONTA"])).alias("status"),
+            _dicre_text(F.col(account_cols["COD_TIPO_ACESSO"])).alias("access"),
+            _canon_key_col(F.col(account_cols["NUM_ID_AREA_ATUACAO"])).alias("area"),
+            _dicre_text(F.col(account_cols["NOM_SIMPLIFICADO"])).alias("short_name"),
+        )
+        emitters = accounts.where(
+            F.col("status").isin("1", "2")
+            & (F.col("access") == "L") & (F.col("area") == "1")
+        ).select(
+            F.col("account_id").alias("emitter_account"),
+            F.col("short_name").alias("emitter_name"),
+        )
+        custodians = accounts.where(F.col("status").isin("1", "2")).select(
+            F.col("account_id").alias("custodian_account"),
+            F.col("short_name").alias("custodian_name"),
+        )
+        eligible_pairs = emitters.join(
+            custodians, F.col("emitter_name") == F.col("custodian_name"), "inner"
+        ).select("emitter_account", "custodian_account").dropDuplicates()
+        bad = roots.join(
+            F.broadcast(eligible_pairs), ["emitter_account", "custodian_account"], "left_anti"
+        )
+        count = bad.count()
+        out.append(Finding(
+            "6f.lookup.accounts", "DICRE target eligibility",
+            SEV_ERROR if count else SEV_INFO, CREDITO_DC_TABLE, count == 0, count=count,
+            column="NUM_CONTA_PARTICIPANTE,NUM_CONTA_CUSTODIANTE",
+            sample=_sample_keys(
+                bad, ["credit_id", "emitter_account", "custodian_account"], sample
+            ),
+            hint="Use active emitter/custodian accounts for the same participant; emitter "
+                 "must have local access L in area 1." if count else "",
+            message="DICRE rows with ineligible emitter/custodian account pairs.",
+        ))
+
+    base_frame = lookup_frames.get("DICRE_BASES")
+    base_cols, base_missing = _dicre_lookup_columns(
+        base_frame, ("NUM_CONTA_PARTICIPANTE", "NUM_ID_BASE_CREDITO")
+    )
+    if base_missing:
+        out.append(_dicre_unavailable(
+            "6f.lookup.base",
+            [lookup_errors.get("DICRE_BASES", "DICRE_BASES")]
+            if base_frame is None else [f"DICRE_BASES.{name}" for name in base_missing],
+            SEV_WARN,
+        ))
+    else:
+        bases = base_frame.select(
+            _canon_key_col(F.col(base_cols["NUM_CONTA_PARTICIPANTE"])).alias("emitter_account"),
+            _canon_key_col(F.col(base_cols["NUM_ID_BASE_CREDITO"])).alias("base_id"),
+        ).dropDuplicates()
+        bad = roots.join(F.broadcast(bases), ["emitter_account", "base_id"], "left_anti")
+        count = bad.count()
+        out.append(Finding(
+            "6f.lookup.base", "DICRE target eligibility", SEV_ERROR if count else SEV_INFO,
+            CREDITO_DC_TABLE, count == 0, count=count,
+            column="NUM_CONTA_PARTICIPANTE,NUM_ID_BASE_CREDITO",
+            sample=_sample_keys(bad, ["credit_id", "emitter_account", "base_id"], sample),
+            hint="Use a base authorized for the emitter through exact type-base code 2."
+                 if count else "",
+            message="DICRE rows without an eligible type-2 credit base.",
+        ))
+
+    if_frame = lookup_frames.get("DICRE_IF_COMPATIBILITY")
+    if_cols, if_missing = _dicre_lookup_columns(
+        if_frame, ("NUM_TIPO_IF", "NUM_TIPO_IF_GARANTIDO", "NUM_ID_TIPO_LOTE")
+    )
+    if if_missing:
+        out.append(_dicre_unavailable(
+            "6f.lookup.if_compatibility",
+            [lookup_errors.get("DICRE_IF_COMPATIBILITY", "DICRE_IF_COMPATIBILITY")]
+            if if_frame is None else
+            [f"DICRE_IF_COMPATIBILITY.{name}" for name in if_missing],
+            SEV_WARN,
+        ))
+    else:
+        compatible = if_frame.select(
+            _canon_key_col(F.col(if_cols["NUM_TIPO_IF"])).alias("credit_if_type"),
+            _canon_key_col(F.col(if_cols["NUM_TIPO_IF_GARANTIDO"])).alias("guaranteed_if_type"),
+            _canon_key_col(F.col(if_cols["NUM_ID_TIPO_LOTE"])).alias("lot_type"),
+        ).dropDuplicates()
+        bad = roots.join(
+            F.broadcast(compatible),
+            ["credit_if_type", "guaranteed_if_type", "lot_type"], "left_anti",
+        )
+        count = bad.count()
+        out.append(Finding(
+            "6f.lookup.if_compatibility", "DICRE target eligibility",
+            SEV_ERROR if count else SEV_INFO, CREDITO_DC_TABLE, count == 0, count=count,
+            column="NUM_TIPO_IF,LOTE.NUM_TIPO_IF,LOTE.NUM_ID_TIPO_LOTE",
+            sample=_sample_keys(
+                bad, ["credit_id", "credit_if_type", "guaranteed_if_type", "lot_type"], sample
+            ),
+            hint="Use an active subtype enabled for lot type 2 and guaranteed LCA."
+                 if count else "",
+            message="DICRE subtype/guaranteed-LCA incompatibilities.",
+        ))
+
+    qualification_frame = lookup_frames.get("DICRE_QUALIFICATIONS")
+    qualification_cols, qualification_missing = _dicre_lookup_columns(
+        qualification_frame,
+        ("NUM_ID_QUALIFICACAO", "NUM_ID_QUALIFICACAO_SUBGRUPO"),
+    )
+    if qualification_missing:
+        out.append(_dicre_unavailable(
+            "6f.lookup.qualifications",
+            [lookup_errors.get("DICRE_QUALIFICATIONS", "DICRE_QUALIFICATIONS")]
+            if qualification_frame is None else
+            [f"DICRE_QUALIFICATIONS.{name}" for name in qualification_missing],
+            SEV_WARN,
+        ))
+    else:
+        required_qualifications = reduce(
+            lambda left, right: left.unionByName(right),
+            [
+                roots.where(F.col(f"qualification_{subgroup}").isNotNull()).select(
+                    "credit_id", "guaranteed_if_type",
+                    F.col(f"qualification_{subgroup}").alias("qualification_id"),
+                    F.lit(subgroup).alias("subgroup"),
+                )
+                for subgroup in ("20", "21", "22", "23")
+            ],
+        )
+        eligible_qualifications = qualification_frame.select(
+            _canon_key_col(F.col(qualification_cols["NUM_ID_QUALIFICACAO"]))
+            .alias("qualification_id"),
+            _canon_key_col(F.col(qualification_cols["NUM_ID_QUALIFICACAO_SUBGRUPO"]))
+            .alias("subgroup"),
+        ).dropDuplicates()
+        bad = required_qualifications.join(
+            F.broadcast(eligible_qualifications), ["qualification_id", "subgroup"], "left_anti"
+        )
+        count = bad.count()
+        out.append(Finding(
+            "6f.lookup.qualifications", "DICRE target eligibility",
+            SEV_ERROR if count else SEV_INFO, CREDITO_DC_TABLE, count == 0, count=count,
+            column="NUM_ID_QUALIF_*",
+            sample=_sample_keys(bad, ["credit_id", "qualification_id", "subgroup"], sample),
+            hint="Resolve each nonnull qualification through an enabled group-4 LCA "
+                 "relationship for subgroup 20, 21, 22, or 23." if count else "",
+            message="DICRE rows with ineligible nonnull qualifications.",
+        ))
+
+    toggle = lookup_frames.get("TCTPFEATURE_TOGGLE")
+    if toggle is None:
+        out.append(_dicre_unavailable(
+            "6f.lookup.ipoc_unique",
+            [lookup_errors.get("TCTPFEATURE_TOGGLE", "TCTPFEATURE_TOGGLE")], SEV_WARN,
+        ))
+    else:
+        enabled_credits = _dicre_enabled_credits(roots, toggle)
+        if enabled_credits is None:
+            out.append(_dicre_unavailable(
+                "6f.lookup.ipoc_unique", ["TCTPFEATURE_TOGGLE required columns"], SEV_WARN
+            ))
+        elif enabled_credits.limit(1).count() == 0:
+            out.append(Finding(
+                "6f.lookup.ipoc_unique", "DICRE target eligibility", SEV_INFO,
+                CREDITO_DC_TABLE, True, column="COD_IPOC",
+                message="VALIDADOR_UNICIDADE_IPOC_LCA is disabled for all synthetic "
+                        "CREDITO_DC.DAT_INCLUSAO dates; target IPOCs are not required.",
+            ))
+        else:
+            target = lookup_frames.get("CREDITO_DC_TARGET")
+            target_column = resolve(target, "COD_IPOC") if target is not None else None
+            if target is None or not target_column:
+                out.append(_dicre_unavailable(
+                    "6f.lookup.ipoc_unique",
+                    [lookup_errors.get("CREDITO_DC_TARGET", "CREDITO_DC_TARGET.COD_IPOC")],
+                    SEV_WARN,
+                ))
+            else:
+                duplicate_synthetic = roots.where(
+                    F.col("ipoc").isNotNull() & (F.col("ipoc") != "")
+                ).groupBy("ipoc").count().where(F.col("count") > 1).select("ipoc")
+                active_target = target
+                target_exclusion = resolve(target, "DAT_EXCLUSAO")
+                if target_exclusion:
+                    active_target = target.where(F.col(target_exclusion).isNull())
+                target_ipocs = active_target.select(
+                    _dicre_text(F.col(target_column)).alias("ipoc")
+                ).where(F.col("ipoc").isNotNull() & (F.col("ipoc") != "")).dropDuplicates()
+                conflicts = duplicate_synthetic.unionByName(target_ipocs).dropDuplicates()
+                bad = enabled_credits.join(conflicts, "ipoc", "inner")
+                count = bad.count()
+                out.append(Finding(
+                    "6f.lookup.ipoc_unique", "DICRE target eligibility",
+                    SEV_ERROR if count else SEV_INFO, CREDITO_DC_TABLE,
+                    count == 0, count=count, column="COD_IPOC",
+                    sample=_sample_keys(bad, ["credit_id", "ipoc"], sample),
+                    hint="Regenerate exact-trimmed, case-sensitive IPOCs colliding within the "
+                         "enabled synthetic rows or active target CREDITO_DC." if count else "",
+                    message="Toggle-enabled DICRE rows with duplicate IPOCs.",
+                ))
+    return out
+
+
+def _dicre_collect_values(
+    frame: DataFrame, expression, alias: str, maximum: int = 100_000
+) -> Tuple[List[str], Optional[str]]:
+    rows = frame.select(expression.alias(alias)).where(
+        F.col(alias).isNotNull()
+    ).dropDuplicates().limit(maximum + 1).collect()
+    if len(rows) > maximum:
+        return [], f"more than {maximum} distinct synthetic keys"
+    return [str(row[alias]) for row in rows], None
+
+
+def load_dicre_target_frames(
+    spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame]
+) -> Tuple[Dict[str, DataFrame], Dict[str, str]]:
+    """Load only target rows addressed by distinct synthetic DICRE keys and pairs."""
+    frames: Dict[str, DataFrame] = {}
+    errors: Dict[str, str] = {}
+
+    def run(name: str, query: str) -> None:
+        try:
+            remote = _jdbc(spark, cfg, query)
+            rows = remote.collect()
+            frames[name] = spark.createDataFrame(rows, remote.schema)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("DICRE target lookup failed for %s: %s", name, exc)
+            errors[name] = str(exc)
+
+    def run_many(name: str, queries: List[str]) -> None:
+        rows = []
+        schema = None
+        try:
+            for query in queries:
+                remote = _jdbc(spark, cfg, query)
+                schema = schema or remote.schema
+                rows.extend(remote.collect())
+            if schema is not None:
+                frames[name] = spark.createDataFrame(rows, schema)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("DICRE target lookup failed for %s: %s", name, exc)
+            errors[name] = str(exc)
+
+    lot = tables.get(LOTE_TABLE)
+    root = tables.get(CREDITO_DC_TABLE)
+    if lot is None or root is None:
+        return frames, {"DICRE": "LOTE/CREDITO_DC unavailable"}
+    lot_id = resolve(lot, "NUM_ID_LOTE")
+    lot_account = resolve(lot, "NUM_CONTA_PARTICIPANTE")
+    lot_type = resolve(lot, "NUM_ID_TIPO_LOTE")
+    guaranteed_type = resolve(lot, "NUM_TIPO_IF")
+    root_lot = resolve(root, "NUM_ID_LOTE")
+    root_type = resolve(root, "NUM_TIPO_IF")
+    custodian = resolve(root, "NUM_CONTA_CUSTODIANTE")
+    base = resolve(root, "NUM_ID_BASE_CREDITO")
+    joined = None
+    if all((lot_id, lot_account, lot_type, guaranteed_type, root_lot)):
+        joined = root.select(
+            _canon_key_col(F.col(root_lot)).alias("lot_id"),
+            *([
+                _canon_key_col(F.col(root_type)).alias("credit_if_type")
+            ] if root_type else []),
+            *([_canon_key_col(F.col(custodian)).alias("custodian")] if custodian else []),
+            *([_canon_key_col(F.col(base)).alias("base_id")] if base else []),
+        ).join(
+            _credito_scr_active(lot).select(
+                _canon_key_col(F.col(lot_id)).alias("lot_id"),
+                _canon_key_col(F.col(lot_account)).alias("emitter"),
+                _canon_key_col(F.col(lot_type)).alias("lot_type"),
+                _canon_key_col(F.col(guaranteed_type)).alias("guaranteed_if_type"),
+            ), "lot_id", "inner",
+        )
+
+    if joined is None or not custodian:
+        errors["DICRE_ACCOUNTS"] = "synthetic account keys unavailable"
+    else:
+        emitter_values, emitter_error = _dicre_collect_values(
+            joined, F.col("emitter"), "value"
+        )
+        custodian_values, custodian_error = _dicre_collect_values(
+            joined, F.col("custodian"), "value"
+        )
+        if emitter_error or custodian_error:
+            errors["DICRE_ACCOUNTS"] = emitter_error or custodian_error
+        elif emitter_values or custodian_values:
+            values = sorted(set(emitter_values + custodian_values))
+            run_many(
+                "DICRE_ACCOUNTS",
+                [
+                    "SELECT cp.NUM_CONTA_PARTICIPANTE, cp.NUM_ID_SITUACAO_CONTA, "
+                    "vf.COD_TIPO_ACESSO, vf.NUM_ID_AREA_ATUACAO, "
+                    "vcp.NOM_SIMPLIFICADO_ENTIDADE NOM_SIMPLIFICADO "
+                    f"FROM {cfg.schema}.CONTA_PARTICIPANTE cp "
+                    f"LEFT JOIN {cfg.schema}.V_FAMILIA_CONTAS vf "
+                    "ON vf.COD_CONTA_MEMBRO=cp.COD_CONTA_PARTICIPANTE "
+                    f"LEFT JOIN {cfg.schema}.V_CONTA_PARTICIPANTE vcp "
+                    "ON vcp.COD_CONTA_PARTICIPANTE=cp.COD_CONTA_PARTICIPANTE "
+                    "WHERE cp.NUM_CONTA_PARTICIPANTE IN ("
+                    + ", ".join(_sql_literal(value) for value in values[offset:offset + 1000])
+                    + ")"
+                    for offset in range(0, len(values), 1000)
+                ],
+            )
+
+    if joined is None or not base:
+        errors["DICRE_BASES"] = "synthetic emitter/base pairs unavailable"
+    else:
+        pairs = joined.select("emitter", "base_id").where(
+            F.col("emitter").isNotNull() & F.col("base_id").isNotNull()
+        ).dropDuplicates().limit(100_001).collect()
+        if len(pairs) > 100_000:
+            errors["DICRE_BASES"] = "more than 100000 synthetic emitter/base pairs"
+        elif pairs:
+            run_many(
+                "DICRE_BASES",
+                [
+                    "SELECT DISTINCT pb.NUM_CONTA_PARTICIPANTE, pb.NUM_ID_BASE_CREDITO "
+                    f"FROM {cfg.schema}.PARAMETRO_BASE_CREDITO pb "
+                    f"JOIN {cfg.schema}.BASE_CREDITO b "
+                    "ON b.NUM_ID_BASE_CREDITO=pb.NUM_ID_BASE_CREDITO "
+                    f"JOIN {cfg.schema}.TIPO_BASE_CREDITO tb "
+                    "ON tb.NUM_ID_TIPO_BASE_CREDITO=b.NUM_ID_TIPO_BASE_CREDITO "
+                    "WHERE TRIM(tb.COD_TIPO_BASE_CREDITO)='2' AND ("
+                    + " OR ".join(
+                        "(pb.NUM_CONTA_PARTICIPANTE=" + _sql_literal(row["emitter"])
+                        + " AND pb.NUM_ID_BASE_CREDITO=" + _sql_literal(row["base_id"])
+                        + ")" for row in pairs[offset:offset + 500]
+                    ) + ")"
+                    for offset in range(0, len(pairs), 500)
+                ],
+            )
+
+    if joined is None or not root_type:
+        errors["DICRE_IF_COMPATIBILITY"] = "synthetic IF compatibility triples unavailable"
+    else:
+        triples = joined.select(
+            "credit_if_type", "guaranteed_if_type", "lot_type"
+        ).dropna().dropDuplicates().limit(100_001).collect()
+        if len(triples) > 100_000:
+            errors["DICRE_IF_COMPATIBILITY"] = "more than 100000 synthetic IF triples"
+        elif triples:
+            run_many(
+                "DICRE_IF_COMPATIBILITY",
+                [
+                    "SELECT DISTINCT h.NUM_TIPO_IF, h.NUM_TIPO_IF_GARANTIDO, "
+                    "h.NUM_ID_TIPO_LOTE "
+                    f"FROM {cfg.schema}.HABILITA_IF_TIPO_LOTE h "
+                    f"JOIN {cfg.schema}.TIPO_IF subtype ON subtype.NUM_TIPO_IF=h.NUM_TIPO_IF "
+                    f"JOIN {cfg.schema}.TIPO_IF guaranteed "
+                    "ON guaranteed.NUM_TIPO_IF=h.NUM_TIPO_IF_GARANTIDO "
+                    "WHERE h.DAT_EXCLUSAO IS NULL AND subtype.DAT_EXCLUSAO IS NULL "
+                    "AND guaranteed.DAT_EXCLUSAO IS NULL AND h.NUM_ID_TIPO_LOTE=2 "
+                    "AND TRIM(guaranteed.COD_TIPO_IF)='LCA' AND ("
+                    + " OR ".join(
+                        "(h.NUM_TIPO_IF=" + _sql_literal(row["credit_if_type"])
+                        + " AND h.NUM_TIPO_IF_GARANTIDO="
+                        + _sql_literal(row["guaranteed_if_type"])
+                        + " AND h.NUM_ID_TIPO_LOTE=" + _sql_literal(row["lot_type"]) + ")"
+                        for row in triples[offset:offset + 500]
+                    ) + ")"
+                    for offset in range(0, len(triples), 500)
+                ],
+            )
+
+    qualification_columns = (
+        ("NUM_ID_QUALIF_FINALIDADE", "20"),
+        ("NUM_ID_QUALIF_JUROS_A_CADA", "21"),
+        ("NUM_ID_QUALIF_AMORT_A_CADA", "22"),
+        ("NUM_ID_QUALIF_GARANTIA_ESPEC", "23"),
+    )
+    qualification_rows = []
+    for name, subgroup in qualification_columns:
+        actual = resolve(root, name)
+        if actual:
+            qualification_rows.extend(
+                (row["value"], subgroup)
+                for row in root.select(
+                    _canon_key_col(F.col(actual)).alias("value")
+                ).where(F.col("value").isNotNull()).dropDuplicates().limit(100_001).collect()
+            )
+    qualification_rows = sorted(set(qualification_rows))
+    if len(qualification_rows) > 100_000:
+        errors["DICRE_QUALIFICATIONS"] = "more than 100000 synthetic qualification pairs"
+    elif qualification_rows:
+        run_many(
+            "DICRE_QUALIFICATIONS",
+            [
+                "SELECT DISTINCT r.NUM_ID_QUALIFICACAO, "
+                "s.NUM_ID_QUALIFICACAO_SUBGRUPO "
+                f"FROM {cfg.schema}.REL_QUALIF_SUBG_TIPO_IF r "
+                f"JOIN {cfg.schema}.QUALIFICACAO q "
+                "ON q.NUM_ID_QUALIFICACAO=r.NUM_ID_QUALIFICACAO "
+                f"JOIN {cfg.schema}.QUALIF_SUBG_TIPO_IF s "
+                "ON s.NUM_ID_QUALIF_SUBG_TIPO_IF=r.NUM_ID_QUALIF_SUBG_TIPO_IF "
+                f"JOIN {cfg.schema}.QUALIFICACAO_SUBGRUPO sg "
+                "ON sg.NUM_ID_QUALIFICACAO_SUBGRUPO=s.NUM_ID_QUALIFICACAO_SUBGRUPO "
+                f"JOIN {cfg.schema}.TIPO_IF tif ON tif.NUM_TIPO_IF=s.NUM_TIPO_IF "
+                "WHERE sg.NUM_ID_QUALIFICACAO_GRUPO=4 AND r.IND_HABILITADO='S' "
+                "AND q.NUM_ID_SITUACAO_QUALIFICACAO=0 "
+                "AND TRIM(tif.COD_TIPO_IF)='LCA' AND ("
+                + " OR ".join(
+                    "(r.NUM_ID_QUALIFICACAO=" + _sql_literal(value)
+                    + " AND s.NUM_ID_QUALIFICACAO_SUBGRUPO=" + _sql_literal(subgroup) + ")"
+                    for value, subgroup in qualification_rows[offset:offset + 500]
+                ) + ")"
+                for offset in range(0, len(qualification_rows), 500)
+            ],
+        )
+    else:
+        frames["DICRE_QUALIFICATIONS"] = spark.createDataFrame(
+            [], "NUM_ID_QUALIFICACAO string, NUM_ID_QUALIFICACAO_SUBGRUPO string"
+        )
+
+    run(
+        "TCTPFEATURE_TOGGLE",
+        "SELECT COD_FTRE_TOG, IND_FTRE_HAB, DATA_INIC_VIG_FTRE, DATA_FIM_VIG_FTRE "
+        f"FROM {cfg.schema}.TCTPFEATURE_TOGGLE "
+        f"WHERE COD_FTRE_TOG='{DICRE_IPOC_TOGGLE}'",
+    )
+    toggle = frames.get("TCTPFEATURE_TOGGLE")
+    inclusion = resolve(root, "DAT_INCLUSAO")
+    ipoc = resolve(root, "COD_IPOC")
+    if toggle is not None and inclusion and ipoc:
+        toggle_roots = root.select(
+            F.to_date(F.col(inclusion)).alias("inclusion_date"),
+            _dicre_text(F.col(ipoc)).alias("ipoc"),
+        )
+        enabled = _dicre_enabled_credits(toggle_roots, toggle)
+        if enabled is not None:
+            ipocs, error = _dicre_collect_values(enabled, F.col("ipoc"), "value")
+            if error:
+                errors["CREDITO_DC_TARGET"] = error
+            elif ipocs:
+                run_many(
+                    "CREDITO_DC_TARGET",
+                    [
+                        "SELECT COD_IPOC, DAT_EXCLUSAO "
+                        f"FROM {cfg.schema}.CREDITO_DC WHERE DAT_EXCLUSAO IS NULL "
+                        "AND TRIM(COD_IPOC) IN ("
+                        + ", ".join(
+                            _sql_literal(value) for value in ipocs[offset:offset + 1000]
+                        ) + ")"
+                        for offset in range(0, len(ipocs), 1000)
+                    ],
+                )
+            else:
+                frames["CREDITO_DC_TARGET"] = spark.createDataFrame(
+                    [], "COD_IPOC string, DAT_EXCLUSAO string"
+                )
+    return frames, errors
+
+
+def check_dicre_registration_profile(
+    tables: Dict[str, DataFrame], sample: int, registration_profile: bool,
+    profile: ValidationProfile,
+) -> List[Finding]:
+    if profile.pipeline != "dicre" or not registration_profile:
+        return []
+    requirements = {
+        LOTE_TABLE: (
+            "NUM_ID_LOTE", "NUM_ID_TIPO_LOTE", "IND_REVOLVENCIA", "DAT_EXCLUSAO",
+        ),
+        CREDITO_DC_TABLE: (
+            "NUM_ID_CREDITO_DC", "COD_CREDITO_DC", "NUM_ID_LOTE", "NUM_TIPO_IF",
+            "VAL_PU", "VAL_PU_EMISSAO", "DAT_VAL_PU", "DAT_CONTRATACAO",
+            "DAT_VENCIMENTO", "COD_TIPO_PESSOA", "NUM_ID_MODALIDADE_CREDITO",
+            "NUM_ID_TIPO_GARANTIA", "NUM_ID_BASE_CREDITO", "NUM_ID_INDEXADOR_CREDITO",
+            "NUM_ID_FORMA_PAGAMENTO", "NUM_ID_TIPO_AMORTIZACAO", "IND_INADIMPLENTE",
+            "IND_MULTIPLO_IPOC", "IND_BAIXA_AUTOMATICA_VENC", "NUM_ID_UF",
+        ),
+        HISTORICO_CREDITO_DC_TABLE: (
+            "NUM_ID_HISTORICO_CREDITO_DC", "COD_CREDITO_DC", "NUM_ID_LOTE",
+            "NUM_ID_TIPO_ACAO_HIST_CREDITO", "VAL_PU", "DAT_VAL_PU",
+            "IND_INADIMPLENTE", "DAT_IND_INADIMPLENTE",
+        ),
+    }
+    columns, missing = _credito_scr_columns(tables, requirements)
+    if missing:
+        return [_dicre_unavailable("8f.profile.availability", missing, SEV_WARN)]
+    lot_cols = columns[LOTE_TABLE]
+    root_cols = columns[CREDITO_DC_TABLE]
+    history_cols = columns[HISTORICO_CREDITO_DC_TABLE]
+    lots = _credito_scr_active(tables[LOTE_TABLE])
+    roots = tables[CREDITO_DC_TABLE]
+    inclusion = tables[HISTORICO_CREDITO_DC_TABLE].where(
+        _canon_key_col(F.col(history_cols["NUM_ID_TIPO_ACAO_HIST_CREDITO"])) == "1"
+    )
+    out: List[Finding] = []
+
+    lot_bad = lots.where(
+        ~F.coalesce(
+            (_dicre_text(F.col(lot_cols["NUM_ID_TIPO_LOTE"])) == "2")
+            & (_dicre_text(F.col(lot_cols["IND_REVOLVENCIA"])) == "S"),
+            F.lit(False),
+        )
+    )
+    count = lot_bad.count()
+    out.append(Finding(
+        "8f.profile.lot_constants", "DICRE observed registration profile",
+        SEV_WARN if count else SEV_INFO, LOTE_TABLE, count == 0, count=count,
+        column="NUM_ID_TIPO_LOTE,IND_REVOLVENCIA",
+        sample=_sample_keys(lot_bad, [lot_cols["NUM_ID_LOTE"]], sample),
+        hint="Treat type-2/revolvencia-S as one DICREINCL batch observation only."
+             if count else "",
+        message="Active lots differing from the observed LCA DICRE batch constants.",
+    ))
+
+    root_expected = {
+        "VAL_PU": "1", "VAL_PU_EMISSAO": "1", "COD_TIPO_PESSOA": "PJ",
+        "NUM_ID_MODALIDADE_CREDITO": "46", "NUM_ID_TIPO_GARANTIA": "16",
+        "NUM_ID_BASE_CREDITO": "4199", "IND_INADIMPLENTE": "N",
+        "IND_MULTIPLO_IPOC": "N", "IND_BAIXA_AUTOMATICA_VENC": "N",
+    }
+    root_mismatch = reduce(
+        lambda left, right: left | right,
+        [
+            ~F.coalesce(
+                _canon_key_col(F.col(root_cols[name])) == expected, F.lit(False)
+            )
+            for name, expected in root_expected.items()
+        ],
+    )
+    root_bad = roots.where(root_mismatch)
+    count = root_bad.count()
+    out.append(Finding(
+        "8f.profile.root_constants", "DICRE observed registration profile",
+        SEV_WARN if count else SEV_INFO, CREDITO_DC_TABLE, count == 0, count=count,
+        column=",".join(root_expected),
+        sample=_sample_keys(root_bad, [root_cols["NUM_ID_CREDITO_DC"]], sample),
+        hint="Confirm drift against another successful DICRE route; these are not hard rules."
+             if count else "",
+        message="CREDITO_DC rows differing from common values in the observed batch.",
+    ))
+
+    observed_combinations = {
+        ("53", "2", "268", "6"),
+        ("139", "1", "267", "3"),
+        ("166", "2", "268", "6"),
+        ("167", "2", "267", "1"),
+        ("177", "2", "297", "6"),
+    }
+    variants = roots.select(
+        _canon_key_col(F.col(root_cols["NUM_ID_CREDITO_DC"])).alias("credit_id"),
+        _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])).alias("if_type"),
+        _canon_key_col(F.col(root_cols["NUM_ID_INDEXADOR_CREDITO"])).alias("indexer"),
+        _canon_key_col(F.col(root_cols["NUM_ID_FORMA_PAGAMENTO"])).alias("payment"),
+        _canon_key_col(F.col(root_cols["NUM_ID_TIPO_AMORTIZACAO"])).alias("amortization"),
+    )
+    observed = reduce(
+        lambda left, right: left | right,
+        [
+            (F.col("if_type") == if_type) & (F.col("indexer") == indexer)
+            & (F.col("payment") == payment) & (F.col("amortization") == amortization)
+            for if_type, indexer, payment, amortization in observed_combinations
+        ],
+    )
+    variant_bad = variants.where(~F.coalesce(observed, F.lit(False)))
+    count = variant_bad.count()
+    out.append(Finding(
+        "8f.profile.subtype_combinations", "DICRE observed registration profile",
+        SEV_WARN if count else SEV_INFO, CREDITO_DC_TABLE, count == 0, count=count,
+        column="NUM_TIPO_IF,NUM_ID_INDEXADOR_CREDITO,NUM_ID_FORMA_PAGAMENTO,"
+               "NUM_ID_TIPO_AMORTIZACAO",
+        sample=_sample_keys(
+            variant_bad, ["credit_id", "if_type", "indexer", "payment", "amortization"], sample
+        ),
+        hint="Validate new subtype combinations through live target FKs and compatibility."
+             if count else "",
+        message="Rows outside the five observed CCB/CMER/CCCM/CCIN/CDIV combinations.",
+    ))
+
+    root_history = roots.select(
+        _dicre_text(F.col(root_cols["COD_CREDITO_DC"])).alias("code"),
+        _canon_key_col(F.col(root_cols["NUM_ID_LOTE"])).alias("lot_id"),
+        _canon_key_col(F.col(root_cols["NUM_ID_CREDITO_DC"])).alias("credit_id"),
+        F.col(root_cols["VAL_PU"]).alias("root_val_pu"),
+        F.col(root_cols["DAT_VAL_PU"]).alias("root_dat_val_pu"),
+        F.col(root_cols["IND_INADIMPLENTE"]).alias("root_default"),
+    ).join(
+        inclusion.select(
+            _dicre_text(F.col(history_cols["COD_CREDITO_DC"])).alias("code"),
+            _canon_key_col(F.col(history_cols["NUM_ID_LOTE"])).alias("lot_id"),
+            _canon_key_col(F.col(history_cols["NUM_ID_HISTORICO_CREDITO_DC"]))
+            .alias("history_id"),
+            F.col(history_cols["VAL_PU"]).alias("history_val_pu"),
+            F.col(history_cols["DAT_VAL_PU"]).alias("history_dat_val_pu"),
+            F.col(history_cols["IND_INADIMPLENTE"]).alias("history_default"),
+        ), ["code", "lot_id"], "inner",
+    )
+    history_bad = root_history.where(
+        ~F.col("root_val_pu").eqNullSafe(F.col("history_val_pu"))
+        | ~F.col("root_dat_val_pu").eqNullSafe(F.col("history_dat_val_pu"))
+        | ~F.col("root_default").eqNullSafe(F.col("history_default"))
+    )
+    count = history_bad.count()
+    out.append(Finding(
+        "8f.profile.history_copied_values", "DICRE observed registration profile",
+        SEV_WARN if count else SEV_INFO, HISTORICO_CREDITO_DC_TABLE,
+        count == 0, count=count, column="VAL_PU,DAT_VAL_PU,IND_INADIMPLENTE",
+        sample=_sample_keys(history_bad, ["credit_id", "history_id"], sample),
+        hint="Copied inclusion values are advisory because later lifecycle changes may drift."
+             if count else "",
+        message="Inclusion history copied values differing from current CREDITO_DC.",
+    ))
+
+    financial = roots.select(
+        _canon_key_col(F.col(root_cols["NUM_ID_CREDITO_DC"])).alias("credit_id"),
+        F.expr(f"try_cast(`{root_cols['VAL_PU']}` as decimal(38,10))").alias("pu"),
+        F.expr(f"try_cast(`{root_cols['VAL_PU_EMISSAO']}` as decimal(38,10))")
+        .alias("issue_pu"),
+        F.to_date(F.col(root_cols["DAT_VAL_PU"])).alias("pu_date"),
+        F.to_date(F.col(root_cols["DAT_CONTRATACAO"])).alias("contract_date"),
+        F.to_date(F.col(root_cols["DAT_VENCIMENTO"])).alias("maturity"),
+    )
+    financial_bad = financial.where(
+        (F.col("pu").isNotNull() & F.col("issue_pu").isNotNull()
+         & (F.col("pu") != F.col("issue_pu")))
+        | (F.col("pu_date").isNotNull() & F.col("contract_date").isNotNull()
+           & (F.col("pu_date") != F.col("contract_date")))
+        | (F.col("contract_date").isNotNull() & F.col("maturity").isNotNull()
+           & (F.col("contract_date") > F.col("maturity")))
+    )
+    count = financial_bad.count()
+    out.append(Finding(
+        "8f.profile.financial_dates", "DICRE observed registration profile",
+        SEV_WARN if count else SEV_INFO, CREDITO_DC_TABLE, count == 0, count=count,
+        column="VAL_PU,VAL_PU_EMISSAO,DAT_VAL_PU,DAT_CONTRATACAO,DAT_VENCIMENTO",
+        sample=_sample_keys(financial_bad, ["credit_id"], sample),
+        hint="These financial/date equalities are observed, not universal DICRE rules."
+             if count else "",
+        message="Rows outside the observed financial/date relationships.",
+    ))
+
+    uf_rows = roots.select(
+        _canon_key_col(F.col(root_cols["NUM_ID_CREDITO_DC"])).alias("credit_id"),
+        _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])).alias("if_type"),
+        _canon_key_col(F.col(root_cols["NUM_ID_UF"])).alias("uf"),
+    )
+    uf_bad = uf_rows.where(
+        ((F.col("if_type") == "53") & F.col("uf").isNull())
+        | ((F.col("if_type") != "53") & F.col("uf").isNotNull())
+    )
+    count = uf_bad.count()
+    out.append(Finding(
+        "8f.profile.uf_behavior", "DICRE observed registration profile",
+        SEV_WARN if count else SEV_INFO, CREDITO_DC_TABLE, count == 0, count=count,
+        column="NUM_TIPO_IF,NUM_ID_UF",
+        sample=_sample_keys(uf_bad, ["credit_id", "if_type", "uf"], sample),
+        hint="Interpret UF with HAB_CAMPO_UF_EMISSAO_DICRE_LCA before making it hard."
+             if count else "",
+        message="UF behavior differing from the observed enabled-toggle batch.",
+    ))
+
+    closure_tables = all(table in tables for table in (
+        TCTPIROP_ATIV_TABLE, TCTPDET_CHAV_IROP_CCB_TABLE,
+        TCTPDET_CHAV_IROP_CMER_TABLE, TCTPSOLI_IROP_ATIV_TABLE,
+    ))
+    if not closure_tables:
+        out.append(_dicre_unavailable(
+            "8f.profile.irop_shape", ["complete IROP closure"], SEV_WARN
+        ))
+    else:
+        irop_cols, irop_missing = _credito_scr_columns(tables, {
+            TCTPIROP_ATIV_TABLE: ("NUM_IROP_ATIV", "NUM_IDT_CRE_DC", "NUM_CHAV_IROP"),
+            TCTPDET_CHAV_IROP_CCB_TABLE: ("NUM_CHAV_IROP",),
+            TCTPDET_CHAV_IROP_CMER_TABLE: ("NUM_CHAV_IROP",),
+            TCTPSOLI_IROP_ATIV_TABLE: ("NUM_IROP_ATIV",),
+        })
+        if irop_missing:
+            out.append(_dicre_unavailable("8f.profile.irop_shape", irop_missing, SEV_WARN))
+        else:
+            irops = tables[TCTPIROP_ATIV_TABLE].select(
+                _canon_key_col(F.col(irop_cols[TCTPIROP_ATIV_TABLE]["NUM_IDT_CRE_DC"]))
+                .alias("credit_id"),
+                _canon_key_col(F.col(irop_cols[TCTPIROP_ATIV_TABLE]["NUM_IROP_ATIV"]))
+                .alias("irop_id"),
+                _canon_key_col(F.col(irop_cols[TCTPIROP_ATIV_TABLE]["NUM_CHAV_IROP"]))
+                .alias("irop_key"),
+            )
+            ccb = tables[TCTPDET_CHAV_IROP_CCB_TABLE].select(
+                _canon_key_col(F.col(irop_cols[TCTPDET_CHAV_IROP_CCB_TABLE]["NUM_CHAV_IROP"]))
+                .alias("ccb_key")
+            )
+            cmer = tables[TCTPDET_CHAV_IROP_CMER_TABLE].select(
+                _canon_key_col(F.col(irop_cols[TCTPDET_CHAV_IROP_CMER_TABLE]["NUM_CHAV_IROP"]))
+                .alias("cmer_key")
+            )
+            requests = tables[TCTPSOLI_IROP_ATIV_TABLE].select(
+                _canon_key_col(F.col(irop_cols[TCTPSOLI_IROP_ATIV_TABLE]["NUM_IROP_ATIV"]))
+                .alias("request_irop_id")
+            )
+            closure_counts = irops.join(
+                ccb.groupBy("ccb_key").count().withColumnRenamed("count", "ccb_count"),
+                F.col("irop_key") == F.col("ccb_key"), "left",
+            ).join(
+                cmer.groupBy("cmer_key").count().withColumnRenamed("count", "cmer_count"),
+                F.col("irop_key") == F.col("cmer_key"), "left",
+            ).join(
+                requests.groupBy("request_irop_id").count().withColumnRenamed(
+                    "count", "request_count"
+                ),
+                F.col("irop_id") == F.col("request_irop_id"), "left",
+            ).groupBy("credit_id").agg(
+                F.count(F.lit(1)).alias("irop_count"),
+                F.sum(F.coalesce(F.col("ccb_count"), F.lit(0))).alias("ccb_count"),
+                F.sum(F.coalesce(F.col("cmer_count"), F.lit(0))).alias("cmer_count"),
+                F.sum(F.coalesce(F.col("request_count"), F.lit(0))).alias("request_count"),
+            )
+            shape = variants.select("credit_id", "if_type").join(
+                closure_counts, "credit_id", "left"
+            ).fillna(0, ["irop_count", "ccb_count", "cmer_count", "request_count"])
+            shape_bad = shape.where(
+                ((F.col("if_type") == "53")
+                 & ((F.col("irop_count") != 1) | (F.col("ccb_count") != 1)
+                    | (F.col("cmer_count") != 0) | (F.col("request_count") != 1)))
+                | ((F.col("if_type") == "139")
+                   & ((F.col("irop_count") != 1) | (F.col("ccb_count") != 0)
+                      | (F.col("cmer_count") != 1) | (F.col("request_count") != 1)))
+                | ((~F.col("if_type").isin("53", "139")) & (F.col("irop_count") != 0))
+            )
+            count = shape_bad.count()
+            out.append(Finding(
+                "8f.profile.irop_shape", "DICRE observed registration profile",
+                SEV_WARN if count else SEV_INFO, TCTPIROP_ATIV_TABLE,
+                count == 0, count=count, column="observed CCB/CMER closure",
+                sample=_sample_keys(shape_bad, ["credit_id", "if_type"], sample),
+                hint="Do not promote observed CCB/CMER closure cardinality to a hard rule."
+                     if count else "",
+                message="IROP closure shape differing from the observed batch.",
+            ))
     return out
 
 
@@ -4720,8 +6732,12 @@ def emit_report(spark: SparkSession, findings: List[Finding],
         by_cat.setdefault(f.category, []).append(f)
 
     print("\n" + "=" * 78)
-    print(f"SYNTHETIC OUTPUT VALIDATION — product={profile.name} "
-          f"(NUM_TIPO_IF={profile.num_tipo_if})")
+    roots = {"credito_scr": CREDITO_SCR_TABLE, "dicre": CREDITO_DC_TABLE}
+    identity = (
+        f"root={roots[profile.pipeline]}" if profile.pipeline in roots
+        else f"NUM_TIPO_IF={profile.num_tipo_if}"
+    )
+    print(f"SYNTHETIC OUTPUT VALIDATION — product={profile.name} ({identity})")
     print("=" * 78)
     print(f"input: {resolved_input}")
     for cat in sorted(by_cat):
@@ -4791,7 +6807,7 @@ def emit_report(spark: SparkSession, findings: List[Finding],
 # ---------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Validate a synthetic CDB/RDB product output against application rules.")
+        description="Validate a synthetic financial product output against application rules.")
     p.add_argument("--product", required=True, choices=sorted(VALIDATION_PROFILES),
                    help="Product profile to validate against (selects identity type, object "
                         "service, domain, and which strict checks are supported).")
@@ -4871,11 +6887,18 @@ def main() -> None:
     run_started = perf_counter()
     args = parse_args()
     profile = get_validation_profile(args.product)
+    is_credito_scr = profile.pipeline == "credito_scr"
+    is_dicre = profile.pipeline == "dicre"
+    is_non_if = is_credito_scr or is_dicre
     skip_prefixes = [prefix.strip() for prefix in args.skip_check if prefix.strip()]
     if _check_is_skipped("0.identity", skip_prefixes):
         raise SystemExit("Product identity is non-skippable; remove its --skip-check prefix.")
     if args.shape_baseline and _check_is_skipped("7.baseline", skip_prefixes):
         raise SystemExit("A supplied baseline contract is non-skippable.")
+    if is_non_if and args.shape_baseline:
+        raise SystemExit(
+            f"--shape-baseline is not supported for the non-IF {profile.name} pipeline."
+        )
     cfg = read_config(args.no_oracle, profile, args.input_base)
     spark = create_spark()
     spark.sparkContext.setLogLevel("WARN")
@@ -4926,38 +6949,62 @@ def main() -> None:
     # Product identity preflight — before any semantic check.
     findings += _timed(
         "category 0 identity",
-        lambda: check_product_identity(tables, profile, args.sample_size),
+        lambda: (
+            check_credito_scr_identity(tables, profile, args.sample_size)
+            if is_credito_scr else check_dicre_identity(tables, profile, args.sample_size)
+            if is_dicre else check_product_identity(tables, profile, args.sample_size)
+        ),
     )
-    findings += _run_check_group(
-        "category 1 polymorphism", ("1.", "1a.", "1b.", "1c."), skip_prefixes,
-        lambda: check_polymorphism(tables, meta, args.sample_size),
+    findings += _timed(
+        "category 0 metadata coverage",
+        lambda: (
+            check_credito_scr_metadata(meta, args.no_oracle, profile)
+            if is_credito_scr else check_dicre_metadata(meta, args.no_oracle, profile)
+            if is_dicre else []
+        ),
     )
-    if args.shape_baseline:
+    if is_credito_scr:
         findings += _run_check_group(
-            "category 1 baseline subtype verification", ("1.map_snapshot",), skip_prefixes,
-            lambda: verify_subtype_map_from_baseline(spark, args.shape_baseline),
+            "category 2d Credito SCR graph", ("2d.",), skip_prefixes,
+            lambda: check_credito_scr_graph(tables, args.sample_size, profile),
         )
-    if not args.no_oracle and args.verify_subtype_map:
+    elif is_dicre:
         findings += _run_check_group(
-            "category 1 Oracle subtype verification", ("1.map_verify",), skip_prefixes,
-            lambda: verify_subtype_map_against_production(spark, cfg),
+            "category 2f DICRE graph", ("2f.",), skip_prefixes,
+            lambda: check_dicre_graph(tables, args.sample_size, profile)
+            + check_dicre_irop_graph(tables, args.sample_size, profile),
         )
-    elif not args.no_oracle:
-        logger.info(
-            "Production subtype-map audit skipped; use --verify-subtype-map to run it."
+    else:
+        findings += _run_check_group(
+            "category 1 polymorphism", ("1.", "1a.", "1b.", "1c."), skip_prefixes,
+            lambda: check_polymorphism(tables, meta, args.sample_size),
         )
-    findings += _run_check_group(
-        "category 2 domain", ("2.domain",), skip_prefixes,
-        lambda: check_domain(tables, meta, args.sample_size, profile),
-    )
-    findings += _run_check_group(
-        "category 2b CDB variants", ("2b.",), skip_prefixes,
-        lambda: check_cdb_variant_rules(tables, args.sample_size, profile),
-    )
-    findings += _run_check_group(
-        "category 2c RDB resgate schedules", ("2c.",), skip_prefixes,
-        lambda: check_rdb_resgate_schedule_rules(tables, args.sample_size, profile),
-    )
+        if args.shape_baseline:
+            findings += _run_check_group(
+                "category 1 baseline subtype verification", ("1.map_snapshot",), skip_prefixes,
+                lambda: verify_subtype_map_from_baseline(spark, args.shape_baseline),
+            )
+        if not args.no_oracle and args.verify_subtype_map:
+            findings += _run_check_group(
+                "category 1 Oracle subtype verification", ("1.map_verify",), skip_prefixes,
+                lambda: verify_subtype_map_against_production(spark, cfg),
+            )
+        elif not args.no_oracle:
+            logger.info(
+                "Production subtype-map audit skipped; use --verify-subtype-map to run it."
+            )
+        findings += _run_check_group(
+            "category 2 domain", ("2.domain",), skip_prefixes,
+            lambda: check_domain(tables, meta, args.sample_size, profile),
+        )
+        findings += _run_check_group(
+            "category 2b CDB variants", ("2b.",), skip_prefixes,
+            lambda: check_cdb_variant_rules(tables, args.sample_size, profile),
+        )
+        findings += _run_check_group(
+            "category 2c RDB resgate schedules", ("2c.",), skip_prefixes,
+            lambda: check_rdb_resgate_schedule_rules(tables, args.sample_size, profile),
+        )
     if args.max_parent_keys is not None:
         logger.warning("--max-parent-keys is deprecated and ignored; "
                        "see --max-residual-keys.")
@@ -4982,10 +7029,11 @@ def main() -> None:
         "category 3b primary keys", ("3b.",), skip_prefixes,
         lambda: check_primary_keys(tables, meta, args.sample_size, args.no_oracle),
     )
-    findings += _run_check_group(
-        "category 3c clone map", ("3c.",), skip_prefixes,
-        lambda: check_clone_map(tables, profile, args.sample_size),
-    )
+    if not is_non_if:
+        findings += _run_check_group(
+            "category 3c clone map", ("3c.",), skip_prefixes,
+            lambda: check_clone_map(tables, profile, args.sample_size),
+        )
     if args.emit_faltantes and not _check_is_skipped("3.fk_orphan", skip_prefixes):
         _timed(
             "category 3 emit faltantes",
@@ -5003,27 +7051,89 @@ def main() -> None:
         "category 5 dates", ("5.",), skip_prefixes,
         lambda: check_dates(tables, meta, args.sample_size),
     )
-    findings += _run_check_group(
-        "category 6 lookup combinations", ("6.required", "6.combo"), skip_prefixes,
-        lambda: check_lookup_combos(
-            spark, cfg, tables, meta, args.sample_size, args.max_residual_keys, profile,
-            skip_prefixes,
-        ),
-    )
-    findings += _run_check_group(
-        "category 7 shapes", ("7.", "7a.", "7b.", "7c.", "7d."), skip_prefixes,
-        lambda: check_shapes(
-            spark, tables, args.shape_baseline, args.sample_size,
-            args.shape_unseen_tol, args.shape_drift_tol, args.shape_op_ratio_tol, profile,
-            skip_prefixes,
-        ),
-    )
-    findings += _run_check_group(
-        "category 8 log invariants", ("8",), skip_prefixes,
-        lambda: check_log_invariants(
-            tables, args.sample_size, args.registration_profile, profile,
-        ),
-    )
+    if is_credito_scr:
+        if args.no_oracle:
+            credito_lookups, credito_lookup_errors = {}, {
+                name: "No Oracle connection"
+                for name in (
+                    "MODALIDADE_CREDITO", "PARAMETRO_BASE_CREDITO",
+                    "TCTPFEATURE_TOGGLE", "CREDITO_SCR_TARGET",
+                )
+            }
+        else:
+            credito_lookups, credito_lookup_errors = _timed(
+                "category 6d Credito SCR target lookup setup",
+                lambda: load_credito_scr_target_frames(
+                    spark, cfg, tables, args.registration_profile
+                ),
+            )
+        findings += _run_check_group(
+            "category 6d Credito SCR target lookups", ("6d.",), skip_prefixes,
+            lambda: check_credito_scr_target_frames(
+                tables, credito_lookups.get("MODALIDADE_CREDITO"),
+                credito_lookups.get("PARAMETRO_BASE_CREDITO"),
+                credito_lookups.get("TCTPFEATURE_TOGGLE"), args.sample_size, profile,
+                credito_lookup_errors, credito_lookups.get("CONTA_PARTICIPANTE"),
+                args.registration_profile, credito_lookups.get("CREDITO_SCR_TARGET"),
+            ),
+        )
+        findings += _run_check_group(
+            "category 8d Credito SCR insertion profile", ("8d.",), skip_prefixes,
+            lambda: check_credito_scr_registration_profile(
+                tables, args.sample_size, args.registration_profile, profile,
+            ),
+        )
+    elif is_dicre:
+        if _check_group_is_skipped(("6f.",), skip_prefixes):
+            logger.info("Skipped category 6f DICRE target lookup setup (--skip-check).")
+        else:
+            if args.no_oracle:
+                dicre_lookups, dicre_lookup_errors = {}, {
+                    name: "No Oracle connection"
+                    for name in (
+                        "DICRE_ACCOUNTS", "DICRE_BASES", "DICRE_IF_COMPATIBILITY",
+                        "DICRE_QUALIFICATIONS", "TCTPFEATURE_TOGGLE", "CREDITO_DC_TARGET",
+                    )
+                }
+            else:
+                dicre_lookups, dicre_lookup_errors = _timed(
+                    "category 6f DICRE target lookup setup",
+                    lambda: load_dicre_target_frames(spark, cfg, tables),
+                )
+            findings += _run_check_group(
+                "category 6f DICRE target eligibility", ("6f.",), skip_prefixes,
+                lambda: check_dicre_target_frames(
+                    tables, dicre_lookups, args.sample_size, profile, dicre_lookup_errors,
+                ),
+            )
+        findings += _run_check_group(
+            "category 8f DICRE insertion profile", ("8f.",), skip_prefixes,
+            lambda: check_dicre_registration_profile(
+                tables, args.sample_size, args.registration_profile, profile,
+            ),
+        )
+    else:
+        findings += _run_check_group(
+            "category 6 lookup combinations", ("6.required", "6.combo"), skip_prefixes,
+            lambda: check_lookup_combos(
+                spark, cfg, tables, meta, args.sample_size, args.max_residual_keys, profile,
+                skip_prefixes,
+            ),
+        )
+        findings += _run_check_group(
+            "category 7 shapes", ("7.", "7a.", "7b.", "7c.", "7d."), skip_prefixes,
+            lambda: check_shapes(
+                spark, tables, args.shape_baseline, args.sample_size,
+                args.shape_unseen_tol, args.shape_drift_tol, args.shape_op_ratio_tol, profile,
+                skip_prefixes,
+            ),
+        )
+        findings += _run_check_group(
+            "category 8 log invariants", ("8",), skip_prefixes,
+            lambda: check_log_invariants(
+                tables, args.sample_size, args.registration_profile, profile,
+            ),
+        )
 
     baseline_identity = None
     if args.shape_baseline:
