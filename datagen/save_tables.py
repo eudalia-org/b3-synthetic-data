@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -221,6 +222,9 @@ def get_extract_env() -> dict[str, str]:
     config["DATAGEN_JDBC_PARTITION_COLUMNS"] = os.environ.get(
         "DATAGEN_JDBC_PARTITION_COLUMNS", ""
     )
+    config["DATAGEN_JDBC_PARTITION_BOUNDS"] = os.environ.get(
+        "DATAGEN_JDBC_PARTITION_BOUNDS", ""
+    )
     config["DATAGEN_JDBC_READ_TIMEOUT_MS"] = os.environ.get(
         "DATAGEN_JDBC_READ_TIMEOUT_MS", DEFAULT_READ_TIMEOUT_MS
     )
@@ -300,6 +304,30 @@ def parse_partition_column_overrides(raw_overrides: str) -> dict[str, str]:
         column = column.strip().upper()
         if table and column:
             overrides[table] = column
+    return overrides
+
+
+def parse_partition_bounds_overrides(
+    raw_overrides: str,
+) -> dict[str, tuple[str, str]]:
+    overrides = {}
+    for item in raw_overrides.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item or "|" not in item:
+            logger.warning(
+                "Ignoring invalid partition bounds %r; expected TABLE=LOWER|UPPER",
+                item,
+            )
+            continue
+        table, bounds = item.split("=", 1)
+        lower_bound, upper_bound = bounds.split("|", 1)
+        table = table.strip().upper()
+        lower_bound = lower_bound.strip()
+        upper_bound = upper_bound.strip()
+        if table and lower_bound and upper_bound:
+            overrides[table] = (lower_bound, upper_bound)
     return overrides
 
 
@@ -442,6 +470,62 @@ def get_numeric_bounds(
     return str(normalize_numeric_bound(row[0])), str(normalize_numeric_bound(row[1]))
 
 
+def parse_datetime_bounds(bounds: tuple[str, str]) -> tuple[datetime, datetime] | None:
+    try:
+        lower_bound = datetime.fromisoformat(bounds[0])
+        upper_bound = datetime.fromisoformat(bounds[1])
+    except ValueError:
+        return None
+    if lower_bound.tzinfo is not None or upper_bound.tzinfo is not None:
+        raise ValueError("Oracle DATE partition bounds must not contain a timezone")
+    if lower_bound >= upper_bound:
+        raise ValueError("Partition lower bound must be before upper bound")
+    return lower_bound, upper_bound
+
+
+def build_oracle_date_predicates(
+    partition_column: str,
+    lower_bound: str,
+    upper_bound: str,
+    num_partitions: int,
+) -> list[str]:
+    partition_column = validate_identifier(partition_column)
+    if num_partitions <= 0:
+        raise ValueError("Number of JDBC partitions must be greater than zero")
+    parsed_bounds = parse_datetime_bounds((lower_bound, upper_bound))
+    if parsed_bounds is None:
+        raise ValueError("Oracle DATE partition bounds must be ISO-8601 timestamps")
+    lower_datetime, upper_datetime = parsed_bounds
+    total_seconds = int((upper_datetime - lower_datetime).total_seconds())
+    boundaries = list(
+        dict.fromkeys(
+            lower_datetime + timedelta(seconds=total_seconds * index // num_partitions)
+            for index in range(1, num_partitions)
+        )
+    )
+    if not boundaries:
+        return ["1=1"]
+
+    def oracle_date(value: datetime) -> str:
+        formatted = (
+            f"{value.year:04d}-{value.month:02d}-{value.day:02d} "
+            f"{value.hour:02d}:{value.minute:02d}:{value.second:02d}"
+        )
+        return f"TO_DATE('{formatted}', 'YYYY-MM-DD HH24:MI:SS')"
+
+    predicates = [
+        f"({partition_column} < {oracle_date(boundaries[0])} "
+        f"OR {partition_column} IS NULL)"
+    ]
+    predicates.extend(
+        f"{partition_column} >= {oracle_date(start)} "
+        f"AND {partition_column} < {oracle_date(end)}"
+        for start, end in zip(boundaries, boundaries[1:])
+    )
+    predicates.append(f"{partition_column} >= {oracle_date(boundaries[-1])}")
+    return predicates
+
+
 def load_source_dataframe(
     spark: SparkSession,
     properties: dict[str, str],
@@ -468,10 +552,18 @@ def load_source_dataframe(
     partition_column = overrides.get(f"{owner}.{table_name}") or overrides.get(table_name)
 
     if partition_column:
-        bounds = get_numeric_bounds(spark, properties, source_table, partition_column)
+        partition_column = validate_identifier(partition_column)
+        bounds_overrides = parse_partition_bounds_overrides(
+            config.get("DATAGEN_JDBC_PARTITION_BOUNDS", "")
+        )
+        bounds = bounds_overrides.get(f"{owner}.{table_name}") or bounds_overrides.get(
+            table_name
+        )
+        if bounds is None:
+            bounds = get_numeric_bounds(spark, properties, source_table, partition_column)
         if bounds:
             lower_bound, upper_bound = bounds
-            num_partitions = config["DATAGEN_JDBC_NUM_PARTITIONS"]
+            num_partitions = int(config["DATAGEN_JDBC_NUM_PARTITIONS"])
             logger.info(
                 "Reading %s in %s JDBC partitions on %s [%s, %s]",
                 source_table,
@@ -480,6 +572,23 @@ def load_source_dataframe(
                 lower_bound,
                 upper_bound,
             )
+            if parse_datetime_bounds(bounds):
+                predicates = build_oracle_date_predicates(
+                    partition_column,
+                    lower_bound,
+                    upper_bound,
+                    num_partitions,
+                )
+                jdbc_properties = {
+                    key: value for key, value in properties.items() if key != "url"
+                }
+                jdbc_properties["fetchsize"] = config["DATAGEN_JDBC_FETCH_SIZE"]
+                return spark.read.jdbc(
+                    url=properties["url"],
+                    table=source_table,
+                    predicates=predicates,
+                    properties=jdbc_properties,
+                )
             return (
                 reader.option("partitionColumn", partition_column)
                 .option("lowerBound", lower_bound)

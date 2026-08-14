@@ -164,6 +164,90 @@ class TestGetNumericBounds:
         )
 
 
+class TestPartitionBoundsOverrides:
+    def test_parses_table_date_bounds(self):
+        overrides = save_tables.parse_partition_bounds_overrides(
+            "CETIP.HISTORY=1900-01-01 00:00:00|2028-01-01 00:00:00"
+        )
+
+        assert overrides == {
+            "CETIP.HISTORY": ("1900-01-01 00:00:00", "2028-01-01 00:00:00")
+        }
+
+
+class TestBuildOracleDatePredicates:
+    def test_uses_explicit_oracle_dates_and_includes_outliers(self):
+        predicates = save_tables.build_oracle_date_predicates(
+            "event_date",
+            "1900-01-01 00:00:00",
+            "1900-01-05 00:00:00",
+            num_partitions=2,
+        )
+
+        boundary = "TO_DATE('1900-01-03 00:00:00', 'YYYY-MM-DD HH24:MI:SS')"
+        assert predicates == [
+            f"(EVENT_DATE < {boundary} OR EVENT_DATE IS NULL)",
+            f"EVENT_DATE >= {boundary}",
+        ]
+
+    def test_formats_ancient_year_with_four_digits(self):
+        predicates = save_tables.build_oracle_date_predicates(
+            "event_date",
+            "0025-02-18 00:00:00",
+            "0025-02-20 00:00:00",
+            num_partitions=2,
+        )
+
+        assert "TO_DATE('0025-02-19 00:00:00'" in predicates[0]
+
+
+class TestLoadSourceDataframe:
+    def test_uses_configured_oracle_date_bounds_without_querying_min_max(
+        self, monkeypatch
+    ):
+        class FakeRead:
+            jdbc_call = None
+
+            def format(self, *args):
+                return self
+
+            def options(self, **kwargs):
+                return self
+
+            def option(self, *args):
+                return self
+
+            def jdbc(self, **kwargs):
+                self.jdbc_call = kwargs
+                return "dataframe"
+
+        class FakeSpark:
+            read = FakeRead()
+
+        monkeypatch.setattr(
+            save_tables,
+            "get_numeric_bounds",
+            lambda *args: pytest.fail("configured bounds should skip MIN/MAX"),
+        )
+        config = {
+            "DATAGEN_JDBC_FETCH_SIZE": "5000",
+            "DATAGEN_JDBC_NUM_PARTITIONS": "2",
+            "DATAGEN_JDBC_PARTITION_COLUMNS": "CETIP.HISTORY=EVENT_DATE",
+            "DATAGEN_JDBC_PARTITION_BOUNDS": (
+                "CETIP.HISTORY=1900-01-01 00:00:00|1900-01-05 00:00:00"
+            ),
+        }
+        properties = {"url": "jdbc:oracle:thin:@host", "user": "svc"}
+
+        result = save_tables.load_source_dataframe(
+            FakeSpark(), properties, config, "SVC", "CETIP.HISTORY", "CETIP.HISTORY", None
+        )
+
+        assert result == "dataframe"
+        assert len(FakeSpark.read.jdbc_call["predicates"]) == 2
+        assert "TO_DATE" in FakeSpark.read.jdbc_call["predicates"][0]
+
+
 class TestFetchRowidPredicates:
     def test_builds_predicates_from_extents(self, monkeypatch):
         monkeypatch.setattr(save_tables, "get_data_object_id", lambda *a: OBJ)

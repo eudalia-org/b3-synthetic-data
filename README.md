@@ -102,6 +102,17 @@ DATAGEN_JDBC_NUM_PARTITIONS=64
 DATAGEN_JDBC_PARTITION_COLUMNS=BIG_TABLE=ID,OTHER_SCHEMA.OTHER_TABLE=OTHER_ID
 ```
 
+Oracle `DATE` partition columns use explicit `TO_DATE` predicates instead of session-dependent
+implicit conversion. Set fixed bounds to skip a costly `MIN/MAX` scan or exclude an anomalous
+minimum from equal-width planning; rows outside the bounds remain included in the first/last
+partition:
+
+```text
+DATAGEN_JDBC_PARTITION_COLUMNS=CETIP.HISTORICO_PU_CURVA=DAT_HISTORICO_VALORES
+DATAGEN_JDBC_PARTITION_BOUNDS=CETIP.HISTORICO_PU_CURVA=1990-01-01 00:00:00|2028-01-01 00:00:00
+DATAGEN_JDBC_NUM_PARTITIONS=2048
+```
+
 Without `DATAGEN_JDBC_PARTITION_COLUMNS`, the script uses one JDBC partition and does not
 query Oracle metadata to discover one.
 
