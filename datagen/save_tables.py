@@ -266,6 +266,27 @@ def build_raw_path(config: dict[str, str], table: str, limit: int | None = None)
     return "/".join(path_parts)
 
 
+def delete_output_path(spark: SparkSession, output_path: str) -> None:
+    spark_context = spark.sparkContext
+    hadoop_conf = spark_context._jsc.hadoopConfiguration()
+    path = spark_context._jvm.org.apache.hadoop.fs.Path(output_path)
+    filesystem = path.getFileSystem(hadoop_conf)
+    if filesystem.exists(path) and not filesystem.delete(path, True):
+        raise OSError(f"Could not delete output path: {output_path}")
+
+
+def write_output_dataframe(spark: SparkSession, dataframe, output_path: str) -> None:
+    if output_path.startswith("oci://"):
+        # OCI rename is non-atomic. Version 2 avoids v1's attempt-directory rename,
+        # which is especially failure-prone when thousands of tasks commit together.
+        spark.sparkContext._jsc.hadoopConfiguration().set(
+            "mapreduce.fileoutputcommitter.algorithm.version", "2"
+        )
+    # OCI overwrite can delete the shared parent prefix, so scope deletion to this table.
+    delete_output_path(spark, output_path)
+    dataframe.write.mode("append").parquet(output_path)
+
+
 def table_path_name(table: str) -> str:
     return table.split(".", 1)[1] if "." in table else table
 
@@ -681,7 +702,7 @@ def save_tables(
             )
 
             logger.info("Saving %s to %s", source_table, output_path)
-            df.write.mode("overwrite").parquet(output_path)
+            write_output_dataframe(spark, df, output_path)
             elapsed_seconds = time.perf_counter() - started_at
             if limit is None:
                 logger.info(

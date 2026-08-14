@@ -248,6 +248,56 @@ class TestLoadSourceDataframe:
         assert "TO_DATE" in FakeSpark.read.jdbc_call["predicates"][0]
 
 
+class TestWriteOutputDataframe:
+    def test_oci_write_uses_v2_committer_scoped_delete_and_append(self, monkeypatch):
+        class FakeHadoopConfig:
+            values = {}
+
+            def set(self, key, value):
+                self.values[key] = value
+
+        class FakeJsc:
+            config = FakeHadoopConfig()
+
+            def hadoopConfiguration(self):
+                return self.config
+
+        class FakeSparkContext:
+            _jsc = FakeJsc()
+
+        class FakeSpark:
+            sparkContext = FakeSparkContext()
+
+        class FakeWriter:
+            mode_name = None
+            path = None
+
+            def mode(self, mode_name):
+                self.mode_name = mode_name
+                return self
+
+            def parquet(self, path):
+                self.path = path
+
+        class FakeDataframe:
+            write = FakeWriter()
+
+        deleted = []
+        monkeypatch.setattr(
+            save_tables, "delete_output_path", lambda spark, path: deleted.append(path)
+        )
+        output_path = "oci://bucket@namespace/raw/HISTORY"
+
+        save_tables.write_output_dataframe(FakeSpark(), FakeDataframe(), output_path)
+
+        assert FakeJsc.config.values == {
+            "mapreduce.fileoutputcommitter.algorithm.version": "2"
+        }
+        assert deleted == [output_path]
+        assert FakeDataframe.write.mode_name == "append"
+        assert FakeDataframe.write.path == output_path
+
+
 class TestFetchRowidPredicates:
     def test_builds_predicates_from_extents(self, monkeypatch):
         monkeypatch.setattr(save_tables, "get_data_object_id", lambda *a: OBJ)

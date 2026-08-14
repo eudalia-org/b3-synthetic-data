@@ -80,6 +80,12 @@ python -m datagen.save_tables --tables BIG_TABLE --limit 100000
 Full runs write to `.../<TABLE>` and limited runs write to `.../<TABLE>_limit_<N>`.
 Both log elapsed time per table.
 
+For `oci://` outputs, the extractor uses Hadoop FileOutputCommitter v2 to avoid the
+rename-heavy v1 task commit. It deletes exactly the target table prefix before writing in
+append mode because OCI overwrite can clobber sibling prefixes. A failed job may leave partial
+files visible; consume an extract only when its `_SUCCESS` marker exists. The next run removes
+the partial table prefix before starting.
+
 Set `DATAGEN_RAW_PREFIX` to place extracts under a prefix inside the target bucket:
 
 ```bash
