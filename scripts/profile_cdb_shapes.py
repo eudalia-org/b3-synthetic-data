@@ -81,6 +81,8 @@ METRIC_VERSION = 2
 PRODUCTS: Dict[str, Dict[str, object]] = {
     "cdb_simplificado": {"num_tipo_if": 49, "simplified": True},
     "cdb": {"num_tipo_if": 49, "simplified": False},
+    "lci": {"num_tipo_if": 81, "simplified": True},
+    "lca": {"num_tipo_if": 96, "simplified": True},
     "rdb": {"num_tipo_if": 50, "simplified": False},
 }
 
@@ -157,6 +159,50 @@ METRICS: List[Metric] = [
     Metric("CARTEIRA_COMITENTE", "CARTEIRA_COMITENTE"),
     Metric("CARTEIRA_PARTICIPANTE", "CARTEIRA_PARTICIPANTE"),
 ]
+
+LCA_METRICS: List[Metric] = [
+    Metric("ENTIDADE", "ENTIDADE", via="IF_LCA_ENTITY"),
+    Metric("REPRESENTANTE_IF", "REPRESENTANTE_IF", via="IF_LCA_ENTITY"),
+    Metric("TITULO", "TITULO"),
+    Metric("IF_LCA", "IF_LCA"),
+    Metric("CREDITO", "CREDITO"),
+    Metric("GARANTIA", "GARANTIA"),
+    Metric("CONDICAO_IF", "CONDICAO_IF"),
+    Metric("CONDICAO_IF_TIPO1", "CONDICAO_IF", where=("COD_TIPO_CONDICAO_IF", "1")),
+    Metric("CONDICAO_IF_TIPO3", "CONDICAO_IF", where=("COD_TIPO_CONDICAO_IF", "3")),
+    Metric("CONDICAO_IF_TIPO5", "CONDICAO_IF", where=("COD_TIPO_CONDICAO_IF", "5")),
+    Metric("CONDICAO_IF_TIPO20", "CONDICAO_IF", where=("COD_TIPO_CONDICAO_IF", "20")),
+    Metric("AMORTIZACAO", "AMORTIZACAO", via="CONDICAO_IF"),
+    Metric("JUROS_FLUTUANTE", "JUROS_FLUTUANTE", via="CONDICAO_IF"),
+    Metric("SPREAD", "SPREAD", via="CONDICAO_IF"),
+    Metric("RESGATE", "RESGATE", via="CONDICAO_IF"),
+    Metric("EVENTO", "EVENTO"),
+    Metric("EVENTO_TIPO83", "EVENTO", where=("NUM_TIPO_EVENTO_LEGADO", "83")),
+    Metric("EVENTO_TIPO84", "EVENTO", where=("NUM_TIPO_EVENTO_LEGADO", "84")),
+    Metric("EVENTO_TIPO85", "EVENTO", where=("NUM_TIPO_EVENTO_LEGADO", "85")),
+    Metric("DEPOSITO", "DEPOSITO_AUTOMATICO_IF"),
+    Metric("OPERACAO", "OPERACAO"),
+    Metric("DADO_OPERACAO", "DADO_OPERACAO", via="OPERACAO"),
+    Metric("LANCAMENTO", "LANCAMENTO", via="OPERACAO"),
+    Metric("ESPECIFICACAO", "ESPECIFICACAO", via="OPERACAO"),
+    Metric("ESPECIFICACAO_COMITENTE", "ESPECIFICACAO_COMITENTE", via="ESPECIFICACAO"),
+    Metric("CARTEIRA_COMITENTE", "CARTEIRA_COMITENTE"),
+    Metric("CARTEIRA_PARTICIPANTE", "CARTEIRA_PARTICIPANTE"),
+]
+
+PRODUCT_METRICS: Dict[str, List[Metric]] = {
+    "cdb_simplificado": METRICS,
+    "cdb": METRICS,
+    "rdb": METRICS,
+    "lci": [
+        metric for metric in METRICS if metric.name not in {"ATUALIZACAO_PRE", "SPREAD"}
+    ],
+    "lca": LCA_METRICS,
+}
+
+
+def metrics_for_product(product: str) -> List[Metric]:
+    return PRODUCT_METRICS[product]
 
 # Write-set of one real CDB-simplificado registration (docs/cetip.out).
 REFERENCE_SHAPE: Dict[str, int] = {
@@ -456,6 +502,59 @@ def _keyed_by_num_if(
         bridge, bkey = tables.get(CONDICAO_IF_TABLE), CONDICAO_IF_KEY
     elif metric.via == "OPERACAO":
         bridge, bkey = tables.get(OPERACAO_TABLE), OPERACAO_KEY
+    elif metric.via == "ESPECIFICACAO":
+        specification = tables.get("ESPECIFICACAO")
+        operation = tables.get(OPERACAO_TABLE)
+        child_spec = _ci(df, "NUM_ID_ESPECIFICACAO")
+        spec_key = _ci(specification, "NUM_ID_ESPECIFICACAO") \
+            if specification is not None else None
+        spec_operation = _ci(specification, OPERACAO_KEY) \
+            if specification is not None else None
+        operation_key = _ci(operation, OPERACAO_KEY) if operation is not None else None
+        operation_if = _ci(operation, ROOT_KEY) if operation is not None else None
+        if not all((specification is not None, operation is not None, child_spec,
+                    spec_key, spec_operation, operation_key, operation_if)):
+            return None
+        specifications = active_rows(specification, [], "ESPECIFICACAO").select(
+            F.col(spec_key).cast("long").alias("spec_id"),
+            F.col(spec_operation).cast("long").alias("operation_id"),
+        )
+        operations = active_rows(operation, [], OPERACAO_TABLE).select(
+            F.col(operation_key).cast("long").alias("operation_id"),
+            F.col(operation_if).cast("long").alias(ROOT_KEY),
+        )
+        return df.select(
+            F.col(child_spec).cast("long").alias("spec_id")
+        ).join(specifications, "spec_id", "inner").join(
+            operations, "operation_id", "inner"
+        ).select(ROOT_KEY)
+    elif metric.via == "IF_LCA_ENTITY":
+        if_lca = tables.get("IF_LCA")
+        representative = tables.get("REPRESENTANTE_IF")
+        if if_lca is None or representative is None:
+            return None
+        entity_key = _ci(df, "NUM_ID_ENTIDADE")
+        representative_key = _ci(representative, "NUM_ID_ENTIDADE")
+        lca_entity = _ci(if_lca, "NUM_ID_ENT_DEPOSITARIO_ORIG")
+        lca_if = _ci(if_lca, ROOT_KEY)
+        if not all((entity_key, representative_key, lca_entity, lca_if)):
+            return None
+        route_entities = active_rows(if_lca, [], "IF_LCA").select(
+            F.col(lca_entity).cast("long").alias("entity_id"),
+            F.col(lca_if).cast("long").alias(ROOT_KEY),
+        )
+        if metric.table == "REPRESENTANTE_IF":
+            child = active_rows(df, [], metric.table).select(
+                F.col(entity_key).cast("long").alias("entity_id")
+            )
+        else:
+            active_representatives = active_rows(representative, [], "REPRESENTANTE_IF").select(
+                F.col(representative_key).cast("long").alias("entity_id")
+            ).dropDuplicates()
+            child = active_rows(df, [], metric.table).select(
+                F.col(entity_key).cast("long").alias("entity_id")
+            ).join(active_representatives, "entity_id", "inner")
+        return child.join(route_entities, "entity_id", "inner").select(ROOT_KEY)
     else:
         raise ValueError(f"Unknown via: {metric.via}")
     if bridge is None:
@@ -475,12 +574,13 @@ def _keyed_by_num_if(
 
 
 def build_counts(
-    universe: DataFrame, tables: Dict[str, DataFrame], notes: List[str]
+    universe: DataFrame, tables: Dict[str, DataFrame], notes: List[str],
+    metrics: Optional[List[Metric]] = None,
 ) -> tuple[DataFrame, List[str]]:
     """Left-join per-metric counts onto the universe. Returns (df, skipped)."""
     result = universe
     skipped: List[str] = []
-    for metric in METRICS:
+    for metric in metrics or METRICS:
         keyed = _keyed_by_num_if(tables, metric, notes)
         if keyed is None:
             skipped.append(metric.name)
@@ -744,7 +844,8 @@ def build_profile(
 ) -> dict:
     """Full profile over an in-memory dict of DataFrames. Pure of IO."""
     notes: List[str] = []
-    metric_names = [m.name for m in METRICS]
+    metrics = metrics_for_product(product)
+    metric_names = [metric.name for metric in metrics]
     if apply_filtros:
         tables = apply_filtros_fonte(tables, notes)
 
@@ -755,8 +856,10 @@ def build_profile(
             else universe_keys.join(domain, ROOT_KEY, "leftsemi")
         )
     universe = build_universe(tables, notes, universe_keys, num_tipo_if)
-    counts, skipped = build_counts(universe, tables, notes)
-    counts = add_simplificado_flag(counts, tables, notes)
+    counts, skipped = build_counts(universe, tables, notes, metrics)
+    is_cdb = product in {"cdb", "cdb_simplificado"}
+    if is_cdb:
+        counts = add_simplificado_flag(counts, tables, notes)
     counts = counts.cache()
 
     profile = {
@@ -770,7 +873,7 @@ def build_profile(
         "filtros_fonte_applied": apply_filtros,
         "metrics_skipped": skipped,
         "notes": sorted(set(notes)),
-        "reference_match": reference_match(counts, metric_names),
+        "reference_match": reference_match(counts, metric_names) if is_cdb else None,
         "shapes": shape_distribution(counts, metric_names, sample_size),
         "marginals": marginals(counts, metric_names),
         "by_simplificado": {},
@@ -779,12 +882,13 @@ def build_profile(
         "subtype_map": build_subtype_map_snapshot(tables, universe),
     }
 
-    for r in counts.groupBy("SIMPLIFICADO").count().collect():
-        seg = counts.where(F.col("SIMPLIFICADO") == r["SIMPLIFICADO"])
-        profile["by_simplificado"][r["SIMPLIFICADO"]] = {
-            "n": r["count"],
-            "top_shapes": shape_distribution(seg, metric_names, sample_size)[:5],
-        }
+    if is_cdb:
+        for r in counts.groupBy("SIMPLIFICADO").count().collect():
+            seg = counts.where(F.col("SIMPLIFICADO") == r["SIMPLIFICADO"])
+            profile["by_simplificado"][r["SIMPLIFICADO"]] = {
+                "n": r["count"],
+                "top_shapes": shape_distribution(seg, metric_names, sample_size)[:5],
+            }
 
     counts.unpersist()
     return profile
@@ -840,7 +944,7 @@ def compare_profiles(current: dict, other: dict, other_label: str) -> dict:
 # ---------------------------------------------------------------------------
 def print_report(profile: dict, label: str, top: int) -> None:
     print("\n" + "=" * 78)
-    print(f"CDB/RDB SHAPE PROFILE — {label} (product={profile.get('product')}, "
+    print(f"FINANCIAL PRODUCT SHAPE PROFILE — {label} (product={profile.get('product')}, "
           f"NUM_TIPO_IF={profile.get('num_tipo_if', CDB_TIPO_IF)})")
     print("=" * 78)
     print(f"Universe (NUM_TIPO_IF={profile.get('num_tipo_if', CDB_TIPO_IF)}, active): "
@@ -850,11 +954,12 @@ def print_report(profile: dict, label: str, top: int) -> None:
     if profile["metrics_skipped"]:
         print(f"Metrics skipped (table/columns unavailable): {profile['metrics_skipped']}")
 
-    ref = profile["reference_match"]
-    print(
-        f"\nReference shape (cetip.out write-set): {ref['matching_ifs']}/{ref['total_ifs']} "
-        f"IFs match exactly ({ref['pct']}%)"
-    )
+    ref = profile.get("reference_match")
+    if ref is not None:
+        print(
+            f"\nReference shape (cetip.out write-set): "
+            f"{ref['matching_ifs']}/{ref['total_ifs']} IFs match exactly ({ref['pct']}%)"
+        )
 
     print(f"\nTop {top} shapes:")
     for s in profile["shapes"][:top]:
@@ -870,11 +975,12 @@ def print_report(profile: dict, label: str, top: int) -> None:
         pretty = ", ".join(f"{k}:{v}" for k, v in ordered)
         print(f"  {name:24} {pretty}")
 
-    print("\nBy comitente-simplificado flag:")
-    for seg, data in sorted(profile["by_simplificado"].items()):
-        print(f"  {seg}: n={data['n']}")
-        for s in data["top_shapes"][:3]:
-            print(f"      {s['pct']:8.3f}%  {s['shape']}")
+    if profile["by_simplificado"]:
+        print("\nBy comitente-simplificado flag:")
+        for seg, data in sorted(profile["by_simplificado"].items()):
+            print(f"  {seg}: n={data['n']}")
+            for s in data["top_shapes"][:3]:
+                print(f"      {s['pct']:8.3f}%  {s['shape']}")
 
     xc = profile["evento_path_crosscheck"]
     print(f"\nEVENTO NUM_IF vs NUM_CONDICAO_IF->NUM_IF crosscheck: {xc.get('status')}")
@@ -1131,7 +1237,7 @@ def main() -> None:
 
     needed = sorted(
         {ROOT_TABLE, CONDICAO_IF_TABLE, OPERACAO_TABLE}
-        | {m.table for m in METRICS}
+        | {m.table for metrics in PRODUCT_METRICS.values() for m in metrics}
         | set(EXTRA_TABLES)
         | set(SUBTYPE_TABLES)
     )

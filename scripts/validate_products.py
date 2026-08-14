@@ -72,7 +72,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from functools import reduce
 from time import perf_counter
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -260,6 +260,12 @@ CAP_CREDITO_SCR_LOOKUPS = "credito_scr_lookups"
 CAP_IPOC_UNIQUENESS = "ipoc_uniqueness"
 CAP_DICRE_GRAPH = "dicre_graph"
 CAP_DICRE_TARGET_ELIGIBILITY = "dicre_target_eligibility"
+CAP_LCI_METADATA = "lci_metadata"
+CAP_LCI_GRAPH = "lci_graph"
+CAP_LCI_TARGET_ELIGIBILITY = "lci_target_eligibility"
+CAP_LCA_METADATA = "lca_metadata"
+CAP_LCA_GRAPH = "lca_graph"
+CAP_LCA_TARGET_ELIGIBILITY = "lca_target_eligibility"
 
 ALL_CAPABILITIES: Tuple[str, ...] = (
     CAP_IDENTITY, CAP_DOMAIN, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
@@ -338,6 +344,18 @@ _DICRE_REQUIRED = (
     CAP_PRIMARY_KEYS, CAP_DICRE_GRAPH, CAP_DICRE_TARGET_ELIGIBILITY,
     CAP_IPOC_UNIQUENESS, CAP_REGISTRATION_PROFILE,
 )
+_LCI_REQUIRED = (
+    CAP_IDENTITY, CAP_DOMAIN, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
+    CAP_CAPACITY, CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_SHAPE,
+    CAP_REGISTRATION_PROFILE, CAP_LCI_METADATA, CAP_LCI_GRAPH,
+    CAP_LCI_TARGET_ELIGIBILITY,
+)
+_LCA_REQUIRED = (
+    CAP_IDENTITY, CAP_DOMAIN, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
+    CAP_CAPACITY, CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_SHAPE,
+    CAP_REGISTRATION_PROFILE, CAP_LCA_METADATA, CAP_LCA_GRAPH,
+    CAP_LCA_TARGET_ELIGIBILITY,
+)
 
 VALIDATION_PROFILES: Dict[str, ValidationProfile] = {
     "cdb_simplificado": ValidationProfile(
@@ -397,6 +415,45 @@ VALIDATION_PROFILES: Dict[str, ValidationProfile] = {
         required_capabilities=_RDB_REQUIRED,
         supported_capabilities=_RDB_SUPPORTED,
         evidence_version=1,
+    ),
+    "lci": ValidationProfile(
+        name="lci",
+        num_tipo_if=81,
+        default_clone_prefix="sintetizacao_multiproduto/lci",
+        simplified_domain=True,
+        object_service_id=75,
+        object_service_code="LCI",
+        # The single observed allocator sample is advisory, not a hard format contract.
+        cod_if_pattern=None,
+        sic_enabled=False,
+        platform_check_enabled=True,
+        account_check_enabled=True,
+        sem_modalidade_ids=None,
+        hard_shape_rules=(SHAPE_RULE_DISTRIBUTION,),
+        registration_constants=None,
+        required_capabilities=_LCI_REQUIRED,
+        supported_capabilities=_LCI_REQUIRED,
+        evidence_version=1,
+        pipeline="lci",
+    ),
+    "lca": ValidationProfile(
+        name="lca",
+        num_tipo_if=96,
+        default_clone_prefix="sintetizacao_multiproduto/lca",
+        simplified_domain=True,
+        object_service_id=843,
+        object_service_code="LCA",
+        cod_if_pattern=None,
+        sic_enabled=False,
+        platform_check_enabled=True,
+        account_check_enabled=True,
+        sem_modalidade_ids=None,
+        hard_shape_rules=(SHAPE_RULE_DISTRIBUTION,),
+        registration_constants=None,
+        required_capabilities=_LCA_REQUIRED,
+        supported_capabilities=_LCA_REQUIRED,
+        evidence_version=1,
+        pipeline="lca",
     ),
     "credito_scr": ValidationProfile(
         name="credito_scr",
@@ -762,6 +819,11 @@ def _canon_key_col(col):
         F.regexp_replace(value, r"(\.\d*?)0+$", "$1"), r"\.$", ""
     )
     return F.when(value.rlike(r"^-?\d+\.\d*0*$"), stripped).otherwise(value)
+
+
+def _oracle_null_equivalent(col):
+    """Oracle treats an empty string as NULL; injected Parquet frames may not."""
+    return col.isNull() | (F.trim(col.cast("string")) == "")
 
 
 def _sample_keys(df: DataFrame, key_cols: List[str], n: int) -> List:
@@ -1644,7 +1706,7 @@ def check_product_identity(
                         hint="Root must carry NUM_TIPO_IF and NUM_IF for identity.",
                         message=f"Root table missing column(s) {missing} for product "
                                 f"{profile.name}.")]
-    active = root.where(F.col(excl).isNull()) if excl else root
+    active = root.where(_oracle_null_equivalent(F.col(excl))) if excl else root
     type_counts = (
         active.select(_norm_code(F.col(tipo)).alias("t"))
         .groupBy("t").count().collect()
@@ -1705,7 +1767,7 @@ def build_capability_findings(profile: ValidationProfile) -> List[Finding]:
 # ---------------------------------------------------------------------------
 def _active(df: DataFrame) -> DataFrame:
     col = resolve(df, "DAT_EXCLUSAO")
-    return df.where(F.col(col).isNull()) if col else df
+    return df.where(_oracle_null_equivalent(F.col(col))) if col else df
 
 
 def _long_keys(df: DataFrame, col: str, alias: str) -> Optional[DataFrame]:
@@ -4500,6 +4562,1451 @@ def check_dicre_registration_profile(
 
 
 # ---------------------------------------------------------------------------
+# Category 0/2e/6e/8e - LCI registration-route evidence
+# ---------------------------------------------------------------------------
+LCI_OUTPUT_TABLES = (
+    "INSTRUMENTO_FINANCEIRO", "TITULO", "CREDITO", "CONDICAO_IF",
+    "JUROS_FIXO", "JUROS_FLUTUANTE", "ATUALIZACAO_POS", "RESGATE",
+    "HISTORICO_PU_CURVA", "EVENTO", "DEPOSITO_AUTOMATICO_IF", "OPERACAO",
+    "DADO_OPERACAO", "LANCAMENTO", "ESPECIFICACAO", "ESPECIFICACAO_COMITENTE",
+    "CARTEIRA_COMITENTE", "CARTEIRA_PARTICIPANTE",
+)
+LCI_CONDITION_SUBTYPES = {
+    "2": "JUROS_FIXO",
+    "3": "JUROS_FLUTUANTE",
+    "4": "ATUALIZACAO_POS",
+    "20": "RESGATE",
+}
+LCI_MEU_NUMERO_TOGGLE = "VALIDA_MEU_NUMERO_DEPOSITO"
+
+
+def _lci_text(column):
+    """Exact business-code semantics: trim only, preserving case and '.0'."""
+    return F.trim(column.cast("string"))
+
+
+def _lci_unavailable(check_id: str, missing: List[str], severity: str = SEV_WARN) -> Finding:
+    return Finding(
+        check_id, "LCI", severity,
+        ",".join(sorted({value.split(".")[0] for value in missing})), False,
+        hint="Export the complete LCI aggregate or make its bounded target lookup available.",
+        message=f"Check unavailable; missing required input: {', '.join(missing)}.",
+    )
+
+
+def check_lci_metadata(
+    meta: Metadata, no_oracle: bool, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "lci":
+        return []
+    if no_oracle:
+        return [Finding(
+            "0.lci_metadata", "Coverage", SEV_WARN, "Oracle metadata", False,
+            hint="Rerun with Oracle access; specs.json is not authoritative for this route.",
+            message="Live Oracle table and PK metadata for the 18-table LCI aggregate is "
+                    "unavailable under --no-oracle (forces PARTIAL).",
+        )]
+    missing = [table for table in LCI_OUTPUT_TABLES if table not in meta.tables]
+    missing_pk = [
+        table for table in LCI_OUTPUT_TABLES if table in meta.tables and not meta.pk.get(table)
+    ]
+    failed = bool(missing or missing_pk)
+    return [Finding(
+        "0.lci_metadata", "Coverage", SEV_ERROR if failed else SEV_INFO,
+        ",".join(LCI_OUTPUT_TABLES), not failed, count=len(missing) + len(missing_pk),
+        hint="Read live table and PK metadata for every LCI output table; do not fill the "
+             "HISTORICO_PU_CURVA gap from specs.json." if failed else "",
+        message=(f"Missing Oracle table metadata={missing}; missing PK metadata={missing_pk}."
+                 if failed else
+                 "Live Oracle table and PK metadata cover all 18 LCI output tables."),
+    )]
+
+
+def _lci_edge_findings(
+    check_id: str, parents: DataFrame, child: DataFrame, child_table: str,
+    parent_column: str, child_id_column: str, sample: int,
+) -> List[Finding]:
+    parent_counts = parents.groupBy("parent_id").count().withColumnRenamed(
+        "count", "parent_count"
+    )
+    edges = child.select(
+        _canon_key_col(F.col(parent_column)).alias("parent_id"),
+        _canon_key_col(F.col(child_id_column)).alias("child_id"),
+    )
+    bad = edges.join(parent_counts, "parent_id", "left").where(
+        F.coalesce(F.col("parent_count"), F.lit(0)) != 1
+    )
+    count = bad.count()
+    duplicate = edges.groupBy("parent_id", "child_id").count().where(F.col("count") > 1)
+    duplicate_count = duplicate.count()
+    return [
+        Finding(
+            f"{check_id}.edge", "LCI graph", SEV_ERROR if count else SEV_INFO,
+            child_table, count == 0, count=count, column=parent_column,
+            sample=_sample_keys(bad, ["child_id", "parent_id"], sample),
+            hint="Remove the orphan/ambiguous edge or export its one parent." if count else "",
+            message="LCI child rows must resolve to exactly one aggregate parent.",
+        ),
+        Finding(
+            f"{check_id}.duplicate", "LCI graph",
+            SEV_ERROR if duplicate_count else SEV_INFO, child_table,
+            duplicate_count == 0, count=duplicate_count,
+            column=f"{child_id_column},{parent_column}",
+            sample=_sample_keys(duplicate, ["child_id", "parent_id"], sample),
+            hint="Keep each physical child-to-parent edge unambiguous."
+                 if duplicate_count else "",
+            message="Duplicate LCI physical graph edges.",
+        ),
+    ]
+
+
+def check_lci_graph(
+    tables: Dict[str, DataFrame], sample: int, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "lci":
+        return []
+    missing_tables = [table for table in LCI_OUTPUT_TABLES if table not in tables]
+    if missing_tables:
+        return [_lci_unavailable("2e.output_tables", missing_tables, SEV_ERROR)]
+
+    requirements = {
+        "INSTRUMENTO_FINANCEIRO": ("NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO", "COD_IF"),
+        "TITULO": ("NUM_IF",),
+        "CREDITO": ("NUM_IF",),
+        "CONDICAO_IF": ("NUM_CONDICAO_IF", "NUM_IF", "COD_TIPO_CONDICAO_IF"),
+        "HISTORICO_PU_CURVA": ("NUM_HISTORICO_PU_CURVA", "NUM_IF"),
+        "EVENTO": ("NUM_EVENTO", "NUM_IF"),
+        "DEPOSITO_AUTOMATICO_IF": ("NUM_IF",),
+        "OPERACAO": ("NUM_ID_OPERACAO", "NUM_IF"),
+        "DADO_OPERACAO": ("NUM_ID_DADO_OPERACAO", "NUM_ID_OPERACAO"),
+        "LANCAMENTO": ("NUM_ID_LANCAMENTO", "NUM_ID_OPERACAO"),
+        "ESPECIFICACAO": ("NUM_ID_ESPECIFICACAO", "NUM_ID_OPERACAO"),
+        "ESPECIFICACAO_COMITENTE": (
+            "NUM_ID_ESPECIFICACAO_COMITENTE", "NUM_ID_ESPECIFICACAO",
+        ),
+        "CARTEIRA_COMITENTE": ("NUM_CARTEIRA_COMITENTE", "NUM_IF"),
+        "CARTEIRA_PARTICIPANTE": ("NUM_CARTEIRA_PARTICIPANTE", "NUM_IF"),
+    }
+    columns, missing = _credito_scr_columns(tables, requirements)
+    if missing:
+        return [_lci_unavailable("2e.graph.availability", missing, SEV_ERROR)]
+
+    root_cols = columns["INSTRUMENTO_FINANCEIRO"]
+    roots_raw = _active(tables["INSTRUMENTO_FINANCEIRO"]).where(
+        _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if)
+    )
+    roots = roots_raw.select(
+        _canon_key_col(F.col(root_cols["NUM_IF"])).alias("parent_id"),
+        _lci_text(F.col(root_cols["COD_IF"])).alias("business_code"),
+    )
+    coded = roots.withColumn(
+        "code_count", F.count(F.lit(1)).over(Window.partitionBy("business_code"))
+    )
+    bad_codes = coded.where(
+        F.col("business_code").isNull() | (F.col("business_code") == "")
+        | (F.col("code_count") > 1)
+    )
+    count = bad_codes.count()
+    out = [Finding(
+        "2e.root_code", "LCI graph", SEV_ERROR if count else SEV_INFO,
+        "INSTRUMENTO_FINANCEIRO", count == 0, count=count, column="COD_IF",
+        sample=_sample_keys(bad_codes, ["parent_id", "business_code"], sample),
+        hint="Generate nonblank, unique exact-trimmed active LCI COD_IF values."
+             if count else "",
+        message="Active LCI roots with blank or duplicate case-sensitive COD_IF values.",
+    )]
+
+    for table in ("TITULO", "CREDITO"):
+        child_col = columns[table]["NUM_IF"]
+        children = tables[table].select(
+            _canon_key_col(F.col(child_col)).alias("parent_id")
+        )
+        counts = children.groupBy("parent_id").count().withColumnRenamed("count", "child_count")
+        bad = roots.select("parent_id").join(counts, "parent_id", "left").where(
+            F.coalesce(F.col("child_count"), F.lit(0)) != 1
+        )
+        child_count = bad.count()
+        out.append(Finding(
+            f"2e.one_{table.lower()}", "LCI graph",
+            SEV_ERROR if child_count else SEV_INFO, table, child_count == 0,
+            count=child_count, column="NUM_IF",
+            sample=_sample_keys(bad, ["parent_id"], sample),
+            hint=f"Keep exactly one {table} row per active LCI root."
+                 if child_count else "",
+            message=f"Active LCI roots without exactly one {table} row.",
+        ))
+        out.extend(_lci_edge_findings(
+            f"2e.{table.lower()}", roots.select("parent_id"), tables[table], table,
+            child_col, child_col, sample,
+        ))
+
+    direct_edges = (
+        ("condition", "CONDICAO_IF", "NUM_IF", "NUM_CONDICAO_IF"),
+        ("history", "HISTORICO_PU_CURVA", "NUM_IF", "NUM_HISTORICO_PU_CURVA"),
+        ("event", "EVENTO", "NUM_IF", "NUM_EVENTO"),
+        ("deposit", "DEPOSITO_AUTOMATICO_IF", "NUM_IF", "NUM_IF"),
+        ("operation", "OPERACAO", "NUM_IF", "NUM_ID_OPERACAO"),
+        ("wallet_comitente", "CARTEIRA_COMITENTE", "NUM_IF", "NUM_CARTEIRA_COMITENTE"),
+        ("wallet_participante", "CARTEIRA_PARTICIPANTE", "NUM_IF",
+         "NUM_CARTEIRA_PARTICIPANTE"),
+    )
+    for name, table, parent_name, child_name in direct_edges:
+        out.extend(_lci_edge_findings(
+            f"2e.{name}", roots.select("parent_id"), tables[table], table,
+            columns[table][parent_name], columns[table][child_name], sample,
+        ))
+
+    operations = tables["OPERACAO"].select(
+        _canon_key_col(F.col(columns["OPERACAO"]["NUM_ID_OPERACAO"])).alias("parent_id")
+    )
+    for name, table, child_name in (
+        ("operation_data", "DADO_OPERACAO", "NUM_ID_DADO_OPERACAO"),
+        ("launch", "LANCAMENTO", "NUM_ID_LANCAMENTO"),
+        ("specification", "ESPECIFICACAO", "NUM_ID_ESPECIFICACAO"),
+    ):
+        out.extend(_lci_edge_findings(
+            f"2e.{name}", operations, tables[table], table,
+            columns[table]["NUM_ID_OPERACAO"], columns[table][child_name], sample,
+        ))
+    specifications = tables["ESPECIFICACAO"].select(
+        _canon_key_col(F.col(columns["ESPECIFICACAO"]["NUM_ID_ESPECIFICACAO"]))
+        .alias("parent_id")
+    )
+    out.extend(_lci_edge_findings(
+        "2e.specification_holder", specifications, tables["ESPECIFICACAO_COMITENTE"],
+        "ESPECIFICACAO_COMITENTE",
+        columns["ESPECIFICACAO_COMITENTE"]["NUM_ID_ESPECIFICACAO"],
+        columns["ESPECIFICACAO_COMITENTE"]["NUM_ID_ESPECIFICACAO_COMITENTE"], sample,
+    ))
+    return out
+
+
+def check_lci_polymorphism(
+    tables: Dict[str, DataFrame], sample: int, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "lci":
+        return []
+    requirements = {
+        "CONDICAO_IF": ("NUM_CONDICAO_IF", "COD_TIPO_CONDICAO_IF"),
+        **{table: ("NUM_CONDICAO_IF",) for table in LCI_CONDITION_SUBTYPES.values()},
+    }
+    columns, missing = _credito_scr_columns(tables, requirements)
+    if missing:
+        return [_lci_unavailable("2e.condition.availability", missing, SEV_ERROR)]
+    condition = _active(tables["CONDICAO_IF"]).select(
+        _canon_key_col(F.col(columns["CONDICAO_IF"]["NUM_CONDICAO_IF"])).alias("condition_id"),
+        _lci_text(F.col(columns["CONDICAO_IF"]["COD_TIPO_CONDICAO_IF"])).alias(
+            "condition_type"
+        ),
+    )
+    membership = None
+    for table in LCI_CONDITION_SUBTYPES.values():
+        frame = _active(tables[table]).select(
+            _canon_key_col(F.col(columns[table]["NUM_CONDICAO_IF"])).alias("condition_id"),
+            F.lit(table).alias("physical_table"),
+        )
+        membership = frame if membership is None else membership.unionByName(frame)
+    counts = membership.groupBy("condition_id").pivot(
+        "physical_table", list(LCI_CONDITION_SUBTYPES.values())
+    ).count().fillna(0)
+    known = condition.where(F.col("condition_type").isin(*LCI_CONDITION_SUBTYPES))
+    joined = known.join(counts, "condition_id", "left").fillna(
+        0, list(LCI_CONDITION_SUBTYPES.values())
+    )
+    expected_pairs = []
+    for code, table in LCI_CONDITION_SUBTYPES.items():
+        expected_pairs.extend((F.lit(code), F.lit(table)))
+    joined = joined.withColumn(
+        "expected_table", F.create_map(*expected_pairs)[F.col("condition_type")]
+    )
+    bad = joined.where(reduce(
+        lambda left, right: left | right,
+        [
+            F.when(F.col("expected_table") == table, F.col(table) != 1)
+            .otherwise(F.col(table) != 0)
+            for table in LCI_CONDITION_SUBTYPES.values()
+        ],
+    ))
+    bad_count = bad.count()
+    unknown = condition.where(
+        F.col("condition_type").isNull()
+        | (F.col("condition_type") == "")
+        | ~F.col("condition_type").isin(*LCI_CONDITION_SUBTYPES)
+    )
+    unknown_count = unknown.count()
+    condition_ids = condition.select("condition_id").dropDuplicates()
+    orphan = membership.join(condition_ids, "condition_id", "left_anti")
+    orphan_count = orphan.count()
+    return [
+        Finding(
+            "2e.condition_polymorphism", "LCI condition polymorphism",
+            SEV_ERROR if bad_count else SEV_INFO, "CONDICAO_IF", bad_count == 0,
+            count=bad_count, column="COD_TIPO_CONDICAO_IF,NUM_CONDICAO_IF",
+            sample=_sample_keys(bad, ["condition_id", "condition_type"], sample),
+            hint="For known LCI types, emit exactly one expected physical row and none in "
+                 "the other known tables." if bad_count else "",
+            message="Known LCI conditions with missing, duplicate, or wrong physical subtype.",
+        ),
+        Finding(
+            "2e.unknown_condition_type", "LCI condition polymorphism",
+            SEV_WARN if unknown_count else SEV_INFO, "CONDICAO_IF", unknown_count == 0,
+            count=unknown_count, column="COD_TIPO_CONDICAO_IF",
+            sample=_sample_keys(unknown, ["condition_id", "condition_type"], sample),
+            hint="Capture another successful LCI variant before assigning a physical mapping."
+                 if unknown_count else "",
+            message="LCI condition types outside the four log-proven mappings.",
+        ),
+        Finding(
+            "2e.subtype_orphan", "LCI condition polymorphism",
+            SEV_ERROR if orphan_count else SEV_INFO, "CONDICAO_IF", orphan_count == 0,
+            count=orphan_count, column="NUM_CONDICAO_IF",
+            sample=_sample_keys(orphan, ["condition_id", "physical_table"], sample),
+            hint="Remove subtype rows without a CONDICAO_IF parent." if orphan_count else "",
+            message="Known LCI physical subtype rows without a condition parent.",
+        ),
+    ]
+
+
+def _lci_active_target(frame: DataFrame) -> Tuple[Optional[DataFrame], bool]:
+    exclusion = resolve(frame, "DAT_EXCLUSAO")
+    if exclusion:
+        return frame.where(_oracle_null_equivalent(F.col(exclusion))), True
+    deleted = resolve(frame, "IND_EXCLUIDO")
+    if deleted:
+        return frame.where(_lci_text(F.col(deleted)) == "N"), True
+    return None, False
+
+
+def _lci_toggle_enabled_roots(roots: DataFrame, toggle: DataFrame) -> Optional[DataFrame]:
+    columns = {name: resolve(toggle, name) for name in (
+        "COD_FTRE_TOG", "IND_FTRE_HAB", "DATA_INIC_VIG_FTRE", "DATA_FIM_VIG_FTRE",
+    )}
+    if any(value is None for value in columns.values()):
+        return None
+    periods = toggle.where(
+        (_lci_text(F.col(columns["COD_FTRE_TOG"])) == LCI_MEU_NUMERO_TOGGLE)
+        & (_lci_text(F.col(columns["IND_FTRE_HAB"])) == "S")
+    ).select(
+        F.to_date(F.col(columns["DATA_INIC_VIG_FTRE"])).alias("toggle_start"),
+        F.to_date(F.col(columns["DATA_FIM_VIG_FTRE"])).alias("toggle_end"),
+    )
+    return roots.join(
+        F.broadcast(periods),
+        (F.col("registration_date") >= F.col("toggle_start"))
+        & (F.col("registration_date") <= F.col("toggle_end")),
+        "left_semi",
+    )
+
+
+def _lci_collision_finding(
+    check_id: str, category: str, source: DataFrame, target: Optional[DataFrame],
+    keys: List[str], table: str, sample: int, active_required: bool = True,
+) -> Finding:
+    if target is None:
+        return _lci_unavailable(check_id, [table], SEV_WARN)
+    target_columns = {key: resolve(target, key) for key in keys}
+    missing = [key for key, actual in target_columns.items() if not actual]
+    if missing:
+        return _lci_unavailable(check_id, [f"{table}.{key}" for key in missing], SEV_WARN)
+    active = target
+    if active_required:
+        active, supported = _lci_active_target(target)
+        if not supported:
+            return Finding(
+                check_id, category, SEV_WARN, table, False, column=",".join(keys),
+                hint="Expose DAT_EXCLUSAO or log-proven IND_EXCLUIDO semantics before "
+                     "classifying target rows as active.",
+                message="Target wallet/code collision check is unavailable because active-row "
+                        "semantics cannot be reconstructed.",
+            )
+    target_keys = active.select(*[
+        _canon_key_col(F.col(target_columns[key])).alias(key) for key in keys
+    ]).dropDuplicates()
+    bad = source.join(F.broadcast(target_keys), keys, "inner")
+    count = bad.count()
+    return Finding(
+        check_id, category, SEV_ERROR if count else SEV_INFO, table, count == 0,
+        count=count, column=",".join(keys), sample=_sample_keys(bad, keys, sample),
+        hint="Regenerate natural keys that collide with active target rows." if count else "",
+        message="Synthetic LCI natural keys colliding with the target.",
+    )
+
+
+def check_lci_target_frames(
+    tables: Dict[str, DataFrame], lookup_frames: Dict[str, DataFrame], sample: int,
+    profile: ValidationProfile, lookup_errors: Optional[Dict[str, str]] = None,
+) -> List[Finding]:
+    if profile.pipeline not in {"lci", "lca"}:
+        return []
+    lookup_errors = lookup_errors or {}
+    requirements = {
+        "INSTRUMENTO_FINANCEIRO": (
+            "NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO", "COD_IF", "NUM_ID_LOTE",
+            "DAT_REGISTRO",
+        ),
+        "DEPOSITO_AUTOMATICO_IF": ("NUM_IF", "NUM_CONTROLE_LANCAMENTO"),
+        "OPERACAO": (
+            "NUM_ID_OPERACAO", "NUM_IF", "NUM_ID_TIPO_OPER_OBJETO_SERV", "COD_OPERACAO",
+        ),
+        "CARTEIRA_COMITENTE": (
+            "NUM_ID_ENTIDADE", "COD_TIPO_POSICAO_CARTEIRA", "NUM_SISTEMA", "NUM_IF",
+            "NUM_CONTA_PARTICIPANTE",
+        ),
+        "CARTEIRA_PARTICIPANTE": (
+            "COD_TIPO_POSICAO_CARTEIRA", "NUM_SISTEMA", "NUM_IF",
+            "NUM_CONTA_PARTICIPANTE",
+        ),
+    }
+    columns, missing = _credito_scr_columns(tables, requirements)
+    if missing:
+        return [_lci_unavailable("6e.lookup.availability", missing, SEV_ERROR)]
+    root_cols = columns["INSTRUMENTO_FINANCEIRO"]
+    roots = _active(tables["INSTRUMENTO_FINANCEIRO"]).where(
+        _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if)
+    ).select(
+        _canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"),
+        _canon_key_col(F.col(root_cols["NUM_ID_LOTE"])).alias("lot_id"),
+        _lci_text(F.col(root_cols["COD_IF"])).alias("business_code"),
+        F.to_date(F.col(root_cols["DAT_REGISTRO"])).alias("registration_date"),
+    )
+    out: List[Finding] = []
+
+    tipo = lookup_frames.get("LCI_TIPO_IF")
+    if tipo is None:
+        out.append(_lci_unavailable(
+            "6e.lookup.tipo_if", [lookup_errors.get("LCI_TIPO_IF", "LCI_TIPO_IF")]
+        ))
+    else:
+        tipo_cols = {name: resolve(tipo, name) for name in ("NUM_TIPO_IF", "COD_TIPO_IF")}
+        if any(value is None for value in tipo_cols.values()):
+            out.append(_lci_unavailable("6e.lookup.tipo_if", ["LCI_TIPO_IF required columns"]))
+        else:
+            active_tipo, supported = _lci_active_target(tipo)
+            if not supported:
+                out.append(_lci_unavailable("6e.lookup.tipo_if", ["TIPO_IF.DAT_EXCLUSAO"]))
+            else:
+                matches = active_tipo.where(
+                    (_lci_text(F.col(tipo_cols["COD_TIPO_IF"])) == profile.object_service_code)
+                    & (_canon_key_col(F.col(tipo_cols["NUM_TIPO_IF"]))
+                       == str(profile.num_tipo_if))
+                ).limit(2).count()
+                out.append(Finding(
+                    "6e.lookup.tipo_if", "LCI target eligibility",
+                    SEV_INFO if matches == 1 else SEV_ERROR, "TIPO_IF", matches == 1,
+                    count=0 if matches == 1 else matches, column="NUM_TIPO_IF,COD_TIPO_IF",
+                    hint="Provide exactly one active exact-trimmed TIPO_IF LCI row for type 81."
+                         if matches != 1 else "",
+                    message="Active target LCI type resolves the expected root type.",
+                ))
+
+    lot_frame = lookup_frames.get("LCI_LOTES")
+    lot_columns = {name: resolve(lot_frame, name) if lot_frame is not None else None for name in (
+        "NUM_ID_LOTE", "NUM_ID_TIPO_LOTE", "NUM_CONTA_PARTICIPANTE",
+    )}
+    lots = None
+    if lot_frame is None or any(value is None for value in lot_columns.values()):
+        out.append(_lci_unavailable(
+            "6e.lookup.lot",
+            [lookup_errors.get("LCI_LOTES", "LCI_LOTES required columns")],
+        ))
+    else:
+        active_lots, supported = _lci_active_target(lot_frame)
+        if not supported:
+            out.append(_lci_unavailable("6e.lookup.lot", ["LOTE.DAT_EXCLUSAO"]))
+        else:
+            lots = active_lots.select(
+                _canon_key_col(F.col(lot_columns["NUM_ID_LOTE"])).alias("lot_id"),
+                _canon_key_col(F.col(lot_columns["NUM_ID_TIPO_LOTE"])).alias("lot_type"),
+                _canon_key_col(F.col(lot_columns["NUM_CONTA_PARTICIPANTE"]))
+                .alias("issuer_account"),
+            )
+            bad = roots.join(lots, "lot_id", "left").where(
+                F.col("issuer_account").isNull()
+                | F.col("lot_type").isNull()
+                | (F.col("lot_type") != ("2" if profile.pipeline == "lca" else "1"))
+            )
+            count = bad.count()
+            out.append(Finding(
+                "6e.lookup.lot", "LCI target eligibility", SEV_ERROR if count else SEV_INFO,
+                "LOTE", count == 0, count=count, column="NUM_ID_LOTE,NUM_ID_TIPO_LOTE",
+                sample=_sample_keys(bad, ["root_id", "lot_id", "lot_type"], sample),
+                hint="Point each LCI root to one active target type-1 lot." if count else "",
+                message="LCI roots without an active target type-1 lot.",
+            ))
+
+    accounts = lookup_frames.get("LCI_ACCOUNTS")
+    account_names = (
+        "NUM_CONTA_PARTICIPANTE", "NUM_ID_SITUACAO_CONTA", "COD_TIPO_ACESSO",
+        "NUM_ID_AREA_ATUACAO",
+    )
+    account_columns = {
+        name: resolve(accounts, name) if accounts is not None else None for name in account_names
+    }
+    if lots is None or accounts is None or any(value is None for value in account_columns.values()):
+        out.append(_lci_unavailable(
+            "6e.lookup.issuer_account",
+            [lookup_errors.get("LCI_ACCOUNTS", "LCI_ACCOUNTS required columns")],
+        ))
+    else:
+        eligible_accounts = accounts.select(
+            _canon_key_col(F.col(account_columns["NUM_CONTA_PARTICIPANTE"]))
+            .alias("issuer_account"),
+            _canon_key_col(F.col(account_columns["NUM_ID_SITUACAO_CONTA"])).alias("status"),
+            _lci_text(F.col(account_columns["COD_TIPO_ACESSO"])).alias("access"),
+            _canon_key_col(F.col(account_columns["NUM_ID_AREA_ATUACAO"])).alias("area"),
+        ).where(
+            F.col("status").isin("1", "2")
+            & ((F.lit(True)) if profile.pipeline == "lca" else
+               ((F.col("access") == "L") & (F.col("area") == "1")))
+        ).select("issuer_account").dropDuplicates()
+        bad = roots.join(lots, "lot_id", "left").join(
+            F.broadcast(eligible_accounts), "issuer_account", "left_anti"
+        )
+        count = bad.count()
+        out.append(Finding(
+            "6e.lookup.issuer_account", "LCI target eligibility",
+            SEV_ERROR if count else SEV_INFO, "CONTA_PARTICIPANTE", count == 0,
+            count=count, column="NUM_ID_SITUACAO_CONTA,COD_TIPO_ACESSO,NUM_ID_AREA_ATUACAO",
+            sample=_sample_keys(bad, ["root_id", "issuer_account"], sample),
+            hint="Use issuer status 1|2 with V_FAMILIA_CONTAS access L in area 1."
+                 if count else "",
+            message="LCI lot issuer accounts outside the log-proven target eligibility.",
+        ))
+
+    object_frame = lookup_frames.get("LCI_OBJECT_SERVICE")
+    object_ok = False
+    object_available = False
+    if object_frame is not None:
+        code = resolve(object_frame, "COD_OBJETO_SERVICO")
+        low = resolve(object_frame, "IND_PLATAFORMA_BAIXA")
+        if code and low:
+            object_available = True
+            object_ok = object_frame.where(
+                (_lci_text(F.col(code)) == profile.object_service_code)
+                & (_lci_text(F.col(low)) == "S")
+            ).limit(1).count() == 1
+    out.append(Finding(
+        "6e.lookup.object_service", "LCI target eligibility",
+        SEV_INFO if object_ok else SEV_ERROR if object_available else SEV_WARN,
+        "V_OBJETOS_SERVICO", object_ok,
+        count=0 if object_ok else 1, column="COD_OBJETO_SERVICO,IND_PLATAFORMA_BAIXA",
+        hint="Expose exact code LCI enabled on the low platform." if not object_ok else "",
+        message="Target low-platform LCI object-service evidence.",
+    ))
+
+    operation = tables["OPERACAO"]
+    op_cols = columns["OPERACAO"]
+    operations = operation.select(
+        _canon_key_col(F.col(op_cols["NUM_ID_OPERACAO"])).alias("operation_id"),
+        _canon_key_col(F.col(op_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias("route_id"),
+        _lci_text(F.col(op_cols["COD_OPERACAO"])).alias("operation_code"),
+    )
+    route_frame = lookup_frames.get("LCI_ROUTES")
+    route_names = (
+        "NUM_ID_TIPO_OPER_OBJETO_SERV", "NUM_ID_OBJETO_SERVICO", "COD_TIPO_OPERACAO",
+        "IND_DISPONIVEL_IDENTIFICACAO",
+    )
+    route_columns = {
+        name: resolve(route_frame, name) if route_frame is not None else None
+        for name in route_names
+    }
+    if route_frame is None or any(value is None for value in route_columns.values()):
+        out.append(_lci_unavailable(
+            "6e.lookup.route", [lookup_errors.get("LCI_ROUTES", "LCI_ROUTES required columns")]
+        ))
+    else:
+        eligible_routes = route_frame.select(
+            _canon_key_col(F.col(route_columns["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
+            .alias("route_id"),
+            _canon_key_col(F.col(route_columns["NUM_ID_OBJETO_SERVICO"]))
+            .alias("object_service_id"),
+            _lci_text(F.col(route_columns["COD_TIPO_OPERACAO"])).alias("operation_type"),
+            _lci_text(F.col(route_columns["IND_DISPONIVEL_IDENTIFICACAO"]))
+            .alias("identification_available"),
+        ).where(
+            (F.col("object_service_id") == str(profile.object_service_id))
+            & (F.col("operation_type") == "1")
+            & (F.col("identification_available") == "S")
+        ).select("route_id").dropDuplicates()
+        bad = operations.join(F.broadcast(eligible_routes), "route_id", "left_anti")
+        count = bad.count()
+        out.append(Finding(
+            "6e.lookup.route", "LCI target eligibility", SEV_ERROR if count else SEV_INFO,
+            "OPERACAO", count == 0, count=count,
+            column="NUM_ID_TIPO_OPER_OBJETO_SERV",
+            sample=_sample_keys(bad, ["operation_id", "route_id"], sample),
+            hint="Use an identification-enabled LCI object-service 75 route with exact "
+                 "operation code 1."
+                 if count else "",
+            message="Synthetic LCI operations using ineligible target route IDs.",
+        ))
+
+    target_codes = lookup_frames.get("LCI_ROOT_CODES")
+    if target_codes is None or not resolve(target_codes, "COD_IF"):
+        out.append(_lci_unavailable(
+            "6e.collision.cod_if",
+            [lookup_errors.get("LCI_ROOT_CODES", "INSTRUMENTO_FINANCEIRO.COD_IF")],
+        ))
+    else:
+        active_codes, supported = _lci_active_target(target_codes)
+        if not supported:
+            out.append(_lci_unavailable(
+                "6e.collision.cod_if", ["INSTRUMENTO_FINANCEIRO.DAT_EXCLUSAO"]
+            ))
+        else:
+            target_col = resolve(active_codes, "COD_IF")
+            existing = active_codes.select(
+                _lci_text(F.col(target_col)).alias("business_code")
+            ).dropDuplicates()
+            bad = roots.join(F.broadcast(existing), "business_code", "inner")
+            count = bad.count()
+            out.append(Finding(
+                "6e.collision.cod_if", "LCI target collisions",
+                SEV_ERROR if count else SEV_INFO, "INSTRUMENTO_FINANCEIRO",
+                count == 0, count=count, column="COD_IF",
+                sample=_sample_keys(bad, ["root_id", "business_code"], sample),
+                hint="Allocate an exact-trimmed, case-sensitive COD_IF absent from active target."
+                     if count else "",
+                message="Synthetic active LCI COD_IF collisions with active target roots.",
+            ))
+
+    local_bad = operations.withColumn(
+        "code_count", F.count(F.lit(1)).over(Window.partitionBy("operation_code"))
+    ).where(
+        F.col("operation_code").isNull() | (F.col("operation_code") == "")
+        | (F.col("code_count") > 1)
+    )
+    count = local_bad.count()
+    out.append(Finding(
+        "6e.operation_code.local", "LCI target collisions",
+        SEV_ERROR if count else SEV_INFO, "OPERACAO", count == 0, count=count,
+        column="COD_OPERACAO",
+        sample=_sample_keys(local_bad, ["operation_id", "operation_code"], sample),
+        hint="Generate nonblank unique exact-trimmed operation codes." if count else "",
+        message="Synthetic LCI operations with blank or duplicate COD_OPERACAO.",
+    ))
+    target_operation_codes = lookup_frames.get("LCI_OPERATION_CODES")
+    if target_operation_codes is None or not resolve(target_operation_codes, "COD_OPERACAO"):
+        out.append(_lci_unavailable(
+            "6e.operation_code.target",
+            [lookup_errors.get("LCI_OPERATION_CODES", "OPERACAO.COD_OPERACAO")],
+        ))
+    else:
+        target_col = resolve(target_operation_codes, "COD_OPERACAO")
+        active_target, supported = _lci_active_target(target_operation_codes)
+        if not supported:
+            out.append(_lci_unavailable("6e.operation_code.target", ["OPERACAO.DAT_EXCLUSAO"]))
+        else:
+            existing = active_target.select(
+                _lci_text(F.col(target_col)).alias("operation_code")
+            ).dropDuplicates()
+            bad = operations.join(F.broadcast(existing), "operation_code", "inner")
+            count = bad.count()
+            out.append(Finding(
+                "6e.operation_code.target", "LCI target collisions",
+                SEV_ERROR if count else SEV_INFO, "OPERACAO", count == 0, count=count,
+                column="COD_OPERACAO",
+                sample=_sample_keys(bad, ["operation_id", "operation_code"], sample),
+                hint="Regenerate operation codes colliding with active target OPERACAO."
+                     if count else "",
+                message="Synthetic LCI COD_OPERACAO collisions with active target operations.",
+            ))
+
+    toggle = lookup_frames.get("LCI_TOGGLE")
+    if toggle is None:
+        out.append(_lci_unavailable(
+            "6e.meu_numero", [lookup_errors.get("LCI_TOGGLE", "TCTPFEATURE_TOGGLE")]
+        ))
+    else:
+        enabled_roots = _lci_toggle_enabled_roots(roots, toggle)
+        if enabled_roots is None:
+            out.append(_lci_unavailable("6e.meu_numero", ["LCI_TOGGLE required columns"]))
+        elif enabled_roots.limit(1).count() == 0:
+            out.append(Finding(
+                "6e.meu_numero", "LCI target collisions", SEV_INFO,
+                "DEPOSITO_AUTOMATICO_IF", True, column="NUM_CONTROLE_LANCAMENTO",
+                message="VALIDA_MEU_NUMERO_DEPOSITO is disabled for all root DAT_REGISTRO "
+                        "dates; target controls are not required.",
+            ))
+        else:
+            dep_cols = columns["DEPOSITO_AUTOMATICO_IF"]
+            deposits = tables["DEPOSITO_AUTOMATICO_IF"].select(
+                _canon_key_col(F.col(dep_cols["NUM_IF"])).alias("root_id"),
+                _lci_text(F.col(dep_cols["NUM_CONTROLE_LANCAMENTO"])).alias("control"),
+            ).join(enabled_roots.select("root_id"), "root_id", "inner")
+            local = deposits.withColumn(
+                "control_count", F.count(F.lit(1)).over(Window.partitionBy("control"))
+            ).where(
+                F.col("control").isNull() | (F.col("control") == "")
+                | (F.col("control_count") > 1)
+            )
+            target_controls = lookup_frames.get("LCI_CONTROLS")
+            target_control_col = (
+                resolve(target_controls, "NUM_CONTROLE_LANCAMENTO")
+                if target_controls is not None else None
+            )
+            collision = None
+            target_unavailable = target_controls is None or target_control_col is None
+            if not target_unavailable:
+                active_controls, active_supported = _lci_active_target(target_controls)
+                target_unavailable = not active_supported
+                if active_supported:
+                    controls = active_controls.select(
+                        _lci_text(F.col(target_control_col)).alias("control")
+                    ).dropDuplicates()
+                    collision = deposits.join(F.broadcast(controls), "control", "inner")
+            local_count = local.count()
+            collision_count = collision.count() if collision is not None else 0
+            if target_unavailable:
+                out.append(_lci_unavailable(
+                    "6e.meu_numero", [lookup_errors.get("LCI_CONTROLS", "active OPERACAO controls")]
+                ))
+            else:
+                bad = local.unionByName(collision, allowMissingColumns=True)
+                count = local_count + collision_count
+                out.append(Finding(
+                    "6e.meu_numero", "LCI target collisions",
+                    SEV_ERROR if count else SEV_INFO, "DEPOSITO_AUTOMATICO_IF",
+                    count == 0, count=count, column="NUM_CONTROLE_LANCAMENTO",
+                    sample=_sample_keys(bad, ["root_id", "control"], sample),
+                    hint="Generate nonblank unique controls absent from active target P1/P2."
+                         if count else "",
+                    message="Toggle-enabled deposits with local or target control collisions.",
+                ))
+
+    wallet_specs = (
+        (
+            "comitente", "CARTEIRA_COMITENTE", "LCI_WALLET_COMITENTE",
+            ["NUM_ID_ENTIDADE", "COD_TIPO_POSICAO_CARTEIRA", "NUM_SISTEMA", "NUM_IF",
+             "NUM_CONTA_PARTICIPANTE"],
+        ),
+        (
+            "participante", "CARTEIRA_PARTICIPANTE", "LCI_WALLET_PARTICIPANTE",
+            ["COD_TIPO_POSICAO_CARTEIRA", "NUM_SISTEMA", "NUM_IF",
+             "NUM_CONTA_PARTICIPANTE"],
+        ),
+    )
+    for name, table, target_name, keys in wallet_specs:
+        source_rows = tables[table].select(*[
+            _canon_key_col(F.col(columns[table][key])).alias(key) for key in keys
+        ])
+        duplicate = source_rows.groupBy(*keys).count().where(F.col("count") > 1)
+        duplicate_count = duplicate.count()
+        out.append(Finding(
+            f"6e.wallet.{name}.local", "LCI target collisions",
+            SEV_ERROR if duplicate_count else SEV_INFO, table, duplicate_count == 0,
+            count=duplicate_count, column=",".join(keys),
+            sample=_sample_keys(duplicate, keys, sample),
+            hint="Keep each synthetic wallet natural key unique." if duplicate_count else "",
+            message="Duplicate synthetic LCI wallet natural keys.",
+        ))
+        source = source_rows.dropDuplicates()
+        out.append(_lci_collision_finding(
+            f"6e.wallet.{name}", "LCI target collisions", source,
+            lookup_frames.get(target_name), keys, target_name, sample,
+            active_required=name != "comitente",
+        ))
+    return out
+
+
+def load_lci_target_frames(
+    spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame], maximum: int = 100_000,
+    skip_prefixes: Sequence[str] = (),
+    profile: Optional[ValidationProfile] = None,
+) -> Tuple[Dict[str, DataFrame], Dict[str, str]]:
+    """Load only target rows addressed by bounded distinct synthetic LCI keys."""
+    profile = profile or VALIDATION_PROFILES["lci"]
+    frames: Dict[str, DataFrame] = {}
+    errors: Dict[str, str] = {}
+
+    def run_many(name: str, queries: List[str], empty_schema: Optional[str] = None) -> None:
+        if not queries:
+            if empty_schema:
+                frames[name] = spark.createDataFrame([], empty_schema)
+            return
+        rows, schema = [], None
+        try:
+            for query in queries:
+                remote = _jdbc(spark, cfg, query)
+                schema = schema or remote.schema
+                rows.extend(remote.collect())
+            frames[name] = spark.createDataFrame(rows, schema)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("LCI target lookup failed for %s: %s", name, exc)
+            errors[name] = str(exc)
+
+    def collect_values(frame: DataFrame, column, alias: str = "value") -> Optional[List[str]]:
+        rows = frame.select(column.alias(alias)).where(
+            F.col(alias).isNotNull() & (F.trim(F.col(alias).cast("string")) != "")
+        ).dropDuplicates().limit(maximum + 1).collect()
+        if len(rows) > maximum:
+            return None
+        return [str(row[alias]) for row in rows]
+
+    def chunks(values: List[str], size: int = 1000):
+        for offset in range(0, len(values), size):
+            yield values[offset:offset + size]
+
+    def wanted(check_id: str) -> bool:
+        return not _check_is_skipped(check_id, skip_prefixes)
+
+    root = tables.get("INSTRUMENTO_FINANCEIRO")
+    operation = tables.get("OPERACAO")
+    deposit = tables.get("DEPOSITO_AUTOMATICO_IF")
+    if root is None:
+        return frames, {"LCI": "INSTRUMENTO_FINANCEIRO unavailable"}
+    root_columns = {name: resolve(root, name) for name in (
+        "NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO", "NUM_ID_LOTE", "COD_IF", "DAT_REGISTRO",
+    )}
+    if any(root_columns[name] is None for name in ("NUM_IF", "NUM_TIPO_IF", "NUM_ID_LOTE")):
+        return frames, {"LCI": "LCI root keys unavailable"}
+    active_root = _active(root).where(
+        _canon_key_col(F.col(root_columns["NUM_TIPO_IF"])) == str(profile.num_tipo_if)
+    )
+
+    if wanted("6e.lookup.tipo_if"):
+        run_many(
+            "LCI_TIPO_IF",
+            [
+                "SELECT NUM_TIPO_IF, COD_TIPO_IF, DAT_EXCLUSAO "
+                f"FROM {cfg.schema}.TIPO_IF "
+                f"WHERE NUM_TIPO_IF={profile.num_tipo_if} OR "
+                f"TRIM(COD_TIPO_IF)={_sql_literal(profile.object_service_code or '')}"
+            ],
+        )
+    if wanted("6e.lookup.object_service"):
+        run_many(
+            "LCI_OBJECT_SERVICE",
+            [
+                "SELECT COD_OBJETO_SERVICO, IND_PLATAFORMA_BAIXA "
+                f"FROM {cfg.schema}.V_OBJETOS_SERVICO WHERE COD_OBJETO_SERVICO="
+                f"{_sql_literal(profile.object_service_code or '')}"
+            ],
+        )
+
+    lot_ids = collect_values(
+        active_root, _canon_key_col(F.col(root_columns["NUM_ID_LOTE"]))
+    )
+    needs_lots = wanted("6e.lookup.lot") or wanted("6e.lookup.issuer_account")
+    if lot_ids is None and needs_lots:
+        errors["LCI_LOTES"] = f"more than {maximum} distinct synthetic lot IDs"
+    elif needs_lots:
+        run_many(
+            "LCI_LOTES",
+            [
+                "SELECT NUM_ID_LOTE, NUM_ID_TIPO_LOTE, NUM_CONTA_PARTICIPANTE, "
+                "NUM_TIPO_IF, DAT_EXCLUSAO "
+                f"FROM {cfg.schema}.LOTE WHERE NUM_ID_LOTE IN ("
+                + ", ".join(_sql_literal(value) for value in batch) + ")"
+                for batch in chunks(lot_ids)
+            ],
+            "NUM_ID_LOTE string, NUM_ID_TIPO_LOTE string, "
+            "NUM_CONTA_PARTICIPANTE string, NUM_TIPO_IF string, DAT_EXCLUSAO string",
+        )
+    lots = frames.get("LCI_LOTES")
+    lot_account = resolve(lots, "NUM_CONTA_PARTICIPANTE") if lots is not None else None
+    accounts = collect_values(lots, _canon_key_col(F.col(lot_account))) if lot_account else []
+    if accounts is None and wanted("6e.lookup.issuer_account"):
+        errors["LCI_ACCOUNTS"] = f"more than {maximum} distinct synthetic issuer accounts"
+    elif wanted("6e.lookup.issuer_account"):
+        run_many(
+            "LCI_ACCOUNTS",
+            [
+                ("SELECT cp.NUM_CONTA_PARTICIPANTE, cp.NUM_ID_SITUACAO_CONTA, "
+                 "CAST(NULL AS VARCHAR2(1)) COD_TIPO_ACESSO, "
+                 "CAST(NULL AS NUMBER) NUM_ID_AREA_ATUACAO "
+                 f"FROM {cfg.schema}.CONTA_PARTICIPANTE cp "
+                 if profile.pipeline == "lca" else
+                 "SELECT cp.NUM_CONTA_PARTICIPANTE, cp.NUM_ID_SITUACAO_CONTA, "
+                 "vf.COD_TIPO_ACESSO, vf.NUM_ID_AREA_ATUACAO "
+                 f"FROM {cfg.schema}.CONTA_PARTICIPANTE cp "
+                 f"LEFT JOIN {cfg.schema}.V_FAMILIA_CONTAS vf "
+                 "ON vf.COD_CONTA_MEMBRO=cp.COD_CONTA_PARTICIPANTE ")
+                + "WHERE cp.NUM_CONTA_PARTICIPANTE IN ("
+                + ", ".join(_sql_literal(value) for value in batch) + ")"
+                for batch in chunks(accounts)
+            ],
+            "NUM_CONTA_PARTICIPANTE string, NUM_ID_SITUACAO_CONTA string, "
+            "COD_TIPO_ACESSO string, NUM_ID_AREA_ATUACAO string",
+        )
+
+    root_codes = (
+        collect_values(active_root, _lci_text(F.col(root_columns["COD_IF"])))
+        if root_columns["COD_IF"] else []
+    )
+    if root_codes is None and wanted("6e.collision.cod_if"):
+        errors["LCI_ROOT_CODES"] = f"more than {maximum} distinct synthetic COD_IF values"
+    elif wanted("6e.collision.cod_if"):
+        run_many(
+            "LCI_ROOT_CODES",
+            [
+                f"SELECT COD_IF, DAT_EXCLUSAO FROM {cfg.schema}.INSTRUMENTO_FINANCEIRO "
+                "WHERE TRIM(COD_IF) IN ("
+                + ", ".join(_sql_literal(value) for value in batch) + ")"
+                for batch in chunks(root_codes)
+            ],
+            "COD_IF string, DAT_EXCLUSAO string",
+        )
+
+    op_columns = {name: resolve(operation, name) if operation is not None else None for name in (
+        "NUM_ID_TIPO_OPER_OBJETO_SERV", "COD_OPERACAO",
+    )}
+    route_ids = (
+        collect_values(operation, _canon_key_col(F.col(op_columns["NUM_ID_TIPO_OPER_OBJETO_SERV"])))
+        if operation is not None and op_columns["NUM_ID_TIPO_OPER_OBJETO_SERV"] else []
+    )
+    if route_ids is None and wanted("6e.lookup.route"):
+        errors["LCI_ROUTES"] = f"more than {maximum} distinct synthetic route IDs"
+    elif wanted("6e.lookup.route"):
+        run_many(
+            "LCI_ROUTES",
+            [
+                "SELECT tos.NUM_ID_TIPO_OPER_OBJETO_SERV, tos.NUM_ID_OBJETO_SERVICO, "
+                "op.COD_TIPO_OPERACAO, tos.IND_DISPONIVEL_IDENTIFICACAO "
+                f"FROM {cfg.schema}.TIPO_OPER_OBJETO_SERV tos "
+                f"JOIN {cfg.schema}.TIPO_OPERACAO op "
+                "ON op.NUM_ID_TIPO_OPERACAO=tos.NUM_ID_TIPO_OPERACAO "
+                "WHERE tos.NUM_ID_TIPO_OPER_OBJETO_SERV IN ("
+                + ", ".join(_sql_literal(value) for value in batch) + ")"
+                for batch in chunks(route_ids)
+            ],
+            "NUM_ID_TIPO_OPER_OBJETO_SERV string, NUM_ID_OBJETO_SERVICO string, "
+            "COD_TIPO_OPERACAO string, IND_DISPONIVEL_IDENTIFICACAO string",
+        )
+
+    operation_codes = (
+        collect_values(operation, _lci_text(F.col(op_columns["COD_OPERACAO"])))
+        if operation is not None and op_columns["COD_OPERACAO"] else []
+    )
+    if operation_codes is None and wanted("6e.operation_code.target"):
+        errors["LCI_OPERATION_CODES"] = (
+            f"more than {maximum} distinct synthetic operation codes"
+        )
+    elif wanted("6e.operation_code.target"):
+        run_many(
+            "LCI_OPERATION_CODES",
+            [
+                f"SELECT COD_OPERACAO, DAT_EXCLUSAO FROM {cfg.schema}.OPERACAO "
+                "WHERE TRIM(COD_OPERACAO) IN ("
+                + ", ".join(_sql_literal(value) for value in batch) + ")"
+                for batch in chunks(operation_codes)
+            ],
+            "COD_OPERACAO string, DAT_EXCLUSAO string",
+        )
+
+    if wanted("6e.meu_numero"):
+        run_many(
+            "LCI_TOGGLE",
+            [
+                "SELECT COD_FTRE_TOG, IND_FTRE_HAB, DATA_INIC_VIG_FTRE, DATA_FIM_VIG_FTRE "
+                f"FROM {cfg.schema}.TCTPFEATURE_TOGGLE "
+                f"WHERE COD_FTRE_TOG='{LCI_MEU_NUMERO_TOGGLE}'"
+            ],
+        )
+    controls: Optional[List[str]] = []
+    toggle = frames.get("LCI_TOGGLE")
+    deposit_if = resolve(deposit, "NUM_IF") if deposit is not None else None
+    deposit_control = (
+        resolve(deposit, "NUM_CONTROLE_LANCAMENTO") if deposit is not None else None
+    )
+    if toggle is not None and root_columns["DAT_REGISTRO"] and deposit_if and deposit_control:
+        root_dates = active_root.select(
+            _canon_key_col(F.col(root_columns["NUM_IF"])).alias("root_id"),
+            F.to_date(F.col(root_columns["DAT_REGISTRO"])).alias("registration_date"),
+        )
+        enabled = _lci_toggle_enabled_roots(root_dates, toggle)
+        if enabled is not None:
+            enabled_deposits = deposit.select(
+                _canon_key_col(F.col(deposit_if)).alias("root_id"),
+                _lci_text(F.col(deposit_control)).alias("control"),
+            ).join(enabled.select("root_id"), "root_id", "inner")
+            controls = collect_values(enabled_deposits, F.col("control"))
+    if controls is None and wanted("6e.meu_numero"):
+        errors["LCI_CONTROLS"] = f"more than {maximum} distinct synthetic controls"
+    elif wanted("6e.meu_numero"):
+        run_many(
+            "LCI_CONTROLS",
+            [
+                "SELECT NUM_CONTROLE_LANCAMENTO, DAT_EXCLUSAO FROM ("
+                f"SELECT NUM_CONTROLE_LANCAMENTO_P1 NUM_CONTROLE_LANCAMENTO, DAT_EXCLUSAO "
+                f"FROM {cfg.schema}.OPERACAO UNION ALL "
+                f"SELECT NUM_CONTROLE_LANCAMENTO_P2, DAT_EXCLUSAO FROM {cfg.schema}.OPERACAO"
+                ") WHERE TRIM(NUM_CONTROLE_LANCAMENTO) IN ("
+                + ", ".join(_sql_literal(value) for value in batch) + ")"
+                for batch in chunks(controls)
+            ],
+            "NUM_CONTROLE_LANCAMENTO string, DAT_EXCLUSAO string",
+        )
+
+    wallet_specs = (
+        (
+            "CARTEIRA_COMITENTE", "LCI_WALLET_COMITENTE",
+            ["NUM_ID_ENTIDADE", "COD_TIPO_POSICAO_CARTEIRA", "NUM_SISTEMA", "NUM_IF",
+             "NUM_CONTA_PARTICIPANTE"], None,
+        ),
+        (
+            "CARTEIRA_PARTICIPANTE", "LCI_WALLET_PARTICIPANTE",
+            ["COD_TIPO_POSICAO_CARTEIRA", "NUM_SISTEMA", "NUM_IF",
+             "NUM_CONTA_PARTICIPANTE"], "DAT_EXCLUSAO",
+        ),
+    )
+    for table, target_name, keys, active_column in wallet_specs:
+        wallet_name = "comitente" if table == "CARTEIRA_COMITENTE" else "participante"
+        if not wanted(f"6e.wallet.{wallet_name}"):
+            continue
+        frame = tables.get(table)
+        actual = {key: resolve(frame, key) if frame is not None else None for key in keys}
+        if frame is None or any(value is None for value in actual.values()):
+            errors[target_name] = f"synthetic {table} natural key unavailable"
+            continue
+        selected = frame.select(*[
+            _canon_key_col(F.col(actual[key])).alias(key) for key in keys
+        ]).dropna().dropDuplicates().limit(maximum + 1).collect()
+        if len(selected) > maximum:
+            errors[target_name] = f"more than {maximum} distinct synthetic wallet keys"
+            continue
+        queries = []
+        for batch_start in range(0, len(selected), 250):
+            predicates = []
+            for row in selected[batch_start:batch_start + 250]:
+                predicates.append("(" + " AND ".join(
+                    f"{key}={_sql_literal(str(row[key]))}" for key in keys
+                ) + ")")
+            if predicates:
+                select_columns = ", ".join(keys + ([active_column] if active_column else []))
+                queries.append(
+                    f"SELECT {select_columns} FROM {cfg.schema}.{table} WHERE "
+                    + " OR ".join(predicates)
+                )
+        schema = ", ".join(f"{key} string" for key in keys)
+        if active_column:
+            schema += f", {active_column} string"
+        run_many(target_name, queries, schema)
+    return frames, errors
+
+
+def _lci_profile_bad_constants(
+    table: str, frame: Optional[DataFrame], expected: Dict[str, object], sample: int,
+) -> Finding:
+    check_id = f"8e.profile.{table.lower()}_constants"
+    if frame is None:
+        return _lci_unavailable(check_id, [table], SEV_WARN)
+    columns = {name: resolve(frame, name) for name in expected}
+    missing = [name for name, actual in columns.items() if not actual]
+    if missing:
+        return _lci_unavailable(check_id, [f"{table}.{name}" for name in missing], SEV_WARN)
+    bad = frame.where(reduce(
+        lambda left, right: left | right,
+        [
+            ~F.coalesce(_canon_key_col(F.col(columns[name])) == str(value), F.lit(False))
+            for name, value in expected.items()
+        ],
+    ))
+    count = bad.count()
+    return Finding(
+        check_id, "LCI observed registration profile", SEV_WARN if count else SEV_INFO,
+        table, count == 0, count=count, column=",".join(expected),
+        sample=_sample_keys(bad, frame.columns[:1], sample),
+        hint="Treat these values as one successful LCI batch observation only." if count else "",
+        message="Rows differing from observed LCI registration constants.",
+    )
+
+
+def check_lci_registration_profile(
+    tables: Dict[str, DataFrame], sample: int, registration_profile: bool,
+    profile: ValidationProfile,
+) -> List[Finding]:
+    if profile.pipeline != "lci" or not registration_profile:
+        return []
+    out = [
+        _lci_profile_bad_constants(
+            "INSTRUMENTO_FINANCEIRO", tables.get("INSTRUMENTO_FINANCEIRO"),
+            {
+                "NUM_SISTEMA": 55, "NUM_TIPO_IF": 81, "NUM_ID_FORMA_PAGAMENTO": 19,
+                "NUM_ID_MOTIVO_SITUACAO_IF": 22, "COD_SITUACAO_IF": 0,
+                "VAL_NOMINAL_EMISSAO": 1, "VAL_NOMINAL_ATUAL": 1,
+                "VAL_NOMINAL_EM": 1, "VAL_PU_CURVA": 1,
+            }, sample,
+        ),
+        _lci_profile_bad_constants(
+            "TITULO", tables.get("TITULO"),
+            {
+                "QTD_EMITIDA": 10, "NUM_ID_TIPO_REGIME_TITULO": 2,
+                "IND_FRACIONAMENTO": "N", "NOM_FORMA_TITULO": "ESCRITURAL",
+            }, sample,
+        ),
+        _lci_profile_bad_constants(
+            "DEPOSITO_AUTOMATICO_IF", tables.get("DEPOSITO_AUTOMATICO_IF"),
+            {"VAL_PRECO_UNITARIO": 1}, sample,
+        ),
+        _lci_profile_bad_constants(
+            "OPERACAO", tables.get("OPERACAO"),
+            {
+                "QTD_OPERACAO": 10, "VAL_PRECO_UNITARIO": 1, "VAL_FINANCEIRO": 10,
+                "COD_SITUACAO_OPERACAO": 402, "NUM_ID_MODALIDADE_LIQUIDACAO": 6,
+            }, sample,
+        ),
+        _lci_profile_bad_constants(
+            "ESPECIFICACAO", tables.get("ESPECIFICACAO"),
+            {
+                "QTD_ESPECIFICAR": 10, "NUM_ID_SITUACAO_ESPECIFICACAO": 2,
+                "IND_EXCLUIDO": "N",
+            }, sample,
+        ),
+        _lci_profile_bad_constants(
+            "ESPECIFICACAO_COMITENTE", tables.get("ESPECIFICACAO_COMITENTE"),
+            {
+                "QTD_ESPECIFICADA": 10, "VAL_PRECO_UNITARIO": 1,
+                "COD_TIPO_POSICAO_CARTEIRA": 1, "IND_EXCLUIDO": "N",
+            }, sample,
+        ),
+        _lci_profile_bad_constants(
+            "CARTEIRA_COMITENTE", tables.get("CARTEIRA_COMITENTE"),
+            {
+                "QTD_CARTEIRA_COMITENTE": 10, "NUM_SISTEMA": 55,
+                "COD_TIPO_POSICAO_CARTEIRA": 1,
+            }, sample,
+        ),
+        _lci_profile_bad_constants(
+            "CARTEIRA_PARTICIPANTE", tables.get("CARTEIRA_PARTICIPANTE"),
+            {
+                "QTD_CARTEIRA_PARTICIPANTE": 10, "NUM_SISTEMA": 55,
+                "COD_TIPO_POSICAO_CARTEIRA": 1,
+            }, sample,
+        ),
+    ]
+    credit = tables.get("CREDITO")
+    if credit is None:
+        out.append(_lci_unavailable("8e.profile.credit_mostly_null", ["CREDITO"], SEV_WARN))
+    else:
+        value_columns = [column for column in credit.columns if column.upper() != "NUM_IF"]
+        if not value_columns:
+            bad = credit.limit(0)
+        else:
+            bad = credit.where(reduce(
+                lambda left, right: left | right,
+                [
+                    F.col(column).isNotNull()
+                    & (F.trim(F.col(column).cast("string")) != "")
+                    for column in value_columns
+                ],
+            ))
+        count = bad.count()
+        out.append(Finding(
+            "8e.profile.credit_mostly_null", "LCI observed registration profile",
+            SEV_WARN if count else SEV_INFO, "CREDITO", count == 0, count=count,
+            column=",".join(value_columns), sample=_sample_keys(bad, [credit.columns[0]], sample),
+            hint="Confirm populated CREDITO attributes against another LCI inclusion route."
+                 if count else "",
+            message="LCI CREDITO product rows differing from the observed mostly-null profile.",
+        ))
+
+    root = tables.get("INSTRUMENTO_FINANCEIRO")
+    condition = tables.get("CONDICAO_IF")
+    root_key = resolve(root, "NUM_IF") if root is not None else None
+    root_type = resolve(root, "NUM_TIPO_IF") if root is not None else None
+    condition_root = resolve(condition, "NUM_IF") if condition is not None else None
+    condition_type = (
+        resolve(condition, "COD_TIPO_CONDICAO_IF") if condition is not None else None
+    )
+    if not all((
+        root is not None, condition is not None, root_key, root_type,
+        condition_root, condition_type,
+    )):
+        out.append(_lci_unavailable(
+            "8e.profile.condition_topology", ["INSTRUMENTO_FINANCEIRO/CONDICAO_IF columns"]
+        ))
+    else:
+        roots = _active(root).where(
+            _canon_key_col(F.col(root_type)) == "81"
+        ).select(_canon_key_col(F.col(root_key)).alias("root_id"))
+        topology = _active(condition).select(
+            _canon_key_col(F.col(condition_root)).alias("root_id"),
+            _lci_text(F.col(condition_type)).alias("condition_type"),
+        ).groupBy("root_id").agg(
+            F.sort_array(F.collect_list("condition_type")).alias("topology")
+        )
+        bad = roots.join(topology, "root_id", "left").where(
+            ~F.coalesce(
+                (F.col("topology") == F.array(F.lit("20"), F.lit("3")))
+                | (F.col("topology") == F.array(F.lit("2"), F.lit("20")))
+                | (F.col("topology") == F.array(F.lit("2"), F.lit("20"), F.lit("4"))),
+                F.lit(False),
+            )
+        )
+        count = bad.count()
+        out.append(Finding(
+            "8e.profile.condition_topology", "LCI observed registration profile",
+            SEV_WARN if count else SEV_INFO, "CONDICAO_IF", count == 0, count=count,
+            column="COD_TIPO_CONDICAO_IF",
+            sample=_sample_keys(bad, ["root_id", "topology"], sample),
+            hint="Observed topologies are floating 3+20, fixed 2+20, and indexed 4+2+20."
+                 if count else "",
+            message="LCI roots outside the three observed condition topologies.",
+        ))
+
+    subtype_frames = []
+    for table, rate_column, observed in (
+        ("JUROS_FLUTUANTE", "VAL_TAXA_JUROS_FLUTUANTE", ("97", "98", "99")),
+        ("JUROS_FIXO", "VAL_TAXA_JUROS_FIXO", ("3.58", "6.7")),
+    ):
+        frame = tables.get(table)
+        rate = resolve(frame, rate_column) if frame is not None else None
+        if frame is None or not rate:
+            out.append(_lci_unavailable(
+                f"8e.profile.{table.lower()}_values", [f"{table}.{rate_column}"]
+            ))
+            continue
+        bad = frame.where(~_canon_key_col(F.col(rate)).isin(*observed))
+        count = bad.count()
+        subtype_frames.append(Finding(
+            f"8e.profile.{table.lower()}_values", "LCI observed registration profile",
+            SEV_WARN if count else SEV_INFO, table, count == 0, count=count,
+            column=rate_column, sample=_sample_keys(bad, frame.columns[:1], sample),
+            hint=f"Observed exact normalized rates are {observed}; retain new values as advisory."
+                 if count else "",
+            message="LCI rate values outside the observed batch.",
+        ))
+    out.extend(subtype_frames)
+    update = tables.get("ATUALIZACAO_POS")
+    update_expected = {
+        "NUM_INDICE_VALORIZACAO": 19, "IND_INCORPORA_ATUALIZACAO": "N",
+        "VAL_PERCENTUAL_PARAMETRO": 100, "COD_TIPO_UNIDADE_TEMPO_APLIC": "D",
+        "COD_TIPO_PRAZO": "COMERCIAL", "COD_DESLOCAMENTO_INDICE": -2,
+        "COD_TIPO_UNIDADE_TEMPO_PART": "M", "COD_TIPO_PRAZO_JUROS_PART": "CORRIDO",
+        "NOM_AGENDA_PAGAMENTO": "CONSTANTE",
+    }
+    if update is not None and update.limit(1).count() == 0:
+        out.append(Finding(
+            "8e.profile.atualizacao_pos_constants", "LCI observed registration profile",
+            SEV_INFO, "ATUALIZACAO_POS", True,
+            message="No indexed LCI rows present; indexed-value advisory is not applicable.",
+        ))
+    else:
+        out.append(_lci_profile_bad_constants(
+            "ATUALIZACAO_POS", update, update_expected, sample
+        ))
+
+    if root is None or not root_key or not root_type or not resolve(root, "COD_IF"):
+        out.append(_lci_unavailable("8e.profile.cod_if_allocator", ["INSTRUMENTO_FINANCEIRO"]))
+    else:
+        cod_if = resolve(root, "COD_IF")
+        active_lci = _active(root).where(
+            _canon_key_col(F.col(root_type)) == "81"
+        )
+        bad = active_lci.where(
+            ~F.coalesce(_lci_text(F.col(cod_if)).rlike(r"^[0-9]{2}[A-Z][0-9]{8}$"), F.lit(False))
+        )
+        count = bad.count()
+        out.append(Finding(
+            "8e.profile.cod_if_allocator", "LCI observed registration profile",
+            SEV_WARN if count else SEV_INFO, "INSTRUMENTO_FINANCEIRO", count == 0,
+            count=count, column="COD_IF", sample=_sample_keys(bad, [root_key, cod_if], sample),
+            hint="The allocator-like format is advisory; do not make it a hard root rule."
+                 if count else "",
+            message="LCI COD_IF values outside the single observed allocator format.",
+        ))
+
+    operation = tables.get("OPERACAO")
+    op_id = resolve(operation, "NUM_ID_OPERACAO") if operation is not None else None
+    op_root = resolve(operation, "NUM_IF") if operation is not None else None
+    if root is None or operation is None or not all((root_key, root_type, op_id, op_root)):
+        out.append(_lci_unavailable("8e.profile.async_closure", ["LCI closure columns"]))
+    else:
+        base = _active(root).where(
+            _canon_key_col(F.col(root_type)) == "81"
+        ).select(_canon_key_col(F.col(root_key)).alias("root_id"))
+
+        def direct_count(table: str, key_name: str, alias: str) -> None:
+            frame = tables.get(table)
+            actual = resolve(frame, key_name) if frame is not None else None
+            if frame is None or not actual:
+                return
+            nonlocal base
+            counts = frame.select(
+                _canon_key_col(F.col(actual)).alias("root_id")
+            ).groupBy("root_id").count().withColumnRenamed("count", alias)
+            base = base.join(counts, "root_id", "left")
+
+        direct_count("HISTORICO_PU_CURVA", "NUM_IF", "history_count")
+        direct_count("DEPOSITO_AUTOMATICO_IF", "NUM_IF", "deposit_count")
+        direct_count("OPERACAO", "NUM_IF", "operation_count")
+        direct_count("CARTEIRA_COMITENTE", "NUM_IF", "wallet_holder_count")
+        direct_count("CARTEIRA_PARTICIPANTE", "NUM_IF", "wallet_participant_count")
+        event = tables.get("EVENTO")
+        event_root, event_type = (
+            (resolve(event, "NUM_IF"), resolve(event, "NUM_TIPO_EVENTO_LEGADO"))
+            if event is not None else (None, None)
+        )
+        if event_root and event_type:
+            event_counts = event.select(
+                _canon_key_col(F.col(event_root)).alias("root_id"),
+                _lci_text(F.col(event_type)).alias("event_type"),
+            ).groupBy("root_id").agg(
+                F.count(F.lit(1)).alias("event_count"),
+                F.sum(F.when(F.col("event_type") == "83", 1).otherwise(0)).alias("event_83"),
+                F.sum(F.when(F.col("event_type") == "85", 1).otherwise(0)).alias("event_85"),
+            )
+            base = base.join(event_counts, "root_id", "left")
+        expected_columns = {
+            "history_count": 1, "deposit_count": 1, "operation_count": 1,
+            "wallet_holder_count": 1, "wallet_participant_count": 1,
+            "event_count": 2, "event_83": 1, "event_85": 1,
+        }
+        available = {
+            name: value for name, value in expected_columns.items() if name in base.columns
+        }
+        bad = base.fillna(0, list(available)).where(reduce(
+            lambda left, right: left | right,
+            [F.col(name) != expected for name, expected in available.items()],
+        )) if available else base
+        count = bad.count()
+        out.append(Finding(
+            "8e.profile.async_closure", "LCI observed registration profile",
+            SEV_WARN if count else SEV_INFO, "LCI aggregate", count == 0, count=count,
+            column=",".join(available), sample=_sample_keys(bad, ["root_id"], sample),
+            hint="Async closure cardinalities are observations; integrity remains hard elsewhere."
+                 if count else "",
+            message="LCI roots differing from observed history/event/deposit/operation/wallet "
+                    "closure cardinalities.",
+        ))
+
+    dado = tables.get("DADO_OPERACAO")
+    lancamento = tables.get("LANCAMENTO")
+    specification = tables.get("ESPECIFICACAO")
+    holder = tables.get("ESPECIFICACAO_COMITENTE")
+    closure_requirements = {
+        "operation": (operation, "NUM_ID_OPERACAO"),
+        "data operation": (dado, "NUM_ID_OPERACAO"),
+        "launch": (lancamento, "NUM_ID_OPERACAO"),
+        "specification": (specification, "NUM_ID_OPERACAO"),
+        "specification holder": (holder, "NUM_ID_ESPECIFICACAO"),
+    }
+    closure_missing = [
+        name for name, (frame, key) in closure_requirements.items()
+        if frame is None or not resolve(frame, key)
+    ]
+    dado_type = resolve(dado, "NUM_ID_TIPO_DADO_OPERACAO") if dado is not None else None
+    spec_id = resolve(specification, "NUM_ID_ESPECIFICACAO") \
+        if specification is not None else None
+    if closure_missing or not dado_type or not spec_id:
+        out.append(_lci_unavailable(
+            "8e.profile.operation_closure",
+            closure_missing + (["DADO/ESPECIFICACAO type/key columns"]
+                               if not dado_type or not spec_id else []),
+        ))
+    else:
+        operation_id = resolve(operation, "NUM_ID_OPERACAO")
+        cluster = operation.select(
+            _canon_key_col(F.col(operation_id)).alias("operation_id")
+        )
+        data_counts = dado.select(
+            _canon_key_col(F.col(resolve(dado, "NUM_ID_OPERACAO"))).alias("operation_id"),
+            _lci_text(F.col(dado_type)).alias("data_type"),
+        ).groupBy("operation_id").agg(
+            F.count(F.lit(1)).alias("data_count"),
+            F.sum(F.when(F.col("data_type") == "265", 1).otherwise(0)).alias("data_265"),
+            F.sum(F.when(F.col("data_type") == "269", 1).otherwise(0)).alias("data_269"),
+        )
+        launch_counts = lancamento.select(
+            _canon_key_col(F.col(resolve(lancamento, "NUM_ID_OPERACAO"))).alias("operation_id")
+        ).groupBy("operation_id").count().withColumnRenamed("count", "launch_count")
+        specifications = specification.select(
+            _canon_key_col(F.col(resolve(specification, "NUM_ID_OPERACAO")))
+            .alias("operation_id"),
+            _canon_key_col(F.col(spec_id)).alias("specification_id"),
+        )
+        specification_counts = specifications.groupBy("operation_id").count().withColumnRenamed(
+            "count", "specification_count"
+        )
+        holder_counts = specifications.join(
+            holder.select(
+                _canon_key_col(F.col(resolve(holder, "NUM_ID_ESPECIFICACAO")))
+                .alias("specification_id")
+            ), "specification_id", "inner",
+        ).groupBy("operation_id").count().withColumnRenamed("count", "holder_count")
+        cluster = cluster.join(data_counts, "operation_id", "left").join(
+            launch_counts, "operation_id", "left"
+        ).join(specification_counts, "operation_id", "left").join(
+            holder_counts, "operation_id", "left"
+        ).fillna(0)
+        bad = cluster.where(
+            (F.col("data_count") != 2) | (F.col("data_265") != 1)
+            | (F.col("data_269") != 1) | (F.col("launch_count") != 1)
+            | (F.col("specification_count") != 1) | (F.col("holder_count") != 1)
+        )
+        count = bad.count()
+        out.append(Finding(
+            "8e.profile.operation_closure", "LCI observed registration profile",
+            SEV_WARN if count else SEV_INFO, "OPERACAO", count == 0, count=count,
+            column="DADO(265+269),LANCAMENTO,ESPECIFICACAO,ESPECIFICACAO_COMITENTE",
+            sample=_sample_keys(bad, ["operation_id"], sample),
+            hint="Exact async closure counts are advisory; graph integrity remains hard."
+                 if count else "",
+            message="LCI operations differing from the observed 2:1:1:1 async closure.",
+        ))
+
+    date_columns = {
+        name: resolve(root, name) if root is not None else None
+        for name in (
+            "DAT_REGISTRO", "DAT_EMISSAO", "DAT_PU_CURVA", "DAT_ULTIMA_CORRECAO",
+            "DAT_SITUACAO_IF", "DAT_VAL_NOMINAL_EM",
+        )
+    }
+    if root is None or not root_key or any(value is None for value in date_columns.values()):
+        out.append(_lci_unavailable(
+            "8e.profile.copied_dates", [
+                f"INSTRUMENTO_FINANCEIRO.{name}"
+                for name, actual in date_columns.items() if not actual
+            ] or ["INSTRUMENTO_FINANCEIRO"],
+        ))
+    else:
+        dates = root.select(
+            _canon_key_col(F.col(root_key)).alias("root_id"),
+            *[F.to_date(F.col(actual)).alias(name) for name, actual in date_columns.items()],
+        )
+        bad = dates.where(reduce(
+            lambda left, right: left | right,
+            [
+                ~F.col("DAT_REGISTRO").eqNullSafe(F.col(name))
+                for name in date_columns if name != "DAT_REGISTRO"
+            ],
+        ))
+        count = bad.count()
+        out.append(Finding(
+            "8e.profile.copied_dates", "LCI observed registration profile",
+            SEV_WARN if count else SEV_INFO, "INSTRUMENTO_FINANCEIRO", count == 0,
+            count=count, column=",".join(date_columns),
+            sample=_sample_keys(bad, ["root_id"], sample),
+            hint="Copied business-date equalities are advisory; DAT_INCLUSAO is runtime."
+                 if count else "",
+            message="LCI roots differing from observed DAT_REGISTRO-based copied dates.",
+        ))
+
+    if operation is not None:
+        quantity = resolve(operation, "QTD_OPERACAO")
+        price = resolve(operation, "VAL_PRECO_UNITARIO")
+        financial = resolve(operation, "VAL_FINANCEIRO")
+        if all((quantity, price, financial)):
+            bad = operation.where(
+                F.expr(f"try_cast(`{quantity}` as decimal(38,10))")
+                * F.expr(f"try_cast(`{price}` as decimal(38,10))")
+                != F.expr(f"try_cast(`{financial}` as decimal(38,10))")
+            )
+            count = bad.count()
+            out.append(Finding(
+                "8e.profile.operation_financial_identity", "LCI observed registration profile",
+                SEV_WARN if count else SEV_INFO, "OPERACAO", count == 0, count=count,
+                column="QTD_OPERACAO,VAL_PRECO_UNITARIO,VAL_FINANCEIRO",
+                sample=_sample_keys(bad, [op_id] if op_id else operation.columns[:1], sample),
+                hint="QTD*PU=VAL_FINANCEIRO is an observed registration relationship."
+                     if count else "",
+                message="Operations differing from the observed financial identity.",
+            ))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Category 3b - Primary-key integrity (all synthetic Oracle tables)
 # ---------------------------------------------------------------------------
 MAPA_CLONE_NUM_IF_TABLE = "MAPA_CLONE_NUM_IF"
@@ -5758,12 +7265,787 @@ def check_lookup_combos(
 
 
 # ---------------------------------------------------------------------------
+# Category 0/2g/6g/8g - LCA registration-route evidence
+# ---------------------------------------------------------------------------
+LCA_OUTPUT_TABLES = (
+    "ENTIDADE", "REPRESENTANTE_IF", "INSTRUMENTO_FINANCEIRO", "TITULO", "IF_LCA",
+    "CREDITO", "GARANTIA", "CONDICAO_IF", "AMORTIZACAO", "JUROS_FLUTUANTE", "SPREAD",
+    "RESGATE", "EVENTO", "DEPOSITO_AUTOMATICO_IF", "OPERACAO", "DADO_OPERACAO",
+    "LANCAMENTO", "ESPECIFICACAO", "ESPECIFICACAO_COMITENTE", "CARTEIRA_COMITENTE",
+    "CARTEIRA_PARTICIPANTE",
+)
+LCA_CONDITION_SUBTYPES = {
+    "1": "AMORTIZACAO", "3": "JUROS_FLUTUANTE", "5": "SPREAD", "20": "RESGATE",
+}
+LCA_MEU_NUMERO_TOGGLE = "VALIDA_MEU_NUMERO_DEPOSITO"
+
+
+def _lca_unavailable(check_id: str, missing: Sequence[str], severity: str = SEV_WARN) -> Finding:
+    return Finding(
+        check_id, "LCA", severity,
+        ",".join(sorted({value.split(".")[0] for value in missing})), False,
+        hint="Export the complete LCA aggregate or make its bounded target lookup available.",
+        message=f"Check unavailable; missing required input: {', '.join(missing)}.",
+    )
+
+
+def check_lca_metadata(
+    meta: Metadata, no_oracle: bool, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "lca":
+        return []
+    if no_oracle:
+        return [Finding(
+            "0.lca_metadata", "Coverage", SEV_WARN, "Oracle metadata", False,
+            hint="Rerun with Oracle access; specs.json omits IF_LCA/GARANTIA and marks "
+                 "ENTIDADE/REPRESENTANTE_IF static.",
+            message="Live Oracle table and PK metadata for all 21 LCA output tables is "
+                    "unavailable under --no-oracle (forces PARTIAL).",
+        )]
+    missing = [table for table in LCA_OUTPUT_TABLES if table not in meta.tables]
+    missing_pk = [
+        table for table in LCA_OUTPUT_TABLES if table in meta.tables and not meta.pk.get(table)
+    ]
+    failed = bool(missing or missing_pk)
+    return [Finding(
+        "0.lca_metadata", "Coverage", SEV_ERROR if failed else SEV_INFO,
+        ",".join(LCA_OUTPUT_TABLES), not failed, count=len(missing) + len(missing_pk),
+        hint="Use live metadata for every LCA output table; specs.json is not authoritative."
+             if failed else "",
+        message=(f"Missing Oracle table metadata={missing}; missing PK metadata={missing_pk}."
+                 if failed else "Live Oracle table and PK metadata cover all 21 LCA tables."),
+    )]
+
+
+def _lca_edge_findings(
+    check_id: str, parents: DataFrame, child: DataFrame, child_table: str,
+    parent_column: str, child_id_column: str, sample: int,
+) -> List[Finding]:
+    parent_counts = parents.groupBy("parent_id").count().withColumnRenamed(
+        "count", "parent_count"
+    )
+    edges = child.select(
+        _canon_key_col(F.col(parent_column)).alias("parent_id"),
+        _canon_key_col(F.col(child_id_column)).alias("child_id"),
+    )
+    bad = edges.join(parent_counts, "parent_id", "left").where(
+        F.coalesce(F.col("parent_count"), F.lit(0)) != 1
+    )
+    duplicate = edges.groupBy("parent_id", "child_id").count().where(F.col("count") > 1)
+    count, duplicate_count = bad.count(), duplicate.count()
+    return [
+        Finding(
+            f"{check_id}.edge", "LCA graph", SEV_ERROR if count else SEV_INFO,
+            child_table, count == 0, count=count, column=parent_column,
+            sample=_sample_keys(bad, ["child_id", "parent_id"], sample),
+            hint="Remove the orphan/ambiguous edge or export its one parent." if count else "",
+            message="LCA child rows must resolve to exactly one aggregate parent.",
+        ),
+        Finding(
+            f"{check_id}.duplicate", "LCA graph",
+            SEV_ERROR if duplicate_count else SEV_INFO, child_table,
+            duplicate_count == 0, count=duplicate_count,
+            column=f"{child_id_column},{parent_column}",
+            sample=_sample_keys(duplicate, ["child_id", "parent_id"], sample),
+            hint="Keep each physical child-to-parent edge unambiguous."
+                 if duplicate_count else "",
+            message="Duplicate LCA physical graph edges.",
+        ),
+    ]
+
+
+def check_lca_graph(
+    tables: Dict[str, DataFrame], sample: int, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "lca":
+        return []
+    missing_tables = [table for table in LCA_OUTPUT_TABLES if table not in tables]
+    if missing_tables:
+        return [_lca_unavailable("2g.output_tables", missing_tables, SEV_ERROR)]
+    requirements = {
+        "ENTIDADE": ("NUM_ID_ENTIDADE",),
+        "REPRESENTANTE_IF": ("NUM_ID_ENTIDADE",),
+        "INSTRUMENTO_FINANCEIRO": ("NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO", "COD_IF"),
+        "TITULO": ("NUM_IF",),
+        "IF_LCA": ("NUM_IF", "NUM_ID_ENT_DEPOSITARIO_ORIG"),
+        "CREDITO": ("NUM_IF",),
+        "GARANTIA": ("NUM_ID_GARANTIA", "NUM_IF"),
+        "CONDICAO_IF": ("NUM_CONDICAO_IF", "NUM_IF", "COD_TIPO_CONDICAO_IF"),
+        **{table: ("NUM_CONDICAO_IF",) for table in LCA_CONDITION_SUBTYPES.values()},
+        "EVENTO": ("NUM_EVENTO", "NUM_IF"),
+        "DEPOSITO_AUTOMATICO_IF": ("NUM_IF",),
+        "OPERACAO": ("NUM_ID_OPERACAO", "NUM_IF"),
+        "DADO_OPERACAO": ("NUM_ID_DADO_OPERACAO", "NUM_ID_OPERACAO"),
+        "LANCAMENTO": ("NUM_ID_LANCAMENTO", "NUM_ID_OPERACAO"),
+        "ESPECIFICACAO": ("NUM_ID_ESPECIFICACAO", "NUM_ID_OPERACAO"),
+        "ESPECIFICACAO_COMITENTE": (
+            "NUM_ID_ESPECIFICACAO_COMITENTE", "NUM_ID_ESPECIFICACAO",
+        ),
+        "CARTEIRA_COMITENTE": ("NUM_CARTEIRA_COMITENTE", "NUM_IF"),
+        "CARTEIRA_PARTICIPANTE": ("NUM_CARTEIRA_PARTICIPANTE", "NUM_IF"),
+    }
+    columns, missing = _credito_scr_columns(tables, requirements)
+    if missing:
+        return [_lca_unavailable("2g.graph.availability", missing, SEV_ERROR)]
+    root_cols = columns["INSTRUMENTO_FINANCEIRO"]
+    roots = _active(tables["INSTRUMENTO_FINANCEIRO"]).where(
+        _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == "96"
+    ).select(
+        _canon_key_col(F.col(root_cols["NUM_IF"])).alias("parent_id"),
+        _lci_text(F.col(root_cols["COD_IF"])).alias("business_code"),
+    )
+    coded = roots.withColumn(
+        "code_count", F.count(F.lit(1)).over(Window.partitionBy("business_code"))
+    )
+    bad_codes = coded.where(
+        F.col("business_code").isNull() | (F.col("business_code") == "")
+        | (F.col("code_count") > 1)
+    )
+    count = bad_codes.count()
+    out = [Finding(
+        "2g.root_code", "LCA graph", SEV_ERROR if count else SEV_INFO,
+        "INSTRUMENTO_FINANCEIRO", count == 0, count=count, column="COD_IF",
+        sample=_sample_keys(bad_codes, ["parent_id", "business_code"], sample),
+        hint="Generate nonblank unique exact-trimmed active LCA COD_IF values."
+             if count else "",
+        message="Active LCA roots with blank or duplicate case-sensitive COD_IF values.",
+    )]
+    for table in ("TITULO", "IF_LCA", "CREDITO", "GARANTIA"):
+        parent_col = columns[table]["NUM_IF"]
+        children = tables[table].select(_canon_key_col(F.col(parent_col)).alias("parent_id"))
+        counts = children.groupBy("parent_id").count().withColumnRenamed("count", "child_count")
+        bad = roots.select("parent_id").join(counts, "parent_id", "left").where(
+            F.coalesce(F.col("child_count"), F.lit(0)) != 1
+        )
+        child_count = bad.count()
+        out.append(Finding(
+            f"2g.one_{table.lower()}", "LCA graph", SEV_ERROR if child_count else SEV_INFO,
+            table, child_count == 0, count=child_count, column="NUM_IF",
+            sample=_sample_keys(bad, ["parent_id"], sample),
+            hint=f"Keep exactly one {table} row per active LCA root." if child_count else "",
+            message=f"Active LCA roots without exactly one {table} row.",
+        ))
+        child_id = columns[table].get("NUM_ID_GARANTIA", parent_col)
+        out.extend(_lca_edge_findings(
+            f"2g.{table.lower()}", roots.select("parent_id"), tables[table], table,
+            parent_col, child_id, sample,
+        ))
+    entities = tables["ENTIDADE"].select(
+        _canon_key_col(F.col(columns["ENTIDADE"]["NUM_ID_ENTIDADE"])).alias("parent_id")
+    )
+    representatives = tables["REPRESENTANTE_IF"].select(
+        _canon_key_col(F.col(columns["REPRESENTANTE_IF"]["NUM_ID_ENTIDADE"])).alias("parent_id")
+    )
+    out.extend(_lca_edge_findings(
+        "2g.representative", entities, tables["REPRESENTANTE_IF"], "REPRESENTANTE_IF",
+        columns["REPRESENTANTE_IF"]["NUM_ID_ENTIDADE"],
+        columns["REPRESENTANTE_IF"]["NUM_ID_ENTIDADE"], sample,
+    ))
+    out.extend(_lca_edge_findings(
+        "2g.depositor_origin", representatives, tables["IF_LCA"], "IF_LCA",
+        columns["IF_LCA"]["NUM_ID_ENT_DEPOSITARIO_ORIG"], columns["IF_LCA"]["NUM_IF"], sample,
+    ))
+    direct_edges = (
+        ("condition", "CONDICAO_IF", "NUM_IF", "NUM_CONDICAO_IF"),
+        ("event", "EVENTO", "NUM_IF", "NUM_EVENTO"),
+        ("deposit", "DEPOSITO_AUTOMATICO_IF", "NUM_IF", "NUM_IF"),
+        ("operation", "OPERACAO", "NUM_IF", "NUM_ID_OPERACAO"),
+        ("wallet_comitente", "CARTEIRA_COMITENTE", "NUM_IF", "NUM_CARTEIRA_COMITENTE"),
+        ("wallet_participante", "CARTEIRA_PARTICIPANTE", "NUM_IF",
+         "NUM_CARTEIRA_PARTICIPANTE"),
+    )
+    for name, table, parent_name, child_name in direct_edges:
+        out.extend(_lca_edge_findings(
+            f"2g.{name}", roots.select("parent_id"), tables[table], table,
+            columns[table][parent_name], columns[table][child_name], sample,
+        ))
+    conditions = tables["CONDICAO_IF"].select(
+        _canon_key_col(F.col(columns["CONDICAO_IF"]["NUM_CONDICAO_IF"])).alias("parent_id")
+    )
+    for table in LCA_CONDITION_SUBTYPES.values():
+        out.extend(_lca_edge_findings(
+            f"2g.{table.lower()}", conditions, tables[table], table,
+            columns[table]["NUM_CONDICAO_IF"], columns[table]["NUM_CONDICAO_IF"], sample,
+        ))
+    operations = tables["OPERACAO"].select(
+        _canon_key_col(F.col(columns["OPERACAO"]["NUM_ID_OPERACAO"])).alias("parent_id")
+    )
+    for name, table, child_name in (
+        ("operation_data", "DADO_OPERACAO", "NUM_ID_DADO_OPERACAO"),
+        ("launch", "LANCAMENTO", "NUM_ID_LANCAMENTO"),
+        ("specification", "ESPECIFICACAO", "NUM_ID_ESPECIFICACAO"),
+    ):
+        out.extend(_lca_edge_findings(
+            f"2g.{name}", operations, tables[table], table,
+            columns[table]["NUM_ID_OPERACAO"], columns[table][child_name], sample,
+        ))
+    specifications = tables["ESPECIFICACAO"].select(
+        _canon_key_col(F.col(columns["ESPECIFICACAO"]["NUM_ID_ESPECIFICACAO"]))
+        .alias("parent_id")
+    )
+    out.extend(_lca_edge_findings(
+        "2g.specification_holder", specifications, tables["ESPECIFICACAO_COMITENTE"],
+        "ESPECIFICACAO_COMITENTE",
+        columns["ESPECIFICACAO_COMITENTE"]["NUM_ID_ESPECIFICACAO"],
+        columns["ESPECIFICACAO_COMITENTE"]["NUM_ID_ESPECIFICACAO_COMITENTE"], sample,
+    ))
+    return out
+
+
+def check_lca_polymorphism(
+    tables: Dict[str, DataFrame], sample: int, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "lca":
+        return []
+    requirements = {
+        "CONDICAO_IF": ("NUM_CONDICAO_IF", "COD_TIPO_CONDICAO_IF"),
+        **{table: ("NUM_CONDICAO_IF",) for table in LCA_CONDITION_SUBTYPES.values()},
+    }
+    columns, missing = _credito_scr_columns(tables, requirements)
+    if missing:
+        return [_lca_unavailable("2g.condition.availability", missing, SEV_ERROR)]
+    condition = _active(tables["CONDICAO_IF"]).select(
+        _canon_key_col(F.col(columns["CONDICAO_IF"]["NUM_CONDICAO_IF"])).alias("condition_id"),
+        _lci_text(F.col(columns["CONDICAO_IF"]["COD_TIPO_CONDICAO_IF"])).alias(
+            "condition_type"
+        ),
+    )
+    membership = None
+    for table in LCA_CONDITION_SUBTYPES.values():
+        frame = _active(tables[table]).select(
+            _canon_key_col(F.col(columns[table]["NUM_CONDICAO_IF"])).alias("condition_id"),
+            F.lit(table).alias("physical_table"),
+        )
+        membership = frame if membership is None else membership.unionByName(frame)
+    subtype_tables = list(LCA_CONDITION_SUBTYPES.values())
+    counts = membership.groupBy("condition_id").pivot("physical_table", subtype_tables).count()
+    known = condition.where(F.col("condition_type").isin(*LCA_CONDITION_SUBTYPES))
+    joined = known.join(counts, "condition_id", "left").fillna(0, subtype_tables)
+    pairs = []
+    for code, table in LCA_CONDITION_SUBTYPES.items():
+        pairs.extend((F.lit(code), F.lit(table)))
+    joined = joined.withColumn("expected_table", F.create_map(*pairs)[F.col("condition_type")])
+    bad = joined.where(reduce(
+        lambda left, right: left | right,
+        [F.when(F.col("expected_table") == table, F.col(table) != 1)
+         .otherwise(F.col(table) != 0) for table in subtype_tables],
+    ))
+    unknown = condition.where(
+        F.col("condition_type").isNull() | (F.col("condition_type") == "")
+        | ~F.col("condition_type").isin(*LCA_CONDITION_SUBTYPES)
+    )
+    orphan = membership.join(condition.select("condition_id").dropDuplicates(),
+                             "condition_id", "left_anti")
+    bad_count, unknown_count, orphan_count = bad.count(), unknown.count(), orphan.count()
+    return [
+        Finding(
+            "2g.condition_polymorphism", "LCA condition polymorphism",
+            SEV_ERROR if bad_count else SEV_INFO, "CONDICAO_IF", bad_count == 0,
+            count=bad_count, column="COD_TIPO_CONDICAO_IF,NUM_CONDICAO_IF",
+            sample=_sample_keys(bad, ["condition_id", "condition_type"], sample),
+            hint="Emit exactly one expected known physical row and no wrong known row."
+                 if bad_count else "",
+            message="Known LCA conditions with missing, duplicate, or wrong physical subtype.",
+        ),
+        Finding(
+            "2g.unknown_condition_type", "LCA condition polymorphism",
+            SEV_WARN if unknown_count else SEV_INFO, "CONDICAO_IF", unknown_count == 0,
+            count=unknown_count, column="COD_TIPO_CONDICAO_IF",
+            sample=_sample_keys(unknown, ["condition_id", "condition_type"], sample),
+            hint="Capture another successful LCA variant before assigning a mapping."
+                 if unknown_count else "",
+            message="LCA condition types outside the four log-proven mappings.",
+        ),
+        Finding(
+            "2g.subtype_orphan", "LCA condition polymorphism",
+            SEV_ERROR if orphan_count else SEV_INFO, "CONDICAO_IF", orphan_count == 0,
+            count=orphan_count, column="NUM_CONDICAO_IF",
+            sample=_sample_keys(orphan, ["condition_id", "physical_table"], sample),
+            hint="Remove subtype rows without a CONDICAO_IF parent." if orphan_count else "",
+            message="Known LCA physical subtype rows without a condition parent.",
+        ),
+    ]
+
+
+# ---------------------------------------------------------------------------
+def _lca_from_lci_finding(finding: Finding) -> Finding:
+    adapted = replace(
+        finding,
+        check_id=finding.check_id.replace("6e.", "6g.", 1),
+        category=finding.category.replace("LCI", "LCA"),
+        table=finding.table.replace("LCI_", "LCA_"),
+        message=finding.message.replace("LCI", "LCA").replace("type-1 lot", "type-2 lot"),
+        hint=finding.hint.replace("LCI", "LCA").replace("type-1 lot", "type-2 lot")
+        .replace("type 81", "type 96").replace("object-service 75", "object-service 843"),
+    )
+    if adapted.check_id == "6g.lookup.issuer_account":
+        adapted = replace(
+            adapted,
+            column="NUM_ID_SITUACAO_CONTA",
+            hint="Use an LCA issuer account with status 1 or 2." if not adapted.passed else "",
+        )
+    return adapted
+
+
+def check_lca_target_frames(
+    tables: Dict[str, DataFrame], frames: Dict[str, DataFrame], sample: int,
+    profile: ValidationProfile, errors: Optional[Dict[str, str]] = None,
+) -> List[Finding]:
+    if profile.pipeline != "lca":
+        return []
+    errors = errors or {}
+    mapping = {
+        "LCA_TIPO_IF": "LCI_TIPO_IF", "LCA_LOTES": "LCI_LOTES",
+        "LCA_ACCOUNTS": "LCI_ACCOUNTS", "LCA_OBJECT_SERVICE": "LCI_OBJECT_SERVICE",
+        "LCA_ROUTES": "LCI_ROUTES", "LCA_ROOT_CODES": "LCI_ROOT_CODES",
+        "LCA_TOGGLE": "LCI_TOGGLE", "LCA_CONTROLS": "LCI_CONTROLS",
+        "LCA_OPERATION_CODES": "LCI_OPERATION_CODES",
+        "LCA_WALLET_COMITENTE": "LCI_WALLET_COMITENTE",
+        "LCA_WALLET_PARTICIPANTE": "LCI_WALLET_PARTICIPANTE",
+    }
+    adapted = {mapping[name]: frame for name, frame in frames.items() if name in mapping}
+    accounts = adapted.get("LCI_ACCOUNTS")
+    if accounts is not None:
+        if resolve(accounts, "COD_TIPO_ACESSO") is None:
+            accounts = accounts.withColumn("COD_TIPO_ACESSO", F.lit(None).cast("string"))
+        if resolve(accounts, "NUM_ID_AREA_ATUACAO") is None:
+            accounts = accounts.withColumn("NUM_ID_AREA_ATUACAO", F.lit(None).cast("long"))
+        adapted["LCI_ACCOUNTS"] = accounts
+    adapted_errors = {mapping[name]: value for name, value in errors.items() if name in mapping}
+    out = [
+        _lca_from_lci_finding(finding)
+        for finding in check_lci_target_frames(tables, adapted, sample, profile, adapted_errors)
+    ]
+    lots = frames.get("LCA_LOTES")
+    lot_id = resolve(lots, "NUM_ID_LOTE") if lots is not None else None
+    lot_type_if = resolve(lots, "NUM_TIPO_IF") if lots is not None else None
+    root = tables.get("INSTRUMENTO_FINANCEIRO")
+    root_lot = resolve(root, "NUM_ID_LOTE") if root is not None else None
+    root_type = resolve(root, "NUM_TIPO_IF") if root is not None else None
+    if lots is not None and all((lot_id, lot_type_if, root is not None, root_lot, root_type)):
+        active_lots, supported = _lci_active_target(lots)
+        if supported:
+            roots = _active(root).where(
+                _canon_key_col(F.col(root_type)) == "96"
+            ).select(_canon_key_col(F.col(root_lot)).alias("lot_id"))
+            target = active_lots.select(
+                _canon_key_col(F.col(lot_id)).alias("lot_id"),
+                _canon_key_col(F.col(lot_type_if)).alias("lot_root_type"),
+            )
+            bad = roots.join(target, "lot_id", "left").where(
+                F.col("lot_root_type").isNull() | (F.col("lot_root_type") != "96")
+            )
+            count = bad.count()
+            out.append(Finding(
+                "6g.lookup.lot_root_type", "LCA target eligibility",
+                SEV_ERROR if count else SEV_INFO, "LOTE", count == 0, count=count,
+                column="LOTE.NUM_TIPO_IF", sample=_sample_keys(bad, ["lot_id"], sample),
+                hint="Use a persisted type-96 LCA lot root." if count else "",
+                message="LCA target lots retain the persisted compatible root type.",
+            ))
+        else:
+            out.append(_lca_unavailable(
+                "6g.lookup.lot_root_type", ["LCA_LOTES.DAT_EXCLUSAO"]
+            ))
+    else:
+        out.append(_lca_unavailable(
+            "6g.lookup.lot_root_type", ["LCA_LOTES.NUM_TIPO_IF"]
+        ))
+    credit = tables.get("CREDITO")
+    credit_if = resolve(credit, "NUM_IF") if credit is not None else None
+    credit_municipality = resolve(credit, "NUM_ID_MUNICIPIO") if credit is not None else None
+    municipalities = frames.get("LCA_MUNICIPALITIES")
+    municipality_id = (
+        resolve(municipalities, "NUM_ID_MUNICIPIO") if municipalities is not None else None
+    )
+    municipality_uf = resolve(municipalities, "NUM_ID_UF") if municipalities is not None else None
+    municipality_active = (
+        resolve(municipalities, "IND_EXCLUIDO") if municipalities is not None else None
+    )
+    if all((credit is not None, credit_if, credit_municipality, municipalities is not None,
+            municipality_id, municipality_uf, municipality_active)):
+        references = credit.select(
+            _canon_key_col(F.col(credit_if)).alias("root_id"),
+            _canon_key_col(F.col(credit_municipality)).alias("municipality_id"),
+        ).where(F.col("municipality_id").isNotNull() & (F.col("municipality_id") != ""))
+        active_municipalities = municipalities.where(
+            _lci_text(F.col(municipality_active)) == "N"
+        ).select(
+            _canon_key_col(F.col(municipality_id)).alias("municipality_id"),
+            _canon_key_col(F.col(municipality_uf)).alias("uf_id"),
+        )
+        bad = references.join(active_municipalities, "municipality_id", "left").where(
+            F.col("uf_id").isNull()
+        )
+        count = bad.count()
+        out.append(Finding(
+            "6g.lookup.municipality", "LCA target eligibility",
+            SEV_ERROR if count else SEV_INFO, "MUNICIPIO", count == 0, count=count,
+            column="CREDITO.NUM_ID_MUNICIPIO,IND_EXCLUIDO",
+            sample=_sample_keys(bad, ["root_id", "municipality_id"], sample),
+            hint="Resolve each nonnull CREDITO municipality to active IND_EXCLUIDO='N'."
+                 if count else "",
+            message="LCA CREDITO municipality references are active.",
+        ))
+        ufs = frames.get("LCA_UFS")
+        uf_id = resolve(ufs, "NUM_ID_UF") if ufs is not None else None
+        uf_active = resolve(ufs, "IND_EXCLUIDO") if ufs is not None else None
+        if ufs is not None and uf_id and uf_active:
+            active_ufs = ufs.where(_lci_text(F.col(uf_active)) == "N").select(
+                _canon_key_col(F.col(uf_id)).alias("uf_id")
+            ).dropDuplicates()
+            bad = references.join(active_municipalities, "municipality_id", "inner").join(
+                F.broadcast(active_ufs), "uf_id", "left_anti"
+            )
+            count = bad.count()
+            out.append(Finding(
+                "6g.lookup.uf", "LCA target eligibility", SEV_ERROR if count else SEV_INFO,
+                "UF", count == 0, count=count, column="MUNICIPIO.NUM_ID_UF,IND_EXCLUIDO",
+                sample=_sample_keys(bad, ["root_id", "municipality_id", "uf_id"], sample),
+                hint="Resolve each municipality to active UF IND_EXCLUIDO='N'." if count else "",
+                message="LCA municipality UF references are active.",
+            ))
+        else:
+            out.append(_lca_unavailable("6g.lookup.uf", ["LCA_UFS"]))
+    else:
+        out.append(_lca_unavailable("6g.lookup.municipality", ["LCA_MUNICIPALITIES"]))
+    return out
+
+
+def load_lca_target_frames(
+    spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame], maximum: int = 100_000,
+    skip_prefixes: Sequence[str] = (),
+) -> Tuple[Dict[str, DataFrame], Dict[str, str]]:
+    """Bounded LCA target setup; skipped 6g prefixes never issue JDBC."""
+    lci_skips = tuple(prefix.replace("6g.", "6e.", 1) for prefix in skip_prefixes)
+    frames, errors = load_lci_target_frames(
+        spark, cfg, tables, maximum, lci_skips, VALIDATION_PROFILES["lca"]
+    )
+    reverse = {
+        "LCI_TIPO_IF": "LCA_TIPO_IF", "LCI_LOTES": "LCA_LOTES",
+        "LCI_ACCOUNTS": "LCA_ACCOUNTS", "LCI_OBJECT_SERVICE": "LCA_OBJECT_SERVICE",
+        "LCI_ROUTES": "LCA_ROUTES", "LCI_ROOT_CODES": "LCA_ROOT_CODES",
+        "LCI_TOGGLE": "LCA_TOGGLE", "LCI_CONTROLS": "LCA_CONTROLS",
+        "LCI_OPERATION_CODES": "LCA_OPERATION_CODES",
+        "LCI_WALLET_COMITENTE": "LCA_WALLET_COMITENTE",
+        "LCI_WALLET_PARTICIPANTE": "LCA_WALLET_PARTICIPANTE",
+    }
+    out = {reverse[name]: frame for name, frame in frames.items() if name in reverse}
+    out_errors = {reverse.get(name, name): value for name, value in errors.items()}
+    want_municipality = not _check_is_skipped(
+        "6g.lookup.municipality", list(skip_prefixes)
+    )
+    want_uf = not _check_is_skipped("6g.lookup.uf", list(skip_prefixes))
+    if not want_municipality and not want_uf:
+        return out, out_errors
+    credit = tables.get("CREDITO")
+    municipality = resolve(credit, "NUM_ID_MUNICIPIO") if credit is not None else None
+    if municipality is None:
+        out_errors["LCA_MUNICIPALITIES"] = "CREDITO.NUM_ID_MUNICIPIO unavailable"
+        return out, out_errors
+    values = [str(row[0]) for row in credit.select(
+        _canon_key_col(F.col(municipality)).alias("id")
+    ).where(F.col("id").isNotNull() & (F.col("id") != "")).dropDuplicates()
+        .limit(maximum + 1).collect()]
+    if len(values) > maximum:
+        out_errors["LCA_MUNICIPALITIES"] = f"more than {maximum} municipality IDs"
+        return out, out_errors
+    municipality_rows, municipality_schema = [], None
+    try:
+        for offset in range(0, len(values), 1000):
+            batch = values[offset:offset + 1000]
+            frame = _jdbc(
+                spark, cfg,
+                "SELECT NUM_ID_MUNICIPIO, NUM_ID_UF, IND_EXCLUIDO "
+                f"FROM {cfg.schema}.MUNICIPIO WHERE NUM_ID_MUNICIPIO IN ("
+                + ", ".join(_sql_literal(value) for value in batch) + ")",
+            )
+            municipality_schema = municipality_schema or frame.schema
+            municipality_rows.extend(frame.collect())
+        if municipality_schema is None:
+            out["LCA_MUNICIPALITIES"] = spark.createDataFrame(
+                [], "NUM_ID_MUNICIPIO string, NUM_ID_UF string, IND_EXCLUIDO string"
+            )
+        else:
+            out["LCA_MUNICIPALITIES"] = spark.createDataFrame(
+                municipality_rows, municipality_schema
+            )
+        if not want_uf:
+            return out, out_errors
+        uf_values = [str(row[0]) for row in out["LCA_MUNICIPALITIES"].select(
+            _canon_key_col(F.col(resolve(out["LCA_MUNICIPALITIES"], "NUM_ID_UF")))
+            .alias("uf_id")
+        ).where(F.col("uf_id").isNotNull()).dropDuplicates().limit(maximum + 1).collect()]
+        if len(uf_values) > maximum:
+            out_errors["LCA_UFS"] = f"more than {maximum} UF IDs"
+        elif uf_values:
+            out["LCA_UFS"] = _jdbc(
+                spark, cfg, "SELECT NUM_ID_UF, IND_EXCLUIDO "
+                f"FROM {cfg.schema}.UF WHERE NUM_ID_UF IN ("
+                + ", ".join(_sql_literal(value) for value in uf_values) + ")",
+            )
+        else:
+            out["LCA_UFS"] = spark.createDataFrame(
+                [], "NUM_ID_UF string, IND_EXCLUIDO string"
+            )
+    except Exception as exc:  # noqa: BLE001
+        out_errors["LCA_MUNICIPALITIES"] = str(exc)
+    return out, out_errors
+
+
+def check_lca_registration_profile(
+    tables: Dict[str, DataFrame], sample: int, enabled: bool, profile: ValidationProfile,
+) -> List[Finding]:
+    if profile.pipeline != "lca" or not enabled:
+        return []
+
+    def constants(table: str, expected: Dict[str, object]) -> Finding:
+        frame = tables.get(table)
+        check_id = f"8g.profile.{table.lower()}_constants"
+        if frame is None:
+            return _lca_unavailable(check_id, [table])
+        actual = {name: resolve(frame, name) for name in expected}
+        if any(column is None for column in actual.values()):
+            return _lca_unavailable(check_id, [f"{table}.{name}" for name, column in actual.items()
+                                                if column is None])
+        bad = frame.where(reduce(
+            lambda left, right: left | right,
+            [~F.coalesce(_canon_key_col(F.col(actual[name])) == str(value), F.lit(False))
+             for name, value in expected.items()],
+        ))
+        count = bad.count()
+        return Finding(
+            check_id, "LCA observed registration profile", SEV_WARN if count else SEV_INFO,
+            table, count == 0, count=count, column=",".join(expected),
+            sample=_sample_keys(bad, frame.columns[:1], sample),
+            hint="Treat lca_inclusao.log values as advisory." if count else "",
+            message="Rows differing from observed LCA registration constants.",
+        )
+
+    out = [
+        constants("INSTRUMENTO_FINANCEIRO", {
+            "NUM_SISTEMA": 55, "NUM_TIPO_IF": 96, "NUM_ID_FORMA_PAGAMENTO": 267,
+            "NUM_ID_MOTIVO_SITUACAO_IF": 7, "COD_SITUACAO_IF": 0,
+            "VAL_NOMINAL_EMISSAO": 500, "VAL_NOMINAL_ATUAL": 500,
+            "VAL_NOMINAL_EM": 500, "VAL_PU_CURVA": 500, "IND_AGENDA_CONSTANTE": "S",
+        }),
+        constants("TITULO", {
+            "QTD_EMITIDA": 1, "NUM_ID_TIPO_REGIME_TITULO": 2,
+            "NUM_ID_VEICULO_GARANTIDOR": 1, "IND_FRACIONAMENTO": "N",
+            "NOM_FORMA_TITULO": "ESCRITURAL",
+        }),
+        constants("IF_LCA", {
+            "IND_MANUT_UNILATERAL_GARANTIAS": "S", "IND_LIQUIDACAO_ANTECIPADA": "N",
+        }),
+        constants("CREDITO", {"NUM_ID_TIPO_CREDITO": 11, "NUM_ID_MUNICIPIO": 339}),
+        constants("GARANTIA", {"NUM_ID_TIPO_GARANTIA": 16}),
+        constants("AMORTIZACAO", {"VAL_TAXA_AMORTIZACAO": 10}),
+        constants("JUROS_FLUTUANTE", {
+            "NUM_INDICE_VALORIZACAO": 4, "VAL_PERCENTUAL_TAXA_JUROS": 100,
+        }),
+        constants("SPREAD", {"VAL_TAXA_SPREAD": 1.56}),
+        constants("RESGATE", {"COD_COND_RESGATE": "SEM TABELA"}),
+    ]
+    root, condition, event = (tables.get(name) for name in (
+        "INSTRUMENTO_FINANCEIRO", "CONDICAO_IF", "EVENTO"
+    ))
+    root_key = resolve(root, "NUM_IF") if root is not None else None
+    root_type = resolve(root, "NUM_TIPO_IF") if root is not None else None
+    condition_root = resolve(condition, "NUM_IF") if condition is not None else None
+    condition_type = resolve(condition, "COD_TIPO_CONDICAO_IF") if condition is not None else None
+    if all((root is not None, condition is not None, root_key, root_type,
+            condition_root, condition_type)):
+        roots = _active(root).where(_canon_key_col(F.col(root_type)) == "96").select(
+            _canon_key_col(F.col(root_key)).alias("root_id")
+        )
+        topology = condition.select(
+            _canon_key_col(F.col(condition_root)).alias("root_id"),
+            _lci_text(F.col(condition_type)).alias("condition_type"),
+        ).groupBy("root_id").agg(F.sort_array(F.collect_list("condition_type")).alias("topology"))
+        bad = roots.join(topology, "root_id", "left").where(
+            ~F.coalesce(F.col("topology") == F.array(
+                F.lit("1"), F.lit("20"), F.lit("3"), F.lit("5")
+            ), F.lit(False))
+        )
+        count = bad.count()
+        out.append(Finding(
+            "8g.profile.condition_topology", "LCA observed registration profile",
+            SEV_WARN if count else SEV_INFO, "CONDICAO_IF", count == 0, count=count,
+            column="COD_TIPO_CONDICAO_IF", sample=_sample_keys(bad, ["root_id"], sample),
+            hint="Observed topology 1+3+5+20 is advisory." if count else "",
+            message="LCA roots outside the observed condition topology.",
+        ))
+    else:
+        out.append(_lca_unavailable(
+            "8g.profile.condition_topology",
+            ["INSTRUMENTO_FINANCEIRO/CONDICAO_IF required columns"],
+        ))
+    event_root = resolve(event, "NUM_IF") if event is not None else None
+    event_type = resolve(event, "NUM_TIPO_EVENTO_LEGADO") if event is not None else None
+    if all((root is not None, event is not None, root_key, root_type, event_root, event_type)):
+        roots = _active(root).where(_canon_key_col(F.col(root_type)) == "96").select(
+            _canon_key_col(F.col(root_key)).alias("root_id")
+        )
+        counts = event.select(
+            _canon_key_col(F.col(event_root)).alias("root_id"),
+            _canon_key_col(F.col(event_type)).alias("event_type"),
+        ).groupBy("root_id").agg(
+            F.count(F.lit(1)).alias("total"),
+            F.sum(F.when(F.col("event_type") == "83", 1).otherwise(0)).alias("type83"),
+            F.sum(F.when(F.col("event_type") == "84", 1).otherwise(0)).alias("type84"),
+            F.sum(F.when(F.col("event_type") == "85", 1).otherwise(0)).alias("type85"),
+        )
+        bad = roots.join(counts, "root_id", "left").fillna(0).where(
+            (F.col("total") != 20) | (F.col("type83") != 10)
+            | (F.col("type84") != 9) | (F.col("type85") != 1)
+        )
+        count = bad.count()
+        out.append(Finding(
+            "8g.profile.event_dml_counts", "LCA observed registration profile",
+            SEV_WARN if count else SEV_INFO, "EVENTO", count == 0, count=count,
+            column="NUM_TIPO_EVENTO_LEGADO",
+            sample=_sample_keys(bad, ["root_id", "total", "type83", "type84", "type85"], sample),
+            hint="Logger says 8 amortizations, but DML has 9 type-84 rows; never harden this."
+                 if count else "",
+            message="Observed event DML is total20/type83=10/type84=9/type85=1; logger says "
+                    "8 amortizations while physical DML has 9.",
+        ))
+        closure = roots
+        for table, root_column, alias in (
+            ("DEPOSITO_AUTOMATICO_IF", "NUM_IF", "deposit_count"),
+            ("OPERACAO", "NUM_IF", "operation_count"),
+            ("CARTEIRA_COMITENTE", "NUM_IF", "wallet_holder_count"),
+            ("CARTEIRA_PARTICIPANTE", "NUM_IF", "wallet_participant_count"),
+        ):
+            frame = tables.get(table)
+            actual = resolve(frame, root_column) if frame is not None else None
+            if actual:
+                per_root = frame.select(
+                    _canon_key_col(F.col(actual)).alias("root_id")
+                ).groupBy("root_id").count().withColumnRenamed("count", alias)
+                closure = closure.join(per_root, "root_id", "left")
+            else:
+                closure = closure.withColumn(alias, F.lit(0))
+        operation = tables.get("OPERACAO")
+        operation_id = resolve(operation, "NUM_ID_OPERACAO") if operation is not None else None
+        operation_root = resolve(operation, "NUM_IF") if operation is not None else None
+        operation_bridge = None
+        if operation_id and operation_root:
+            operation_bridge = operation.select(
+                _canon_key_col(F.col(operation_id)).alias("operation_id"),
+                _canon_key_col(F.col(operation_root)).alias("root_id"),
+            )
+            for table, alias in (
+                ("DADO_OPERACAO", "data_count"),
+                ("LANCAMENTO", "launch_count"),
+                ("ESPECIFICACAO", "specification_count"),
+            ):
+                frame = tables.get(table)
+                child_operation = resolve(frame, "NUM_ID_OPERACAO") \
+                    if frame is not None else None
+                if child_operation:
+                    per_root = frame.select(
+                        _canon_key_col(F.col(child_operation)).alias("operation_id")
+                    ).join(operation_bridge, "operation_id", "inner").groupBy(
+                        "root_id"
+                    ).count().withColumnRenamed("count", alias)
+                    closure = closure.join(per_root, "root_id", "left")
+                else:
+                    closure = closure.withColumn(alias, F.lit(0))
+            specification = tables.get("ESPECIFICACAO")
+            holder = tables.get("ESPECIFICACAO_COMITENTE")
+            specification_id = resolve(specification, "NUM_ID_ESPECIFICACAO") \
+                if specification is not None else None
+            specification_operation = resolve(specification, "NUM_ID_OPERACAO") \
+                if specification is not None else None
+            holder_specification = resolve(holder, "NUM_ID_ESPECIFICACAO") \
+                if holder is not None else None
+            if specification_id and specification_operation and holder_specification:
+                specification_roots = specification.select(
+                    _canon_key_col(F.col(specification_id)).alias("specification_id"),
+                    _canon_key_col(F.col(specification_operation))
+                    .alias("operation_id"),
+                ).join(operation_bridge, "operation_id", "inner")
+                holder_counts = holder.select(
+                    _canon_key_col(F.col(holder_specification)).alias("specification_id")
+                ).join(specification_roots, "specification_id", "inner").groupBy(
+                    "root_id"
+                ).count().withColumnRenamed("count", "holder_count")
+                closure = closure.join(holder_counts, "root_id", "left")
+            else:
+                closure = closure.withColumn("holder_count", F.lit(0))
+        else:
+            for column in (
+                "data_count", "launch_count", "specification_count", "holder_count",
+            ):
+                closure = closure.withColumn(column, F.lit(0))
+        count_columns = [
+            "deposit_count", "operation_count", "wallet_holder_count",
+            "wallet_participant_count", "launch_count", "specification_count", "holder_count",
+        ]
+        closure = closure.fillna(0, count_columns + ["data_count"])
+        closure_bad = closure.where(
+            reduce(
+                lambda left, right: left | right,
+                [F.col(column) != 1 for column in count_columns]
+                + [F.col("data_count") != 2],
+            )
+        )
+        closure_count = closure_bad.count()
+        out.append(Finding(
+            "8g.profile.async_closure", "LCA observed registration profile",
+            SEV_WARN if closure_count else SEV_INFO, "OPERACAO", closure_count == 0,
+            count=closure_count, column=",".join(count_columns + ["data_count"]),
+            sample=_sample_keys(closure_bad, ["root_id"], sample),
+            hint=("Observed one deposit/operation/lancamento/specification/wallet closure and "
+                  "two DADO rows are advisory asynchronous state, never hard."
+                  if closure_count else ""),
+            message="LCA asynchronous closure differs from the observed 1/1/2/1/1/1/1 state.",
+        ))
+        data = tables.get("DADO_OPERACAO")
+        data_operation = resolve(data, "NUM_ID_OPERACAO") if data is not None else None
+        data_type = resolve(data, "NUM_ID_TIPO_DADO_OPERACAO") if data is not None else None
+        if data_operation and data_type and operation_bridge is not None:
+            data_types = data.select(
+                _canon_key_col(F.col(data_operation)).alias("operation_id"),
+                _canon_key_col(F.col(data_type)).alias("data_type"),
+            ).groupBy("operation_id").agg(
+                F.sort_array(F.collect_list("data_type")).alias("data_types")
+            )
+            bad = operation_bridge.join(data_types, "operation_id", "left").where(
+                ~F.coalesce(
+                    F.col("data_types") == F.array(F.lit("287"), F.lit("288")), F.lit(False)
+                )
+            )
+            count = bad.count()
+            out.append(Finding(
+                "8g.profile.operation_data_types", "LCA observed registration profile",
+                SEV_WARN if count else SEV_INFO, "DADO_OPERACAO", count == 0, count=count,
+                column="NUM_ID_TIPO_DADO_OPERACAO",
+                sample=_sample_keys(bad, ["root_id", "operation_id", "data_types"], sample),
+                hint="The observed exact 287+288 pair is advisory." if count else "",
+                message="LCA operation data differs from observed types 287+288.",
+            ))
+        else:
+            out.append(_lca_unavailable(
+                "8g.profile.operation_data_types", ["DADO_OPERACAO/OPERACAO required columns"]
+            ))
+    else:
+        missing = ["INSTRUMENTO_FINANCEIRO/EVENTO required columns"]
+        out.extend([
+            _lca_unavailable("8g.profile.event_dml_counts", missing),
+            _lca_unavailable("8g.profile.async_closure", missing),
+            _lca_unavailable("8g.profile.operation_data_types", missing),
+        ])
+    return out
+
+
 # Category 7 - Shape conformance (per-IF cardinalities)
 # ---------------------------------------------------------------------------
 # Counting core kept in sync with scripts/profile_cdb_shapes.py: same universe
 # (NUM_TIPO_IF=49, DAT_EXCLUSAO IS NULL), same active-row rule, same shape
 # signature format ("TABLE=n|TABLE=n|..."). Schema-v2 metric names and order are
-# validated against DEFAULT_SHAPE_METRICS before any shape action.
+# validated against the selected product's metric inventory before any shape action.
 SHAPE_ROOT_TABLE = "INSTRUMENTO_FINANCEIRO"
 SHAPE_ROOT_KEY = "NUM_IF"
 SHAPE_TIPO_IF = 49
@@ -5777,6 +8059,8 @@ SHAPE_VIA: Dict[str, Tuple[str, str]] = {
     "SPREAD": ("CONDICAO_IF", "NUM_CONDICAO_IF"),
     "DADO_OPERACAO": ("OPERACAO", "NUM_ID_OPERACAO"),
     "LANCAMENTO": ("OPERACAO", "NUM_ID_OPERACAO"),
+    "ESPECIFICACAO": ("OPERACAO", "NUM_ID_OPERACAO"),
+    "ESPECIFICACAO_COMITENTE": ("ESPECIFICACAO", "NUM_ID_ESPECIFICACAO"),
 }
 # Filtered metrics: metric name -> (source table, filter column, normalized value).
 # Mirrors profile_cdb_shapes.py METRICS entries with a `where`; every domain IF
@@ -5785,6 +8069,11 @@ SHAPE_VIA: Dict[str, Tuple[str, str]] = {
 SHAPE_FILTERED: Dict[str, Tuple[str, str, str]] = {
     "EVENTO_TIPO83": ("EVENTO", "NUM_TIPO_EVENTO_LEGADO", "83"),
     "EVENTO_TIPO85": ("EVENTO", "NUM_TIPO_EVENTO_LEGADO", "85"),
+    "EVENTO_TIPO84": ("EVENTO", "NUM_TIPO_EVENTO_LEGADO", "84"),
+    "CONDICAO_IF_TIPO1": ("CONDICAO_IF", "COD_TIPO_CONDICAO_IF", "1"),
+    "CONDICAO_IF_TIPO3": ("CONDICAO_IF", "COD_TIPO_CONDICAO_IF", "3"),
+    "CONDICAO_IF_TIPO5": ("CONDICAO_IF", "COD_TIPO_CONDICAO_IF", "5"),
+    "CONDICAO_IF_TIPO20": ("CONDICAO_IF", "COD_TIPO_CONDICAO_IF", "20"),
 }
 DEFAULT_SHAPE_METRICS: List[str] = [
     "TITULO", "CREDITO", "CONDICAO_IF", "RESGATE", "JUROS_FLUTUANTE", "JUROS_FIXO",
@@ -5793,13 +8082,30 @@ DEFAULT_SHAPE_METRICS: List[str] = [
     "OPERACAO", "DADO_OPERACAO", "LANCAMENTO", "DEPOSITO_AUTOMATICO_IF",
     "CARTEIRA_COMITENTE", "CARTEIRA_PARTICIPANTE",
 ]
+LCI_SHAPE_METRICS = [
+    metric for metric in DEFAULT_SHAPE_METRICS
+    if metric not in {"ATUALIZACAO_PRE", "SPREAD"}
+]
+LCA_SHAPE_METRICS = [
+    "ENTIDADE", "REPRESENTANTE_IF", "TITULO", "IF_LCA", "CREDITO", "GARANTIA",
+    "CONDICAO_IF", "CONDICAO_IF_TIPO1", "CONDICAO_IF_TIPO3", "CONDICAO_IF_TIPO5",
+    "CONDICAO_IF_TIPO20", "AMORTIZACAO", "JUROS_FLUTUANTE", "SPREAD", "RESGATE",
+    "EVENTO", "EVENTO_TIPO83", "EVENTO_TIPO84", "EVENTO_TIPO85", "DEPOSITO",
+    "OPERACAO", "DADO_OPERACAO", "LANCAMENTO", "ESPECIFICACAO",
+    "ESPECIFICACAO_COMITENTE", "CARTEIRA_COMITENTE", "CARTEIRA_PARTICIPANTE",
+]
+SHAPE_METRICS_BY_PIPELINE = {
+    "instrumento_financeiro": DEFAULT_SHAPE_METRICS,
+    "lci": LCI_SHAPE_METRICS,
+    "lca": LCA_SHAPE_METRICS,
+}
 BASELINE_DOMAIN_VERSION = 1
 BASELINE_METRIC_VERSION = 2
 
 
 def _shape_active(df: DataFrame) -> DataFrame:
     col = resolve(df, "DAT_EXCLUSAO")
-    return df.where(F.col(col).isNull()) if col else df
+    return df.where(_oracle_null_equivalent(F.col(col))) if col else df
 
 
 def _shape_universe(
@@ -5822,6 +8128,8 @@ def _shape_counts(
     result, skipped = universe, []
     for name in metric_names:
         source_table, wcol_name, wval = name, None, None
+        if name == "DEPOSITO":
+            source_table = "DEPOSITO_AUTOMATICO_IF"
         if name in SHAPE_FILTERED:
             source_table, wcol_name, wval = SHAPE_FILTERED[name]
         df = tables.get(source_table)
@@ -5832,7 +8140,60 @@ def _shape_counts(
                 wcol = resolve(df, wcol_name)
                 df = df.where(_norm_code(F.col(wcol)) == wval) if wcol else None
         if df is not None:
-            if name in SHAPE_VIA:
+            if name in {"ENTIDADE", "REPRESENTANTE_IF"}:
+                if_lca = tables.get("IF_LCA")
+                representative = tables.get("REPRESENTANTE_IF")
+                entity_key = resolve(df, "NUM_ID_ENTIDADE")
+                rep_key = (
+                    resolve(representative, "NUM_ID_ENTIDADE")
+                    if representative is not None else None
+                )
+                lca_entity = (
+                    resolve(if_lca, "NUM_ID_ENT_DEPOSITARIO_ORIG")
+                    if if_lca is not None else None
+                )
+                lca_if = resolve(if_lca, SHAPE_ROOT_KEY) if if_lca is not None else None
+                if all((if_lca is not None, representative is not None, entity_key,
+                        rep_key, lca_entity, lca_if)):
+                    route = _shape_active(if_lca).select(
+                        F.col(lca_entity).cast("long").alias("entity_id"),
+                        F.col(lca_if).cast("long").alias(SHAPE_ROOT_KEY),
+                    )
+                    child = df.select(F.col(entity_key).cast("long").alias("entity_id"))
+                    if name == "ENTIDADE":
+                        reps = _shape_active(representative).select(
+                            F.col(rep_key).cast("long").alias("entity_id")
+                        ).dropDuplicates()
+                        child = child.join(reps, "entity_id", "inner")
+                    keyed = child.join(route, "entity_id", "inner").select(SHAPE_ROOT_KEY)
+            elif name == "ESPECIFICACAO_COMITENTE":
+                specification = tables.get("ESPECIFICACAO")
+                operation = tables.get("OPERACAO")
+                child_spec = resolve(df, "NUM_ID_ESPECIFICACAO")
+                spec_key = resolve(specification, "NUM_ID_ESPECIFICACAO") \
+                    if specification is not None else None
+                spec_operation = resolve(specification, "NUM_ID_OPERACAO") \
+                    if specification is not None else None
+                operation_key = resolve(operation, "NUM_ID_OPERACAO") \
+                    if operation is not None else None
+                operation_if = resolve(operation, SHAPE_ROOT_KEY) \
+                    if operation is not None else None
+                if all((specification is not None, operation is not None, child_spec,
+                        spec_key, spec_operation, operation_key, operation_if)):
+                    specifications = _shape_active(specification).select(
+                        F.col(spec_key).cast("long").alias("spec_id"),
+                        F.col(spec_operation).cast("long").alias("operation_id"),
+                    )
+                    operations = _shape_active(operation).select(
+                        F.col(operation_key).cast("long").alias("operation_id"),
+                        F.col(operation_if).cast("long").alias(SHAPE_ROOT_KEY),
+                    )
+                    keyed = df.select(
+                        F.col(child_spec).cast("long").alias("spec_id")
+                    ).join(specifications, "spec_id", "inner").join(
+                        operations, "operation_id", "inner"
+                    ).select(SHAPE_ROOT_KEY)
+            elif name in SHAPE_VIA:
                 bridge_table, bridge_key = SHAPE_VIA[name]
                 bridge = tables.get(bridge_table)
                 ck = resolve(df, bridge_key)
@@ -5944,7 +8305,8 @@ def _baseline_incompatibility(
     if int(baseline["metric_version"]) != BASELINE_METRIC_VERSION:
         return (f"baseline metric_version={baseline['metric_version']} != validator "
                 f"metric_version={BASELINE_METRIC_VERSION}")
-    if baseline["metrics"] != DEFAULT_SHAPE_METRICS:
+    expected_metrics = SHAPE_METRICS_BY_PIPELINE.get(profile.pipeline, DEFAULT_SHAPE_METRICS)
+    if baseline["metrics"] != expected_metrics:
         return "baseline metrics do not match the validator metric contract"
     if current_identity is not None:
         for field in ("map_mode", "source_key_count", "source_key_fingerprint"):
@@ -5988,7 +8350,7 @@ def check_shapes(
                         message="INSTRUMENTO_FINANCEIRO not in output; shape checks skipped.")]
 
     baseline_pct: Optional[dict] = None
-    metric_names = DEFAULT_SHAPE_METRICS
+    metric_names = SHAPE_METRICS_BY_PIPELINE.get(profile.pipeline, DEFAULT_SHAPE_METRICS)
     if baseline_path:
         try:
             baseline_raw = _load_shape_baseline(spark, baseline_path)
@@ -6252,7 +8614,7 @@ def _cat8_active_cdb(tables: Dict[str, DataFrame], required: List[str], num_tipo
         return None, missing
     return df.where(
         (_norm_code(F.col(columns["NUM_TIPO_IF"])) == str(num_tipo_if))
-        & F.col(columns["DAT_EXCLUSAO"]).isNull()
+        & _oracle_null_equivalent(F.col(columns["DAT_EXCLUSAO"]))
     ), []
 
 
@@ -6889,6 +9251,8 @@ def main() -> None:
     profile = get_validation_profile(args.product)
     is_credito_scr = profile.pipeline == "credito_scr"
     is_dicre = profile.pipeline == "dicre"
+    is_lci = profile.pipeline == "lci"
+    is_lca = profile.pipeline == "lca"
     is_non_if = is_credito_scr or is_dicre
     skip_prefixes = [prefix.strip() for prefix in args.skip_check if prefix.strip()]
     if _check_is_skipped("0.identity", skip_prefixes):
@@ -6960,7 +9324,9 @@ def main() -> None:
         lambda: (
             check_credito_scr_metadata(meta, args.no_oracle, profile)
             if is_credito_scr else check_dicre_metadata(meta, args.no_oracle, profile)
-            if is_dicre else []
+            if is_dicre else check_lci_metadata(meta, args.no_oracle, profile)
+            if is_lci else check_lca_metadata(meta, args.no_oracle, profile)
+            if is_lca else []
         ),
     )
     if is_credito_scr:
@@ -6975,9 +9341,29 @@ def main() -> None:
             + check_dicre_irop_graph(tables, args.sample_size, profile),
         )
     else:
+        if is_lci:
+            findings += _run_check_group(
+                "category 2e LCI graph", ("2e.",), skip_prefixes,
+                lambda: check_lci_graph(tables, args.sample_size, profile),
+            )
+        elif is_lca:
+            findings += _run_check_group(
+                "category 2g LCA graph", ("2g.",), skip_prefixes,
+                lambda: check_lca_graph(tables, args.sample_size, profile),
+            )
+        polymorphism_prefixes = (
+            ("2e.condition_polymorphism", "2e.unknown_condition_type", "2e.subtype_orphan")
+            if is_lci else
+            ("2g.condition_polymorphism", "2g.unknown_condition_type", "2g.subtype_orphan")
+            if is_lca else ("1.", "1a.", "1b.", "1c.")
+        )
         findings += _run_check_group(
-            "category 1 polymorphism", ("1.", "1a.", "1b.", "1c."), skip_prefixes,
-            lambda: check_polymorphism(tables, meta, args.sample_size),
+            "category 1 polymorphism", polymorphism_prefixes, skip_prefixes,
+            lambda: (
+                check_lci_polymorphism(tables, args.sample_size, profile)
+                if is_lci else check_lca_polymorphism(tables, args.sample_size, profile)
+                if is_lca else check_polymorphism(tables, meta, args.sample_size)
+            ),
         )
         if args.shape_baseline:
             findings += _run_check_group(
@@ -7109,6 +9495,88 @@ def main() -> None:
         findings += _run_check_group(
             "category 8f DICRE insertion profile", ("8f.",), skip_prefixes,
             lambda: check_dicre_registration_profile(
+                tables, args.sample_size, args.registration_profile, profile,
+            ),
+        )
+    elif is_lci:
+        if _check_group_is_skipped(("6e.",), skip_prefixes):
+            logger.info("Skipped category 6e LCI target lookup setup (--skip-check).")
+        else:
+            if args.no_oracle:
+                lci_lookups, lci_lookup_errors = {}, {
+                    name: "No Oracle connection"
+                    for name in (
+                        "LCI_TIPO_IF", "LCI_LOTES", "LCI_ACCOUNTS", "LCI_OBJECT_SERVICE",
+                        "LCI_ROUTES", "LCI_ROOT_CODES", "LCI_TOGGLE", "LCI_CONTROLS",
+                        "LCI_OPERATION_CODES", "LCI_WALLET_COMITENTE",
+                        "LCI_WALLET_PARTICIPANTE",
+                    )
+                }
+            else:
+                lci_lookups, lci_lookup_errors = _timed(
+                    "category 6e LCI target lookup setup",
+                    lambda: load_lci_target_frames(
+                        spark, cfg, tables, skip_prefixes=skip_prefixes
+                    ),
+                )
+            findings += _run_check_group(
+                "category 6e LCI target eligibility", ("6e.",), skip_prefixes,
+                lambda: check_lci_target_frames(
+                    tables, lci_lookups, args.sample_size, profile, lci_lookup_errors,
+                ),
+            )
+        findings += _run_check_group(
+            "category 7 LCI shapes", ("7.", "7a.", "7b."), skip_prefixes,
+            lambda: check_shapes(
+                spark, tables, args.shape_baseline, args.sample_size,
+                args.shape_unseen_tol, args.shape_drift_tol, args.shape_op_ratio_tol, profile,
+                skip_prefixes,
+            ),
+        )
+        findings += _run_check_group(
+            "category 8e LCI insertion profile", ("8e.",), skip_prefixes,
+            lambda: check_lci_registration_profile(
+                tables, args.sample_size, args.registration_profile, profile,
+            ),
+        )
+    elif is_lca:
+        if _check_group_is_skipped(("6g.",), skip_prefixes):
+            logger.info("Skipped category 6g LCA target lookup setup (--skip-check).")
+        else:
+            if args.no_oracle:
+                lca_lookups, lca_lookup_errors = {}, {
+                    name: "No Oracle connection"
+                    for name in (
+                        "LCA_TIPO_IF", "LCA_LOTES", "LCA_ACCOUNTS", "LCA_OBJECT_SERVICE",
+                        "LCA_ROUTES", "LCA_ROOT_CODES", "LCA_TOGGLE", "LCA_CONTROLS",
+                        "LCA_OPERATION_CODES", "LCA_WALLET_COMITENTE",
+                        "LCA_WALLET_PARTICIPANTE", "LCA_MUNICIPALITIES", "LCA_UFS",
+                    )
+                }
+            else:
+                lca_lookups, lca_lookup_errors = _timed(
+                    "category 6g LCA target lookup setup",
+                    lambda: load_lca_target_frames(
+                        spark, cfg, tables, skip_prefixes=skip_prefixes
+                    ),
+                )
+            findings += _run_check_group(
+                "category 6g LCA target eligibility", ("6g.",), skip_prefixes,
+                lambda: check_lca_target_frames(
+                    tables, lca_lookups, args.sample_size, profile, lca_lookup_errors,
+                ),
+            )
+        findings += _run_check_group(
+            "category 7 LCA shapes", ("7.", "7a.", "7b."), skip_prefixes,
+            lambda: check_shapes(
+                spark, tables, args.shape_baseline, args.sample_size,
+                args.shape_unseen_tol, args.shape_drift_tol, args.shape_op_ratio_tol, profile,
+                skip_prefixes,
+            ),
+        )
+        findings += _run_check_group(
+            "category 8g LCA insertion profile", ("8g.",), skip_prefixes,
+            lambda: check_lca_registration_profile(
                 tables, args.sample_size, args.registration_profile, profile,
             ),
         )
