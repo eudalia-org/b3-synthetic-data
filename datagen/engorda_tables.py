@@ -461,6 +461,22 @@ class EngordaJob:
     cod_if_dry_prefix: Optional[str] = None
 
 
+# Tabelas que devem ser engordadas por produto. Ao preencher as tuplas abaixo,
+# as tabelas correspondentes serão marcadas como static=False no spec único.
+TABELAS_ENGORDA_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
+    "cdb_simplificado": (),
+    "cdb_resgate": (),
+    "cdb_escalonamento": (),
+    "rdb_inclusao": (),
+    "rdb_resgate": (),
+    "lci": (),
+    "lca": (),
+    "ccb": (),
+    "lastro": (),
+    "direito_creditorio": (),
+}
+
+
 # Perfil ÚNICO do schema CETIP, comum a todos os produtos.
 REGRAS_SCHEMA_CETIP: Dict[str, Any] = {
     # None desliga os ajustes DAT_*.
@@ -569,18 +585,21 @@ def _normalize_clone_prefix(value: str) -> str:
 
 
 def _normalize_produto(name: Any) -> str:
-    """Rótulo do produto: texto livre validado, sem lista fechada.
+    """Normaliza e valida um produto configurado para engorda.
 
-    O nome NÃO seleciona configuração (o perfil do schema é único). Ele dá nome
-    ao app no Data Flow, rastreia o run no log e alimenta os DEFAULTS de
-    --query-num-if-sql (<produto>.sql) e --clone-prefix
-    (sintetizacao_multiproduto/<produto>)."""
+    O nome seleciona as tabelas em TABELAS_ENGORDA_POR_PRODUTO e também alimenta
+    os defaults de --query-num-if-sql e --clone-prefix."""
     if not isinstance(name, str) or not name.strip():
         raise ValueError("produto precisa ser texto não vazio")
     normalized = name.strip().lower()
     if not PRODUTO_NOME_RE.fullmatch(normalized):
         raise ValueError(
             f"nome de produto inválido: {name!r} (use [a-z][a-z0-9_]*)")
+    if normalized not in TABELAS_ENGORDA_POR_PRODUTO:
+        raise ValueError(
+            f"produto desconhecido: {name!r}; escolha entre: "
+            + ", ".join(TABELAS_ENGORDA_POR_PRODUTO)
+        )
     return normalized
 
 
@@ -887,11 +906,10 @@ def get_product_profile(
     cod_if_dry_prefix: Optional[str] = None,
     tipo_oracle: Optional[int] = None,
 ) -> ProductProfile:
-    """Compila e valida o perfil para QUALQUER rótulo de produto.
+    """Compila e valida o perfil para um produto configurado.
 
-    Não há mais lista fechada de produtos: o perfil técnico é único
-    (REGRAS_SCHEMA_CETIP) e tudo que variava por produto virou parâmetro ou
-    valor derivado do dado."""
+    O perfil técnico é único (REGRAS_SCHEMA_CETIP); as tabelas engordáveis são
+    selecionadas por TABELAS_ENGORDA_POR_PRODUTO."""
     profile = _build_product_profile(
         name, REGRAS_SCHEMA_CETIP,
         query_filename=query_filename,
@@ -3534,6 +3552,23 @@ def executa_clonagem(spark, config, spec: dict, *,
     _valida_contrato_nulificacao_seletiva(
         spec, product_profile.integrity.selective_missing_keys
     )
+    produto = _normalize_produto(product_profile.name)
+    tabelas_produto = {
+        table_path_name(table.strip().upper())
+        for table in TABELAS_ENGORDA_POR_PRODUTO[produto]
+        if table.strip()
+    }
+    tabelas_ausentes = sorted(tabelas_produto - set(spec))
+    if tabelas_ausentes:
+        raise ValueError(
+            f"Produto {produto}: tabela(s) não encontrada(s) no "
+            f"spec: {tabelas_ausentes}"
+        )
+    for table in tabelas_produto:
+        spec[table]["static"] = False
+    if tabelas_produto:
+        logger.info("Tabelas engordáveis do produto %s: %s",
+                    produto, sorted(tabelas_produto))
     estaticas_extra = {
         table_path_name(t.strip().upper())
         for t in (*product_profile.static_tables, *(tratar_como_static or set()))
@@ -3998,7 +4033,7 @@ def nonneg_int(value: str) -> int:
 
 
 def _parse_produto(value: str) -> str:
-    """Rótulo livre validado; não há mais lista fechada de produtos."""
+    """Produto presente em TABELAS_ENGORDA_POR_PRODUTO."""
     try:
         return _normalize_produto(value)
     except ValueError as exc:
@@ -4042,11 +4077,10 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Motor multi-produto de sintetização por entidade "
                     "(synthesize-and-remap), dirigido por query SQL, "
-                    "spec_config.json e parâmetros. Produto novo NÃO exige "
-                    "alteração de código.")
+                    "spec_config.json, produto e parâmetros.")
     parser.add_argument(
         "--produto", required=True, type=_parse_produto,
-        help="Rótulo do run ([a-z][a-z0-9_]*). Não seleciona configuração: "
+        help="Produto que seleciona as tabelas engordáveis no spec único e "
              "define o nome do app e os DEFAULTS de --query-num-if-sql "
              "(<produto>.sql) e --clone-prefix "
              f"({DEFAULT_CLONE_PREFIX}/<produto>).",
