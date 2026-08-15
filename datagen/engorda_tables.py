@@ -200,6 +200,12 @@ COL_NUM_TIPO_IF = "NUM_TIPO_IF"
 # Quantos tipos distintos o diagnóstico de lote heterogêneo lista no erro.
 MAX_TIPOS_DIAGNOSTICO = 10
 
+PRODUTOS_COM_PODA_SUBTIPO = frozenset({
+    'cdb_simplificado',
+    'cdb_resgate',
+    'cdb_escalonamento',
+})
+
 # ---------------------------------------------------------------------------
 # Poda de domínio (itens 1, 3 e 4) — instrumentos que o sintético NÃO conseguiria
 # deixar carregável são removidos do domínio ANTES da amostragem. A amostragem
@@ -2232,7 +2238,9 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
     # Poda de domínio: junta as exclusões dos itens 1/3/4 e tira do domínio.
     exclusoes: List[Tuple[str, DataFrame]] = []
     subtype_policy = profile.integrity.subtype
-    if poda_subtipo and subtype_policy is not None:
+    if (poda_subtipo
+            and profile.name in PRODUTOS_COM_PODA_SUBTIPO
+            and subtype_policy is not None):
         exclusoes.append(("subtipo dangling (Cat 1)",
                           _num_if_inconsistentes_subtipo(
                               spark, config, spec, fonte, subtype_policy)))
@@ -3816,7 +3824,9 @@ def executa_clonagem(spark, config, spec: dict, *,
     if faltantes is not None:
         logger.info("Filtro de faltantes (itens 3/4) ativo: %d chave(s) de "
                     "referência inexistentes no destino.", faltantes.count())
-    if not poda_subtipo and product_profile.integrity.subtype is not None:
+    if (not poda_subtipo
+            and produto in PRODUTOS_COM_PODA_SUBTIPO
+            and product_profile.integrity.subtype is not None):
         logger.warning("Poda de subtipo (item 1) DESLIGADA (--sem-poda-subtipo): "
                        "sintéticos podem ter CONDICAO_IF dangling (Cat 1).")
     valores = seleciona_instrumentos(spark, config, spec, num_ifs, n_instrumentos,
