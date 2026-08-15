@@ -17,11 +17,10 @@ referencial que pertencem a esses instrumentos e reescreve APENAS chaves:
   4. FKs para tabelas sintetizadas -> reescritas pelo mapeamento do pai.
 
 Quando o perfil ativa a estratégia padrão, um conjunto FECHADO de colunas de
-DATA recebe a data do run (ver ENGORDA_COL_*): DAT_INCLUSAO, DAT_ALTERACAO,
-DAT_INCLUSAO_REGISTRO, DAT_EMISSAO e DAT_VENCIMENTO. TODAS as demais colunas
-ficam intocadas — é isso que preserva as combinações de negócio e o
-polimorfismo Hibernate de CONDICAO_IF (a linha-subtipo é copiada junto, na
-tabela certa, por construção; nada é recombinado).
+DATA recebe o timestamp do run ou a data do controle operacional (ver
+ENGORDA_*_COLS). DAT_VENCIMENTO preserva o prazo original a partir da nova
+DAT_EMISSAO. TODAS as demais colunas ficam intocadas — é isso que preserva as
+combinações de negócio e o polimorfismo Hibernate de CONDICAO_IF.
 
 ===========================================================================
 MULTI-PRODUTO SEM EDITAR CÓDIGO
@@ -242,16 +241,15 @@ FALTANTES_SELECTIVE_MARKER_COL = "__faltante_seletiva_match"
 # ---------------------------------------------------------------------------
 # Regras de engorda por coluna.
 #
-# Data de engorda = instante em que este script começa a executar. A mesma data
-# é reutilizada para todas as tabelas do run, evitando pequenas diferenças de
-# timestamp entre componentes ou ações Spark.
+# Timestamp de engorda = instante em que este script começa a executar. O mesmo
+# valor é reutilizado em todas as tabelas. Datas de negócio marcadas abaixo usam
+# CETIP.CONTROLE_OPERACIONAL.DAT_CTL_OPER (NUM_ORDEM=0, NUM_SISTEMA IS NULL).
 #
 # Regras aplicadas quando a coluna existir na tabela:
-#   DAT_INCLUSAO              -> data/hora da engorda (timestamp)
-#   DAT_ALTERACAO             -> mesma data/hora de DAT_INCLUSAO (timestamp)
-#   DAT_INCLUSAO_REGISTRO     -> mesma data/hora de DAT_INCLUSAO (timestamp)
-#   DAT_EMISSAO               -> data da engorda, sem timestamp
-#   DAT_VENCIMENTO            -> data da engorda + prazo, sem timestamp
+#   auditoria                 -> data/hora da engorda (timestamp)
+#   datas operacionais        -> DAT_CTL_OPER, sem hora
+#   DAT_VENCIMENTO            -> DAT_CTL_OPER + prazo, sem hora
+#   datas derivadas do EVENTO -> DAT_LIQUIDACAO original
 #
 # As PKs NÃO entram aqui (nem NUM_ID_CERTIFICACAO_CETIP): quem as reescreve é o
 # plano de sintetização (monta_plano + _monta_mapeamento_pk), incremental acima do
@@ -272,14 +270,50 @@ FALTANTES_SELECTIVE_MARKER_COL = "__faltante_seletiva_match"
 ENGORDA_COL_DAT_INCLUSAO = "DAT_INCLUSAO"
 ENGORDA_COL_DAT_ALTERACAO = "DAT_ALTERACAO"
 ENGORDA_COL_DAT_INCLUSAO_REGISTRO = "DAT_INCLUSAO_REGISTRO"
+ENGORDA_COL_DAT_ATUALIZACAO_REGISTRO = "DAT_ATUALIZACAO_REGISTRO"
 ENGORDA_COL_DAT_VENCIMENTO = "DAT_VENCIMENTO"
 ENGORDA_COL_DAT_EMISSAO = "DAT_EMISSAO"
-# Colunas que recebem o MESMO timestamp único da engorda. Declarativo: para
-# tratar mais uma coluna de timestamp, basta adicioná-la aqui.
+# Colunas de auditoria comuns que recebem o MESMO timestamp único da engorda.
 ENGORDA_COLS_TIMESTAMP = (
     ENGORDA_COL_DAT_INCLUSAO,
     ENGORDA_COL_DAT_ALTERACAO,
     ENGORDA_COL_DAT_INCLUSAO_REGISTRO,
+)
+ENGORDA_TIMESTAMP_COLS_BY_TABLE = {
+    "OPERACAO": (
+        ENGORDA_COL_DAT_ATUALIZACAO_REGISTRO,
+        "TSP_SITUACAO",
+    ),
+    "INSTRUMENTO_FINANCEIRO": (ENGORDA_COL_DAT_ATUALIZACAO_REGISTRO,),
+    "TITULO": (ENGORDA_COL_DAT_ATUALIZACAO_REGISTRO,),
+}
+ENGORDA_FORMATTED_TIMESTAMP_COLS_BY_TABLE = {
+    "OPERACAO": ("VAL_TIME_STAMP_ATUALIZACAO",),
+}
+ENGORDA_OPERATIONAL_DATE_COLS_BY_TABLE = {
+    "INSTRUMENTO_FINANCEIRO": (
+        ENGORDA_COL_DAT_EMISSAO,
+        "DAT_REGISTRO",
+        "DAT_VAL_NOMINAL_EM",
+        "DAT_ULTIMA_CORRECAO",
+        "DAT_PU_CURVA",
+        "DAT_VAL_NOMINAL_EM_ORIG",
+        "DAT_FATOR_JUR_FLUT_ACUM_CDB",
+    ),
+    "ESPECIFICACAO": (
+        "DAT_LIMITE_IDENTIFICACAO",
+        "DAT_SITUACAO",
+    ),
+}
+ENGORDA_EVENT_LIQUIDATION_COL = "DAT_LIQUIDACAO"
+ENGORDA_EVENT_DERIVED_COLS = (
+    "DAT_OCORRENCIA_EVENTO",
+    "DAT_ORIGINAL_EVENTO",
+)
+CONTROLE_OPERACIONAL_DATE_SQL = (
+    "SELECT DAT_CTL_OPER "
+    "FROM CETIP.CONTROLE_OPERACIONAL "
+    "WHERE NUM_ORDEM = 0 AND NUM_SISTEMA IS NULL AND ROWNUM = 1"
 )
 DEFAULT_DT_VENCIMENTO_PRAZO_DIAS = 30
 MIN_DT_VENCIMENTO_PRAZO_DIAS = 1
@@ -410,6 +444,7 @@ class EngordaJob:
     tratar_como_static: Tuple[str, ...] = ()
     max_passadas: int = 6
     engorda_ts: Optional[datetime] = None
+    controle_operacional_date: Optional[date] = None
     prazo_vencimento_dias: Optional[int] = None
     faltantes_arg: Optional[str] = None
     faltantes_parquet: Optional[str] = None
@@ -1181,13 +1216,11 @@ def _null_efetivo_pred(df: DataFrame, col: str):
 # Regras de engorda (datas) — ver bloco de constantes ENGORDA_COL_* no topo.
 # ---------------------------------------------------------------------------
 def _normalize_engorda_ts(value: Optional[datetime]) -> datetime:
-    """Timestamp único do run. Microssegundos zerados: o Oracle guarda DATE com
-    precisão de segundo e um resíduo de microssegundo só criaria diferença
-    entre o Parquet e o que a carga grava."""
+    """Timestamp único do run; preserva frações para o timestamp textual."""
     if value is None:
-        return datetime.now().replace(microsecond=0)
+        return datetime.now()
     if isinstance(value, datetime):
-        return value.replace(microsecond=0)
+        return value
     raise TypeError("engorda_ts deve ser datetime ou None.")
 
 
@@ -1201,7 +1234,8 @@ def _timestamp_literal_for_type(value: datetime, dt: T.DataType):
     """Literal de timestamp respeitando o tipo físico da coluna."""
     if isinstance(dt, T.StringType):
         return F.date_format(F.lit(value).cast("timestamp"), "yyyy-MM-dd HH:mm:ss")
-    return F.lit(value).cast(dt)
+    # As colunas Oracle DATE guardam segundos; a fração só é usada pelo VAL_TIME_*.
+    return F.lit(value.replace(microsecond=0)).cast(dt)
 
 
 def _date_literal_for_type(value: date, dt: T.DataType):
@@ -1224,6 +1258,7 @@ def _date_expression_for_type(expr, dt: T.DataType):
 
 
 def aplica_regras_engorda(df: DataFrame, tabela: str, *, engorda_ts: datetime,
+                          controle_operacional_date: date,
                           prazo_vencimento_dias: Optional[int] = None,
                           ) -> Tuple[DataFrame, List[str]]:
     """Aplica as regras de DATA do engorda aos sintéticos de UMA tabela.
@@ -1236,7 +1271,7 @@ def aplica_regras_engorda(df: DataFrame, tabela: str, *, engorda_ts: datetime,
     sobrescrita; senão o "prazo original da linha sintetizada" viraria
     (vencimento_original - data_do_run), que é outro número.
     """
-    engorda_dt = engorda_ts.date()
+    tabela = table_path_name(tabela).upper()
     tipos = {f.name: f.dataType for f in df.schema.fields}
     aplicadas: List[str] = []
 
@@ -1248,8 +1283,13 @@ def aplica_regras_engorda(df: DataFrame, tabela: str, *, engorda_ts: datetime,
                        tabela, col, tipos[col].simpleString())
         return False
 
-    tem_venc = ENGORDA_COL_DAT_VENCIMENTO in tipos and _tipo_ok(ENGORDA_COL_DAT_VENCIMENTO)
-    tem_emissao = ENGORDA_COL_DAT_EMISSAO in tipos and _tipo_ok(ENGORDA_COL_DAT_EMISSAO)
+    is_instrumento = tabela == TABELA_RAIZ
+    tem_venc = (is_instrumento
+                and ENGORDA_COL_DAT_VENCIMENTO in tipos
+                and _tipo_ok(ENGORDA_COL_DAT_VENCIMENTO))
+    tem_emissao = (is_instrumento
+                   and ENGORDA_COL_DAT_EMISSAO in tipos
+                   and _tipo_ok(ENGORDA_COL_DAT_EMISSAO))
 
     # 1) Prazo de vencimento (dias), ainda com os valores ORIGINAIS na mão.
     if tem_venc:
@@ -1276,29 +1316,51 @@ def aplica_regras_engorda(df: DataFrame, tabela: str, *, engorda_ts: datetime,
         df = df.withColumn(ENGORDA_PRAZO_TMP_COL, prazo_expr)
 
     # 2) Colunas de timestamp: TODAS com o mesmo instante do run.
-    for col in ENGORDA_COLS_TIMESTAMP:
+    timestamp_cols = (*ENGORDA_COLS_TIMESTAMP,
+                      *ENGORDA_TIMESTAMP_COLS_BY_TABLE.get(tabela, ()))
+    for col in timestamp_cols:
         if col not in tipos or not _tipo_ok(col):
             continue
         df = df.withColumn(col, _timestamp_literal_for_type(engorda_ts, tipos[col]))
         aplicadas.append(col)
 
-    # 3) DAT_EMISSAO = data do run, sem hora.
-    if tem_emissao:
-        df = df.withColumn(
-            ENGORDA_COL_DAT_EMISSAO,
-            _date_literal_for_type(engorda_dt, tipos[ENGORDA_COL_DAT_EMISSAO]))
-        aplicadas.append(ENGORDA_COL_DAT_EMISSAO)
+    # Timestamp legado textual de OPERACAO: yyyyMMddHHmmssSS (centésimos).
+    formatted_ts = (engorda_ts.strftime("%Y%m%d%H%M%S")
+                    + f"{engorda_ts.microsecond // 10_000:02d}")
+    for col in ENGORDA_FORMATTED_TIMESTAMP_COLS_BY_TABLE.get(tabela, ()):
+        if col not in tipos or not _tipo_ok(col):
+            continue
+        df = df.withColumn(col, F.lit(formatted_ts).cast(tipos[col]))
+        aplicadas.append(col)
 
-    # 4) DAT_VENCIMENTO = data do run + prazo, sem hora.
+    # 3) Datas do controle operacional, à meia-noite.
+    for col in ENGORDA_OPERATIONAL_DATE_COLS_BY_TABLE.get(tabela, ()):
+        if col not in tipos or not _tipo_ok(col):
+            continue
+        df = df.withColumn(
+            col, _date_literal_for_type(controle_operacional_date, tipos[col]))
+        aplicadas.append(col)
+
+    # 4) DAT_VENCIMENTO = data operacional + prazo original/fixo, sem hora.
     if tem_venc:
         venc_expr = F.expr(
-            f"date_add(DATE '{engorda_dt.isoformat()}', "
+            f"date_add(DATE '{controle_operacional_date.isoformat()}', "
             f"CAST({ENGORDA_PRAZO_TMP_COL} AS INT))")
         df = df.withColumn(
             ENGORDA_COL_DAT_VENCIMENTO,
             _date_expression_for_type(venc_expr, tipos[ENGORDA_COL_DAT_VENCIMENTO]),
         ).drop(ENGORDA_PRAZO_TMP_COL)
         aplicadas.append(ENGORDA_COL_DAT_VENCIMENTO)
+
+    # 5) DAT_LIQUIDACAO permanece original; as datas equivalentes a copiam.
+    if tabela == "EVENTO" and ENGORDA_EVENT_LIQUIDATION_COL in tipos:
+        source = ENGORDA_EVENT_LIQUIDATION_COL
+        if _tipo_ok(source):
+            for col in ENGORDA_EVENT_DERIVED_COLS:
+                if col not in tipos or not _tipo_ok(col):
+                    continue
+                df = df.withColumn(col, F.col(source).cast(tipos[col]))
+                aplicadas.append(col)
 
     return df, aplicadas
 
@@ -2422,6 +2484,30 @@ def _open_oracle_connection(jvm, jdbc_url: str, user: str, password: str):
         raise RuntimeError("falha ao abrir conexão Oracle no driver") from None
 
 
+def _read_controle_operacional_date(jvm, jdbc_url: str, user: str,
+                                    password: str) -> date:
+    """Lê a data operacional única usada por todo o run."""
+    connection = _open_oracle_connection(jvm, jdbc_url, user, password)
+    statement = None
+    result_set = None
+    try:
+        statement = connection.prepareStatement(CONTROLE_OPERACIONAL_DATE_SQL)
+        result_set = statement.executeQuery()
+        if not result_set.next():
+            raise ValueError(
+                "CONTROLE_OPERACIONAL não retornou NUM_ORDEM=0/NUM_SISTEMA NULL")
+        raw = result_set.getDate(1)
+        if raw is None:
+            raise ValueError("CONTROLE_OPERACIONAL.DAT_CTL_OPER está NULL")
+        return date.fromisoformat(str(raw))
+    finally:
+        if result_set is not None:
+            result_set.close()
+        if statement is not None:
+            statement.close()
+        connection.close()
+
+
 def _allocation_sql(code_kind: str, batch_count: int,
                     policy: BusinessKeyPolicy) -> str:
     if batch_count < 1:
@@ -3372,6 +3458,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                      tratar_como_static: Optional[Set[str]] = None,
                      max_passadas: int = 6,
                      engorda_ts: Optional[datetime] = None,
+                     controle_operacional_date: Optional[date] = None,
                      prazo_vencimento_dias: Optional[int] = None,
                      faltantes_arg: Optional[str] = None,
                      faltantes_parquet: Optional[str] = None,
@@ -3420,8 +3507,21 @@ def executa_clonagem(spark, config, spec: dict, *,
     # timestamp só porque foram materializadas em ações Spark diferentes.
     engorda_ts = _normalize_engorda_ts(engorda_ts)
     if product_profile.date_strategy == "standard":
-        logger.info("Data de engorda do run: %s (prazo de %s: %s)",
-                    engorda_ts.isoformat(sep=" "), ENGORDA_COL_DAT_VENCIMENTO,
+        if credentials is not None:
+            if controle_operacional_date is not None:
+                raise ValueError(
+                    "controle_operacional_date só pode ser informado no dry-run")
+            controle_operacional_date = _read_controle_operacional_date(
+                spark._sc._jvm, *credentials)
+        elif controle_operacional_date is None:
+            controle_operacional_date = engorda_ts.date()
+            logger.warning(
+                "Dry-run sem --data-controle-operacional: usando a data da "
+                "engorda (%s) apenas para simulação.", controle_operacional_date)
+        logger.info("Timestamp de engorda: %s; data operacional: %s "
+                    "(prazo de %s: %s)",
+                    engorda_ts.isoformat(sep=" "), controle_operacional_date,
+                    ENGORDA_COL_DAT_VENCIMENTO,
                     f"{prazo_vencimento_dias} dia(s) fixos"
                     if prazo_vencimento_dias is not None
                     else "preserva o prazo original da linha sintetizada")
@@ -3495,6 +3595,7 @@ def executa_clonagem(spark, config, spec: dict, *,
         if product_profile.date_strategy == "standard":
             clones, cols_data = aplica_regras_engorda(
                 clones, t, engorda_ts=engorda_ts,
+                controle_operacional_date=controle_operacional_date,
                 prazo_vencimento_dias=prazo_vencimento_dias)
         else:
             cols_data = []
@@ -3555,6 +3656,7 @@ def executa_clonagem(spark, config, spec: dict, *,
         )
 
     def _prepare_outputs(output_base: Optional[str], is_dry_run: bool) -> None:
+        code_allocation_date = controle_operacional_date or engorda_ts.date()
         instrumentos, n_raiz = resultados[TABELA_RAIZ]
         slots_if = _code_slots(
             instrumentos, COL_NUM_IF, "COD_IF", "NUM_IF_NOVO", "COD_IF_ORIG"
@@ -3566,7 +3668,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                       else f"{output_base}/{MAPA_COD_IF_TABLE}"),
             dry_run=is_dry_run, credentials=credentials,
             batch_size=oracle_code_batch_size,
-            engorda_date=engorda_ts.date(), policy=business_policy)
+            engorda_date=code_allocation_date, policy=business_policy)
         instrumentos = _attach_generated_code(
             instrumentos, mapa_cod_if, pk_col=COL_NUM_IF,
             new_pk_alias="NUM_IF_NOVO", code_col="COD_IF",
@@ -3590,7 +3692,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                           else f"{output_base}/{MAPA_COD_OPERACAO_TABLE}"),
                 dry_run=is_dry_run, credentials=credentials,
                 batch_size=oracle_code_batch_size,
-                engorda_date=engorda_ts.date(), policy=business_policy)
+                engorda_date=code_allocation_date, policy=business_policy)
             operacoes = _attach_generated_code(
                 operacoes, mapa_cod_operacao, pk_col="NUM_ID_OPERACAO",
                 new_pk_alias="NUM_ID_OPERACAO_NOVO", code_col="COD_OPERACAO",
@@ -3783,6 +3885,12 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
         raise ValueError(f"tabela(s) obrigatória(s) não podem ser static: {forbidden}")
     if job.engorda_ts is not None and not isinstance(job.engorda_ts, datetime):
         raise ValueError("engorda_ts precisa ser datetime")
+    if (job.controle_operacional_date is not None
+            and (not isinstance(job.controle_operacional_date, date)
+                 or isinstance(job.controle_operacional_date, datetime))):
+        raise ValueError("controle_operacional_date precisa ser date")
+    if job.controle_operacional_date is not None and not job.dry_run:
+        raise ValueError("controle_operacional_date só pode ser informado no dry-run")
     for field_name in ("poda_subtipo", "dry_run"):
         if type(getattr(job, field_name)) is not bool:
             raise ValueError(f"{field_name} precisa ser booleano")
@@ -3843,6 +3951,7 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
             tratar_como_static=set(job.tratar_como_static),
             max_passadas=job.max_passadas,
             engorda_ts=job.engorda_ts,
+            controle_operacional_date=job.controle_operacional_date,
             prazo_vencimento_dias=job.prazo_vencimento_dias,
             faltantes_arg=job.faltantes_arg,
             faltantes_parquet=job.faltantes_parquet,
@@ -3921,6 +4030,14 @@ def _parse_data_engorda(txt: str) -> datetime:
         "--data-engorda deve ser 'YYYY-MM-DD' ou 'YYYY-MM-DD HH:MM:SS'")
 
 
+def _parse_controle_operacional_date(txt: str) -> date:
+    try:
+        return date.fromisoformat(txt.strip())
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "--data-controle-operacional deve ser 'YYYY-MM-DD'") from None
+
+
 def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Motor multi-produto de sintetização por entidade "
@@ -3986,9 +4103,17 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--data-engorda", type=_parse_data_engorda, default=None,
                         help="Data/hora do run usada nas colunas DAT_* "
                              "('YYYY-MM-DD' ou 'YYYY-MM-DD HH:MM:SS'). "
-                             "Default: instante de início do script.")
+                              "Default: instante de início do script.")
+    parser.add_argument(
+        "--data-controle-operacional",
+        type=_parse_controle_operacional_date,
+        default=None,
+        help="Override de CETIP.CONTROLE_OPERACIONAL.DAT_CTL_OPER apenas para "
+             "dry-run (YYYY-MM-DD). Execuções reais sempre consultam NUM_ORDEM=0 "
+             "e NUM_SISTEMA IS NULL; dry-run sem valor usa a data da engorda.",
+    )
     parser.add_argument("--prazo-vencimento-dias", type=positive_int, default=None,
-                        help=f"{ENGORDA_COL_DAT_VENCIMENTO} = data da engorda + N "
+                        help=f"{ENGORDA_COL_DAT_VENCIMENTO} = data operacional + N "
                              "dias. Default: preserva o prazo original da linha "
                              f"sintetizada ({ENGORDA_COL_DAT_VENCIMENTO} - "
                              f"{ENGORDA_COL_DAT_EMISSAO}); prazo inválido cai em "
@@ -4074,6 +4199,7 @@ def main() -> None:
         ),
         max_passadas=args.max_passadas,
         engorda_ts=args.data_engorda,
+        controle_operacional_date=args.data_controle_operacional,
         prazo_vencimento_dias=args.prazo_vencimento_dias,
         faltantes_arg=args.faltantes_arg,
         faltantes_parquet=args.faltantes_parquet,

@@ -1,5 +1,6 @@
 import json
 import sys
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -364,6 +365,81 @@ class TestLoadSpecs:
             engorda_tables.load_specs(spark, "oci://cfg/specs.json")
 
 
+class TestControleOperacionalDate:
+    class _ResultSet:
+        def __init__(self, values):
+            self.values = iter(values)
+            self.current = None
+            self.closed = False
+
+        def next(self):
+            try:
+                self.current = next(self.values)
+                return True
+            except StopIteration:
+                return False
+
+        def getDate(self, _index):
+            return self.current
+
+        def close(self):
+            self.closed = True
+
+    class _Statement:
+        def __init__(self, values):
+            self.result_set = TestControleOperacionalDate._ResultSet(values)
+            self.closed = False
+
+        def executeQuery(self):
+            return self.result_set
+
+        def close(self):
+            self.closed = True
+
+    class _Connection:
+        def __init__(self, values):
+            self.statement = TestControleOperacionalDate._Statement(values)
+            self.sql = None
+            self.closed = False
+
+        def prepareStatement(self, sql):
+            self.sql = sql
+            return self.statement
+
+        def close(self):
+            self.closed = True
+
+    def test_reads_exactly_one_operational_date(self, monkeypatch):
+        connection = self._Connection(["2026-05-08"])
+        monkeypatch.setattr(
+            engorda_tables, "_open_oracle_connection",
+            lambda *_args: connection,
+        )
+
+        result = engorda_tables._read_controle_operacional_date(
+            object(), "jdbc:test", "user", "password")
+
+        assert result == date(2026, 5, 8)
+        assert connection.sql == (
+            "SELECT DAT_CTL_OPER FROM CETIP.CONTROLE_OPERACIONAL "
+            "WHERE NUM_ORDEM = 0 AND NUM_SISTEMA IS NULL AND ROWNUM = 1"
+        )
+        assert connection.closed is True
+        assert connection.statement.closed is True
+        assert connection.statement.result_set.closed is True
+
+    def test_rejects_missing_operational_date(self, monkeypatch):
+        connection = self._Connection([])
+        monkeypatch.setattr(
+            engorda_tables, "_open_oracle_connection",
+            lambda *_args: connection,
+        )
+
+        with pytest.raises(ValueError, match="CONTROLE_OPERACIONAL"):
+            engorda_tables._read_controle_operacional_date(
+                object(), "jdbc:test", "user", "password")
+
+
 class TestEngordaLoop:
     def _config(self):
         return {
@@ -603,6 +679,108 @@ def spark():
     )
     yield session
     session.stop()
+
+
+class TestEngordaDateRules:
+    ENGORDA_TS = datetime(2026, 8, 8, 10, 19, 6, 340_000)
+    OPERATIONAL_DATE = date(2026, 5, 8)
+
+    def test_instrument_uses_operational_date_and_preserves_term(self, spark):
+        original_emission = datetime(2024, 1, 10)
+        original_maturity = datetime(2025, 2, 20)
+        original_term = (original_maturity.date() - original_emission.date()).days
+        df = spark.createDataFrame([(
+            original_emission,
+            original_maturity,
+            datetime(2024, 1, 11),
+            datetime(2024, 1, 12),
+            datetime(2024, 1, 13),
+            datetime(2024, 1, 14),
+            datetime(2024, 1, 15),
+            datetime(2024, 1, 16),
+            datetime(2024, 1, 17),
+        )], (
+            "DAT_EMISSAO timestamp, DAT_VENCIMENTO timestamp, "
+            "DAT_REGISTRO timestamp, DAT_VAL_NOMINAL_EM timestamp, "
+            "DAT_ULTIMA_CORRECAO timestamp, DAT_PU_CURVA timestamp, "
+            "DAT_VAL_NOMINAL_EM_ORIG timestamp, "
+            "DAT_FATOR_JUR_FLUT_ACUM_CDB timestamp, "
+            "DAT_ATUALIZACAO_REGISTRO timestamp"
+        ))
+
+        out, applied = engorda_tables.aplica_regras_engorda(
+            df,
+            "INSTRUMENTO_FINANCEIRO",
+            engorda_ts=self.ENGORDA_TS,
+            controle_operacional_date=self.OPERATIONAL_DATE,
+        )
+        row = out.first()
+
+        operational_midnight = datetime.combine(self.OPERATIONAL_DATE, datetime.min.time())
+        for column in (
+            "DAT_EMISSAO",
+            "DAT_REGISTRO",
+            "DAT_VAL_NOMINAL_EM",
+            "DAT_ULTIMA_CORRECAO",
+            "DAT_PU_CURVA",
+            "DAT_VAL_NOMINAL_EM_ORIG",
+            "DAT_FATOR_JUR_FLUT_ACUM_CDB",
+        ):
+            assert row[column] == operational_midnight
+            assert column in applied
+        assert row.DAT_VENCIMENTO == operational_midnight + timedelta(days=original_term)
+        assert row.DAT_ATUALIZACAO_REGISTRO == self.ENGORDA_TS.replace(microsecond=0)
+
+    def test_operation_uses_run_timestamp_and_formats_legacy_value(self, spark):
+        old = datetime(2020, 1, 1)
+        df = spark.createDataFrame(
+            [(old, old, old, old, old, old, "old")],
+            "DAT_INCLUSAO timestamp, DAT_ALTERACAO timestamp, "
+            "DAT_INCLUSAO_REGISTRO timestamp, "
+            "DAT_ATUALIZACAO_REGISTRO timestamp, TSP_SITUACAO timestamp, "
+            "DAT_OPERACAO timestamp, VAL_TIME_STAMP_ATUALIZACAO string",
+        )
+
+        out, _ = engorda_tables.aplica_regras_engorda(
+            df,
+            "OPERACAO",
+            engorda_ts=self.ENGORDA_TS,
+            controle_operacional_date=self.OPERATIONAL_DATE,
+        )
+        row = out.first()
+        expected = self.ENGORDA_TS.replace(microsecond=0)
+
+        for column in (
+            "DAT_INCLUSAO",
+            "DAT_ALTERACAO",
+            "DAT_INCLUSAO_REGISTRO",
+            "DAT_ATUALIZACAO_REGISTRO",
+            "TSP_SITUACAO",
+        ):
+            assert row[column] == expected
+        assert row.VAL_TIME_STAMP_ATUALIZACAO == "2026080810190634"
+        assert row.DAT_OPERACAO == old
+
+    def test_event_keeps_liquidation_and_copies_related_dates(self, spark):
+        liquidation = datetime(2028, 4, 27)
+        df = spark.createDataFrame(
+            [(liquidation, datetime(2020, 1, 1), datetime(2021, 1, 1))],
+            "DAT_LIQUIDACAO timestamp, DAT_OCORRENCIA_EVENTO timestamp, "
+            "DAT_ORIGINAL_EVENTO timestamp",
+        )
+
+        out, applied = engorda_tables.aplica_regras_engorda(
+            df,
+            "EVENTO",
+            engorda_ts=self.ENGORDA_TS,
+            controle_operacional_date=self.OPERATIONAL_DATE,
+        )
+        row = out.first()
+
+        assert row.DAT_LIQUIDACAO == liquidation
+        assert row.DAT_OCORRENCIA_EVENTO == liquidation
+        assert row.DAT_ORIGINAL_EVENTO == liquidation
+        assert set(applied) == {"DAT_OCORRENCIA_EVENTO", "DAT_ORIGINAL_EVENTO"}
 
 
 class TestContiguousRowId:
