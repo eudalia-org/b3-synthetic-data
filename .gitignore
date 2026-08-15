@@ -29,6 +29,8 @@ venv/
 
 # Oracle JDBC drivers (download separately)
 *.jar
+!jvm/oracle-audit-writer.jar
+jvm/build/
 
 # Notebooks and images
 *.ipynb

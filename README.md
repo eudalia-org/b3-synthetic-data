@@ -6,6 +6,9 @@ Synthetic data generation pipeline for Oracle Cloud.
 
 1. Install dependencies: `uv sync` or `pip install -r requirements.txt`
 2. Download Oracle JDBC drivers to project root (ojdbc8.jar, oraclepki.jar, osdt_cert.jar, osdt_core.jar, ucp.jar)
+3. Use the versioned Spark 3.5.0 audited writer at
+   `jvm/oracle-audit-writer.jar`. Rebuild it after Java source changes with
+   `SPARK_HOME=/path/to/spark-3.5.0 ./jvm/build.sh`.
 
 ## Usage
 
@@ -164,6 +167,11 @@ many short-lived parallel JDBC partitions (each partition commits in seconds, so
 load survives the Data Flow→ADB connection killer; Spark retries any killed
 partition). It **appends** to existing target tables. Run one Data Flow job per big
 table, or omit `--tables` to load every non-static table from the specs.
+
+Attach `jvm/oracle-audit-writer.jar` to the Spark/Data Flow classpath alongside
+the Oracle JDBC JARs. The loader uses it to evaluate registration timestamps with
+Oracle `SYSTIMESTAMP` inside each `INSERT`; the synthetic Parquet values for those
+audit columns are intentionally ignored during the load.
 
 ```bash
 python -m datagen.load_tables --tables LANCAMENTO            # one table

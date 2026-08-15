@@ -157,6 +157,57 @@ class TestConnectionProperties:
         assert load_tables.resolve_num_partitions(self.CONFIG) == 256
 
 
+class TestOracleAuditInsert:
+    def test_operation_uses_common_and_specific_audit_columns(self):
+        columns = [
+            "NUM_ID_OPERACAO",
+            "DAT_INCLUSAO",
+            "DAT_INCLUSAO_REGISTRO",
+            "TSP_SITUACAO",
+            "VAL_TIME_STAMP_ATUALIZACAO",
+            "DAT_OPERACAO",
+        ]
+
+        result = load_tables.oracle_audit_columns("CETIP.OPERACAO", columns)
+
+        assert result == {
+            "DAT_INCLUSAO": "timestamp",
+            "DAT_INCLUSAO_REGISTRO": "timestamp",
+            "TSP_SITUACAO": "timestamp",
+            "VAL_TIME_STAMP_ATUALIZACAO": "formatted",
+        }
+
+    def test_unlisted_business_dates_remain_payload(self):
+        columns = ["NUM_IF", "DAT_EMISSAO", "DAT_VENCIMENTO", "DAT_INCLUSAO"]
+
+        result = load_tables.oracle_audit_columns("INSTRUMENTO_FINANCEIRO", columns)
+
+        assert result == {"DAT_INCLUSAO": "timestamp"}
+
+    def test_builds_insert_select_with_oracle_clock(self):
+        columns = ["NUM_ID_OPERACAO", "DAT_INCLUSAO", "VAL_TIME_STAMP_ATUALIZACAO"]
+        audit = load_tables.oracle_audit_columns("OPERACAO", columns)
+
+        sql, payload = load_tables.build_oracle_audit_insert_sql(
+            "CETIP.OPERACAO", columns, audit)
+
+        assert payload == ["NUM_ID_OPERACAO"]
+        assert sql == (
+            "INSERT INTO CETIP.OPERACAO (NUM_ID_OPERACAO, DAT_INCLUSAO, "
+            "VAL_TIME_STAMP_ATUALIZACAO) SELECT ?, DATAGEN_CLOCK.INSERTED_AT, "
+            "TO_CHAR(DATAGEN_CLOCK.INSERTED_AT, 'YYYYMMDDHH24MISSFF2') FROM ("
+            "SELECT /*+ NO_MERGE */ SYSTIMESTAMP AS INSERTED_AT FROM DUAL) "
+            "DATAGEN_CLOCK"
+        )
+
+    def test_rejects_unqualified_or_injected_table(self):
+        with pytest.raises(ValueError):
+            load_tables.build_oracle_audit_insert_sql("OPERACAO", ["ID"], {})
+        with pytest.raises(ValueError):
+            load_tables.build_oracle_audit_insert_sql(
+                "CETIP.OPERACAO;DROP", ["ID"], {})
+
+
 class TestPositiveInt:
     def test_accepts_positive(self):
         assert load_tables.positive_int("100") == 100

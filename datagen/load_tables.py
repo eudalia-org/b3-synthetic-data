@@ -47,6 +47,25 @@ NULL_ON_INSERT = {
     "INSTRUMENTO_FINANCEIRO": ["NUM_IF_ORIGEM", "NUM_IF_PERTENCE"],
 }
 
+# Evaluated by Oracle inside each INSERT. Business dates remain the values
+# materialized by the engorda.
+ORACLE_AUDIT_COMMON_COLUMNS = (
+    "DAT_INCLUSAO",
+    "DAT_ALTERACAO",
+    "DAT_INCLUSAO_REGISTRO",
+)
+ORACLE_AUDIT_COLUMNS_BY_TABLE = {
+    "OPERACAO": (
+        "DAT_ATUALIZACAO_REGISTRO",
+        "TSP_SITUACAO",
+        "VAL_TIME_STAMP_ATUALIZACAO",
+    ),
+    "INSTRUMENTO_FINANCEIRO": ("DAT_ATUALIZACAO_REGISTRO",),
+    "TITULO": ("DAT_ATUALIZACAO_REGISTRO",),
+}
+ORACLE_AUDIT_FORMATTED_COLUMNS = {"VAL_TIME_STAMP_ATUALIZACAO"}
+ORACLE_AUDIT_WRITER_CLASS = "com.eudalia.datagen.OracleAuditJdbcWriter"
+
 Violation = namedtuple("Violation", ["table", "check", "columns", "detail"])
 
 
@@ -598,6 +617,60 @@ def dbtable_name(target_user: str, table: str) -> str:
     return table if "." in table else f"{target_user}.{table}"
 
 
+def oracle_audit_columns(table: str, columns: list[str]) -> dict[str, str]:
+    """Return {actual_column: timestamp|formatted} for Oracle-side audit values."""
+    table_name = table_path_name(table).upper()
+    configured = {
+        *ORACLE_AUDIT_COMMON_COLUMNS,
+        *ORACLE_AUDIT_COLUMNS_BY_TABLE.get(table_name, ()),
+    }
+    out = {}
+    for column in columns:
+        upper = column.upper()
+        if upper in configured:
+            out[column] = ("formatted" if upper in ORACLE_AUDIT_FORMATTED_COLUMNS
+                           else "timestamp")
+    return out
+
+
+def build_oracle_audit_insert_sql(
+    dbtable: str, columns: list[str], audit_columns: dict[str, str]
+) -> tuple[str, list[str]]:
+    """Build an INSERT whose audit values are evaluated by the target Oracle."""
+    parts = dbtable.split(".")
+    if len(parts) != 2:
+        raise ValueError(f"Expected schema-qualified table, got {dbtable!r}")
+    qualified = ".".join(validate_identifier(part) for part in parts)
+    validated_columns = {column: validate_identifier(column) for column in columns}
+    unknown = set(audit_columns) - set(columns)
+    if unknown:
+        raise ValueError(f"Audit columns absent from insert schema: {sorted(unknown)}")
+
+    payload_columns = [column for column in columns if column not in audit_columns]
+    values = []
+    for column in columns:
+        kind = audit_columns.get(column)
+        if kind is None:
+            values.append("?")
+        elif kind == "timestamp":
+            values.append("DATAGEN_CLOCK.INSERTED_AT")
+        elif kind == "formatted":
+            values.append(
+                "TO_CHAR(DATAGEN_CLOCK.INSERTED_AT, 'YYYYMMDDHH24MISSFF2')")
+        else:
+            raise ValueError(f"Unsupported audit expression kind: {kind!r}")
+
+    column_sql = ", ".join(validated_columns[column] for column in columns)
+    value_sql = ", ".join(values)
+    sql = (
+        f"INSERT INTO {qualified} ({column_sql}) "
+        f"SELECT {value_sql} FROM ("
+        "SELECT /*+ NO_MERGE */ SYSTIMESTAMP AS INSERTED_AT FROM DUAL"
+        ") DATAGEN_CLOCK"
+    )
+    return sql, payload_columns
+
+
 def build_load_path(config: dict[str, str], table: str) -> str:
     path_parts = [config["DATAGEN_LOAD_BASE_URI"]]
     if config["DATAGEN_LOAD_PREFIX"]:
@@ -868,6 +941,52 @@ def null_self_ref_columns(df, table, null_map):
     return df
 
 
+def write_jdbc_append(
+    spark: SparkSession,
+    df,
+    properties: dict[str, str],
+    dbtable: str,
+    table: str,
+    batch_size: str,
+) -> None:
+    """Append with Oracle-side audit timestamps when this table has audit columns."""
+    audit_columns = oracle_audit_columns(table, df.columns)
+    if not audit_columns:
+        (df.write.format("jdbc")
+         .options(**properties)
+         .option("dbtable", dbtable)
+         .option("batchsize", batch_size)
+         .option("isolationLevel", DEFAULT_ISOLATION_LEVEL)
+         .mode("append")
+         .save())
+        return
+
+    sql, payload_columns = build_oracle_audit_insert_sql(
+        dbtable, df.columns, audit_columns)
+    logger.info(
+        "%s: Oracle-side insertion timestamps for %s",
+        table_path_name(table).upper(), ", ".join(audit_columns),
+    )
+    payload = df.select(*payload_columns)
+    try:
+        writer = spark._jvm.com.eudalia.datagen.OracleAuditJdbcWriter
+        writer.save(
+            payload._jdf,
+            sql,
+            properties["url"],
+            properties["user"],
+            properties["password"],
+            properties["driver"],
+            int(properties["oracle.jdbc.ReadTimeout"]),
+            int(batch_size),
+        )
+    except TypeError as exc:
+        raise RuntimeError(
+            f"{ORACLE_AUDIT_WRITER_CLASS} is not on the Spark classpath; "
+            "attach jvm/oracle-audit-writer.jar to the load application"
+        ) from exc
+
+
 def load_table(
     spark: SparkSession,
     properties: dict[str, str],
@@ -911,15 +1030,7 @@ def load_table(
         dbtable,
         num_partitions,
     )
-    (
-        df.write.format("jdbc")
-        .options(**properties)
-        .option("dbtable", dbtable)
-        .option("batchsize", batch_size)
-        .option("isolationLevel", DEFAULT_ISOLATION_LEVEL)
-        .mode("append")
-        .save()
-    )
+    write_jdbc_append(spark, df, properties, dbtable, table, batch_size)
     return appended
 
 
