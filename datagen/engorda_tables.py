@@ -635,8 +635,6 @@ TABELAS_ENGORDA_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
         "CARTEIRA_PARTICIPANTE",
     ),
     "lca": (
-        "ENTIDADE",
-        "REPRESENTANTE_IF",
         "INSTRUMENTO_FINANCEIRO",
         "TITULO",
         "IF_LCA",
