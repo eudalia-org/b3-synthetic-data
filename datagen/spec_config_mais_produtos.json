@@ -111,7 +111,7 @@
       "DAT_INCLUSAO",
       "NUM_CONDICAO_IF"
     ],
-    "static": false
+    "static": true
   },
   "AREA_ATUACAO": {
     "pk_cols": [
@@ -324,7 +324,7 @@
       "NUM_CONDICAO_IF",
       "NUM_ID_TIPO_INDICADOR"
     ],
-    "static": false
+    "static": true
   },
   "ATUALIZACAO_PRE": {
     "pk_cols": [
@@ -364,7 +364,7 @@
       "NUM_CONDICAO_IF",
       "VAL_RESGATE_PRE"
     ],
-    "static": false
+    "static": true
   },
   "BASE_CREDITO": {
     "pk_cols": [
@@ -543,7 +543,7 @@
       "NUM_SISTEMA",
       "QTD_CARTEIRA_COMITENTE"
     ],
-    "static": false
+    "static": true
   },
   "CARTEIRA_PARTICIPANTE": {
     "pk_cols": [
@@ -596,7 +596,7 @@
       "NUM_SISTEMA",
       "QTD_CARTEIRA_PARTICIPANTE"
     ],
-    "static": false
+    "static": true
   },
   "CATEGORIA_SELIC": {
     "pk_cols": [
@@ -876,7 +876,7 @@
       "NUM_ID_ORIG_DESL_LIQ",
       "NUM_IF"
     ],
-    "static": false
+    "static": true
   },
   "CONDICAO_INV_ESTRANG": {
     "pk_cols": [
@@ -921,7 +921,7 @@
       "NUM_CONDICAO_IF",
       "NUM_ID_CONDICAO_RESGATE"
     ],
-    "static": false
+    "static": true
   },
   "CONDICAO_TRIBUTARIA": {
     "pk_cols": [
@@ -1330,7 +1330,7 @@
     "not_null_cols": [
       "NUM_IF"
     ],
-    "static": false
+    "static": true
   },
   "CREDITO_DC": {
     "pk_cols": [
@@ -1519,7 +1519,7 @@
       "VAL_PU",
       "VAL_PU_EMISSAO"
     ],
-    "static": false
+    "static": true
   },
   "CREDITO_SCR": {
     "pk_cols": [
@@ -1595,7 +1595,7 @@
       "DAT_INCLUSAO",
       "NUM_ID_CREDITO_SCR"
     ],
-    "static": false
+    "static": true
   },
   "CREDOR_REGISTRO_CARTORIO": {
     "pk_cols": [
@@ -1656,7 +1656,7 @@
       "NUM_ID_TIPO_DADO_OPERACAO",
       "VAL_DADO_ATUAL"
     ],
-    "static": false
+    "static": true
   },
   "DEPOSITO_AUTOMATICO_IF": {
     "pk_cols": [
@@ -1713,7 +1713,7 @@
       "NUM_CONTA_PARTICIPANTE",
       "NUM_IF"
     ],
-    "static": false
+    "static": true
   },
   "DESDOBRAMENTO": {
     "pk_cols": [
@@ -1734,7 +1734,7 @@
       "DAT_INCLUSAO",
       "NUM_CONDICAO_IF"
     ],
-    "static": false
+    "static": true
   },
   "DETENTOR_IF": {
     "pk_cols": [
@@ -1829,7 +1829,7 @@
       "NUM_ID_ENTIDADE",
       "NUM_ID_TIPO_ENTIDADE"
     ],
-    "static": false
+    "static": true
   },
   "ESPECIFICACAO": {
     "pk_cols": [
@@ -1875,7 +1875,7 @@
       "QTD_ESPECIFICAR",
       "NUM_ID_OPERACAO"
     ],
-    "static": false
+    "static": true
   },
   "ESPECIFICACAO_COMITENTE": {
     "pk_cols": [
@@ -1919,7 +1919,7 @@
       "NUM_ID_ESPECIFICACAO_COMITENTE",
       "QTD_ESPECIFICADA"
     ],
-    "static": false
+    "static": true
   },
   "ESTADO_EVENTO": {
     "pk_cols": [
@@ -2119,7 +2119,7 @@
       "NUM_EVENTO",
       "NUM_TIPO_EVENTO_LEGADO"
     ],
-    "static": false
+    "static": true
   },
   "FAIXA_COBRANCA": {
     "pk_cols": [
@@ -2329,7 +2329,7 @@
       "NUM_ID_TIPO_GARANTIA",
       "NUM_IF"
     ],
-    "static": false
+    "static": true
   },
   "GRP_FORMA_PAGAMENTO": {
     "pk_cols": [
@@ -2381,7 +2381,7 @@
       "NUM_ID_HISTORICO_CREDITO_DC",
       "NUM_ID_TIPO_ACAO_HIST_CREDITO"
     ],
-    "static": false
+    "static": true
   },
   "HISTORICO_CREDITO_SCR": {
     "pk_cols": [
@@ -2469,7 +2469,7 @@
       "TXT_DESCRICAO",
       "VAL_SALDO_REMANESCENTE"
     ],
-    "static": false
+    "static": true
   },
   "HIST_MARCACAO_MERCADO": {
     "pk_cols": [
@@ -2573,7 +2573,7 @@
       "IND_LIQUIDACAO_ANTECIPADA",
       "NUM_IF"
     ],
-    "static": false
+    "static": true
   },
   "INDEXADOR_CREDITO": {
     "pk_cols": [
@@ -3043,7 +3043,7 @@
       "NUM_SISTEMA",
       "NUM_TIPO_IF"
     ],
-    "static": false
+    "static": true
   },
   "JURISDICAO": {
     "pk_cols": [
@@ -3116,7 +3116,7 @@
       "IND_JUROS_REDUTOR",
       "NUM_CONDICAO_IF"
     ],
-    "static": false
+    "static": true
   },
   "JUROS_FLUTUANTE": {
     "pk_cols": [
@@ -3188,7 +3188,7 @@
       "NUM_ID_TIPO_INDICADOR",
       "NUM_INDICE_VALORIZACAO"
     ],
-    "static": false
+    "static": true
   },
   "LANCAMENTO": {
     "pk_cols": [
@@ -3237,7 +3237,7 @@
       "NUM_ID_LANCAMENTO",
       "NUM_ID_OPERACAO"
     ],
-    "static": false
+    "static": true
   },
   "LOCAL_NEGOCIACAO": {
     "pk_cols": [
@@ -3289,7 +3289,7 @@
       "NUM_ID_LOTE",
       "NUM_ID_TIPO_LOTE"
     ],
-    "static": false
+    "static": true
   },
   "MALOTE": {
     "pk_cols": [
@@ -3987,7 +3987,7 @@
       "NUM_TENTATIVAS_SUBIDA",
       "QTD_OPERACAO"
     ],
-    "static": false
+    "static": true
   },
   "ORIGEM_CAPITAL": {
     "pk_cols": [
@@ -4232,7 +4232,7 @@
       "DAT_INCLUSAO",
       "NUM_CONDICAO_IF"
     ],
-    "static": false
+    "static": true
   },
   "PARTICIPANTE": {
     "pk_cols": [
@@ -4320,7 +4320,7 @@
       "NUM_ID_TIPO_PENDENCIA",
       "NUM_IF"
     ],
-    "static": false
+    "static": true
   },
   "PESSOA_JURIDICA": {
     "pk_cols": [
@@ -5080,7 +5080,7 @@
     "not_null_cols": [
       "NUM_ID_ENTIDADE"
     ],
-    "static": false
+    "static": true
   },
   "REPRESENTANTE_REGISTRO_CART": {
     "pk_cols": [
@@ -5112,7 +5112,7 @@
       "DAT_INCLUSAO",
       "NUM_CONDICAO_IF"
     ],
-    "static": false
+    "static": true
   },
   "RESGATE": {
     "pk_cols": [
@@ -5134,7 +5134,7 @@
       "IND_RESGATE_ANTECIPADO",
       "NUM_CONDICAO_IF"
     ],
-    "static": false
+    "static": true
   },
   "SETOR_ECONOMICO": {
     "pk_cols": [
@@ -5464,7 +5464,7 @@
       "NUM_CONDICAO_IF",
       "VAL_TAXA_SPREAD"
     ],
-    "static": false
+    "static": true
   },
   "STATUS_CESTA": {
     "pk_cols": [
@@ -5518,7 +5518,7 @@
       "NUM_CHAV_IROP",
       "NUM_TIPO_IF"
     ],
-    "static": false
+    "static": true
   },
   "TCTPCRONOGRAMA_CCB": {
     "pk_cols": [
@@ -5614,7 +5614,7 @@
       "COD_IPOC",
       "NUM_CHAV_IROP"
     ],
-    "static": false
+    "static": true
   },
   "TCTPDET_CHAV_IROP_CMER": {
     "pk_cols": [
@@ -5638,7 +5638,7 @@
       "TXT_DOCM_CRDR_ORIG",
       "TXT_DOCM_EMI"
     ],
-    "static": false
+    "static": true
   },
   "TCTPIROP_ATIV": {
     "pk_cols": [
@@ -5678,7 +5678,7 @@
       "NUM_IROP_ATIV",
       "NUM_STUS_IROP"
     ],
-    "static": false
+    "static": true
   },
   "TCTPSOLI_IROP_ATIV": {
     "pk_cols": [
@@ -5710,7 +5710,7 @@
       "NUM_SOLI_IROP_ATIV",
       "NUM_TIPO_SOLI_IROP"
     ],
-    "static": false
+    "static": true
   },
   "TCTPSTUS_IROP_ATIV": {
     "pk_cols": [
@@ -6716,7 +6716,7 @@
       "NUM_ID_TIPO_REGIME_TITULO",
       "NUM_IF"
     ],
-    "static": false
+    "static": true
   },
   "TRANSFERENCIA_ARQUIVO": {
     "pk_cols": [
