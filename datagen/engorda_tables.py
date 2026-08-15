@@ -27,7 +27,7 @@ MULTI-PRODUTO SEM EDITAR CÓDIGO
 ===========================================================================
 Um produto novo NÃO exige mudança neste arquivo. O que o define é, por inteiro:
 
-  * o .sql de domínio     -> --query-num-if-sql (default: <produto>.sql)
+  * o catálogo de domínio -> queries_produtos.sql (bloco escolhido por --produto)
   * o spec do fecho       -> --specs (define QUAIS tabelas são engordadas:
                              o motor engorda exatamente as tabelas não-static
                              do spec)
@@ -94,7 +94,7 @@ o caminho fixo `<destino>` antes de consumir a saída.
 USO RECOMENDADO:
     escolha os parâmetros em executar_engorda_multiproduto.py e execute:
     spark-submit --py-files engorda_instrumentos.py \
-      --files cdb_simplificado.sql,cdb.sql,rdb.sql \
+      --files queries_produtos.sql \
       executar_engorda_multiproduto.py
 
 CLI DIRETA (OCI Data Flow — mesmas envs do engorda_tables.py):
@@ -105,10 +105,10 @@ CLI DIRETA (OCI Data Flow — mesmas envs do engorda_tables.py):
           (+ opcionais DATAGEN_RAW_PREFIX, DATAGEN_SYNTHETIC_PREFIX,
            DATAGEN_CLONE_PREFIX — default derivado do nome do produto)
     argumentos:
-      --produto cdb_simplificado    # rótulo livre; dá nome ao app e aos defaults
+      --produto cdb_simplificado    # escolhe tabelas e query do produto
       --num-ifs 12345,67890         # lista explícita (aceita 1 só), OU
       --n-instrumentos 5 --seed 42  # amostra do domínio definido no SQL
-      --query-num-if-sql cdb_simplificado.sql  # default: <produto>.sql
+      --query-num-if-sql queries_produtos.sql  # override opcional do catálogo
       --specs oci://.../spec_cdb.json  # define as tabelas engordadas
       --clone-prefix sintetizacao_multiproduto/cdb  # default: .../<produto>
       --fator-k 3                   # sintéticos por instrumento (default 1)
@@ -187,8 +187,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Domínio: a seleção de NUM_IF vive no arquivo SQL. A leitura das tabelas para
-# montar o fecho é RAW; filtros posteriores neste módulo são de integridade.
+# Domínio: a seleção de NUM_IF vive no catálogo SQL único, em um bloco por
+# produto. A leitura das tabelas para montar o fecho é RAW; filtros posteriores
+# neste módulo são de integridade.
 # ---------------------------------------------------------------------------
 TABELA_RAIZ = "INSTRUMENTO_FINANCEIRO"
 COL_NUM_IF = "NUM_IF"
@@ -337,6 +338,7 @@ ORACLE_ENV_VARS = (
     "DATAGEN_SOURCE_DB_PASSWORD",
 )
 DEFAULT_CLONE_PREFIX = "sintetizacao_multiproduto"
+DEFAULT_QUERIES_FILENAME = "queries_produtos.sql"
 DEFAULT_SEED = 42
 MAPA_NUM_IF_TABLE = "MAPA_CLONE_NUM_IF"
 MAPA_COD_IF_TABLE = "MAPA_CLONE_COD_IF"
@@ -345,6 +347,13 @@ DEFAULT_ORACLE_CODE_BATCH_SIZE = 50_000
 MAX_MEU_NUMERO_ORDINAL = 9_999_999
 MEU_PREFIX_PATTERN = re.compile(r"^[1-9][0-9]{2}$")
 PRODUTO_NOME_RE = re.compile(r"[a-z][a-z0-9_]*")
+QUERY_SECTION_RE = re.compile(
+    r"^[ \t]*--[ \t]*BEGIN QUERY:[ \t]*"
+    r"([a-z][a-z0-9_]*)[ \t]*\r?$"
+    r"(.*?)"
+    r"^[ \t]*--[ \t]*END QUERY:[ \t]*\1[ \t]*\r?$",
+    re.MULTILINE | re.DOTALL,
+)
 RAW_SOURCE_PLACEHOLDER_RE = re.compile(
     r"\{\{RAW_([A-Z][A-Z0-9_]*)\}\}", re.IGNORECASE
 )
@@ -771,8 +780,8 @@ def _normalize_clone_prefix(value: str) -> str:
 def _normalize_produto(name: Any) -> str:
     """Normaliza e valida um produto configurado para engorda.
 
-    O nome seleciona as tabelas em TABELAS_ENGORDA_POR_PRODUTO e também alimenta
-    os defaults de --query-num-if-sql e --clone-prefix."""
+    O nome seleciona as tabelas em TABELAS_ENGORDA_POR_PRODUTO, a query no
+    catálogo SQL único e o default de --clone-prefix."""
     if not isinstance(name, str) or not name.strip():
         raise ValueError("produto precisa ser texto não vazio")
     normalized = name.strip().lower()
@@ -925,7 +934,7 @@ def _build_product_profile(
         name=produto,
         query_filename=(query_filename.strip()
                         if isinstance(query_filename, str) and query_filename.strip()
-                        else f"{produto}.sql"),
+                        else DEFAULT_QUERIES_FILENAME),
         default_clone_prefix=_normalize_clone_prefix(
             clone_prefix if clone_prefix else f"{DEFAULT_CLONE_PREFIX}/{produto}"
         ),
@@ -1185,10 +1194,47 @@ def _default_num_if_query_path(filename: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
 
 
+def _extract_num_if_query_for_product(catalog_text: str, produto: str,
+                                      source: str) -> str:
+    """Extrai do catálogo SQL único a query correspondente ao produto."""
+    produto = _normalize_produto(produto)
+    sections: Dict[str, str] = {}
+    for match in QUERY_SECTION_RE.finditer(catalog_text):
+        section_product = match.group(1)
+        if section_product in sections:
+            raise ValueError(
+                f"catálogo de queries {source!r} repete o produto "
+                f"{section_product!r}"
+            )
+        sections[section_product] = match.group(2).strip()
+
+    expected = set(TABELAS_ENGORDA_POR_PRODUTO)
+    missing = sorted(expected - set(sections))
+    unknown = sorted(set(sections) - expected)
+    if missing or unknown:
+        details = []
+        if missing:
+            details.append(f"produtos ausentes={missing}")
+        if unknown:
+            details.append(f"produtos desconhecidos={unknown}")
+        raise ValueError(
+            f"catálogo de queries inválido em {source!r}: " + "; ".join(details)
+        )
+
+    query = sections[produto]
+    if not query:
+        raise ValueError(
+            f"produto {produto!r} ainda não possui query configurada em "
+            f"{source!r}"
+        )
+    return query
+
+
 def _read_num_if_query_text(spark: SparkSession,
                             query_path: Optional[str],
-                            default_filename: Optional[str] = None) -> Tuple[str, str]:
-    """Lê uma única query SQL local ou em URI suportada pelo Spark."""
+                            default_filename: Optional[str],
+                            produto: str) -> Tuple[str, str]:
+    """Lê o catálogo SQL e devolve somente a query do produto selecionado."""
     selected_path = query_path or default_filename
     if selected_path is None:
         raise ValueError("query de NUM_IF não informada e produto sem arquivo SQL")
@@ -1217,8 +1263,9 @@ def _read_num_if_query_text(spark: SparkSession,
             ) from exc
         resolved = expanded
     if not text.strip():
-        raise ValueError(f"query de NUM_IF vazia em {resolved!r}")
-    return text, resolved
+        raise ValueError(f"catálogo de queries vazio em {resolved!r}")
+    query = _extract_num_if_query_for_product(text, produto, resolved)
+    return query, f"{resolved} [produto={produto}]"
 
 
 def _render_num_if_query(sql_text: str, config: Mapping[str, str]) -> str:
@@ -1751,7 +1798,7 @@ def ordem_topologica(planos: Dict[str, PlanoTabela]) -> List[str]:
 # ---------------------------------------------------------------------------
 def _dominio_num_if_produto(spark, config, profile: ProductProfile,
                              query_path: Optional[str] = None) -> DataFrame:
-    """Executa a query externa que define integralmente o domínio de NUM_IF.
+    """Executa a query do produto extraída do catálogo SQL único.
 
     O SQL deve ser um único SELECT e expor exatamente uma coluna chamada NUM_IF.
     Placeholders {{RAW_TABELA}} são resolvidos para o Parquet RAW correspondente.
@@ -1761,7 +1808,7 @@ def _dominio_num_if_produto(spark, config, profile: ProductProfile,
     """
     _validate_product_profile(profile)
     sql_text, resolved_path = _read_num_if_query_text(
-        spark, query_path, profile.query_filename
+        spark, query_path, profile.query_filename, profile.name
     )
     sql = _render_num_if_query(sql_text, config)
     logger.info("Produto %s: executando query de domínio de NUM_IF: %s",
@@ -4264,9 +4311,8 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                     "spec_config.json, produto e parâmetros.")
     parser.add_argument(
         "--produto", required=True, type=_parse_produto,
-        help="Produto que seleciona as tabelas engordáveis no spec único e "
-             "define o nome do app e os DEFAULTS de --query-num-if-sql "
-             "(<produto>.sql) e --clone-prefix "
+        help="Produto que seleciona a query no catálogo SQL, as tabelas "
+             "engordáveis no spec único e o default de --clone-prefix "
              f"({DEFAULT_CLONE_PREFIX}/<produto>).",
     )
     grupo = parser.add_mutually_exclusive_group(required=True)
@@ -4276,10 +4322,9 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                        help="Sorteia N instrumentos do domínio definido pela "
                             "query SQL; usa --seed.")
     parser.add_argument("--query-num-if-sql", dest="query_num_if_path", default=None,
-                        help="Arquivo Spark SQL que define o domínio do produto "
-                             "(NUM_TIPO_IF, COD_COND_RESGATE, escalonamento e "
-                             "demais filtros de negócio moram AQUI). Deve retornar "
-                             "NUM_IF; caminho local ou URI. Default: <produto>.sql.")
+                        help="Override do catálogo SQL único de produtos; caminho "
+                             "local ou URI. Default: queries_produtos.sql ao lado "
+                             "do script. O bloco de --produto deve retornar NUM_IF.")
     parser.add_argument("--fator-k", type=positive_int, default=1,
                         help="Sintéticos por instrumento (default 1).")
     parser.add_argument("--meu-numero-prefix", type=_validate_meu_numero_prefix,
