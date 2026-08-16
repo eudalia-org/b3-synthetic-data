@@ -2471,6 +2471,33 @@
     ],
     "static": true
   },
+  "HISTORICO_PU_CURVA": {
+    "pk_cols": [
+      "NUM_HISTORICO_PU_CURVA"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_IF"
+        ],
+        "parent_table": "INSTRUMENTO_FINANCEIRO",
+        "parent_columns": [
+          "NUM_IF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_ENTIDADE_ATUALIZ"
+        ],
+        "parent_table": "USUARIO",
+        "parent_columns": [
+          "NUM_ID_ENTIDADE"
+        ]
+      }
+    ],
+    "not_null_cols": [],
+    "static": true
+  },
   "HIST_MARCACAO_MERCADO": {
     "pk_cols": [
       "NUM_ID_HIST_MARCACAO_MERCADO"
