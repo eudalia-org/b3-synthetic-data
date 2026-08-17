@@ -656,7 +656,11 @@ TABELAS_ENGORDA_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
         "CARTEIRA_COMITENTE",
         "CARTEIRA_PARTICIPANTE",
     ),
-    "ccb": (),
+    "ccb_pppre": (),
+    "ccb_pfpre": (),
+    "ccb_pgrpre": (),
+    "ccb_favcp": (),
+    "ccb_fapre": (),
     "lastro": (
         "LOTE",
         "CREDITO_SCR",
