@@ -6010,6 +6010,7 @@ def check_lci_registration_profile(
 # Category 3b - Primary-key integrity (all synthetic Oracle tables)
 # ---------------------------------------------------------------------------
 MAPA_CLONE_NUM_IF_TABLE = "MAPA_CLONE_NUM_IF"
+PK_METADATA_WARN_TABLES = {"HISTORICO_PU_CURVA"}
 
 
 def check_primary_keys(
@@ -6033,10 +6034,18 @@ def check_primary_keys(
             continue  # not an Oracle table in the target schema
         pk = meta.pk.get(table) or []
         if not pk:
-            out.append(Finding("3b.pk_missing_meta", cat, SEV_ERROR, table, False,
-                               hint="Table has no primary key in Oracle metadata; confirm it "
-                                    "is a real base table before appending.",
-                               message=f"{table} has no PK defined in Oracle metadata."))
+            severity = SEV_WARN if table in PK_METADATA_WARN_TABLES else SEV_ERROR
+            out.append(Finding(
+                "3b.pk_missing_meta", cat, severity, table, False,
+                hint=(
+                    "Oracle declares no PK for this known application-written base table; "
+                    "validate its logical identifier through the generation spec."
+                    if severity == SEV_WARN
+                    else "Table has no primary key in Oracle metadata; confirm it is a real "
+                         "base table before appending."
+                ),
+                message=f"{table} has no PK defined in Oracle metadata.",
+            ))
             continue
         resolved = [resolve(df, c) for c in pk]
         missing = [c for c, a in zip(pk, resolved) if not a]

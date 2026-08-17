@@ -245,6 +245,23 @@ def test_primary_key_and_clone_map_checks_detect_duplicates_and_dangling_rows(sp
     assert clone["3c.clone_map_no_dangling"].count == 1
 
 
+def test_historico_pu_curva_without_oracle_pk_is_warn_only(spark):
+    tables = {
+        "HISTORICO_PU_CURVA": spark.createDataFrame(
+            [(1,)], "NUM_HISTORICO_PU_CURVA long"
+        ),
+        "OTHER_TABLE": spark.createDataFrame([(1,)], "ID long"),
+    }
+    meta = validator.Metadata(set(tables), {}, {}, {}, {})
+
+    findings = validator.check_primary_keys(tables, meta, sample=5, no_oracle=False)
+    by_table = {finding.table: finding for finding in findings}
+
+    assert by_table["HISTORICO_PU_CURVA"].check_id == "3b.pk_missing_meta"
+    assert by_table["HISTORICO_PU_CURVA"].severity == validator.SEV_WARN
+    assert by_table["OTHER_TABLE"].severity == validator.SEV_ERROR
+
+
 def test_report_exit_codes_distinguish_pass_partial_and_fail(capsys):
     simplificado = validator.VALIDATION_PROFILES["cdb_simplificado"]
     rdb = validator.VALIDATION_PROFILES["rdb"]
