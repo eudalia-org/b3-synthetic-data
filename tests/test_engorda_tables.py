@@ -782,6 +782,62 @@ class TestEngordaDateRules:
         assert row.DAT_ORIGINAL_EVENTO == liquidation
         assert set(applied) == {"DAT_OCORRENCIA_EVENTO", "DAT_ORIGINAL_EVENTO"}
 
+    def test_resgate_schedule_moves_with_issuance(self, spark):
+        resultados = {
+            "INSTRUMENTO_FINANCEIRO": (
+                spark.createDataFrame(
+                    [(100, date(2026, 5, 8))],
+                    "NUM_IF long, DAT_EMISSAO date",
+                ),
+                1,
+            ),
+            "CONDICAO_IF": (
+                spark.createDataFrame(
+                    [(200, 100)],
+                    "NUM_CONDICAO_IF long, NUM_IF long",
+                ),
+                1,
+            ),
+            "RESGATE": (
+                spark.createDataFrame(
+                    [(200, date(2025, 5, 8))],
+                    "NUM_CONDICAO_IF long, DAT_RESGATE date",
+                ),
+                1,
+            ),
+            "CONDICAO_RESGATE": (
+                spark.createDataFrame(
+                    [
+                        (300, 200, date(2024, 6, 7)),
+                        (301, 200, date(2024, 7, 7)),
+                    ],
+                    "NUM_ID_CONDICAO_RESGATE long, NUM_CONDICAO_IF long, DAT_RESGATE date",
+                ),
+                2,
+            ),
+        }
+        lote_instrumentos = spark.createDataFrame(
+            [(10, date(2024, 5, 8))],
+            "NUM_IF long, DAT_EMISSAO date",
+        )
+        mapa_num_if = spark.createDataFrame(
+            [(10, 0, 100)],
+            "old_NUM_IF long, __k int, new_NUM_IF long",
+        )
+
+        adjusted, changed = engorda_tables.ajusta_datas_resgate(
+            resultados, lote_instrumentos, mapa_num_if
+        )
+
+        assert changed == ["CONDICAO_RESGATE", "RESGATE"]
+        assert adjusted["RESGATE"][0].first().DAT_RESGATE == date(2027, 5, 8)
+        assert [
+            row.DAT_RESGATE
+            for row in adjusted["CONDICAO_RESGATE"][0].orderBy(
+                "NUM_ID_CONDICAO_RESGATE"
+            ).collect()
+        ] == [date(2026, 6, 7), date(2026, 7, 7)]
+
 
 class TestContiguousRowId:
     def test_ids_are_contiguous_and_unique_across_partitions(self, spark):

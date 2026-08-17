@@ -65,8 +65,14 @@ def required_frames(
     tos=None,
     tipos=None,
     cdb_objects=None,
+    operations=None,
+    root_num_ifs=(1,),
 ):
     tables = {
+        "INSTRUMENTO_FINANCEIRO": spark.createDataFrame(
+            [(num_if, None) for num_if in root_num_ifs],
+            "NUM_IF long, DAT_EXCLUSAO string",
+        ),
         "TITULO": spark.createDataFrame(
             [(title_account,)], "NUM_CONTA_PARTICIPANTE string"
         ),
@@ -74,8 +80,11 @@ def required_frames(
             [(deposit_account,)], "NUM_CONTA_PARTICIPANTE string"
         ),
         "OPERACAO": spark.createDataFrame(
-            [(1, operation_tos, 6, p1_account, p2_account)],
-            "NUM_ID_OPERACAO long, NUM_ID_TIPO_OPER_OBJETO_SERV string, "
+            operations
+            if operations is not None
+            else [(1, 1, operation_tos, 6, p1_account, p2_account)],
+            "NUM_ID_OPERACAO long, NUM_IF long, "
+            "NUM_ID_TIPO_OPER_OBJETO_SERV string, "
             "NUM_ID_MODALIDADE_LIQUIDACAO long, NUM_CONTA_PARTICIPANTE_P1 string, "
             "NUM_CONTA_PARTICIPANTE_P2 string",
         ),
@@ -338,6 +347,55 @@ def test_operation_type_code_two_fails_required_tos(spark):
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 1
     assert_failed_have_hints([finding])
+
+
+def test_historical_operation_tos_is_ignored_when_registration_exists(spark):
+    finding = by_id(required_findings(
+        spark,
+        operations=[
+            (1, 1, "100", 6, "13", "14"),
+            (2, 1, "200", 6, "13", "14"),
+        ],
+        tos=[
+            ("100", "10", "44", "S"),
+            ("200", "20", "45", "N"),
+        ],
+        tipos=[
+            ("10", "S", "1"),
+            ("20", "S", "2"),
+        ],
+    ))["6.required.operation_tos"]
+
+    assert finding.passed
+
+
+def test_each_cdb_requires_registration_operation(spark):
+    finding = by_id(required_findings(
+        spark,
+        operations=[(1, 1, "100", 6, "13", "14")],
+        root_num_ifs=(1, 2),
+    ))["6.required.operation_tos"]
+
+    assert finding.severity == validator.SEV_ERROR
+    assert finding.count == 1
+    assert finding.sample == ["2"]
+
+
+def test_invalid_registration_is_reported_even_when_another_is_valid(spark):
+    finding = by_id(required_findings(
+        spark,
+        operations=[
+            (1, 1, "100", 6, "13", "14"),
+            (2, 1, "101", 6, "13", "14"),
+        ],
+        tos=[
+            ("100", "10", "44", "S"),
+            ("101", "10", "44", None),
+        ],
+    ))["6.required.operation_tos"]
+
+    assert finding.severity == validator.SEV_ERROR
+    assert finding.count == 1
 
 
 @pytest.mark.parametrize(

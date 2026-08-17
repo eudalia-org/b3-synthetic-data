@@ -6478,10 +6478,11 @@ def check_required_lookup_frames(
 ) -> List[Finding]:
     """Enforce the mandatory target-backed registration lookups for the selected product.
 
-    The operation-TOS structural check runs for every product (object service is taken from
-    the profile). Account and platform checks are product-gated: when the profile disables
-    them (unresolved target evidence, e.g. RDB), an explicit unsupported WARN is emitted
-    instead of a CDB-shaped ERROR."""
+    The operation-TOS check classifies registration operations through the target operation
+    type and requires registration coverage per synthetic root. Historical operations remain
+    subject to the generic FK checks. Account and platform checks are product-gated: when the
+    profile disables them (unresolved target evidence, e.g. RDB), an explicit unsupported WARN
+    is emitted instead of a CDB-shaped ERROR."""
     if profile is None:
         profile = CDB_SIMPLIFICADO_PROFILE
     skip_prefixes = skip_prefixes or []
@@ -6637,14 +6638,30 @@ def check_required_lookup_frames(
     # Do not evaluate RDB rows with CDB's identification='S'/operation-type='1' literals.
     op_df = tables.get(OPERACAO_TABLE) if tos_semantics_supported else None
     op_tos_col = resolve(op_df, "NUM_ID_TIPO_OPER_OBJETO_SERV") if op_df is not None else None
+    op_num_if_col = resolve(op_df, "NUM_IF") if op_df is not None else None
+    root_df = tables.get("INSTRUMENTO_FINANCEIRO") if tos_semantics_supported else None
+    root_num_if_col = resolve(root_df, "NUM_IF") if root_df is not None else None
     if not run_operation:
         operation_finding = None
-    elif op_df is None or op_tos_col is None:
-        missing = (
-            OPERACAO_TABLE
-            if op_df is None
-            else f"{OPERACAO_TABLE}.NUM_ID_TIPO_OPER_OBJETO_SERV"
-        )
+    elif (
+        op_df is None
+        or op_tos_col is None
+        or op_num_if_col is None
+        or root_df is None
+        or root_num_if_col is None
+    ):
+        missing = []
+        if op_df is None:
+            missing.append(OPERACAO_TABLE)
+        else:
+            if op_tos_col is None:
+                missing.append(f"{OPERACAO_TABLE}.NUM_ID_TIPO_OPER_OBJETO_SERV")
+            if op_num_if_col is None:
+                missing.append(f"{OPERACAO_TABLE}.NUM_IF")
+        if root_df is None:
+            missing.append("INSTRUMENTO_FINANCEIRO")
+        elif root_num_if_col is None:
+            missing.append("INSTRUMENTO_FINANCEIRO.NUM_IF")
         operation_finding = Finding(
             "6.required.operation_tos", cat, SEV_ERROR, OPERACAO_TABLE, False,
             column="NUM_ID_TIPO_OPER_OBJETO_SERV",
@@ -6652,9 +6669,9 @@ def check_required_lookup_frames(
                 _sample_keys(op_df, [resolve(op_df, "NUM_ID_OPERACAO")], sample)
                 if op_df is not None and resolve(op_df, "NUM_ID_OPERACAO") else []
             ),
-            hint="Export OPERACAO with NUM_ID_TIPO_OPER_OBJETO_SERV; every row requires its "
-                 "original nonblank target TOS reference.",
-            message=f"Required operation TOS source is missing: {missing}.",
+            hint="Export OPERACAO.NUM_IF and NUM_ID_TIPO_OPER_OBJETO_SERV together with "
+                 "INSTRUMENTO_FINANCEIRO.NUM_IF so registration coverage can be checked.",
+            message=f"Required registration-operation source is missing: {', '.join(missing)}.",
         )
     else:
         tos_cols = target_columns(
@@ -6694,16 +6711,12 @@ def check_required_lookup_frames(
                         f"{'; '.join(unavailable)}.",
             )
         else:
-            op_id_col = resolve(op_df, "NUM_ID_OPERACAO")
             operations = op_df.select(
-                *(
-                    [_norm_code(F.col(op_id_col)).alias("operation_id")]
-                    if op_id_col else []
-                ),
+                _norm_code(F.col(op_num_if_col)).alias("num_if"),
                 F.col(op_tos_col).cast("string").alias("raw_tos_id"),
                 _canon_key_col(F.col(op_tos_col)).alias("tos_id"),
             )
-            valid_tos = (
+            tos_semantics = (
                 tos_df.select(
                     _canon_key_col(F.col(tos_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
                     .alias("tos_id"),
@@ -6725,43 +6738,67 @@ def check_required_lookup_frames(
                     "tipo_operacao_id",
                     "inner",
                 )
-                .where(
-                    (F.col("objeto_servico_id") == str(profile.object_service_id))
-                    & (F.col("identification_flag") == "S")
-                    & (F.col("operation_type_code") == "1")
-                )
-                .select("tos_id")
                 .where(F.col("tos_id").isNotNull())
-                .dropDuplicates()
+                .dropDuplicates(["tos_id"])
             )
-            invalid_operations = operations.where(
-                F.col("raw_tos_id").isNull() | (F.trim(F.col("raw_tos_id")) == "")
-            ).unionByName(
+            registration_operations = (
                 operations.where(
                     F.col("raw_tos_id").isNotNull()
                     & (F.trim(F.col("raw_tos_id")) != "")
-                ).join(F.broadcast(valid_tos), "tos_id", "left_anti"),
-                allowMissingColumns=True,
+                )
+                .join(F.broadcast(tos_semantics), "tos_id", "inner")
+                .where(F.col("operation_type_code") == "1")
             )
-            invalid_operation_count = invalid_operations.count()
-            operation_sample_cols = (
-                ["operation_id"] if "operation_id" in operations.columns else ["tos_id"]
+            valid_registration_ifs = (
+                registration_operations.where(
+                    (F.col("objeto_servico_id") == str(profile.object_service_id))
+                    & (F.col("identification_flag") == "S")
+                )
+                .select("num_if")
+                .where(F.col("num_if").isNotNull())
+                .dropDuplicates()
             )
+            invalid_registration_ifs = (
+                registration_operations.where(
+                    (
+                        F.coalesce(F.col("objeto_servico_id"), F.lit(""))
+                        != str(profile.object_service_id)
+                    )
+                    | (F.coalesce(F.col("identification_flag"), F.lit("")) != "S")
+                )
+                .select("num_if")
+                .where(F.col("num_if").isNotNull())
+            )
+            active_roots = (
+                _active(root_df)
+                .select(_norm_code(F.col(root_num_if_col)).alias("num_if"))
+                .where(F.col("num_if").isNotNull())
+                .dropDuplicates()
+            )
+            missing_registration_ifs = active_roots.join(
+                F.broadcast(valid_registration_ifs), "num_if", "left_anti"
+            )
+            invalid_ifs = (
+                invalid_registration_ifs.unionByName(missing_registration_ifs)
+                .dropDuplicates(["num_if"])
+            )
+            invalid_if_count = invalid_ifs.count()
             operation_finding = Finding(
                 "6.required.operation_tos", cat,
-                SEV_ERROR if invalid_operation_count else SEV_INFO,
-                OPERACAO_TABLE, invalid_operation_count == 0,
-                count=invalid_operation_count,
-                column="NUM_ID_TIPO_OPER_OBJETO_SERV",
-                sample=_sample_keys(invalid_operations, operation_sample_cols, sample),
+                SEV_ERROR if invalid_if_count else SEV_INFO,
+                OPERACAO_TABLE, invalid_if_count == 0,
+                count=invalid_if_count,
+                column="NUM_IF,NUM_ID_TIPO_OPER_OBJETO_SERV",
+                sample=_sample_keys(invalid_ifs, ["num_if"], sample),
                 hint=(
-                    "Use a nonblank target TOS with NUM_ID_OBJETO_SERVICO="
-                    f"{profile.object_service_id}, trimmed "
-                    "IND_DISPONIVEL_IDENTIFICACAO='S', and joined "
-                    "TIPO_OPERACAO.COD_TIPO_OPERACAO exactly '1' (not '2')."
-                    if invalid_operation_count else ""
+                    "Ensure every active synthetic root has a registration operation whose "
+                    "target TOS joins to TIPO_OPERACAO.COD_TIPO_OPERACAO='1', "
+                    f"NUM_ID_OBJETO_SERVICO={profile.object_service_id}, and trimmed "
+                    "IND_DISPONIVEL_IDENTIFICACAO='S'. Historical operation types are allowed."
+                    if invalid_if_count else ""
                 ),
-                message="Every synthetic operation must resolve to the approved CDB TOS.",
+                message="Every synthetic root must have an approved registration-operation "
+                        "TOS; historical operation types are not constrained by this check.",
             )
 
     if run_operation and not tos_semantics_supported:

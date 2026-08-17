@@ -19,8 +19,9 @@ referencial que pertencem a esses instrumentos e reescreve APENAS chaves:
 Quando o perfil ativa a estratégia padrão, um conjunto FECHADO de colunas de
 DATA recebe o timestamp do run ou a data do controle operacional (ver
 ENGORDA_*_COLS). DAT_VENCIMENTO preserva o prazo original a partir da nova
-DAT_EMISSAO. TODAS as demais colunas ficam intocadas — é isso que preserva as
-combinações de negócio e o polimorfismo Hibernate de CONDICAO_IF.
+DAT_EMISSAO; DAT_RESGATE do resgate e de seu cronograma acompanha o mesmo
+deslocamento da emissão. TODAS as demais colunas ficam intocadas — é isso que
+preserva as combinações de negócio e o polimorfismo Hibernate de CONDICAO_IF.
 
 ===========================================================================
 MULTI-PRODUTO SEM EDITAR CÓDIGO
@@ -1616,6 +1617,99 @@ def aplica_regras_engorda(df: DataFrame, tabela: str, *, engorda_ts: datetime,
                 aplicadas.append(col)
 
     return df, aplicadas
+
+
+def ajusta_datas_resgate(
+    resultados: Mapping[str, Tuple[DataFrame, int]],
+    lote_instrumentos: DataFrame,
+    mapa_num_if: DataFrame,
+    tabelas: Optional[Sequence[str]] = None,
+) -> Tuple[Dict[str, Tuple[DataFrame, int]], List[str]]:
+    """Desloca resgate e cronograma pela mesma diferença aplicada à emissão raiz."""
+    updated = dict(resultados)
+    required_tables = (TABELA_RAIZ, CONDICAO_IF_TABLE)
+    if any(table not in updated for table in required_tables):
+        return updated, []
+
+    roots = updated[TABELA_RAIZ][0]
+    conditions = updated[CONDICAO_IF_TABLE][0]
+    required_columns = {
+        TABELA_RAIZ: {COL_NUM_IF, ENGORDA_COL_DAT_EMISSAO},
+        CONDICAO_IF_TABLE: {CONDICAO_IF_PK, COL_NUM_IF},
+    }
+    frames = {TABELA_RAIZ: roots, CONDICAO_IF_TABLE: conditions}
+    if any(required_columns[name] - set(frames[name].columns) for name in required_tables):
+        return updated, []
+    if {f"old_{COL_NUM_IF}", f"new_{COL_NUM_IF}"} - set(mapa_num_if.columns):
+        return updated, []
+    if {COL_NUM_IF, ENGORDA_COL_DAT_EMISSAO} - set(lote_instrumentos.columns):
+        return updated, []
+
+    original_roots = lote_instrumentos.select(
+        _norm_key_col(F.col(COL_NUM_IF)).alias("__old_num_if"),
+        F.to_date(F.col(ENGORDA_COL_DAT_EMISSAO)).alias("__old_emission"),
+    ).dropDuplicates(["__old_num_if"])
+    root_map = mapa_num_if.select(
+        _norm_key_col(F.col(f"old_{COL_NUM_IF}")).alias("__old_num_if"),
+        _norm_key_col(F.col(f"new_{COL_NUM_IF}")).alias("__new_num_if"),
+    ).dropDuplicates(["__old_num_if", "__new_num_if"])
+    shifted_roots = roots.select(
+        _norm_key_col(F.col(COL_NUM_IF)).alias("__new_num_if"),
+        F.to_date(F.col(ENGORDA_COL_DAT_EMISSAO)).alias("__new_emission"),
+    ).dropDuplicates(["__new_num_if"])
+    shifts = (
+        root_map.join(original_roots, "__old_num_if", "inner")
+        .join(shifted_roots, "__new_num_if", "inner")
+        .where(F.col("__old_emission").isNotNull() & F.col("__new_emission").isNotNull())
+        .select(
+            "__new_num_if",
+            F.datediff("__new_emission", "__old_emission").alias("__shift_days"),
+        )
+        .dropDuplicates(["__new_num_if"])
+    )
+    condition_shifts = (
+        conditions.select(
+            _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__condition_key"),
+            _norm_key_col(F.col(COL_NUM_IF)).alias("__new_num_if"),
+        )
+        .join(shifts, "__new_num_if", "inner")
+        .select("__condition_key", "__shift_days")
+        .dropDuplicates(["__condition_key"])
+    )
+
+    selected = {
+        table_path_name(table).upper()
+        for table in (tabelas or ("RESGATE", "CONDICAO_RESGATE"))
+    }
+    changed: List[str] = []
+    for table in ("CONDICAO_RESGATE", "RESGATE"):
+        if table not in selected or table not in updated:
+            continue
+        frame, source_rows = updated[table]
+        if CONDICAO_IF_PK not in frame.columns or "DAT_RESGATE" not in frame.columns:
+            continue
+        date_type = frame.schema["DAT_RESGATE"].dataType
+        source = frame.withColumn(
+            "__condition_key", _norm_key_col(F.col(CONDICAO_IF_PK))
+        ).alias("source")
+        context = condition_shifts.alias("context")
+        joined = source.join(F.broadcast(context), "__condition_key", "left")
+        parsed = F.to_date(F.col("source.DAT_RESGATE"))
+        shifted = F.date_add(parsed, F.col("context.__shift_days"))
+        shifted_for_type = _date_expression_for_type(shifted, date_type)
+        adjusted = joined.select(*[
+            F.when(
+                parsed.isNotNull() & F.col("context.__shift_days").isNotNull(),
+                shifted_for_type,
+            ).otherwise(F.col(f"source.{column}")).alias(column)
+            if column == "DAT_RESGATE"
+            else F.col(f"source.{column}").alias(column)
+            for column in frame.columns
+        ])
+        updated[table] = (adjusted, source_rows)
+        changed.append(table)
+
+    return updated, changed
 
 
 # ---------------------------------------------------------------------------
@@ -3871,6 +3965,18 @@ def executa_clonagem(spark, config, spec: dict, *,
                 clones, t, engorda_ts=engorda_ts,
                 controle_operacional_date=controle_operacional_date,
                 prazo_vencimento_dias=prazo_vencimento_dias)
+            if t in {"RESGATE", "CONDICAO_RESGATE"}:
+                date_context = dict(resultados)
+                date_context[t] = (clones, n_lote)
+                adjusted, changed = ajusta_datas_resgate(
+                    date_context,
+                    lotes[TABELA_RAIZ],
+                    mapeamentos[TABELA_RAIZ],
+                    tabelas=(t,),
+                )
+                if t in changed:
+                    clones = adjusted[t][0]
+                    cols_data.append("DAT_RESGATE")
         else:
             cols_data = []
         # Faltantes allowlisted são anulados seletivamente após todo remap e
