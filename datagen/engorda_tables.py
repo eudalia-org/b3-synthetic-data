@@ -661,6 +661,7 @@ TABELAS_ENGORDA_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
     "ccb_pgrpre": (),
     "ccb_favcp": (),
     "ccb_fapre": (),
+    "gravame": (),
     "lastro": (
         "LOTE",
         "CREDITO_SCR",
