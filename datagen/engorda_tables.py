@@ -207,7 +207,22 @@ PRODUTOS_COM_PODA_SUBTIPO = frozenset({
     'cdb_simplificado',
     'cdb_resgate',
     'cdb_escalonamento',
+    'rdb_inclusao',
 })
+
+# O validador RDB confere TODAS as CONDICAO_IF (inclusive historicas) e exige
+# uma unica tabela-subtipo fisica coerente com COD_TIPO_CONDICAO_IF. Mantemos
+# esse modo estrito opt-in para nao alterar produtos CDB ja homologados.
+PRODUTOS_COM_PODA_SUBTIPO_ESTRITA = frozenset({'rdb_inclusao'})
+
+# Algumas tabelas possuem mais de uma FK principal no spec. Para estes produtos,
+# uma linha so pertence ao lote quando o NUM_IF da propria linha pertence a raiz;
+# isso evita, por exemplo, trazer OPERACAO de outro instrumento via EVENTO.
+TABELAS_COM_ESCOPO_NUM_IF_ESTRITO_POR_PRODUTO: Dict[
+    str, frozenset[str]
+] = {
+    'rdb_inclusao': frozenset({'OPERACAO'}),
+}
 
 # Checks de integridade de NEGÓCIO são opt-in por produto. O conjunto vazio é
 # deliberado: produtos que já passam integralmente (em especial
@@ -218,6 +233,7 @@ CHECK_RESGATE_VALUES = "resgate_schedule_values"
 CHECK_ESCALONAMENTO_SOURCE_DATES = "escalonamento_source_dates"
 CHECK_OPERATION_TOS_CDB = "operation_tos_cdb"
 CHECK_ACTIVE_ACCOUNT_CDB = "active_account_cdb"
+CHECK_DATE_ORDER = "date_order"
 VALID_INVALID_NUM_IF_CHECKS = frozenset({
     CHECK_RESGATE_COVERAGE,
     CHECK_RESGATE_PARENT,
@@ -225,6 +241,7 @@ VALID_INVALID_NUM_IF_CHECKS = frozenset({
     CHECK_ESCALONAMENTO_SOURCE_DATES,
     CHECK_OPERATION_TOS_CDB,
     CHECK_ACTIVE_ACCOUNT_CDB,
+    CHECK_DATE_ORDER,
 })
 
 CONDITION_DATE_STRATEGY_SHIFT_BY_EMISSION = "shift_by_emission_delta"
@@ -234,10 +251,22 @@ VALID_CONDITION_DATE_STRATEGIES = frozenset({
 
 OFFLINE_LOOKUP_TOS_CDB_APPROVED = "TOS_REGISTRO_CDB_APROVADO"
 OFFLINE_LOOKUP_TOS_CDB_INVALID = "TOS_REGISTRO_CDB_INVALIDO"
-OFFLINE_LOOKUP_ACCOUNT_CDB = "CONTA_CDB_ELEGIVEL"
+OFFLINE_LOOKUP_ACCOUNT_CDB = "CONTA_CDB_ATIVA_FORMATO_VALIDO"
 OFFLINE_LOOKUP_NAME_COL = "LOOKUP"
 OFFLINE_LOOKUP_VALUE_COL = "VALOR"
 TARGET_SNAPSHOT_ID_COL = "SNAPSHOT_ID"
+
+# Toda fonte usada pelos lookups offline precisa ser uma tabela física presente
+# no spec. Esta guarda impede repetir o erro de tratar uma view Oracle como RAW.
+RAW_TABLES_BY_OFFLINE_LOOKUP: Dict[str, frozenset[str]] = {
+    OFFLINE_LOOKUP_TOS_CDB_APPROVED: frozenset({
+        "TIPO_OPER_OBJETO_SERV", "TIPO_OPERACAO",
+    }),
+    OFFLINE_LOOKUP_TOS_CDB_INVALID: frozenset({
+        "TIPO_OPER_OBJETO_SERV", "TIPO_OPERACAO",
+    }),
+    OFFLINE_LOOKUP_ACCOUNT_CDB: frozenset({"CONTA_PARTICIPANTE"}),
+}
 
 REQUIRED_TABLES_BY_CHECK: Dict[str, Set[str]] = {
     CHECK_RESGATE_COVERAGE: {
@@ -256,7 +285,18 @@ REQUIRED_TABLES_BY_CHECK: Dict[str, Set[str]] = {
     CHECK_ACTIVE_ACCOUNT_CDB: {
         TABELA_RAIZ, "TITULO", "DEPOSITO_AUTOMATICO_IF", "OPERACAO",
     },
+    CHECK_DATE_ORDER: {TABELA_RAIZ, "TITULO", "CONDICAO_IF"},
 }
+
+# Mesmo contrato do check 5.date_order em validate_products.py. A violacao so
+# existe quando as duas pontas sao datas validas; valor ausente/ilegivel nao e
+# transformado em erro por esta regra.
+DATE_ORDER_RULES: Tuple[Tuple[str, str, str], ...] = (
+    (TABELA_RAIZ, "DAT_EMISSAO", "DAT_VENCIMENTO"),
+    (TABELA_RAIZ, "DAT_REGISTRO", "DAT_VENCIMENTO"),
+    ("TITULO", "DAT_EMISSAO", "DAT_VENCIMENTO"),
+    ("CONDICAO_IF", "DAT_INICIO_CONDICAO_IF", "DAT_FIM_CONDICAO_IF"),
+)
 
 # ---------------------------------------------------------------------------
 # Poda de domínio (itens 1, 3 e 4) — instrumentos que o sintético NÃO conseguiria
@@ -750,6 +790,12 @@ INVALID_NUM_IF_CHECKS_BY_PRODUCT: Dict[str, frozenset[str]] = {
         CHECK_RESGATE_PARENT,
         CHECK_RESGATE_VALUES,
     }),
+    "rdb_inclusao": frozenset({
+        CHECK_RESGATE_COVERAGE,
+        CHECK_RESGATE_PARENT,
+        CHECK_RESGATE_VALUES,
+        CHECK_DATE_ORDER,
+    }),
 }
 
 CONDITION_DATE_STRATEGY_BY_PRODUCT: Dict[str, str] = {
@@ -772,6 +818,10 @@ OFFLINE_FK_COVERAGE_REQUIRED_BY_PRODUCT: Dict[
     str, frozenset[Tuple[str, str]]
 ] = {
     "rdb_resgate": frozenset({
+        ("CARTEIRA_COMITENTE", "NUM_ID_ENTIDADE"),
+        ("ESPECIFICACAO_COMITENTE", "NUM_ID_ENTIDADE"),
+    }),
+    "rdb_inclusao": frozenset({
         ("CARTEIRA_COMITENTE", "NUM_ID_ENTIDADE"),
         ("ESPECIFICACAO_COMITENTE", "NUM_ID_ENTIDADE"),
     }),
@@ -1127,6 +1177,15 @@ def _validate_product_profile(profile: ProductProfile) -> None:
         table_path_name(table).upper()
         for table in TABELAS_ENGORDA_POR_PRODUTO[profile.name]
     }
+    strict_scope_tables = TABELAS_COM_ESCOPO_NUM_IF_ESTRITO_POR_PRODUTO.get(
+        profile.name, frozenset()
+    )
+    missing_scope_tables = sorted(strict_scope_tables - product_tables)
+    if missing_scope_tables:
+        raise ValueError(
+            f"{profile.name}: escopo NUM_IF estrito referencia tabela(s) "
+            f"fora do fecho: {missing_scope_tables}"
+        )
     for check in invalid_checks:
         missing_tables = sorted(REQUIRED_TABLES_BY_CHECK[check] - product_tables)
         if missing_tables:
@@ -1192,6 +1251,7 @@ def _validate_product_profile(profile: ProductProfile) -> None:
         table_path_name(table.strip().upper()) for table in profile.static_tables
     }
     protected_tables = {TABELA_RAIZ}
+    protected_tables.update(strict_scope_tables)
     for check in invalid_checks:
         protected_tables.update(REQUIRED_TABLES_BY_CHECK[check])
     protected_tables.update(
@@ -2338,30 +2398,43 @@ def _subtipos_clonaveis(spec: dict,
 
 
 def _num_if_inconsistentes_subtipo(spark, config, spec, dominio: DataFrame,
-                                    policy: SubtypePolicy) -> DataFrame:
-    """NUM_IF do domínio cujo sintético teria ao menos UMA CONDICAO_IF ativa sem a
-    respectiva linha-subtipo sintetizável — os dangling da Cat 1 (item 1). Base da
-    poda: excluídos do sorteio, o lote nasce sem ClassCastException.
+                                    policy: SubtypePolicy,
+                                    strict: bool = False) -> DataFrame:
+    """NUM_IF cujo sintético teria polimorfismo inconsistente em CONDICAO_IF.
+
+    O modo legado confere apenas condições ativas sem o subtipo esperado. O modo
+    estrito (RDB inclusão) espelha o validator: confere todas as condições e
+    também rejeita uma chave presente em mais de uma tabela-subtipo.
 
     A presença é comparada pelo par (COD_TIPO_CONDICAO_IF, NUM_CONDICAO_IF),
     portanto uma PK existente na tabela do tipo errado continua dangling."""
     cond_source = _read_source(spark, config, policy.condition_table)
     required = {
         COL_NUM_IF, policy.condition_pk, policy.condition_type_column,
-        policy.active_column,
     }
+    if not strict:
+        required.add(policy.active_column)
     missing = sorted(required - set(cond_source.columns))
     if missing:
         raise ValueError(
             f"{policy.condition_table}: coluna(s) obrigatória(s) ausente(s) "
             f"para poda de subtipo: {missing}"
         )
-    cond = (cond_source.where(F.col(policy.active_column).isNull())
-            .select(F.col(COL_NUM_IF).alias(COL_NUM_IF),
-                    _norm_key_col(F.col(policy.condition_pk)).alias("__nci"),
-                    _norm_key_col(F.col(policy.condition_type_column)).alias(
-                        "__tipo"))
-            .join(dominio.select(COL_NUM_IF), on=COL_NUM_IF, how="left_semi"))
+    scoped_conditions = (
+        cond_source
+        if strict
+        else cond_source.where(F.col(policy.active_column).isNull())
+    )
+    cond = (
+        scoped_conditions.select(
+            F.col(COL_NUM_IF).alias(COL_NUM_IF),
+            _norm_key_col(F.col(policy.condition_pk)).alias("__nci"),
+            _validator_code_col(F.col(policy.condition_type_column)).alias(
+                "__tipo"
+            ),
+        )
+        .join(dominio.select(COL_NUM_IF), on=COL_NUM_IF, how="left_semi")
+    )
     presente = None
     for tipo, s in _subtipos_clonaveis(spec, policy):
         try:
@@ -2382,10 +2455,31 @@ def _num_if_inconsistentes_subtipo(spark, config, spec, dominio: DataFrame,
     if presente is None:
         # Nenhuma tabela-subtipo sintetizável: toda condição concreta seria dangling.
         return cond.select(COL_NUM_IF).dropDuplicates()
-    dangling = cond.join(
-        presente.dropDuplicates(), on=["__nci", "__tipo"], how="left_anti"
-    )
-    return dangling.select(COL_NUM_IF).dropDuplicates()
+    presente = presente.dropDuplicates(["__nci", "__tipo"])
+    if strict:
+        membership_counts = (
+            presente.groupBy("__nci")
+            .agg(F.countDistinct("__tipo").alias("__subtype_count"))
+        )
+        dangling_or_ambiguous = (
+            cond.join(membership_counts, "__nci", "left")
+            .where(
+                F.coalesce(F.col("__subtype_count"), F.lit(0)) != F.lit(1)
+            )
+            .select(COL_NUM_IF)
+        )
+        known_types = tuple(str(tipo) for tipo, _ in policy.subtype_by_type)
+        wrong_known_type = (
+            cond.where(F.col("__tipo").isin(*known_types))
+            .join(presente, ["__nci", "__tipo"], "left_anti")
+            .select(COL_NUM_IF)
+        )
+        return dangling_or_ambiguous.unionByName(
+            wrong_known_type
+        ).dropDuplicates()
+    return cond.join(
+        presente, on=["__nci", "__tipo"], how="left_anti"
+    ).select(COL_NUM_IF).dropDuplicates()
 
 
 def _require_columns(df: DataFrame, table: str,
@@ -2787,13 +2881,6 @@ def _build_offline_reference_lookups(
 
     if OFFLINE_LOOKUP_ACCOUNT_CDB in required:
         accounts = _read_source(spark, config, "CONTA_PARTICIPANTE")
-        try:
-            families = _read_source(spark, config, "V_FAMILIA_CONTAS")
-        except Exception as exc:
-            raise ValueError(
-                "active_account_cdb: RAW V_FAMILIA_CONTAS e obrigatoria; "
-                "nenhuma consulta Oracle sera usada como fallback"
-            ) from exc
         _require_columns(
             accounts,
             "CONTA_PARTICIPANTE",
@@ -2804,27 +2891,13 @@ def _build_offline_reference_lookups(
             ),
             "validar conta CDB pelo snapshot RAW",
         )
-        _require_columns(
-            families,
-            "V_FAMILIA_CONTAS",
-            ("COD_CONTA_MEMBRO", "NUM_ID_AREA_ATUACAO", "COD_TIPO_ACESSO"),
-            "validar conta CDB pelo snapshot RAW",
-        )
         eligible = (
             accounts.alias("cp")
-            .join(
-                families.alias("vf"),
-                F.col("cp.COD_CONTA_PARTICIPANTE")
-                == F.col("vf.COD_CONTA_MEMBRO"),
-                "inner",
-            )
             .where(
                 (_norm_key_col(F.col("cp.NUM_ID_SITUACAO_CONTA")) == F.lit("1"))
                 & F.trim(
                     F.col("cp.COD_CONTA_PARTICIPANTE").cast("string")
                 ).rlike(r"^[0-9]{5}\.(40|10)-[0-9]$")
-                & (_norm_key_col(F.col("vf.NUM_ID_AREA_ATUACAO")) == F.lit("1"))
-                & (F.col("vf.COD_TIPO_ACESSO").cast("string") == F.lit("L"))
             )
             .select(
                 F.lit(OFFLINE_LOOKUP_ACCOUNT_CDB).alias(
@@ -2838,6 +2911,12 @@ def _build_offline_reference_lookups(
             .dropDuplicates()
         )
         pieces.append(eligible)
+        logger.warning(
+            "active_account_cdb: a view de famílias usada pelo validador não "
+            "é uma fonte RAW. A pré-poda offline confere situação ativa e "
+            "formato .40/.10 em CONTA_PARTICIPANTE; a elegibilidade de família "
+            "continua sendo confirmada pelo validate_products.py."
+        )
 
     if not pieces:
         return spark.createDataFrame([], schema)
@@ -2969,6 +3048,61 @@ def _num_if_com_conta_inelegivel_cdb(
     return _restrict_invalid_num_if(invalid, dominio)
 
 
+def _num_if_invalidos_date_order(
+    spark,
+    config,
+    dominio: DataFrame,
+) -> DataFrame:
+    """Poda raízes que produziriam ERROR 5.date_order no validator."""
+    sources: Dict[str, DataFrame] = {}
+    invalid_parts: List[DataFrame] = []
+    domain_keys = dominio.select(COL_NUM_IF).dropDuplicates()
+    for table, left_column, right_column in DATE_ORDER_RULES:
+        # A raiz recebe emissão/registro/vencimento novos antes da validação;
+        # podar pelo valor antigo reduziria o domínio sem necessidade.
+        if table == TABELA_RAIZ:
+            continue
+        source = sources.get(table)
+        if source is None:
+            source = _read_source(spark, config, table)
+            sources[table] = source
+        if COL_NUM_IF not in source.columns:
+            raise ValueError(
+                f"{table}: {COL_NUM_IF} ausente para validar ordem de datas"
+            )
+        missing_dates = {
+            left_column, right_column,
+        } - set(source.columns)
+        if missing_dates:
+            logger.warning(
+                "%s: check date_order não aplicável; coluna(s) ausente(s): %s",
+                table,
+                sorted(missing_dates),
+            )
+            continue
+        scoped = source.join(domain_keys, COL_NUM_IF, "left_semi")
+        invalid_parts.append(
+            scoped.withColumn(
+                "__date_left", _try_cast_column(left_column, "DATE")
+            )
+            .withColumn(
+                "__date_right", _try_cast_column(right_column, "DATE")
+            )
+            .where(
+                F.col("__date_left").isNotNull()
+                & F.col("__date_right").isNotNull()
+                & (F.col("__date_left") > F.col("__date_right"))
+            )
+            .select(COL_NUM_IF)
+        )
+    if not invalid_parts:
+        return domain_keys.limit(0)
+    invalid = invalid_parts[0]
+    for part in invalid_parts[1:]:
+        invalid = invalid.unionByName(part)
+    return _restrict_invalid_num_if(invalid, dominio)
+
+
 def _num_if_invalidos_por_politica(
     spark,
     config,
@@ -3010,6 +3144,11 @@ def _num_if_invalidos_por_politica(
             _num_if_com_conta_inelegivel_cdb(
                 spark, config, dominio, offline_lookups
             ),
+        ))
+    if CHECK_DATE_ORDER in checks:
+        results.append((
+            CHECK_DATE_ORDER,
+            _num_if_invalidos_date_order(spark, config, dominio),
         ))
     return results
 
@@ -3104,7 +3243,7 @@ def _num_if_por_faltante_transitivo(
 ) -> Optional[DataFrame]:
     """Resolve somente caminhos explicitamente comprovados para um produto."""
     if (
-        produto != "rdb_resgate"
+        produto not in {"rdb_resgate", "rdb_inclusao"}
         or tabela != "ESPECIFICACAO_COMITENTE"
         or coluna != "NUM_ID_ENTIDADE"
     ):
@@ -3437,7 +3576,16 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
             and subtype_policy is not None):
         exclusoes.append(("subtipo dangling (Cat 1)",
                           _num_if_inconsistentes_subtipo(
-                              spark, config, spec, fonte, subtype_policy)))
+                              spark,
+                              config,
+                              spec,
+                              fonte,
+                              subtype_policy,
+                              strict=(
+                                  profile.name
+                                  in PRODUTOS_COM_PODA_SUBTIPO_ESTRITA
+                              ),
+                          )))
     exclusoes.extend(
         _num_if_invalidos_por_politica(
             spark,
@@ -3605,7 +3753,9 @@ def _deriva_tipo_oracle(spark, config, num_if_valores: List,
 # ---------------------------------------------------------------------------
 def calcula_lotes(spark, config, spec: dict, planos: Dict[str, PlanoTabela],
                   ordem: List[str], num_if_valores: List,
-                  max_passadas: int) -> Dict[str, DataFrame]:
+                  max_passadas: int,
+                  strict_num_if_tables: frozenset[str] = frozenset(),
+                  ) -> Dict[str, DataFrame]:
     """Desce a árvore a partir da raiz pelas FKs de vínculo principal,
     pais-antes-de-filhos; repete a passada até estabilizar (ciclos), até
     max_passadas. Cada lote é pequeno (linhas de N instrumentos) -> persist +
@@ -3649,6 +3799,14 @@ def calcula_lotes(spark, config, spec: dict, planos: Dict[str, PlanoTabela],
             lote_t = partes[0]
             for extra in partes[1:]:
                 lote_t = lote_t.unionByName(extra)
+            if t in strict_num_if_tables:
+                if COL_NUM_IF not in lote_t.columns:
+                    raise ValueError(
+                        f"{t}: escopo estrito exige coluna {COL_NUM_IF}"
+                    )
+                lote_t = lote_t.join(
+                    F.broadcast(sel), on=COL_NUM_IF, how="left_semi"
+                )
             lote_t = lote_t.dropDuplicates(list(plano.pk_cols))
             lote_t = lote_t.localCheckpoint(eager=True)
             n = lote_t.count()
@@ -4007,7 +4165,7 @@ def _raw_reference_candidates(
         )
 
     if (
-        produto == "rdb_resgate"
+        produto in {"rdb_resgate", "rdb_inclusao"}
         and table == "ESPECIFICACAO_COMITENTE"
         and column == "NUM_ID_ENTIDADE"
     ):
@@ -4658,6 +4816,169 @@ def _read_existing_meu_tuples(spark: SparkSession, credentials: Tuple[str, str, 
 # ---------------------------------------------------------------------------
 # Validações pré-escrita.
 # ---------------------------------------------------------------------------
+def _validate_polymorphism_sintetico(
+    resultados: Mapping[str, Tuple[DataFrame, int]],
+    policy: SubtypePolicy,
+) -> List[str]:
+    """Validação final estrita da Cat 1, antes de qualquer publicação."""
+    if policy.condition_table not in resultados:
+        return [f"polimorfismo: tabela ausente {policy.condition_table}"]
+    conditions = resultados[policy.condition_table][0]
+    try:
+        _require_columns(
+            conditions,
+            policy.condition_table,
+            (COL_NUM_IF, policy.condition_pk, policy.condition_type_column),
+            "validação final de polimorfismo",
+        )
+    except ValueError as exc:
+        return [str(exc)]
+
+    condition_keys = conditions.select(
+        F.col(COL_NUM_IF),
+        _norm_key_col(F.col(policy.condition_pk)).alias("__nci"),
+        _validator_code_col(F.col(policy.condition_type_column)).alias(
+            "__tipo"
+        ),
+    )
+    membership: Optional[DataFrame] = None
+    for tipo, table in policy.subtype_by_type:
+        if table not in resultados:
+            continue
+        subtype = resultados[table][0]
+        if policy.condition_pk not in subtype.columns:
+            return [
+                f"polimorfismo: {table} sem coluna {policy.condition_pk}"
+            ]
+        piece = subtype.select(
+            _norm_key_col(F.col(policy.condition_pk)).alias("__nci"),
+            F.lit(str(tipo)).alias("__tipo"),
+        )
+        membership = (
+            piece if membership is None else membership.unionByName(piece)
+        )
+    if membership is None:
+        return ["polimorfismo: nenhuma tabela-subtipo no resultado"]
+
+    membership = membership.dropDuplicates(["__nci", "__tipo"])
+    membership_counts = membership.groupBy("__nci").agg(
+        F.countDistinct("__tipo").alias("__subtype_count")
+    )
+    condition_membership = condition_keys.join(
+        membership_counts, "__nci", "left"
+    )
+    dangling = condition_membership.where(
+        F.coalesce(F.col("__subtype_count"), F.lit(0)) == F.lit(0)
+    ).count()
+    ambiguous = condition_membership.where(
+        F.col("__subtype_count") > F.lit(1)
+    ).count()
+    known_types = tuple(str(tipo) for tipo, _ in policy.subtype_by_type)
+    wrong = (
+        condition_membership.where(
+            (F.col("__subtype_count") == F.lit(1))
+            & F.col("__tipo").isin(*known_types)
+        )
+        .join(membership, ["__nci", "__tipo"], "left_anti")
+        .count()
+    )
+    orphan = (
+        membership.select("__nci")
+        .dropDuplicates()
+        .join(
+            condition_keys.select("__nci").dropDuplicates(),
+            "__nci",
+            "left_anti",
+        )
+        .count()
+    )
+    errors: List[str] = []
+    if dangling:
+        errors.append(
+            "polimorfismo: "
+            f"{dangling} CONDICAO_IF sem linha em tabela-subtipo"
+        )
+    if ambiguous:
+        errors.append(
+            f"polimorfismo: {ambiguous} chave(s) em múltiplos subtipos"
+        )
+    if wrong:
+        errors.append(
+            f"polimorfismo: {wrong} chave(s) na tabela-subtipo incorreta"
+        )
+    if orphan:
+        errors.append(
+            f"polimorfismo: {orphan} chave(s) de subtipo sem CONDICAO_IF"
+        )
+    return errors
+
+
+def _validate_date_order_sintetico(
+    resultados: Mapping[str, Tuple[DataFrame, int]],
+) -> List[str]:
+    """Replica as quatro regras ERROR 5.date_order do validator."""
+    errors: List[str] = []
+    for table, left_column, right_column in DATE_ORDER_RULES:
+        if table not in resultados:
+            errors.append(f"date_order: tabela ausente {table}")
+            continue
+        frame = resultados[table][0]
+        missing = {left_column, right_column} - set(frame.columns)
+        if missing:
+            # O validator considera essa regra indisponível, não ERROR.
+            continue
+        invalid = (
+            frame.withColumn(
+                "__date_left", _try_cast_column(left_column, "DATE")
+            )
+            .withColumn(
+                "__date_right", _try_cast_column(right_column, "DATE")
+            )
+            .where(
+                F.col("__date_left").isNotNull()
+                & F.col("__date_right").isNotNull()
+                & (F.col("__date_left") > F.col("__date_right"))
+            )
+            .count()
+        )
+        if invalid:
+            errors.append(
+                f"date_order: {table}.{left_column}<={right_column}: "
+                f"{invalid} linha(s) inválida(s)"
+            )
+    return errors
+
+
+def _validate_strict_num_if_scope(
+    resultados: Mapping[str, Tuple[DataFrame, int]],
+    tables: frozenset[str],
+) -> List[str]:
+    """Garante que tabelas multi-pai não vazem para outra raiz do lote."""
+    if not tables:
+        return []
+    if TABELA_RAIZ not in resultados:
+        return [f"escopo NUM_IF: tabela raiz ausente {TABELA_RAIZ}"]
+    roots = resultados[TABELA_RAIZ][0]
+    if COL_NUM_IF not in roots.columns:
+        return [f"escopo NUM_IF: raiz sem coluna {COL_NUM_IF}"]
+    root_keys = roots.select(COL_NUM_IF).dropDuplicates()
+    errors: List[str] = []
+    for table in sorted(tables):
+        if table not in resultados:
+            errors.append(f"escopo NUM_IF: tabela ausente {table}")
+            continue
+        frame = resultados[table][0]
+        if COL_NUM_IF not in frame.columns:
+            errors.append(f"escopo NUM_IF: {table} sem coluna {COL_NUM_IF}")
+            continue
+        outside = frame.join(root_keys, COL_NUM_IF, "left_anti").count()
+        if outside:
+            errors.append(
+                f"escopo NUM_IF: {table} contém {outside} linha(s) fora da raiz"
+            )
+    return errors
+
+
 def _validate_resgate_sintetico(
     resultados: Mapping[str, Tuple[DataFrame, int]],
     checks: frozenset[str],
@@ -5664,6 +5985,11 @@ def executa_clonagem(spark, config, spec: dict, *,
         spec, product_profile.integrity.selective_missing_keys
     )
     produto = _normalize_produto(product_profile.name)
+    if produto in PRODUTOS_COM_PODA_SUBTIPO_ESTRITA and not poda_subtipo:
+        raise ValueError(
+            f"{produto}: --sem-poda-subtipo é incompatível com a garantia "
+            "de polimorfismo do produto"
+        )
     tabelas_produto = {
         table_path_name(table.strip().upper())
         for table in TABELAS_ENGORDA_POR_PRODUTO[produto]
@@ -5686,6 +6012,11 @@ def executa_clonagem(spark, config, spec: dict, *,
         if t.strip()
     }
     protected_runtime_tables = {TABELA_RAIZ}
+    protected_runtime_tables.update(
+        TABELAS_COM_ESCOPO_NUM_IF_ESTRITO_POR_PRODUTO.get(
+            produto, frozenset()
+        )
+    )
     if operation_policy is not None:
         protected_runtime_tables.add(operation_policy.table)
     for check in product_profile.integrity.invalid_num_if_checks:
@@ -5721,6 +6052,20 @@ def executa_clonagem(spark, config, spec: dict, *,
         produto,
         frozenset(),
     )
+    required_lookup_tables: Set[str] = set()
+    for lookup_name in required_offline_lookups:
+        lookup_tables = RAW_TABLES_BY_OFFLINE_LOOKUP.get(lookup_name)
+        if lookup_tables is None:
+            raise ValueError(
+                f"lookup offline sem fontes RAW declaradas: {lookup_name}"
+            )
+        required_lookup_tables.update(lookup_tables)
+    missing_lookup_tables = sorted(required_lookup_tables - set(spec))
+    if missing_lookup_tables:
+        raise ValueError(
+            f"{produto}: lookup offline referencia tabela(s) fora do spec: "
+            f"{missing_lookup_tables}"
+        )
     required_offline_fk_pairs = OFFLINE_FK_COVERAGE_REQUIRED_BY_PRODUCT.get(
         produto,
         frozenset(),
@@ -5805,7 +6150,20 @@ def executa_clonagem(spark, config, spec: dict, *,
     ordem = ordem_topologica(planos)
     logger.info("Ordem de sintetização (%d tabela(s)): %s", len(ordem), ordem)
 
-    lotes = calcula_lotes(spark, config, spec, planos, ordem, valores, max_passadas)
+    lotes = calcula_lotes(
+        spark,
+        config,
+        spec,
+        planos,
+        ordem,
+        valores,
+        max_passadas,
+        strict_num_if_tables=(
+            TABELAS_COM_ESCOPO_NUM_IF_ESTRITO_POR_PRODUTO.get(
+                produto, frozenset()
+            )
+        ),
+    )
 
     mapeamentos: Dict[str, DataFrame] = {}
     resultados: Dict[str, Tuple[DataFrame, int]] = {}
@@ -5914,6 +6272,26 @@ def executa_clonagem(spark, config, spec: dict, *,
             erros_globais.extend(f"{t}: {e}" for e in erros)
         resultados[t] = (clones, n_lote)
 
+    erros_globais.extend(
+        _validate_strict_num_if_scope(
+            resultados,
+            TABELAS_COM_ESCOPO_NUM_IF_ESTRITO_POR_PRODUTO.get(
+                product_profile.name, frozenset()
+            ),
+        )
+    )
+    if product_profile.name in PRODUTOS_COM_PODA_SUBTIPO_ESTRITA:
+        subtype_policy = product_profile.integrity.subtype
+        if subtype_policy is None:
+            erros_globais.append(
+                "polimorfismo estrito habilitado sem política de subtipo"
+            )
+        else:
+            erros_globais.extend(
+                _validate_polymorphism_sintetico(resultados, subtype_policy)
+            )
+    if CHECK_DATE_ORDER in product_profile.integrity.invalid_num_if_checks:
+        erros_globais.extend(_validate_date_order_sintetico(resultados))
     if (
         product_profile.condition_date_strategy
         == CONDITION_DATE_STRATEGY_SHIFT_BY_EMISSION
@@ -6204,6 +6582,11 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
         for table in job.tratar_como_static
     }
     protected_tables = {TABELA_RAIZ}
+    protected_tables.update(
+        TABELAS_COM_ESCOPO_NUM_IF_ESTRITO_POR_PRODUTO.get(
+            profile.name, frozenset()
+        )
+    )
     operation_policy = profile.business_keys.operation
     if operation_policy is not None:
         protected_tables.add(operation_policy.table)
