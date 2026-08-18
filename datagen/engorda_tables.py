@@ -6277,7 +6277,19 @@ def executa_clonagem(spark, config, spec: dict, *,
             "Produto %s não gera meu-número; prefixo informado será ignorado.",
             product_profile.name,
         )
-    credentials = None if dry_run else _oracle_credentials(config)
+    # Dry-run é estritamente offline. Trabalhar sobre uma cópia sem as chaves
+    # Oracle impede inclusive que uma chamada futura/acidental tente conectar.
+    if dry_run:
+        config = dict(config)
+        for oracle_env in ORACLE_ENV_VARS:
+            config.pop(oracle_env, None)
+        credentials = None
+        logger.info(
+            "--dry-run: Oracle desabilitado; data e códigos serão simulados "
+            "localmente."
+        )
+    else:
+        credentials = _oracle_credentials(config)
     anular_cols = _merge_nullification_mappings(
         product_profile.integrity.nullify_mapping(), anular_cols
     )
@@ -6285,7 +6297,11 @@ def executa_clonagem(spark, config, spec: dict, *,
     # timestamp só porque foram materializadas em ações Spark diferentes.
     engorda_ts = _normalize_engorda_ts(engorda_ts)
     if product_profile.date_strategy == "standard":
-        if credentials is not None:
+        if not dry_run:
+            if credentials is None:
+                raise RuntimeError(
+                    "credenciais Oracle ausentes fora do --dry-run"
+                )
             if controle_operacional_date is not None and phase != "materialize":
                 raise ValueError(
                     "controle_operacional_date só pode ser informado no dry-run")
@@ -6740,6 +6756,14 @@ def executa_clonagem(spark, config, spec: dict, *,
         )
 
     def _prepare_outputs(output_base: Optional[str], is_dry_run: bool) -> None:
+        if is_dry_run != dry_run:
+            raise RuntimeError(
+                "invariante violada: modo dry-run divergente na preparação"
+            )
+        if is_dry_run and credentials is not None:
+            raise RuntimeError(
+                "invariante violada: --dry-run não pode possuir credenciais Oracle"
+            )
         code_allocation_date = controle_operacional_date or engorda_ts.date()
         instrumentos, n_raiz = resultados[TABELA_RAIZ]
         slots_if = _code_slots(
