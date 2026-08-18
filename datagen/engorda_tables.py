@@ -102,7 +102,8 @@ CLI DIRETA (OCI Data Flow — mesmas envs do engorda_tables.py):
     envs: DATAGEN_RAW_BASE_URI, DATAGEN_SPECS_URI, DATAGEN_SYNTHETIC_BASE_URI,
           DATAGEN_SOURCE_JDBC_URL, DATAGEN_SOURCE_DB_USER,
           DATAGEN_SOURCE_DB_PASSWORD (nomes legados: apontam para o Oracle
-          receptor; as três últimas são dispensadas no --dry-run)
+          receptor; no --dry-run elas só são dispensadas para produtos sem
+          validações de integridade no Oracle alvo)
           (+ opcionais DATAGEN_RAW_PREFIX, DATAGEN_SYNTHETIC_PREFIX,
            DATAGEN_CLONE_PREFIX — default derivado do nome do produto)
     argumentos:
@@ -130,11 +131,8 @@ CLI DIRETA (OCI Data Flow — mesmas envs do engorda_tables.py):
                                     # itens 3/4: poda NUM_IF por padrão; para a
                                     #   allowlist nullable, anula só sintéticos casados
       --faltantes-parquet oci://.../faltantes  # idem, TABELA/COLUNA/VALOR (listas grandes)
-      --oracle-target-lookups-parquet oci://.../lookups_alvo
-                                    # TOS/contas elegíveis extraídos do receptor
-      --oracle-target-fk-manifest-parquet oci://.../manifesto_fk_alvo
-                                    # cobertura/contagens/snapshot das FKs
-      # dry-run dos produtos acima também exige DATAGEN_TARGET_ID=DB_UNIQUE_NAME
+      # Checks de TOS/conta/FK consultam automaticamente o Oracle receptor
+      # configurado em DATAGEN_SOURCE_JDBC_*.
       --anular-cols 'TAB.COL,COL2;...'  # item 2 (extra): colunas nullable a anular
 
 REGRAS DO SCHEMA:
@@ -166,7 +164,6 @@ from __future__ import annotations
 import argparse
 import copy
 import dataclasses
-import hashlib
 import json
 import logging
 import os
@@ -241,14 +238,6 @@ TARGET_LOOKUP_ACCOUNT_CDB = "CONTA_CDB_ELEGIVEL"
 TARGET_LOOKUP_NAME_COL = "LOOKUP"
 TARGET_LOOKUP_VALUE_COL = "VALOR"
 TARGET_SNAPSHOT_ID_COL = "SNAPSHOT_ID"
-TARGET_ID_COL = "TARGET_ID"
-TARGET_ID_ENV_VAR = "DATAGEN_TARGET_ID"
-TARGET_FK_COVERAGE_COL = "COBERTURA_COMPLETA"
-TARGET_FK_REFERENCE_COUNT_COL = "QTD_REFERENCIAS_DISTINTAS"
-TARGET_FK_PRESENT_COUNT_COL = "QTD_PRESENTES_ALVO_DISTINTAS"
-TARGET_FK_MISSING_COUNT_COL = "QTD_FALTANTES_DISTINTOS"
-TARGET_FK_REFERENCE_HASH_COL = "HASH_REFERENCIAS_SHA256"
-TARGET_FK_MISSING_HASH_COL = "HASH_FALTANTES_SHA256"
 
 REQUIRED_TABLES_BY_CHECK: Dict[str, Set[str]] = {
     CHECK_RESGATE_COVERAGE: {
@@ -385,9 +374,6 @@ CONTROLE_OPERACIONAL_DATE_SQL = (
     "FROM CETIP.CONTROLE_OPERACIONAL "
     "WHERE NUM_ORDEM = 0 AND NUM_SISTEMA IS NULL AND ROWNUM = 1"
 )
-ORACLE_TARGET_ID_SQL = (
-    "SELECT SYS_CONTEXT('USERENV', 'DB_UNIQUE_NAME') FROM DUAL"
-)
 DEFAULT_DT_VENCIMENTO_PRAZO_DIAS = 30
 MIN_DT_VENCIMENTO_PRAZO_DIAS = 1
 # Prazo FIXO de DAT_VENCIMENTO por tabela (dias). Vazio por padrão: sem entrada
@@ -416,6 +402,7 @@ MAPA_NUM_IF_TABLE = "MAPA_CLONE_NUM_IF"
 MAPA_COD_IF_TABLE = "MAPA_CLONE_COD_IF"
 MAPA_COD_OPERACAO_TABLE = "MAPA_CLONE_COD_OPERACAO"
 DEFAULT_ORACLE_CODE_BATCH_SIZE = 50_000
+ORACLE_TARGET_KEY_BATCH_SIZE = 900
 MAX_MEU_NUMERO_ORDINAL = 9_999_999
 MEU_PREFIX_PATTERN = re.compile(r"^[1-9][0-9]{2}$")
 PRODUTO_NOME_RE = re.compile(r"[a-z][a-z0-9_]*")
@@ -542,12 +529,6 @@ class EngordaJob:
     # Overrides estruturais do COD_IF; None = defaults agnósticos de produto.
     cod_if_pattern: Optional[str] = None
     cod_if_dry_prefix: Optional[str] = None
-    # Evidências do Oracle receptor. Permanecem opt-in por produto e no fim da
-    # dataclass para preservar construtores posicionais legados.
-    oracle_target_lookups_parquet: Optional[str] = None
-    oracle_target_fk_manifest_parquet: Optional[str] = None
-
-
 # Tabelas que devem ser engordadas por produto. As tabelas correspondentes são
 # marcadas como static=False no spec único durante a execução.
 TABELAS_ENGORDA_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
@@ -1358,9 +1339,6 @@ def get_engorda_env(specs_uri_override: Optional[str] = None) -> dict[str, str]:
         value = os.environ.get(name)
         if value:
             config[name] = value
-    target_id = os.environ.get(TARGET_ID_ENV_VAR)
-    if target_id:
-        config[TARGET_ID_ENV_VAR] = target_id.strip().upper()
     return config
 
 
@@ -2784,8 +2762,7 @@ def _carrega_faltantes(spark, config, faltantes_arg: Optional[str],
                        faltantes_parquet: Optional[str]) -> Optional[DataFrame]:
     """DataFrame [TABELA, COLUNA, VALOR, SNAPSHOT_ID] das chaves que NÃO existem
     no destino (QAB) — itens 3/4, sem conexão Oracle. Vem de --faltantes-arg
-    (inline, sem prova de snapshot) e/ou --faltantes-parquet. SNAPSHOT_ID é
-    obrigatório no Parquet para as FKs alvo exigidas pelo produto. VALOR é
+    e/ou --faltantes-parquet. SNAPSHOT_ID é metadado opcional; VALOR é
     normalizado para string comparável. Sem nenhuma fonte -> None (sem poda 3/4)."""
     df: Optional[DataFrame] = None
     linhas: List[Tuple[str, str, str]] = []
@@ -2827,105 +2804,6 @@ def _carrega_faltantes(spark, config, faltantes_arg: Optional[str],
                      F.col(TARGET_SNAPSHOT_ID_COL)).dropDuplicates()
 
 
-def _carrega_oracle_target_lookups(
-    spark,
-    parquet_path: Optional[str],
-) -> Optional[DataFrame]:
-    """Conjuntos POSITIVOS extraídos do Oracle receptor, nunca do RAW de origem."""
-    if not parquet_path:
-        return None
-    frame = read_parquet(spark, parquet_path)
-    columns = {column.upper(): column for column in frame.columns}
-    required = {
-        TARGET_LOOKUP_NAME_COL,
-        TARGET_LOOKUP_VALUE_COL,
-        TARGET_SNAPSHOT_ID_COL,
-        TARGET_ID_COL,
-    }
-    missing = sorted(required - set(columns))
-    if missing:
-        raise ValueError(
-            "--oracle-target-lookups-parquet precisa das colunas "
-            f"{sorted(required)}; faltam {missing} (achei {frame.columns})"
-        )
-    return (
-        frame.select(
-            F.upper(F.trim(F.col(columns[TARGET_LOOKUP_NAME_COL]).cast("string")))
-            .alias(TARGET_LOOKUP_NAME_COL),
-            _norm_key_col(F.col(columns[TARGET_LOOKUP_VALUE_COL])).alias(
-                TARGET_LOOKUP_VALUE_COL
-            ),
-            F.trim(F.col(columns[TARGET_SNAPSHOT_ID_COL]).cast("string")).alias(
-                TARGET_SNAPSHOT_ID_COL
-            ),
-            F.upper(
-                F.trim(F.col(columns[TARGET_ID_COL]).cast("string"))
-            ).alias(TARGET_ID_COL),
-        )
-        .dropDuplicates()
-    )
-
-
-def _carrega_oracle_target_fk_manifest(
-    spark,
-    parquet_path: Optional[str],
-) -> Optional[DataFrame]:
-    """Manifesto quantitativo que prova a cobertura da comparação de FKs."""
-    if not parquet_path:
-        return None
-    frame = read_parquet(spark, parquet_path)
-    columns = {column.upper(): column for column in frame.columns}
-    required = {
-        "TABELA",
-        "COLUNA",
-        TARGET_FK_COVERAGE_COL,
-        TARGET_FK_REFERENCE_COUNT_COL,
-        TARGET_FK_PRESENT_COUNT_COL,
-        TARGET_FK_MISSING_COUNT_COL,
-        TARGET_FK_REFERENCE_HASH_COL,
-        TARGET_FK_MISSING_HASH_COL,
-        TARGET_SNAPSHOT_ID_COL,
-        TARGET_ID_COL,
-    }
-    missing = sorted(required - set(columns))
-    if missing:
-        raise ValueError(
-            "--oracle-target-fk-manifest-parquet precisa das colunas "
-            f"{sorted(required)}; faltam {missing} (achei {frame.columns})"
-        )
-    return frame.select(
-        F.element_at(
-            F.split(F.upper(F.trim(F.col(columns["TABELA"]).cast("string"))), r"\."),
-            -1,
-        ).alias("TABELA"),
-        F.upper(F.trim(F.col(columns["COLUNA"]).cast("string"))).alias("COLUNA"),
-        F.col(columns[TARGET_FK_COVERAGE_COL]).cast("boolean").alias(
-            TARGET_FK_COVERAGE_COL
-        ),
-        F.col(columns[TARGET_FK_REFERENCE_COUNT_COL]).cast("long").alias(
-            TARGET_FK_REFERENCE_COUNT_COL
-        ),
-        F.col(columns[TARGET_FK_PRESENT_COUNT_COL]).cast("long").alias(
-            TARGET_FK_PRESENT_COUNT_COL
-        ),
-        F.col(columns[TARGET_FK_MISSING_COUNT_COL]).cast("long").alias(
-            TARGET_FK_MISSING_COUNT_COL
-        ),
-        F.lower(
-            F.trim(F.col(columns[TARGET_FK_REFERENCE_HASH_COL]).cast("string"))
-        ).alias(TARGET_FK_REFERENCE_HASH_COL),
-        F.lower(
-            F.trim(F.col(columns[TARGET_FK_MISSING_HASH_COL]).cast("string"))
-        ).alias(TARGET_FK_MISSING_HASH_COL),
-        F.trim(F.col(columns[TARGET_SNAPSHOT_ID_COL]).cast("string")).alias(
-            TARGET_SNAPSHOT_ID_COL
-        ),
-        F.upper(
-            F.trim(F.col(columns[TARGET_ID_COL]).cast("string"))
-        ).alias(TARGET_ID_COL),
-    )
-
-
 def _target_lookup_keys(
     target_lookups: DataFrame,
     lookup_name: str,
@@ -2939,244 +2817,6 @@ def _target_lookup_keys(
         .where(F.col(alias).isNotNull())
         .dropDuplicates()
     )
-
-
-def _key_set_sha256(frame: DataFrame, column: str) -> str:
-    """SHA-256 do conjunto normalizado/ordenado.
-
-    Para cada chave UTF-8: 8 bytes big-endian do tamanho + os bytes da chave.
-    O conjunto vazio usa SHA-256 da sequência vazia.
-    """
-    digest = hashlib.sha256()
-    for row in frame.select(column).dropDuplicates().orderBy(column).toLocalIterator():
-        value = str(row[column]).encode("utf-8")
-        digest.update(len(value).to_bytes(8, byteorder="big", signed=False))
-        digest.update(value)
-    return digest.hexdigest()
-
-
-def _validate_oracle_target_evidence(
-    produto: str,
-    target_lookups: Optional[DataFrame],
-    target_fk_manifest: Optional[DataFrame],
-    faltantes: Optional[DataFrame],
-    expected_target_id: Optional[str],
-) -> None:
-    """Falha fechado se a evidência do alvo estiver ausente/incompleta/incoerente."""
-    required_lookups = TARGET_LOOKUPS_REQUIRED_BY_PRODUCT.get(
-        produto, frozenset()
-    )
-    required_pairs = TARGET_FK_COVERAGE_REQUIRED_BY_PRODUCT.get(
-        produto, frozenset()
-    )
-    snapshot_ids: Set[str] = set()
-    target_ids: Set[str] = set()
-    if (required_lookups or required_pairs) and not expected_target_id:
-        raise ValueError(
-            f"Produto {produto}: não foi possível identificar o Oracle receptor"
-        )
-
-    if required_lookups:
-        if target_lookups is None:
-            raise ValueError(
-                f"Produto {produto}: informe --oracle-target-lookups-parquet "
-                f"com os conjuntos {sorted(required_lookups)}"
-            )
-        allowed = {TARGET_LOOKUP_TOS_CDB, TARGET_LOOKUP_ACCOUNT_CDB}
-        observed_names = {
-            row[TARGET_LOOKUP_NAME_COL]
-            for row in target_lookups.select(
-                TARGET_LOOKUP_NAME_COL
-            ).dropDuplicates().collect()
-        }
-        invalid_names = sorted(
-            repr(name) for name in observed_names if name not in allowed
-        )
-        if invalid_names:
-            raise ValueError(
-                "lookup(s) desconhecido(s) em "
-                f"--oracle-target-lookups-parquet: {invalid_names}"
-            )
-        for lookup_name in sorted(required_lookups):
-            subset = target_lookups.where(
-                F.col(TARGET_LOOKUP_NAME_COL) == F.lit(lookup_name)
-            )
-            ids = {
-                row[TARGET_SNAPSHOT_ID_COL]
-                for row in subset.select(
-                    TARGET_SNAPSHOT_ID_COL
-                ).dropDuplicates().collect()
-                if row[TARGET_SNAPSHOT_ID_COL]
-            }
-            key_count = (
-                subset.where(
-                    F.col(TARGET_LOOKUP_VALUE_COL).isNotNull()
-                    & (
-                        F.length(F.col(TARGET_LOOKUP_VALUE_COL))
-                        > F.lit(0)
-                    )
-                )
-                .select(TARGET_LOOKUP_VALUE_COL)
-                .dropDuplicates()
-                .count()
-            )
-            invalid_key_rows = subset.where(
-                F.col(TARGET_LOOKUP_VALUE_COL).isNull()
-                | (F.length(F.col(TARGET_LOOKUP_VALUE_COL)) == F.lit(0))
-            ).limit(1).count()
-            invalid_snapshot_rows = subset.where(
-                F.col(TARGET_SNAPSHOT_ID_COL).isNull()
-                | (F.length(F.col(TARGET_SNAPSHOT_ID_COL)) == F.lit(0))
-            ).limit(1).count()
-            ids_alvo = {
-                row[TARGET_ID_COL]
-                for row in subset.select(TARGET_ID_COL).dropDuplicates().collect()
-                if row[TARGET_ID_COL]
-            }
-            invalid_target_rows = subset.where(
-                F.col(TARGET_ID_COL).isNull()
-                | (F.length(F.col(TARGET_ID_COL)) == F.lit(0))
-                | (F.col(TARGET_ID_COL) != F.lit(expected_target_id))
-            ).limit(1).count()
-            if (
-                len(ids) != 1
-                or ids_alvo != {expected_target_id}
-                or key_count < 1
-                or invalid_key_rows
-                or invalid_snapshot_rows
-                or invalid_target_rows
-            ):
-                raise ValueError(
-                    f"Lookup alvo {lookup_name}: exige ao menos uma chave e "
-                    "exatamente um SNAPSHOT_ID não vazio"
-                )
-            snapshot_ids.update(ids)
-            target_ids.update(ids_alvo)
-
-    if required_pairs:
-        if target_fk_manifest is None:
-            raise ValueError(
-                f"Produto {produto}: informe "
-                "--oracle-target-fk-manifest-parquet para comprovar as FKs "
-                f"{sorted(required_pairs)}"
-            )
-        for table, column in sorted(required_pairs):
-            rows = (
-                target_fk_manifest.where(
-                    (F.col("TABELA") == F.lit(table))
-                    & (F.col("COLUNA") == F.lit(column))
-                )
-                .collect()
-            )
-            if len(rows) != 1:
-                raise ValueError(
-                    f"Manifesto alvo: esperado exatamente um registro para "
-                    f"{table}.{column}; achei {len(rows)}"
-                )
-            row = rows[0]
-            counts = (
-                row[TARGET_FK_REFERENCE_COUNT_COL],
-                row[TARGET_FK_PRESENT_COUNT_COL],
-                row[TARGET_FK_MISSING_COUNT_COL],
-            )
-            reference_hash = row[TARGET_FK_REFERENCE_HASH_COL]
-            missing_hash = row[TARGET_FK_MISSING_HASH_COL]
-            if (
-                row[TARGET_FK_COVERAGE_COL] is not True
-                or any(value is None or int(value) < 0 for value in counts)
-                or int(counts[0]) != int(counts[1]) + int(counts[2])
-                or not isinstance(reference_hash, str)
-                or re.fullmatch(r"[0-9a-f]{64}", reference_hash) is None
-                or not isinstance(missing_hash, str)
-                or re.fullmatch(r"[0-9a-f]{64}", missing_hash) is None
-            ):
-                raise ValueError(
-                    f"Manifesto alvo incoerente para {table}.{column}: "
-                    "COBERTURA_COMPLETA deve ser true e "
-                    "REFERENCIAS = PRESENTES + FALTANTES"
-                )
-            actual_missing = 0
-            actual_missing_hash = hashlib.sha256().hexdigest()
-            missing_snapshot_ids: Set[str] = set()
-            if faltantes is not None:
-                pair_missing = faltantes.where(
-                        (F.col("TABELA") == F.lit(table))
-                        & (F.col("COLUNA") == F.lit(column))
-                        & F.col("VALOR").isNotNull()
-                        & (F.length(F.col("VALOR")) > F.lit(0))
-                    )
-                missing_keys = (
-                    pair_missing
-                    .select("VALOR")
-                    .dropDuplicates()
-                )
-                actual_missing = missing_keys.count()
-                actual_missing_hash = _key_set_sha256(
-                    missing_keys,
-                    "VALOR",
-                )
-                missing_snapshot_ids = {
-                    missing_row[TARGET_SNAPSHOT_ID_COL]
-                    for missing_row in pair_missing.select(
-                        TARGET_SNAPSHOT_ID_COL
-                    ).dropDuplicates().collect()
-                    if missing_row[TARGET_SNAPSHOT_ID_COL]
-                }
-                invalid_missing_snapshot_rows = pair_missing.where(
-                    F.col(TARGET_SNAPSHOT_ID_COL).isNull()
-                    | (
-                        F.length(F.col(TARGET_SNAPSHOT_ID_COL))
-                        == F.lit(0)
-                    )
-                ).limit(1).count()
-            else:
-                invalid_missing_snapshot_rows = 0
-            if int(row[TARGET_FK_MISSING_COUNT_COL]) != actual_missing:
-                raise ValueError(
-                    f"Manifesto alvo {table}.{column}: declarou "
-                    f"{row[TARGET_FK_MISSING_COUNT_COL]} faltante(s), mas "
-                    f"--faltantes-* contém {actual_missing}"
-                )
-            if missing_hash != actual_missing_hash:
-                raise ValueError(
-                    f"Manifesto alvo {table}.{column}: "
-                    f"{TARGET_FK_MISSING_HASH_COL} não confere com "
-                    "--faltantes-*"
-                )
-            snapshot_id = row[TARGET_SNAPSHOT_ID_COL]
-            if not snapshot_id:
-                raise ValueError(
-                    f"Manifesto alvo {table}.{column}: SNAPSHOT_ID vazio"
-                )
-            if actual_missing and (
-                invalid_missing_snapshot_rows
-                or missing_snapshot_ids != {str(snapshot_id)}
-            ):
-                raise ValueError(
-                    f"Faltantes de {table}.{column}: SNAPSHOT_ID deve ser "
-                    f"exatamente {snapshot_id!r}; achei "
-                    f"{sorted(missing_snapshot_ids)}"
-                )
-            target_id = row[TARGET_ID_COL]
-            if target_id != expected_target_id:
-                raise ValueError(
-                    f"Manifesto alvo {table}.{column}: TARGET_ID "
-                    f"{target_id!r} difere do Oracle receptor "
-                    f"{expected_target_id!r}"
-                )
-            snapshot_ids.add(str(snapshot_id))
-            target_ids.add(str(target_id))
-
-    if len(snapshot_ids) > 1:
-        raise ValueError(
-            "Evidências do Oracle alvo usam SNAPSHOT_ID diferentes: "
-            f"{sorted(snapshot_ids)}"
-        )
-    if target_ids and target_ids != {expected_target_id}:
-        raise ValueError(
-            "Evidências pertencem a Oracle alvo diferente: "
-            f"{sorted(target_ids)}; esperado={expected_target_id!r}"
-        )
 
 
 def _num_if_por_faltante_transitivo(
@@ -3338,120 +2978,6 @@ def _num_if_excluidos_por_faltantes(spark, config, spec, faltantes: DataFrame,
             .dropDuplicates())
 
 
-def _validate_required_target_fk_paths(
-    spark,
-    config,
-    spec: Mapping[str, dict],
-    produto: str,
-    required_pairs: frozenset[Tuple[str, str]],
-    target_fk_manifest: Optional[DataFrame],
-    faltantes: Optional[DataFrame],
-) -> None:
-    """Valida o caminho até NUM_IF mesmo quando a comparação achou zero faltantes."""
-    if not required_pairs:
-        return
-    empty_values = spark.createDataFrame(
-        [],
-        T.StructType([
-            T.StructField("__v", T.StringType(), True),
-        ]),
-    )
-    for table, column in sorted(required_pairs):
-        if table not in spec:
-            raise ValueError(
-                f"FK alvo obrigatória {table}.{column}: tabela fora do spec"
-            )
-        source = _read_source(spark, config, table)
-        _require_columns(
-            source,
-            table,
-            (column,),
-            "validar caminho da FK alvo até NUM_IF",
-        )
-        source_references = (
-            source.select(_norm_key_col(F.col(column)).alias("__reference"))
-            .where(
-                F.col("__reference").isNotNull()
-                & (F.length(F.col("__reference")) > F.lit(0))
-            )
-            .dropDuplicates()
-            .localCheckpoint(eager=True)
-        )
-        source_reference_count = source_references.count()
-        source_reference_hash = _key_set_sha256(
-            source_references,
-            "__reference",
-        )
-        if faltantes is not None:
-            declared_missing = (
-                faltantes.where(
-                    (F.col("TABELA") == F.lit(table))
-                    & (F.col("COLUNA") == F.lit(column))
-                    & F.col("VALOR").isNotNull()
-                    & (F.length(F.col("VALOR")) > F.lit(0))
-                )
-                .select(F.col("VALOR").alias("__reference"))
-                .dropDuplicates()
-            )
-            foreign_missing = declared_missing.join(
-                source_references,
-                "__reference",
-                "left_anti",
-            ).limit(1).count()
-            if foreign_missing:
-                raise ValueError(
-                    f"Faltantes de {table}.{column}: há chave que não pertence "
-                    "às referências distintas do RAW global"
-                )
-        if target_fk_manifest is None:
-            raise ValueError(
-                f"FK alvo obrigatória {table}.{column}: manifesto ausente"
-            )
-        manifest_row = (
-            target_fk_manifest.where(
-                (F.col("TABELA") == F.lit(table))
-                & (F.col("COLUNA") == F.lit(column))
-            )
-            .select(
-                TARGET_FK_REFERENCE_COUNT_COL,
-                TARGET_FK_REFERENCE_HASH_COL,
-            )
-            .first()
-        )
-        if (
-            manifest_row is None
-            or int(manifest_row[TARGET_FK_REFERENCE_COUNT_COL])
-            != source_reference_count
-            or manifest_row[TARGET_FK_REFERENCE_HASH_COL]
-            != source_reference_hash
-        ):
-            declared = (
-                None
-                if manifest_row is None
-                else manifest_row[TARGET_FK_REFERENCE_COUNT_COL]
-            )
-            raise ValueError(
-                f"Manifesto alvo {table}.{column}: contagem/hash das "
-                f"referências não confere com o RAW global "
-                f"(declarado={declared}, atual={source_reference_count})"
-            )
-        if COL_NUM_IF in source.columns:
-            continue
-        resolved = _num_if_por_faltante_transitivo(
-            spark,
-            config,
-            produto,
-            table,
-            column,
-            empty_values,
-        )
-        if resolved is None:
-            raise ValueError(
-                f"FK alvo obrigatória {table}.{column}: produto {produto} "
-                f"não declara caminho transitivo até {COL_NUM_IF}"
-            )
-
-
 def aplica_nulificacao(df: DataFrame, tabela: str,
                        cols_por_tabela: Mapping[str, Sequence[str]],
                        not_null_cols: Optional[Set[str]] = None,
@@ -3593,7 +3119,9 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
                            query_num_if_path: Optional[str] = None,
                            faltantes: Optional[DataFrame] = None,
                            target_lookups: Optional[DataFrame] = None,
-                           poda_subtipo: bool = True) -> List:
+                           poda_subtipo: bool = True,
+                           dominio_precalculado: Optional[DataFrame] = None,
+                           ) -> List:
     """Devolve a lista de valores de NUM_IF do lote (coletada no driver — o lote
     é pequeno por definição). O SORTEIO e a VALIDAÇÃO de lista explícita rodam
     contra o domínio da query SQL (ver _dominio_num_if_produto), JÁ PODADO:
@@ -3616,8 +3144,13 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
         # Defensivo (o argparse já barra): lista vazia NÃO pode virar sorteio.
         raise ValueError("Lista de NUM_IF vazia; informe valores ou use "
                          "--n-instrumentos.")
-    fonte = (_dominio_num_if_produto(spark, config, profile, query_num_if_path)
-             .select(COL_NUM_IF).dropDuplicates())
+    fonte = (
+        dominio_precalculado
+        if dominio_precalculado is not None
+        else _dominio_num_if_produto(
+            spark, config, profile, query_num_if_path
+        )
+    ).select(COL_NUM_IF).dropDuplicates()
     logger.info("Produto %s: domínio de NUM_IF vindo integralmente da query.",
                 profile.name)
 
@@ -4165,32 +3698,523 @@ def _read_controle_operacional_date(jvm, jdbc_url: str, user: str,
         connection.close()
 
 
-def _read_oracle_target_id(
-    jvm,
-    jdbc_url: str,
-    user: str,
-    password: str,
-) -> str:
-    """Identificador estável do próprio receptor usado para validar snapshots."""
-    connection = _open_oracle_connection(jvm, jdbc_url, user, password)
-    statement = None
-    result_set = None
+def _normalize_python_key(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = re.sub(r"\.0+$", "", str(value).strip())
+    return normalized or None
+
+
+def _oracle_match_numeric_candidates(
+    spark: SparkSession,
+    connection,
+    candidates: DataFrame,
+    sql_before_in: str,
+    sql_after_in: str = "",
+    batch_size: int = ORACLE_TARGET_KEY_BATCH_SIZE,
+) -> DataFrame:
+    """Retorna as chaves candidatas que satisfazem uma consulta no Oracle alvo."""
+    if batch_size < 1 or batch_size > 900:
+        raise ValueError("batch_size da consulta Oracle deve estar entre 1 e 900")
+    if "__candidate_key" not in candidates.columns:
+        raise ValueError("candidatos Oracle precisam da coluna __candidate_key")
+
+    jvm = spark.sparkContext._jvm
+    found: Set[str] = set()
+    batch: List[Tuple[str, Any]] = []
+    invalid_numeric = 0
+
+    def _execute_batch(values: Sequence[Tuple[str, Any]]) -> None:
+        if not values:
+            return
+        placeholders = ",".join("?" for _ in values)
+        sql = f"{sql_before_in} ({placeholders}) {sql_after_in}"
+        statement = result_set = None
+        try:
+            statement = connection.prepareStatement(sql)
+            statement.setFetchSize(max(len(values), 1))
+            for index, (_, decimal_value) in enumerate(values, 1):
+                statement.setBigDecimal(index, decimal_value)
+            result_set = statement.executeQuery()
+            while result_set.next():
+                normalized = _normalize_python_key(result_set.getString(1))
+                if normalized is not None:
+                    found.add(normalized)
+        finally:
+            if result_set is not None:
+                result_set.close()
+            if statement is not None:
+                statement.close()
+
+    rows = (
+        candidates.select("__candidate_key")
+        .where(
+            F.col("__candidate_key").isNotNull()
+            & (F.length(F.col("__candidate_key")) > F.lit(0))
+        )
+        .dropDuplicates()
+        .toLocalIterator()
+    )
+    for row in rows:
+        normalized = _normalize_python_key(row["__candidate_key"])
+        if normalized is None:
+            continue
+        try:
+            decimal_value = jvm.java.math.BigDecimal(normalized)
+        except Exception:
+            invalid_numeric += 1
+            continue
+        batch.append((normalized, decimal_value))
+        if len(batch) >= batch_size:
+            _execute_batch(batch)
+            batch = []
+    _execute_batch(batch)
+    if invalid_numeric:
+        logger.warning(
+            "Oracle alvo: %d chave(s) candidata(s) não numérica(s) serão "
+            "consideradas inválidas.",
+            invalid_numeric,
+        )
+
+    schema = T.StructType([
+        T.StructField("__target_key", T.StringType(), False),
+    ])
+    return spark.createDataFrame(
+        [(value,) for value in sorted(found)],
+        schema,
+    )
+
+
+def _target_reference_candidates(
+    spark: SparkSession,
+    config: Mapping[str, str],
+    produto: str,
+    table: str,
+    column: str,
+    dominio: DataFrame,
+) -> DataFrame:
+    """Chaves RAW do domínio que precisam existir no Oracle receptor."""
+    source = _read_source(spark, config, table)
+    _require_columns(
+        source,
+        table,
+        (column,),
+        "comparar referência automaticamente com o Oracle alvo",
+    )
+    if COL_NUM_IF in source.columns:
+        return (
+            source.join(
+                dominio.select(COL_NUM_IF).dropDuplicates(),
+                COL_NUM_IF,
+                "left_semi",
+            )
+            .select(_norm_key_col(F.col(column)).alias("__candidate_key"))
+            .where(
+                F.col("__candidate_key").isNotNull()
+                & (F.length(F.col("__candidate_key")) > F.lit(0))
+            )
+            .dropDuplicates()
+        )
+
+    if (
+        produto == "rdb_resgate"
+        and table == "ESPECIFICACAO_COMITENTE"
+        and column == "NUM_ID_ENTIDADE"
+    ):
+        specification = _read_source(spark, config, "ESPECIFICACAO")
+        operation = _read_source(spark, config, "OPERACAO")
+        _require_columns(
+            source,
+            table,
+            (column, "NUM_ID_ESPECIFICACAO"),
+            "resolver referência até NUM_IF",
+        )
+        _require_columns(
+            specification,
+            "ESPECIFICACAO",
+            ("NUM_ID_ESPECIFICACAO", "NUM_ID_OPERACAO"),
+            "resolver referência até NUM_IF",
+        )
+        _require_columns(
+            operation,
+            "OPERACAO",
+            ("NUM_ID_OPERACAO", COL_NUM_IF),
+            "resolver referência até NUM_IF",
+        )
+        scoped_operations = (
+            operation.join(
+                dominio.select(COL_NUM_IF).dropDuplicates(),
+                COL_NUM_IF,
+                "left_semi",
+            )
+            .select(
+                _norm_key_col(F.col("NUM_ID_OPERACAO")).alias(
+                    "__operation_key"
+                )
+            )
+            .dropDuplicates()
+        )
+        return (
+            source.select(
+                _norm_key_col(F.col(column)).alias("__candidate_key"),
+                _norm_key_col(F.col("NUM_ID_ESPECIFICACAO")).alias(
+                    "__specification_key"
+                ),
+            )
+            .join(
+                specification.select(
+                    _norm_key_col(F.col("NUM_ID_ESPECIFICACAO")).alias(
+                        "__specification_key"
+                    ),
+                    _norm_key_col(F.col("NUM_ID_OPERACAO")).alias(
+                        "__operation_key"
+                    ),
+                ),
+                "__specification_key",
+                "inner",
+            )
+            .join(scoped_operations, "__operation_key", "left_semi")
+            .select("__candidate_key")
+            .where(
+                F.col("__candidate_key").isNotNull()
+                & (F.length(F.col("__candidate_key")) > F.lit(0))
+            )
+            .dropDuplicates()
+        )
+
+    raise ValueError(
+        f"{produto}: não há caminho declarado de {table}.{column} até "
+        f"{COL_NUM_IF}"
+    )
+
+
+def _target_lookup_candidates(
+    spark: SparkSession,
+    config: Mapping[str, str],
+    lookup_name: str,
+    dominio: DataFrame,
+) -> DataFrame:
+    """Materializa no Spark somente as chaves RAW relevantes ao lookup alvo."""
+    scoped_domain = dominio.select(COL_NUM_IF).dropDuplicates()
+    if lookup_name == TARGET_LOOKUP_TOS_CDB:
+        operations = _read_source(spark, config, "OPERACAO")
+        _require_columns(
+            operations,
+            "OPERACAO",
+            (COL_NUM_IF, "NUM_ID_TIPO_OPER_OBJETO_SERV"),
+            "consultar TOS aprovado no Oracle alvo",
+        )
+        candidates = (
+            operations.join(scoped_domain, COL_NUM_IF, "left_semi")
+            .select(
+                _norm_key_col(
+                    F.col("NUM_ID_TIPO_OPER_OBJETO_SERV")
+                ).alias("__candidate_key")
+            )
+        )
+    elif lookup_name == TARGET_LOOKUP_ACCOUNT_CDB:
+        account_columns = {
+            "TITULO": ("NUM_CONTA_PARTICIPANTE",),
+            "DEPOSITO_AUTOMATICO_IF": ("NUM_CONTA_PARTICIPANTE",),
+            "OPERACAO": (
+                "NUM_CONTA_PARTICIPANTE_P1",
+                "NUM_CONTA_PARTICIPANTE_P2",
+            ),
+        }
+        pieces: List[DataFrame] = []
+        for table, columns in account_columns.items():
+            source = _read_source(spark, config, table)
+            _require_columns(
+                source,
+                table,
+                (COL_NUM_IF, *columns),
+                "consultar conta elegível no Oracle alvo",
+            )
+            scoped = source.join(scoped_domain, COL_NUM_IF, "left_semi")
+            pieces.extend(
+                scoped.select(
+                    _norm_key_col(F.col(column)).alias("__candidate_key")
+                )
+                for column in columns
+            )
+        candidates = pieces[0]
+        for piece in pieces[1:]:
+            candidates = candidates.unionByName(piece)
+    else:
+        raise ValueError(f"lookup Oracle alvo desconhecido: {lookup_name}")
+
+    materialized = (
+        candidates.where(
+            F.col("__candidate_key").isNotNull()
+            & (F.length(F.col("__candidate_key")) > F.lit(0))
+        )
+        .dropDuplicates()
+        .localCheckpoint(eager=True)
+    )
+    logger.info(
+        "Oracle alvo: lookup %s possui %d chave(s) candidata(s) no domínio.",
+        lookup_name,
+        materialized.count(),
+    )
+    return materialized
+
+
+def _read_oracle_target_constraints_live(
+    spark: SparkSession,
+    config: Mapping[str, str],
+    produto: str,
+    dominio: DataFrame,
+    credentials: Tuple[str, str, str],
+) -> Tuple[DataFrame, DataFrame]:
+    """Consulta lookups e FKs no Oracle receptor sem novos argumentos públicos."""
+    required_lookups = TARGET_LOOKUPS_REQUIRED_BY_PRODUCT.get(
+        produto, frozenset()
+    )
+    required_pairs = TARGET_FK_COVERAGE_REQUIRED_BY_PRODUCT.get(
+        produto, frozenset()
+    )
+    lookup_schema = T.StructType([
+        T.StructField(TARGET_LOOKUP_NAME_COL, T.StringType(), False),
+        T.StructField(TARGET_LOOKUP_VALUE_COL, T.StringType(), False),
+    ])
+    missing_schema = T.StructType([
+        T.StructField("TABELA", T.StringType(), False),
+        T.StructField("COLUNA", T.StringType(), False),
+        T.StructField("VALOR", T.StringType(), False),
+        T.StructField(TARGET_SNAPSHOT_ID_COL, T.StringType(), True),
+    ])
+    if not required_lookups and not required_pairs:
+        return (
+            spark.createDataFrame([], lookup_schema),
+            spark.createDataFrame([], missing_schema),
+        )
+
+    # Todos os jobs Spark sobre o RAW terminam antes de abrir a transação
+    # read-only no Oracle. Durante a transação restam apenas consultas JDBC
+    # parametrizadas sobre conjuntos já materializados.
+    lookup_candidates = {
+        lookup_name: _target_lookup_candidates(
+            spark,
+            config,
+            lookup_name,
+            dominio,
+        )
+        for lookup_name in sorted(required_lookups)
+    }
+    fk_candidates: Dict[Tuple[str, str], DataFrame] = {}
+    for table, column in sorted(required_pairs):
+        candidates = _target_reference_candidates(
+            spark,
+            config,
+            produto,
+            table,
+            column,
+            dominio,
+        ).localCheckpoint(eager=True)
+        logger.info(
+            "Oracle alvo: FK %s.%s possui %d chave(s) candidata(s) no domínio.",
+            table,
+            column,
+            candidates.count(),
+        )
+        fk_candidates[(table, column)] = candidates
+
+    jdbc_url, user, password = credentials
+    connection = _open_oracle_connection(
+        spark.sparkContext._jvm,
+        jdbc_url,
+        user,
+        password,
+    )
+    lookup_pieces: List[DataFrame] = []
+    missing_pieces: List[DataFrame] = []
+    transaction_statement = None
     try:
-        statement = connection.prepareStatement(ORACLE_TARGET_ID_SQL)
-        result_set = statement.executeQuery()
-        if not result_set.next():
-            raise ValueError("Oracle receptor não retornou DB_UNIQUE_NAME")
-        raw = result_set.getString(1)
-        target_id = str(raw).strip().upper() if raw is not None else ""
-        if not target_id:
-            raise ValueError("Oracle receptor retornou DB_UNIQUE_NAME vazio")
-        return target_id
+        connection.setAutoCommit(False)
+        transaction_statement = connection.createStatement()
+        transaction_statement.execute("SET TRANSACTION READ ONLY")
+        transaction_statement.close()
+        transaction_statement = None
+
+        target_id_statement = target_id_result = None
+        try:
+            target_id_statement = connection.prepareStatement(
+                "SELECT SYS_CONTEXT('USERENV','DB_UNIQUE_NAME'), "
+                "SYS_CONTEXT('USERENV','CON_NAME') FROM DUAL"
+            )
+            target_id_result = target_id_statement.executeQuery()
+            if target_id_result.next():
+                logger.info(
+                    "Validação automática no Oracle alvo: DB=%s CON=%s.",
+                    target_id_result.getString(1),
+                    target_id_result.getString(2),
+                )
+        finally:
+            if target_id_result is not None:
+                target_id_result.close()
+            if target_id_statement is not None:
+                target_id_statement.close()
+
+        if TARGET_LOOKUP_TOS_CDB in required_lookups:
+            approved = _oracle_match_numeric_candidates(
+                spark,
+                connection,
+                lookup_candidates[TARGET_LOOKUP_TOS_CDB],
+                "SELECT tos.NUM_ID_TIPO_OPER_OBJETO_SERV "
+                "FROM CETIP.TIPO_OPER_OBJETO_SERV tos "
+                "JOIN CETIP.TIPO_OPERACAO top "
+                "ON top.NUM_ID_TIPO_OPERACAO = tos.NUM_ID_TIPO_OPERACAO "
+                "WHERE tos.NUM_ID_TIPO_OPER_OBJETO_SERV IN",
+                "AND TRIM(top.COD_TIPO_OPERACAO) = '1' "
+                "AND tos.NUM_ID_OBJETO_SERVICO = 44 "
+                "AND TRIM(tos.IND_DISPONIVEL_IDENTIFICACAO) = 'S'",
+            )
+            lookup_pieces.append(
+                approved.select(
+                    F.lit(TARGET_LOOKUP_TOS_CDB).alias(
+                        TARGET_LOOKUP_NAME_COL
+                    ),
+                    F.col("__target_key").alias(TARGET_LOOKUP_VALUE_COL),
+                )
+            )
+
+        if TARGET_LOOKUP_ACCOUNT_CDB in required_lookups:
+            # Este é o vínculo usado pelo contrato do validador. Valida o
+            # schema da view diretamente (também funciona quando ela é synonym)
+            # e falha fechado se o Oracle receptor divergir.
+            probe_statement = probe_result = None
+            try:
+                probe_statement = connection.prepareStatement(
+                    "SELECT fc.COD_CONTA_PARTICIPANTE, "
+                    "fc.NUM_ID_AREA_ATUACAO, fc.COD_TIPO_ACESSO "
+                    "FROM CETIP.V_FAMILIA_CONTAS fc WHERE 1 = 0"
+                )
+                probe_result = probe_statement.executeQuery()
+            finally:
+                if probe_result is not None:
+                    probe_result.close()
+                if probe_statement is not None:
+                    probe_statement.close()
+            family_join = (
+                "TRIM(fc.COD_CONTA_PARTICIPANTE) = "
+                "TRIM(cp.COD_CONTA_PARTICIPANTE)"
+            )
+            eligible = _oracle_match_numeric_candidates(
+                spark,
+                connection,
+                lookup_candidates[TARGET_LOOKUP_ACCOUNT_CDB],
+                "SELECT cp.NUM_CONTA_PARTICIPANTE "
+                "FROM CETIP.CONTA_PARTICIPANTE cp "
+                "WHERE cp.NUM_CONTA_PARTICIPANTE IN",
+                "AND cp.NUM_ID_SITUACAO_CONTA = 1 "
+                "AND REGEXP_LIKE(TRIM(cp.COD_CONTA_PARTICIPANTE), "
+                "'^[0-9]{5}[.](40|10)-[0-9]$') "
+                "AND EXISTS (SELECT 1 FROM CETIP.V_FAMILIA_CONTAS fc "
+                f"WHERE {family_join} "
+                "AND fc.NUM_ID_AREA_ATUACAO = 1 "
+                "AND TRIM(fc.COD_TIPO_ACESSO) = 'L')",
+            )
+            lookup_pieces.append(
+                eligible.select(
+                    F.lit(TARGET_LOOKUP_ACCOUNT_CDB).alias(
+                        TARGET_LOOKUP_NAME_COL
+                    ),
+                    F.col("__target_key").alias(TARGET_LOOKUP_VALUE_COL),
+                )
+            )
+
+        for table, column in sorted(required_pairs):
+            candidates = fk_candidates[(table, column)]
+            if table == "OPERACAO" and column == "NUM_ID_CTX_MSG_P1":
+                sql_before = (
+                    "SELECT NUM_ID_CTX_MSG FROM CETIP.CONTEXTO_MENSAGEM "
+                    "WHERE NUM_ID_CTX_MSG IN"
+                )
+            elif column == "NUM_ID_ENTIDADE" and table in {
+                "CARTEIRA_COMITENTE",
+                "ESPECIFICACAO_COMITENTE",
+            }:
+                sql_before = (
+                    "SELECT NUM_ID_ENTIDADE FROM CETIP.COMITENTE "
+                    "WHERE NUM_ID_ENTIDADE IN"
+                )
+            else:
+                raise ValueError(
+                    f"consulta Oracle não declarada para {table}.{column}"
+                )
+            present = _oracle_match_numeric_candidates(
+                spark,
+                connection,
+                candidates,
+                sql_before,
+            )
+            missing_pieces.append(
+                candidates.join(
+                    present,
+                    candidates["__candidate_key"]
+                    == present["__target_key"],
+                    "left_anti",
+                ).select(
+                    F.lit(table).alias("TABELA"),
+                    F.lit(column).alias("COLUNA"),
+                    F.col("__candidate_key").alias("VALOR"),
+                    F.lit(None).cast("string").alias(
+                        TARGET_SNAPSHOT_ID_COL
+                    ),
+                )
+            )
+
     finally:
-        if result_set is not None:
-            result_set.close()
-        if statement is not None:
-            statement.close()
+        if transaction_statement is not None:
+            transaction_statement.close()
+        try:
+            connection.rollback()
+        except Exception:
+            pass
         connection.close()
+
+    # Os joins/checkpoints Spark ficam fora da transação Oracle. Os DataFrames
+    # de chaves presentes já são locais e não dependem da conexão encerrada.
+    target_lookups = (
+        spark.createDataFrame([], lookup_schema)
+        if not lookup_pieces
+        else lookup_pieces[0]
+    )
+    for piece in lookup_pieces[1:]:
+        target_lookups = target_lookups.unionByName(piece)
+    target_lookups = target_lookups.dropDuplicates().localCheckpoint(eager=True)
+    for lookup_name in sorted(required_lookups):
+        n_lookup = (
+            target_lookups.where(
+                F.col(TARGET_LOOKUP_NAME_COL) == F.lit(lookup_name)
+            )
+            .select(TARGET_LOOKUP_VALUE_COL)
+            .dropDuplicates()
+            .count()
+        )
+        if n_lookup == 0:
+            raise ValueError(
+                f"Oracle alvo não retornou nenhuma chave elegível para "
+                f"{lookup_name}; a execução foi interrompida antes da amostragem"
+            )
+
+    automatic_missing = (
+        spark.createDataFrame([], missing_schema)
+        if not missing_pieces
+        else missing_pieces[0]
+    )
+    for piece in missing_pieces[1:]:
+        automatic_missing = automatic_missing.unionByName(piece)
+    automatic_missing = automatic_missing.dropDuplicates().localCheckpoint(
+        eager=True
+    )
+    logger.info(
+        "Oracle alvo: %d lookup(s) positivo(s) e %d referência(s) "
+        "faltante(s) materializados automaticamente.",
+        target_lookups.count(),
+        automatic_missing.count(),
+    )
+    return target_lookups, automatic_missing
 
 
 def _allocation_sql(code_kind: str, batch_count: int,
@@ -5617,8 +5641,6 @@ def executa_clonagem(spark, config, spec: dict, *,
                      prazo_vencimento_dias: Optional[int] = None,
                      faltantes_arg: Optional[str] = None,
                      faltantes_parquet: Optional[str] = None,
-                     oracle_target_lookups_parquet: Optional[str] = None,
-                     oracle_target_fk_manifest_parquet: Optional[str] = None,
                      poda_subtipo: bool = True,
                      anular_cols: Optional[Mapping[str, Sequence[str]]] = None,
                      oracle_code_batch_size: int = DEFAULT_ORACLE_CODE_BATCH_SIZE,
@@ -5756,64 +5778,42 @@ def executa_clonagem(spark, config, spec: dict, *,
         produto,
         frozenset(),
     )
-    target_lookups = (
-        _carrega_oracle_target_lookups(
+    dominio_precalculado = (
+        _dominio_num_if_produto(
             spark,
-            oracle_target_lookups_parquet,
+            config,
+            product_profile,
+            query_num_if_path,
         )
-        if required_target_lookups
-        else None
+        .select(COL_NUM_IF)
+        .dropDuplicates()
+        .localCheckpoint(eager=True)
     )
-    target_fk_manifest = (
-        _carrega_oracle_target_fk_manifest(
-            spark,
-            oracle_target_fk_manifest_parquet,
-        )
-        if required_target_fk_pairs
-        else None
-    )
-    if oracle_target_lookups_parquet and not required_target_lookups:
-        logger.info(
-            "Produto %s não exige lookups do Oracle alvo; parâmetro ignorado.",
-            produto,
-        )
-    if oracle_target_fk_manifest_parquet and not required_target_fk_pairs:
-        logger.info(
-            "Produto %s não exige manifesto de FK alvo; parâmetro ignorado.",
-            produto,
-        )
-    expected_target_id: Optional[str] = None
+    target_lookups: Optional[DataFrame] = None
     if required_target_lookups or required_target_fk_pairs:
-        if credentials is not None:
-            expected_target_id = _read_oracle_target_id(
-                spark._sc._jvm,
-                *credentials,
+        target_read_credentials = (
+            credentials if credentials is not None else _oracle_credentials(config)
+        )
+        target_lookups, automatic_missing = (
+            _read_oracle_target_constraints_live(
+                spark,
+                config,
+                produto,
+                dominio_precalculado,
+                target_read_credentials,
             )
-        else:
-            expected_target_id = (
-                config.get(TARGET_ID_ENV_VAR, "").strip().upper()
-            )
-            if not expected_target_id:
-                raise ValueError(
-                    f"Dry-run do produto {produto}: configure "
-                    f"{TARGET_ID_ENV_VAR} com o DB_UNIQUE_NAME do Oracle alvo"
+        )
+        if required_target_fk_pairs:
+            if faltantes is not None:
+                # Para estes pares, a comparação Oracle do próprio run é
+                # autoritativa; descarta listas manuais possivelmente antigas.
+                faltantes = faltantes.where(
+                    ~_pred_faltante_seletivo(required_target_fk_pairs)
                 )
-    _validate_oracle_target_evidence(
-        produto,
-        target_lookups,
-        target_fk_manifest,
-        faltantes,
-        expected_target_id,
-    )
-    _validate_required_target_fk_paths(
-        spark,
-        config,
-        spec,
-        produto,
-        required_target_fk_pairs,
-        target_fk_manifest,
-        faltantes,
-    )
+                faltantes = faltantes.unionByName(automatic_missing)
+            else:
+                faltantes = automatic_missing
+            faltantes = faltantes.dropDuplicates().localCheckpoint(eager=True)
     if faltantes is not None:
         logger.info("Filtro de faltantes (itens 3/4) ativo: %d chave(s) de "
                     "referência inexistentes no destino.", faltantes.count())
@@ -5828,7 +5828,8 @@ def executa_clonagem(spark, config, spec: dict, *,
                                      query_num_if_path=query_num_if_path,
                                      faltantes=faltantes,
                                      target_lookups=target_lookups,
-                                     poda_subtipo=poda_subtipo)
+                                     poda_subtipo=poda_subtipo,
+                                     dominio_precalculado=dominio_precalculado)
 
     # Tipo do instrumento DERIVADO do lote — antes de qualquer round-trip Oracle.
     # É isto que substitui o antigo literal por produto e o que impede alocar
@@ -5949,6 +5950,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                 product_profile.integrity.invalid_num_if_checks,
             )
         )
+    if faltantes is not None or required_target_fk_pairs:
         erros_globais.extend(
             _validate_no_known_missing_references(
                 resultados,
@@ -6161,8 +6163,6 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
         "clone_prefix",
         "cod_if_pattern",
         "cod_if_dry_prefix",
-        "oracle_target_lookups_parquet",
-        "oracle_target_fk_manifest_parquet",
     ):
         value = getattr(job, field_name)
         if value is not None and (not isinstance(value, str) or not value.strip()):
@@ -6315,10 +6315,6 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
             prazo_vencimento_dias=job.prazo_vencimento_dias,
             faltantes_arg=job.faltantes_arg,
             faltantes_parquet=job.faltantes_parquet,
-            oracle_target_lookups_parquet=job.oracle_target_lookups_parquet,
-            oracle_target_fk_manifest_parquet=(
-                job.oracle_target_fk_manifest_parquet
-            ),
             poda_subtipo=job.poda_subtipo,
             anular_cols=_merge_nullification_mappings(
                 profile.integrity.nullify_mapping(), job.anular_cols
@@ -6498,25 +6494,9 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                              "'CARTEIRA_COMITENTE.NUM_ID_ENTIDADE=343..;"
                              "CARTEIRA_COMITENTE.NUM_CONTA=95..'.")
     parser.add_argument("--faltantes-parquet", default=None,
-                        help="Itens 3/4: Parquet com TABELA/COLUNA/VALOR e "
-                             "SNAPSHOT_ID para FKs alvo obrigatórias "
+                        help="Itens 3/4: Parquet com TABELA/COLUNA/VALOR "
                              "das chaves inexistentes no destino (mesma poda do "
                              "--faltantes-arg, p/ listas grandes).")
-    parser.add_argument(
-        "--oracle-target-lookups-parquet",
-        default=None,
-        help="Conjuntos positivos do Oracle receptor. Colunas "
-             "LOOKUP/VALOR/SNAPSHOT_ID/TARGET_ID; lookups aceitos: "
-             f"{TARGET_LOOKUP_TOS_CDB} e {TARGET_LOOKUP_ACCOUNT_CDB}.",
-    )
-    parser.add_argument(
-        "--oracle-target-fk-manifest-parquet",
-        default=None,
-        help="Manifesto de cobertura das FKs comparadas ao Oracle receptor. "
-             "Exige TABELA/COLUNA/COBERTURA_COMPLETA, as três contagens "
-             "QTD_*_DISTINTAS/QTD_FALTANTES_DISTINTOS, hashes SHA-256, "
-             "SNAPSHOT_ID e TARGET_ID. Contagens/hashes têm escopo GLOBAL_RAW.",
-    )
     parser.add_argument("--anular-cols", default=None,
                         help="Item 2 (override/extra): colunas nullable a ANULAR "
                              "nos sintéticos, formato 'TABELA.COL,COL2;TAB2.COL3'. "
@@ -6581,10 +6561,6 @@ def main() -> None:
         prazo_vencimento_dias=args.prazo_vencimento_dias,
         faltantes_arg=args.faltantes_arg,
         faltantes_parquet=args.faltantes_parquet,
-        oracle_target_lookups_parquet=args.oracle_target_lookups_parquet,
-        oracle_target_fk_manifest_parquet=(
-            args.oracle_target_fk_manifest_parquet
-        ),
         poda_subtipo=not args.sem_poda_subtipo,
         anular_cols=(
             _merge_anular_cols({}, args.anular_cols)
