@@ -163,6 +163,7 @@ from __future__ import annotations
 import argparse
 import copy
 import dataclasses
+import hashlib
 import json
 import logging
 import os
@@ -476,6 +477,10 @@ SQL_PLACEHOLDER_RE = re.compile(r"\{\{[^{}]+\}\}")
 DEFAULT_COD_IF_PATTERN = r"^[0-9A-Z]{6,20}$"
 DEFAULT_COD_IF_DRY_PREFIX = "SYN100"
 DEFAULT_COD_OPERACAO_PATTERN = r"^[0-9]{16}$"
+ENGORDA_ARTIFACT_SCHEMA_VERSION = 1
+ENGORDA_PLAN_ARTIFACT = "engorda_plan"
+ENGORDA_RESERVATION_ARTIFACT = "engorda_reservation"
+ENGORDA_PHASES = ("all", "plan", "materialize")
 
 
 # ---------------------------------------------------------------------------
@@ -568,6 +573,11 @@ class EngordaJob:
     # Overrides estruturais do COD_IF; None = defaults agnósticos de produto.
     cod_if_pattern: Optional[str] = None
     cod_if_dry_prefix: Optional[str] = None
+    phase: str = "all"
+    plan_uri: Optional[str] = None
+    reservation_uri: Optional[str] = None
+    raw_uri: Optional[str] = None
+    output_uri: Optional[str] = None
 # Tabelas que devem ser engordadas por produto. As tabelas correspondentes são
 # marcadas como static=False no spec único durante a execução.
 TABELAS_ENGORDA_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
@@ -1394,20 +1404,29 @@ def raw_path(config: dict[str, str], table: str) -> str:
 
 
 def clone_base_path(config: dict[str, str]) -> str:
+    if config.get("DATAGEN_OUTPUT_URI"):
+        return config["DATAGEN_OUTPUT_URI"]
     base = config["DATAGEN_SYNTHETIC_BASE_URI"]
     prefix = config.get("DATAGEN_CLONE_PREFIX") or DEFAULT_CLONE_PREFIX
     return f"{base}/{prefix}"
 
 
-def get_engorda_env(specs_uri_override: Optional[str] = None) -> dict[str, str]:
+def get_engorda_env(
+    specs_uri_override: Optional[str] = None,
+    raw_uri_override: Optional[str] = None,
+    output_uri_override: Optional[str] = None,
+) -> dict[str, str]:
     """Mesmas envs do engorda_tables.py + DATAGEN_CLONE_PREFIX opcional, para
     que a configuração do Data Flow seja idêntica entre os dois jobs."""
     config: dict[str, str] = {}
     missing = []
     for name in REQUIRED_ENV_VARS:
-        value = (specs_uri_override
-                 if name == "DATAGEN_SPECS_URI" and specs_uri_override
-                 else os.environ.get(name))
+        override = {
+            "DATAGEN_RAW_BASE_URI": raw_uri_override,
+            "DATAGEN_SYNTHETIC_BASE_URI": output_uri_override,
+            "DATAGEN_SPECS_URI": specs_uri_override,
+        }[name]
+        value = override or os.environ.get(name)
         if not value:
             missing.append(name)
         else:
@@ -1420,6 +1439,10 @@ def get_engorda_env(specs_uri_override: Optional[str] = None) -> dict[str, str]:
         "DATAGEN_SYNTHETIC_PREFIX", "").strip("/")
     config["DATAGEN_CLONE_PREFIX"] = os.environ.get(
         "DATAGEN_CLONE_PREFIX", DEFAULT_CLONE_PREFIX).strip("/")
+    if raw_uri_override:
+        config["DATAGEN_RAW_PREFIX"] = ""
+    if output_uri_override:
+        config["DATAGEN_OUTPUT_URI"] = output_uri_override.rstrip("/")
     for name in ORACLE_ENV_VARS:
         value = os.environ.get(name)
         if value:
@@ -1599,6 +1622,78 @@ def load_specs(spark: SparkSession, specs_uri: str) -> dict:
     if not isinstance(parsed, dict) or not parsed:
         raise ValueError(f"specs.json em `{specs_uri}` precisa ser objeto não-vazio.")
     return normalize_specs(parsed)
+
+
+def _canonical_json(value: Mapping[str, Any]) -> str:
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def _local_artifact_path(uri: str) -> Optional[str]:
+    if uri.startswith("file://"):
+        return uri[7:]
+    return None if "://" in uri else uri
+
+
+def _write_json_artifact(spark: SparkSession, uri: str,
+                         artifact: Mapping[str, Any]) -> None:
+    """Writes one immutable deterministic JSON object locally or through Hadoop FS."""
+    text = json.dumps(artifact, ensure_ascii=True, sort_keys=True, indent=2) + "\n"
+    local_path = _local_artifact_path(uri)
+    if local_path is not None:
+        parent = os.path.dirname(os.path.abspath(local_path))
+        os.makedirs(parent, exist_ok=True)
+        temporary = f"{local_path}.tmp-{uuid.uuid4().hex}"
+        try:
+            with open(temporary, "w", encoding="ascii", newline="\n") as handle:
+                handle.write(text)
+            os.replace(temporary, local_path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        return
+    jvm = spark._jvm
+    path = jvm.org.apache.hadoop.fs.Path(uri)
+    fs = path.getFileSystem(spark._jsc.hadoopConfiguration())
+    if fs.exists(path):
+        raise ValueError(f"artefato JSON imutável já existe em {uri!r}")
+    stream = fs.create(path, False)
+    try:
+        stream.write(bytearray(text.encode("ascii")))
+    finally:
+        stream.close()
+
+
+def _read_json_artifact(spark: SparkSession, uri: str) -> dict[str, Any]:
+    local_path = _local_artifact_path(uri)
+    if local_path is not None:
+        try:
+            with open(local_path, "r", encoding="utf-8") as handle:
+                parsed = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"artefato JSON inválido em {uri!r}: {exc}") from exc
+    else:
+        jvm = spark._jvm
+        path = jvm.org.apache.hadoop.fs.Path(uri)
+        fs = path.getFileSystem(spark._jsc.hadoopConfiguration())
+        if not fs.exists(path) or fs.getFileStatus(path).isDirectory():
+            raise ValueError(f"esperado um objeto JSON em {uri!r}")
+        stream = fs.open(path)
+        try:
+            text = jvm.org.apache.commons.io.IOUtils.toString(
+                stream, jvm.java.nio.charset.StandardCharsets.UTF_8
+            )
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"artefato JSON inválido em {uri!r}: {exc}") from exc
+        finally:
+            stream.close()
+    if not isinstance(parsed, dict):
+        raise ValueError(f"artefato JSON em {uri!r} precisa ser um objeto")
+    return parsed
+
+
+def _plan_id(plan_without_id: Mapping[str, Any]) -> str:
+    return hashlib.sha256(_canonical_json(plan_without_id).encode("ascii")).hexdigest()
 
 
 def _not_null_cols(cfg: dict) -> set[str]:
@@ -3870,6 +3965,11 @@ def _monta_mapeamento_pk(clones: DataFrame, plano: PlanoTabela,
 
     if plano.pk_regra == "OFFSET_PROPRIO":
         base = clones.select(*pk, K_COL).dropDuplicates(pk + [K_COL])
+        order_columns = [*pk, K_COL]
+        base = base.repartitionByRange(
+            max(1, base.rdd.getNumPartitions()),
+            *[F.col(column) for column in order_columns],
+        ).sortWithinPartitions(*order_columns)
         pk_col = pk[0]
         dt = clones.schema[pk_col].dataType
         com_id = _with_contiguous_row_id(base, "__pk_rid")
@@ -4498,8 +4598,11 @@ def _attach_generated_code(df: DataFrame, mapping: DataFrame, *, pk_col: str,
 
 
 def _generate_meu_numeros(operacoes: DataFrame, prefix: str,
-                          engorda_date: date) -> DataFrame:
+                           engorda_date: date, *, ordinal_start: int = 1,
+                           ordinal_end: Optional[int] = None) -> DataFrame:
     _validate_meu_numero_prefix(prefix)
+    if type(ordinal_start) is not int or ordinal_start < 1:
+        raise ValueError("ordinal_start do meu-número deve ser inteiro >= 1")
     required = {
         "NUM_ID_OPERACAO", "DAT_OPERACAO", "NUM_CONTA_PARTICIPANTE_P1",
         "NUM_CONTA_PARTICIPANTE_P2", "NUM_CONTROLE_LANCAMENTO_P1",
@@ -4516,9 +4619,17 @@ def _generate_meu_numeros(operacoes: DataFrame, prefix: str,
         .unionByName(staged.where("__meu_same_account").select(
             "NUM_ID_OPERACAO", F.lit(2).cast("int").alias("__meu_side"))))
     allocated = allocations.count()
-    _validate_meu_capacity(allocated)
+    expected_end = ordinal_start + allocated - 1
+    if ordinal_end is not None and ordinal_end != expected_end:
+        raise ValueError(
+            f"faixa de meu-número {ordinal_start}..{ordinal_end} não atende "
+            f"{allocated} ordinal(is)"
+        )
+    _validate_meu_capacity(max(0, expected_end))
     allocation_map = _with_distributed_ordinal(
         allocations, ["NUM_ID_OPERACAO", "__meu_side"], "__meu_ord"
+    ).withColumn(
+        "__meu_ord", F.col("__meu_ord") + F.lit(ordinal_start - 1)
     ).localCheckpoint(eager=True)
     p1_map = allocation_map.where(F.col("__meu_side") == 1).select(
         "NUM_ID_OPERACAO", F.col("__meu_ord").alias("__meu_p1_ord"))
@@ -5651,7 +5762,8 @@ def _valida_destino(config: dict) -> str:
     sintetizacao_multiproduto/<produto>). Dois produtos com o mesmo
     --clone-prefix se sobrescrevem — o segundo run publica por cima do primeiro."""
     prefix = (config.get("DATAGEN_CLONE_PREFIX") or "").strip("/")
-    if not prefix:
+    exact_output = config.get("DATAGEN_OUTPUT_URI")
+    if not prefix and not exact_output:
         raise ValueError(
             "DATAGEN_CLONE_PREFIX vazio: o destino seria a RAIZ de "
             "DATAGEN_SYNTHETIC_BASE_URI, que seria substituída por inteiro. "
@@ -5673,7 +5785,7 @@ def _valida_destino(config: dict) -> str:
     # Área do engorda: só é problema se substituir save_base LEVAR JUNTO a área
     # do engorda (igual ou descendente). O contrário — sintéticos DENTRO da base
     # sintética, em prefixo próprio — é o layout esperado.
-    if _mesmo_ou_ancestral(save_base, engorda_area):
+    if not exact_output and _mesmo_ou_ancestral(save_base, engorda_area):
         raise ValueError(
             f"Destino dos sintéticos ({save_base}) é igual/ancestral da área de "
             f"saída do engorda ({engorda_area}); apagá-lo destruiria a saída "
@@ -5890,6 +6002,214 @@ def _loga_contagens_dominio(spark, config: dict,
 # ---------------------------------------------------------------------------
 # Orquestração.
 # ---------------------------------------------------------------------------
+def _meu_numero_ordinal_demand(operacoes: DataFrame, fator_k: int) -> int:
+    norm_p1 = _norm_key_col(F.col("NUM_CONTA_PARTICIPANTE_P1"))
+    norm_p2 = _norm_key_col(F.col("NUM_CONTA_PARTICIPANTE_P2"))
+    same_accounts = operacoes.where(norm_p1.eqNullSafe(norm_p2)).count()
+    return (operacoes.count() + same_accounts) * fator_k
+
+
+def _build_engorda_plan(
+    *,
+    config: Mapping[str, str],
+    specs_uri: str,
+    product_profile: ProductProfile,
+    valores: Sequence[int],
+    fator_k: int,
+    seed: int,
+    engorda_ts: datetime,
+    controle_operacional_date: Optional[date],
+    tipo_derivado: int,
+    planos: Mapping[str, PlanoTabela],
+    lotes: Mapping[str, DataFrame],
+    faltantes_uri: Optional[str],
+) -> dict[str, Any]:
+    tables: dict[str, Any] = {}
+    for table in sorted(planos):
+        plano = planos[table]
+        source_count = int(lotes[table].count())
+        synthetic_count = source_count * fator_k
+        tables[table] = {
+            "source_count": source_count,
+            "synthetic_count": synthetic_count,
+            "pk": {
+                "rule": plano.pk_regra,
+                "count_demand": synthetic_count
+                if plano.pk_regra == "OFFSET_PROPRIO" else 0,
+                "step": plano.pk_passo,
+                "minimum_start": plano.pk_start,
+            },
+        }
+
+    operation = product_profile.business_keys.operation
+    operation_count = 0
+    meu_demand = 0
+    if operation is not None and operation.table in lotes:
+        operation_count = int(lotes[operation.table].count()) * fator_k
+        if operation.generate_meu_numero:
+            meu_demand = _meu_numero_ordinal_demand(
+                lotes[operation.table], fator_k
+            )
+
+    body: dict[str, Any] = {
+        "artifact_type": ENGORDA_PLAN_ARTIFACT,
+        "schema_version": ENGORDA_ARTIFACT_SCHEMA_VERSION,
+        "product": product_profile.name,
+        "selected_num_ifs": sorted(int(value) for value in valores),
+        "fator_k": fator_k,
+        "seed": seed,
+        "engorda_timestamp": engorda_ts.isoformat(),
+        "controle_operacional_date": (
+            controle_operacional_date.isoformat()
+            if controle_operacional_date is not None else None
+        ),
+        "raw_uri": _area(
+            config["DATAGEN_RAW_BASE_URI"], config.get("DATAGEN_RAW_PREFIX")
+        ),
+        "output_uri": clone_base_path(dict(config)),
+        "specs_uri": specs_uri,
+        "faltantes_uri": faltantes_uri,
+        "tables": tables,
+        "cod_if": {
+            "count": tables[TABELA_RAIZ]["synthetic_count"],
+            "oracle_type": tipo_derivado,
+        },
+        "cod_operacao": {"count": operation_count},
+        "meu_numero": {"ordinal_count_demand": meu_demand},
+    }
+    return {**body, "plan_id": _plan_id(body)}
+
+
+def _validate_plan_artifact(plan: Mapping[str, Any]) -> dict[str, Any]:
+    if plan.get("artifact_type") != ENGORDA_PLAN_ARTIFACT:
+        raise ValueError("artefato de plano possui artifact_type inválido")
+    if plan.get("schema_version") != ENGORDA_ARTIFACT_SCHEMA_VERSION:
+        raise ValueError("artefato de plano possui schema_version incompatível")
+    plan_id = plan.get("plan_id")
+    if not isinstance(plan_id, str) or not plan_id:
+        raise ValueError("artefato de plano sem plan_id")
+    body = {key: value for key, value in plan.items() if key != "plan_id"}
+    if plan_id != _plan_id(body):
+        raise ValueError("plan_id não corresponde ao conteúdo do plano")
+    required = {
+        "product", "selected_num_ifs", "fator_k", "seed",
+        "engorda_timestamp", "controle_operacional_date", "raw_uri",
+        "output_uri", "specs_uri", "faltantes_uri", "tables", "cod_if",
+        "cod_operacao", "meu_numero",
+    }
+    missing = sorted(required - set(plan))
+    if missing:
+        raise ValueError(f"artefato de plano incompleto: {missing}")
+    if not isinstance(plan["tables"], dict) or not plan["tables"]:
+        raise ValueError("artefato de plano precisa conter tables")
+    return dict(plan)
+
+
+def _reservation_range(section: Mapping[str, Any], context: str,
+                       expected_count: int, *, step: int = 1) -> Tuple[int, int]:
+    if section.get("count") != expected_count:
+        raise ValueError(
+            f"reserva {context}: count={section.get('count')!r}, "
+            f"esperado {expected_count}"
+        )
+    start, end = section.get("start"), section.get("end")
+    if any(type(value) is not int for value in (start, end)):
+        raise ValueError(f"reserva {context}: start/end precisam ser inteiros")
+    expected_end = start + (expected_count - 1) * step
+    if end != expected_end:
+        raise ValueError(
+            f"reserva {context}: range {start}..{end} não atende "
+            f"count={expected_count}, step={step}"
+        )
+    return start, end
+
+
+def _validate_reservation_artifact(
+    plan: Mapping[str, Any], reservation: Mapping[str, Any]
+) -> dict[str, Any]:
+    if reservation.get("artifact_type") != ENGORDA_RESERVATION_ARTIFACT:
+        raise ValueError("artefato de reserva possui artifact_type inválido")
+    if reservation.get("schema_version") != ENGORDA_ARTIFACT_SCHEMA_VERSION:
+        raise ValueError("artefato de reserva possui schema_version incompatível")
+    if reservation.get("plan_id") != plan["plan_id"]:
+        raise ValueError("reserva não está vinculada ao plan_id consumido")
+    if reservation.get("product") != plan["product"]:
+        raise ValueError("produto da reserva diverge do plano")
+
+    table_pks = reservation.get("table_pks")
+    if not isinstance(table_pks, dict):
+        raise ValueError("reserva precisa conter table_pks")
+    expected_tables = {
+        table for table, table_plan in plan["tables"].items()
+        if table_plan["pk"]["rule"] == "OFFSET_PROPRIO"
+        and table_plan["pk"]["count_demand"] > 0
+    }
+    if set(table_pks) != expected_tables:
+        raise ValueError(
+            "reserva table_pks diverge do plano: "
+            f"esperado={sorted(expected_tables)}, recebido={sorted(table_pks)}"
+        )
+    for table in sorted(expected_tables):
+        table_plan = plan["tables"][table]["pk"]
+        table_reservation = table_pks[table]
+        if not isinstance(table_reservation, Mapping):
+            raise ValueError(f"reserva table_pks.{table} inválida")
+        if table_reservation.get("step") != table_plan["step"]:
+            raise ValueError(f"reserva table_pks.{table}: step diverge do plano")
+        start, _ = _reservation_range(
+            table_reservation,
+            f"table_pks.{table}",
+            table_plan["count_demand"],
+            step=table_plan["step"],
+        )
+        if start < table_plan["minimum_start"]:
+            raise ValueError(
+                f"reserva table_pks.{table}: start {start} abaixo do mínimo "
+                f"seguro {table_plan['minimum_start']}"
+            )
+
+    cod_reservation = reservation.get("cod_operacao")
+    if not isinstance(cod_reservation, Mapping):
+        raise ValueError("reserva precisa conter cod_operacao")
+    cod_count = plan["cod_operacao"]["count"]
+    if cod_count:
+        if cod_reservation != {
+            "strategy": "oracle_allocator", "count": cod_count
+        }:
+            raise ValueError(
+                "cod_operacao precisa permanecer no allocator oficial Oracle"
+            )
+    elif cod_reservation != {"strategy": "oracle_allocator", "count": 0}:
+        raise ValueError("reserva cod_operacao vazia possui contrato inválido")
+
+    meu_reservation = reservation.get("meu_numero")
+    if not isinstance(meu_reservation, Mapping):
+        raise ValueError("reserva precisa conter meu_numero")
+    meu_count = plan["meu_numero"]["ordinal_count_demand"]
+    if meu_count:
+        try:
+            _validate_meu_numero_prefix(meu_reservation.get("prefix"))
+        except argparse.ArgumentTypeError as exc:
+            raise ValueError(str(exc)) from exc
+        start, end = _reservation_range(
+            meu_reservation, "meu_numero", meu_count
+        )
+        if start < 1 or end > MAX_MEU_NUMERO_ORDINAL:
+            raise ValueError("reserva meu_numero excede os ordinais de 1 a 9999999")
+    elif meu_reservation != {
+        "prefix": None, "count": 0, "start": None, "end": None
+    }:
+        raise ValueError("reserva meu_numero vazia possui contrato inválido")
+    return dict(reservation)
+
+
+def _inject_reserved_pk_starts(
+    planos: Mapping[str, PlanoTabela], reservation: Mapping[str, Any]
+) -> None:
+    for table, table_reservation in reservation["table_pks"].items():
+        planos[table].pk_start = int(table_reservation["start"])
+
+
 def executa_clonagem(spark, config, spec: dict, *,
                      product_profile: ProductProfile,
                      meu_numero_prefix: Optional[str] = None,
@@ -5911,9 +6231,14 @@ def executa_clonagem(spark, config, spec: dict, *,
                      faltantes_parquet: Optional[str] = None,
                      poda_subtipo: bool = True,
                      anular_cols: Optional[Mapping[str, Sequence[str]]] = None,
-                     oracle_code_batch_size: int = DEFAULT_ORACLE_CODE_BATCH_SIZE,
-                     tipo_oracle: Optional[int] = None,
-                     dry_run: bool = False) -> Dict[str, dict]:
+                      oracle_code_batch_size: int = DEFAULT_ORACLE_CODE_BATCH_SIZE,
+                      tipo_oracle: Optional[int] = None,
+                      dry_run: bool = False,
+                      phase: str = "all",
+                      plan_uri: Optional[str] = None,
+                      planned_artifact: Optional[Mapping[str, Any]] = None,
+                      reservation: Optional[Mapping[str, Any]] = None,
+                      specs_uri: Optional[str] = None) -> Dict[str, dict]:
     """Roda a sintetização fim a fim; devolve {tabela: estatísticas} (para uso em
     notebook). Aborta sem gravar NADA se qualquer validação falhar.
 
@@ -5932,6 +6257,8 @@ def executa_clonagem(spark, config, spec: dict, *,
     conferência opcional."""
     inicio = time.perf_counter()
     _validate_product_profile(product_profile)
+    if phase not in ENGORDA_PHASES:
+        raise ValueError(f"phase inválida: {phase!r}")
     if (num_ifs is None) == (n_instrumentos is None):
         raise ValueError(
             "informe exatamente uma seleção: num_ifs ou n_instrumentos"
@@ -5942,9 +6269,10 @@ def executa_clonagem(spark, config, spec: dict, *,
         raise ValueError("--oracle-code-batch-size deve ser >= 1")
     business_policy = product_profile.business_keys
     operation_policy = business_policy.operation
-    if operation_policy is not None and operation_policy.generate_meu_numero:
+    if (phase == "all" and operation_policy is not None
+            and operation_policy.generate_meu_numero):
         meu_numero_prefix = _validate_meu_numero_prefix(meu_numero_prefix)
-    elif meu_numero_prefix is not None:
+    elif phase == "all" and meu_numero_prefix is not None:
         logger.info(
             "Produto %s não gera meu-número; prefixo informado será ignorado.",
             product_profile.name,
@@ -5958,11 +6286,12 @@ def executa_clonagem(spark, config, spec: dict, *,
     engorda_ts = _normalize_engorda_ts(engorda_ts)
     if product_profile.date_strategy == "standard":
         if credentials is not None:
-            if controle_operacional_date is not None:
+            if controle_operacional_date is not None and phase != "materialize":
                 raise ValueError(
                     "controle_operacional_date só pode ser informado no dry-run")
-            controle_operacional_date = _read_controle_operacional_date(
-                spark._sc._jvm, *credentials)
+            if controle_operacional_date is None:
+                controle_operacional_date = _read_controle_operacional_date(
+                    spark._sc._jvm, *credentials)
         elif controle_operacional_date is None:
             controle_operacional_date = engorda_ts.date()
             logger.warning(
@@ -6164,6 +6493,61 @@ def executa_clonagem(spark, config, spec: dict, *,
             )
         ),
     )
+
+    current_plan = None
+    if phase != "all":
+        current_plan = _build_engorda_plan(
+            config=config,
+            specs_uri=specs_uri or config["DATAGEN_SPECS_URI"],
+            product_profile=product_profile,
+            valores=valores,
+            fator_k=fator_k,
+            seed=seed,
+            engorda_ts=engorda_ts,
+            controle_operacional_date=controle_operacional_date,
+            tipo_derivado=tipo_derivado,
+            planos=planos,
+            lotes=lotes,
+            faltantes_uri=faltantes_parquet,
+        )
+    if phase == "plan":
+        if not plan_uri:
+            raise ValueError("phase=plan exige plan_uri")
+        if current_plan is None:
+            raise RuntimeError("plano interno ausente")
+        _write_json_artifact(spark, plan_uri, current_plan)
+        logger.info("Plano de seleção imutável gravado em %s (plan_id=%s).",
+                    plan_uri, current_plan["plan_id"])
+        return {
+            table: {
+                "lote": table_plan["source_count"],
+                "clones": table_plan["synthetic_count"],
+            }
+            for table, table_plan in current_plan["tables"].items()
+        }
+
+    meu_numero_ordinal_start = 1
+    meu_numero_ordinal_end: Optional[int] = None
+    if phase == "materialize":
+        if planned_artifact is None or reservation is None:
+            raise ValueError("phase=materialize exige plano e reserva")
+        if current_plan is None:
+            raise RuntimeError("plano interno ausente")
+        frozen_plan = _validate_plan_artifact(planned_artifact)
+        if current_plan != frozen_plan:
+            raise ValueError(
+                "materialização diverge do plano congelado; seleção, caminhos, "
+                "datas, regras ou contagens mudaram"
+            )
+        validated_reservation = _validate_reservation_artifact(
+            frozen_plan, reservation
+        )
+        _inject_reserved_pk_starts(planos, validated_reservation)
+        meu_reservation = validated_reservation["meu_numero"]
+        if frozen_plan["meu_numero"]["ordinal_count_demand"]:
+            meu_numero_prefix = meu_reservation["prefix"]
+            meu_numero_ordinal_start = meu_reservation["start"]
+            meu_numero_ordinal_end = meu_reservation["end"]
 
     mapeamentos: Dict[str, DataFrame] = {}
     resultados: Dict[str, Tuple[DataFrame, int]] = {}
@@ -6399,7 +6783,9 @@ def executa_clonagem(spark, config, spec: dict, *,
                 generated_alias="COD_OPERACAO_GERADO")
             if operation_policy.generate_meu_numero:
                 operacoes = _generate_meu_numeros(
-                    operacoes, meu_numero_prefix, engorda_ts.date())
+                    operacoes, meu_numero_prefix, engorda_ts.date(),
+                    ordinal_start=meu_numero_ordinal_start,
+                    ordinal_end=meu_numero_ordinal_end)
             operacoes = operacoes.localCheckpoint(eager=True)
             resultados[operation_table] = (operacoes, n_operacoes)
 
@@ -6519,10 +6905,22 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
         "clone_prefix",
         "cod_if_pattern",
         "cod_if_dry_prefix",
+        "plan_uri",
+        "reservation_uri",
+        "raw_uri",
+        "output_uri",
     ):
         value = getattr(job, field_name)
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise ValueError(f"{field_name} precisa ser texto não vazio")
+    if job.phase not in ENGORDA_PHASES:
+        raise ValueError(f"phase deve ser uma de {ENGORDA_PHASES}")
+    if job.phase == "plan" and job.plan_uri is None:
+        raise ValueError("phase=plan exige plan_uri")
+    if job.phase == "materialize" and (
+        job.plan_uri is None or job.reservation_uri is None
+    ):
+        raise ValueError("phase=materialize exige plan_uri e reservation_uri")
     if job.cod_if_pattern is not None:
         try:
             re.compile(job.cod_if_pattern)
@@ -6554,9 +6952,17 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
     if job.n_instrumentos is not None:
         if type(job.n_instrumentos) is not int or job.n_instrumentos < 1:
             raise ValueError("n_instrumentos deve ser inteiro >= 1")
-    if (job.num_ifs is None) == (job.n_instrumentos is None):
+    if job.phase != "materialize" and (
+        (job.num_ifs is None) == (job.n_instrumentos is None)
+    ):
         raise ValueError(
             "informe exatamente uma seleção: num_ifs ou n_instrumentos"
+        )
+    if job.phase == "materialize" and (
+        job.num_ifs is not None or job.n_instrumentos is not None
+    ):
+        raise ValueError(
+            "phase=materialize não aceita seleção; NUM_IF vem do plano congelado"
         )
     for field_name in ("fator_k", "pk_passo", "max_passadas",
                        "oracle_code_batch_size"):
@@ -6619,7 +7025,8 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
         _merge_nullification_mappings(
             profile.integrity.nullify_mapping(), job.anular_cols
         )
-    if operation_policy is not None and operation_policy.generate_meu_numero:
+    if (job.phase == "all" and operation_policy is not None
+            and operation_policy.generate_meu_numero):
         try:
             _validate_meu_numero_prefix(job.meu_numero_prefix)
         except argparse.ArgumentTypeError as exc:
@@ -6630,7 +7037,9 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
 def executar_job(job: EngordaJob) -> Dict[str, dict]:
     """Executa um job configurado sem duplicar bootstrap entre CLI e runner."""
     profile = _validate_engorda_job(job)
-    config = dict(get_engorda_env(job.specs_uri))
+    config = dict(get_engorda_env(
+        job.specs_uri, job.raw_uri, job.output_uri
+    ))
     if job.clone_prefix is not None:
         config["DATAGEN_CLONE_PREFIX"] = _normalize_clone_prefix(job.clone_prefix)
     elif not os.environ.get("DATAGEN_CLONE_PREFIX"):
@@ -6641,29 +7050,79 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
         config["DATAGEN_CLONE_PREFIX"] = _normalize_clone_prefix(
             config["DATAGEN_CLONE_PREFIX"]
         )
-    logger.info(
-        "Job produto=%s query=%s specs=%s destino_prefixo=%s tipo_oracle=%s "
-        "dry_run=%s",
-        profile.name,
-        job.query_num_if_path or profile.query_filename,
-        job.specs_uri or config["DATAGEN_SPECS_URI"],
-        config["DATAGEN_CLONE_PREFIX"],
-        job.tipo_oracle if job.tipo_oracle is not None else "derivado do lote",
-        job.dry_run,
-    )
-
     spark = create_spark_session(f"DataGenEngorda_{profile.name}")
     try:
         specs_uri = job.specs_uri or config["DATAGEN_SPECS_URI"]
+        planned_artifact = None
+        reservation = None
+        num_ifs = list(job.num_ifs) if job.num_ifs is not None else None
+        n_instrumentos = job.n_instrumentos
+        fator_k = job.fator_k
+        seed = job.seed
+        engorda_ts = job.engorda_ts
+        controle_operacional_date = job.controle_operacional_date
+        tipo_oracle = job.tipo_oracle
+        if job.phase == "materialize":
+            planned_artifact = _validate_plan_artifact(
+                _read_json_artifact(spark, job.plan_uri)
+            )
+            reservation = _read_json_artifact(spark, job.reservation_uri)
+            if planned_artifact["product"] != profile.name:
+                raise ValueError(
+                    f"produto do plano ({planned_artifact['product']}) diverge de "
+                    f"--produto ({profile.name})"
+                )
+            expected_paths = {
+                "raw_uri": _area(
+                    config["DATAGEN_RAW_BASE_URI"],
+                    config.get("DATAGEN_RAW_PREFIX"),
+                ),
+                "output_uri": clone_base_path(config),
+                "specs_uri": specs_uri,
+                "faltantes_uri": job.faltantes_parquet,
+            }
+            for field_name, actual in expected_paths.items():
+                if planned_artifact[field_name] != actual:
+                    raise ValueError(
+                        f"{field_name} resolvido ({actual}) diverge do plano "
+                        f"({planned_artifact[field_name]})"
+                    )
+            num_ifs = list(planned_artifact["selected_num_ifs"])
+            n_instrumentos = None
+            fator_k = planned_artifact["fator_k"]
+            seed = planned_artifact["seed"]
+            engorda_ts = datetime.fromisoformat(
+                planned_artifact["engorda_timestamp"]
+            )
+            control_text = planned_artifact["controle_operacional_date"]
+            controle_operacional_date = (
+                date.fromisoformat(control_text) if control_text else None
+            )
+            planned_type = planned_artifact["cod_if"]["oracle_type"]
+            if tipo_oracle is not None and tipo_oracle != planned_type:
+                raise ValueError("--tipo-oracle diverge do tipo congelado no plano")
+            tipo_oracle = planned_type
+
+        logger.info(
+            "Job phase=%s produto=%s query=%s specs=%s destino=%s "
+            "tipo_oracle=%s dry_run=%s",
+            job.phase,
+            profile.name,
+            job.query_num_if_path or profile.query_filename,
+            specs_uri,
+            clone_base_path(config),
+            tipo_oracle if tipo_oracle is not None else "derivado do lote",
+            job.dry_run,
+        )
         spec = load_specs(spark, specs_uri)
         return executa_clonagem(
             spark, config, spec,
             product_profile=profile,
             meu_numero_prefix=job.meu_numero_prefix,
-            num_ifs=list(job.num_ifs) if job.num_ifs is not None else None,
-            n_instrumentos=job.n_instrumentos,
-            fator_k=job.fator_k,
-            seed=job.seed,
+            num_ifs=num_ifs,
+            n_instrumentos=n_instrumentos,
+            fator_k=fator_k,
+            seed=seed,
             query_num_if_path=job.query_num_if_path,
             pk_offset=job.pk_offset,
             pk_safety_band=job.pk_safety_band,
@@ -6671,8 +7130,8 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
             offset_num_if=job.offset_num_if,
             tratar_como_static=set(job.tratar_como_static),
             max_passadas=job.max_passadas,
-            engorda_ts=job.engorda_ts,
-            controle_operacional_date=job.controle_operacional_date,
+            engorda_ts=engorda_ts,
+            controle_operacional_date=controle_operacional_date,
             prazo_vencimento_dias=job.prazo_vencimento_dias,
             faltantes_arg=job.faltantes_arg,
             faltantes_parquet=job.faltantes_parquet,
@@ -6681,8 +7140,13 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
                 profile.integrity.nullify_mapping(), job.anular_cols
             ),
             oracle_code_batch_size=job.oracle_code_batch_size,
-            tipo_oracle=job.tipo_oracle,
+            tipo_oracle=tipo_oracle,
             dry_run=job.dry_run,
+            phase=job.phase,
+            plan_uri=job.plan_uri,
+            planned_artifact=planned_artifact,
+            reservation=reservation,
+            specs_uri=specs_uri,
         )
     finally:
         spark.stop()
@@ -6765,12 +7229,17 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                     "(synthesize-and-remap), dirigido por query SQL, "
                     "spec_config.json, produto e parâmetros.")
     parser.add_argument(
+        "--phase", choices=ENGORDA_PHASES, default="all",
+        help="all mantém o fluxo atual; plan grava seleção/contagens; "
+             "materialize consome plano e reserva sem sortear novamente.",
+    )
+    parser.add_argument(
         "--produto", required=True, type=_parse_produto,
         help="Produto que seleciona a query no catálogo SQL, as tabelas "
              "engordáveis no spec único e o default de --clone-prefix "
              f"({DEFAULT_CLONE_PREFIX}/<produto>).",
     )
-    grupo = parser.add_mutually_exclusive_group(required=True)
+    grupo = parser.add_mutually_exclusive_group(required=False)
     grupo.add_argument("--num-ifs", type=_parse_num_ifs, default=None,
                        help="Lista explícita de NUM_IF (ex.: 123,456). Aceita 1 só.")
     grupo.add_argument("--n-instrumentos", type=positive_int, default=None,
@@ -6873,8 +7342,38 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--specs", default=None,
                         help="Override de DATAGEN_SPECS_URI (specs.json único). "
                              "É o spec que DEFINE quais tabelas são engordadas: "
-                             "as não-static presentes nele.")
-    return parser.parse_args(argv)
+                              "as não-static presentes nele.")
+    parser.add_argument(
+        "--plan-uri", default=None,
+        help="JSON do plano: destino em phase=plan; entrada em materialize.",
+    )
+    parser.add_argument(
+        "--reservation-uri", default=None,
+        help="JSON de reserva de PK/COD_OPERACAO/meu-número em materialize.",
+    )
+    parser.add_argument(
+        "--raw-uri", default=None,
+        help="Override exato da raiz RAW; senão usa DATAGEN_RAW_BASE_URI/prefixo.",
+    )
+    parser.add_argument(
+        "--output-uri", default=None,
+        help="Override exato do destino publicado; senão usa as envs atuais.",
+    )
+    args = parser.parse_args(argv)
+    has_selection = args.num_ifs is not None or args.n_instrumentos is not None
+    if args.phase == "materialize":
+        if has_selection:
+            parser.error("--phase materialize não aceita --num-ifs/--n-instrumentos")
+        if not args.plan_uri or not args.reservation_uri:
+            parser.error(
+                "--phase materialize exige --plan-uri e --reservation-uri"
+            )
+    else:
+        if not has_selection:
+            parser.error("informe --num-ifs ou --n-instrumentos")
+        if args.phase == "plan" and not args.plan_uri:
+            parser.error("--phase plan exige --plan-uri")
+    return args
 
 
 def _merge_anular_cols(base: Mapping[str, Sequence[str]],
@@ -6899,8 +7398,8 @@ def _merge_anular_cols(base: Mapping[str, Sequence[str]],
     return {t: tuple(cols) for t, cols in merged.items()}
 
 
-def main() -> None:
-    args = parse_arguments()
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    args = parse_arguments(argv)
     executar_job(EngordaJob(
         produto=args.produto,
         num_ifs=tuple(args.num_ifs) if args.num_ifs is not None else None,
@@ -6934,6 +7433,11 @@ def main() -> None:
         dry_run=args.dry_run,
         specs_uri=args.specs,
         clone_prefix=args.clone_prefix,
+        phase=args.phase,
+        plan_uri=args.plan_uri,
+        reservation_uri=args.reservation_uri,
+        raw_uri=args.raw_uri,
+        output_uri=args.output_uri,
     ))
 
 

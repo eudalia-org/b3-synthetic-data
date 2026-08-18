@@ -9110,7 +9110,8 @@ def emit_report(spark: SparkSession, findings: List[Finding],
                  profile: ValidationProfile, resolved_input: str,
                  table_inventory: List[str], partial_reasons: List[str],
                  baseline_identity: Optional[dict] = None,
-                 runtime_identity: Optional[dict] = None) -> int:
+                 runtime_identity: Optional[dict] = None,
+                 allow_partial: bool = False) -> int:
     fail_level = _SEV_ORDER[fail_severity.upper()]
     failing = [f for f in findings if (not f.passed) and _SEV_ORDER[f.severity] >= fail_level]
 
@@ -9205,9 +9206,7 @@ def emit_report(spark: SparkSession, findings: List[Finding],
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not write report to %s: %s", report_path, exc)
 
-    # A PARTIAL run is not a pass: return non-zero so CI cannot treat incomplete
-    # coverage as green.
-    return 0 if verdict == "PASS" else 1
+    return 0 if verdict == "PASS" or (allow_partial and verdict == "PARTIAL") else 1
 
 
 # ---------------------------------------------------------------------------
@@ -9246,6 +9245,8 @@ def parse_args() -> argparse.Namespace:
                         "OPERACAO:DADO_OPERACAO:LANCAMENTO = 1:2:1 (default 5.0).")
     p.add_argument("--fail-severity", default="error", choices=["error", "warn"],
                    help="Minimum severity that makes the run exit non-zero.")
+    p.add_argument("--allow-partial", action="store_true",
+                   help="Exit zero for a PARTIAL verdict. FAIL still exits non-zero.")
     p.add_argument("--sample-size", type=int, default=20, help="Offending keys sampled per check.")
     p.add_argument("--validate-against", default="union", choices=["synthetic", "union"],
                    help="Resolve FK parents only within the synthetic output, "
@@ -9673,7 +9674,7 @@ def main() -> None:
         lambda: emit_report(
             spark, findings, args.report_path, args.fail_severity, profile,
             cfg.synthetic_base, list(tables), partial_reasons,
-            baseline_identity, runtime_identity,
+            baseline_identity, runtime_identity, args.allow_partial,
         ),
     )
     logger.info("[PERF] complete run elapsed=%.1fs", perf_counter() - run_started)

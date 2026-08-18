@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -133,7 +134,14 @@ def test_validator_cli_requires_product(monkeypatch):
     monkeypatch.setattr(
         sys, "argv", ["validate_products.py", "--product", "rdb"]
     )
-    assert validator.parse_args().product == "rdb"
+    args = validator.parse_args()
+    assert args.product == "rdb"
+    assert not args.allow_partial
+
+    monkeypatch.setattr(
+        sys, "argv", ["validate_products.py", "--product", "rdb", "--allow-partial"]
+    )
+    assert validator.parse_args().allow_partial
 
 
 def test_identity_rejects_foreign_and_mixed_root_types(spark):
@@ -262,7 +270,7 @@ def test_historico_pu_curva_without_oracle_pk_is_warn_only(spark):
     assert by_table["OTHER_TABLE"].severity == validator.SEV_ERROR
 
 
-def test_report_exit_codes_distinguish_pass_partial_and_fail(capsys):
+def test_report_exit_codes_distinguish_pass_partial_and_fail(capsys, tmp_path):
     simplificado = validator.VALIDATION_PROFILES["cdb_simplificado"]
     rdb = validator.VALIDATION_PROFILES["rdb"]
     failure = validator.Finding(
@@ -275,11 +283,27 @@ def test_report_exit_codes_distinguish_pass_partial_and_fail(capsys):
 
     assert validator.emit_report(None, [], None, "error", simplificado, "/input", [], []) == 0
     assert validator.emit_report(None, [], None, "error", rdb, "/input", [], []) == 1
+    report_path = tmp_path / "partial.json"
+    assert validator.emit_report(
+        None, [], str(report_path), "error", rdb, "/input", [], [], allow_partial=True
+    ) == 0
+    report = json.loads(report_path.read_text())
+    assert report["schema_version"] == 2
+    assert report["verdict"] == "PARTIAL"
+    assert report["failed"] is False
     assert validator.emit_report(
         None, [unavailable], None, "error", simplificado, "/input", [], []
     ) == 1
     assert validator.emit_report(
-        None, [failure], None, "error", simplificado, "/input", [], []
+        None, [unavailable], None, "error", simplificado, "/input", [], [],
+        allow_partial=True,
+    ) == 0
+    assert validator.emit_report(
+        None, [unavailable], None, "warn", simplificado, "/input", [], [],
+        allow_partial=True,
+    ) == 1
+    assert validator.emit_report(
+        None, [failure], None, "error", simplificado, "/input", [], [], allow_partial=True
     ) == 1
     output = capsys.readouterr().out
     assert "VERDICT=PASS" in output

@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "environment": "qab",
+  "compartment_id": "ocid1.compartment.oc1..replace-me",
+  "artifact_root": "oci://synthetic-data@namespace/pipeline-runs",
+  "manifest_root": "oci://synthetic-data@namespace/pipeline-manifests",
+  "applications": {
+    "engorda_plan": "ocid1.dataflowapplication.oc1..replace-engorda-plan",
+    "engorda_materialize": "ocid1.dataflowapplication.oc1..replace-engorda-materialize",
+    "validate": "ocid1.dataflowapplication.oc1..replace-validator"
+  },
+  "reservations": {
+    "lease_uri": "oci://synthetic-data@namespace/pipeline-control/qab/lease.json",
+    "ledger_uri": "oci://synthetic-data@namespace/pipeline-control/qab/reservations.json"
+  },
+  "products": {
+    "cdb_simplificado": {"capabilities": ["engorda", "validate"]},
+    "cdb_resgate": {"capabilities": ["engorda", "validate"]},
+    "cdb_escalonamento": {"capabilities": ["engorda", "validate"]},
+    "rdb_inclusao": {"capabilities": ["engorda", "validate"]},
+    "rdb_resgate": {"capabilities": ["engorda", "validate"]},
+    "lci": {"capabilities": ["engorda", "validate"]},
+    "lca": {"capabilities": ["engorda", "validate"]}
+  },
+  "stage_defaults": {
+    "engorda": {
+      "n_instrumentos": 100,
+      "fator_k": 1,
+      "seed": 42,
+      "specs": "oci://synthetic-data@namespace/contracts/specs.json"
+    },
+    "validate": {
+      "fail_severity": "error",
+      "validate_against": "union"
+    }
+  }
+}

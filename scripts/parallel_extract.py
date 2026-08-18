@@ -12,9 +12,12 @@ import logging
 import os
 import re
 import shlex
-import subprocess
 import sys
 import time
+
+import oci_dataflow
+
+subprocess = oci_dataflow.subprocess  # compatibility seam for callers patching subprocess.run
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("parallel_extract")
@@ -162,12 +165,7 @@ def _opts_from_args(a) -> dict:
 
 def oci_auth_flags(opts) -> list:
     """Global OCI CLI auth flags to append to every `oci` invocation (only those set)."""
-    flags = []
-    for key, flag in (("profile", "--profile"), ("config_file", "--config-file"),
-                      ("auth", "--auth"), ("cert_bundle", "--cert-bundle")):
-        if opts.get(key):
-            flags += [flag, opts[key]]
-    return flags
+    return oci_dataflow.oci_auth_flags(opts)
 
 
 def build_plan(weights: dict, num_buckets: int, opts: dict, provenance: dict) -> dict:
@@ -225,22 +223,17 @@ def main():
         sys.exit(1)
 
 
-_PENDING = {"ACCEPTED", "IN_PROGRESS", "CANCELING", "STOPPING"}
-_SUCCESS = {"SUCCEEDED"}
-_FAILURE = {"FAILED", "CANCELED", "STOPPED"}
+_PENDING = oci_dataflow.PENDING_STATES
+_SUCCESS = oci_dataflow.SUCCESS_STATES
+_FAILURE = oci_dataflow.FAILURE_STATES
 
 
 def classify_state(state: str) -> str:
-    if state in _SUCCESS:
-        return "success"
-    if state in _FAILURE:
-        return "failure"
-    return "pending"        # unknown states keep polling (logged by caller)
+    return oci_dataflow.classify_state(state)
 
 
 def _oci_json(cmd: list) -> dict:
-    out = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    return json.loads(out.stdout) if out.stdout.strip() else {}
+    return oci_dataflow.run_json(cmd)
 
 
 def submit_run(bucket, index, opts) -> str:
@@ -250,9 +243,22 @@ def submit_run(bucket, index, opts) -> str:
 
 
 def poll_run(run_id: str, opts=None) -> str:
-    cmd = ["oci", "data-flow", "run", "get", "--run-id", run_id] + oci_auth_flags(opts or {})
+    cmd = build_run_get_command(run_id, opts)
     data = _oci_json(cmd)
     return data["data"]["lifecycle-state"]
+
+
+def build_run_get_command(run_id: str, opts=None) -> list:
+    return oci_dataflow.build_run_get_command(run_id) + oci_auth_flags(opts or {})
+
+
+def build_run_cancel_command(run_id: str, opts=None) -> list:
+    return oci_dataflow.build_run_cancel_command(run_id) + oci_auth_flags(opts or {})
+
+
+def cancel_run(run_id: str, opts=None) -> str:
+    data = _oci_json(build_run_cancel_command(run_id, opts))
+    return data.get("data", {}).get("lifecycle-state", "CANCELING")
 
 
 def run_buckets(buckets, opts, submit=submit_run, poll=poll_run, _after_terminal=None) -> list:
@@ -448,31 +454,18 @@ def resolve_sizes(keys, connect=connect_source, allow_fallback=False):
 
 
 # Confirmed against `oci data-flow run create --help` (Task 8, Step 1).
-RUN_ARGS_FLAG = "--arguments"        # JSON array of application arguments
+RUN_ARGS_FLAG = oci_dataflow.RUN_ARGS_FLAG
 
 
 def build_run_create_command(bucket: list, index: int, opts: dict) -> list:
     """Build the argv for `oci data-flow run create` for one bucket. Pure."""
     tables = ",".join(f"{owner}.{name}" for owner, name in bucket)
     arguments = ["--tables", tables, *opts["passthrough"]]
-    cmd = [
-        "oci", "data-flow", "run", "create",
-        "--application-id", opts["application_id"],
-        "--compartment-id", opts["compartment_id"],
-        "--display-name", f"extract-bucket-{index}",
-        RUN_ARGS_FLAG, json.dumps(arguments),
-    ]
-    if opts.get("num_executors"):
-        cmd += ["--num-executors", str(opts["num_executors"])]
-    if opts.get("driver_shape"):
-        cmd += ["--driver-shape", opts["driver_shape"]]
-    if opts.get("executor_shape"):
-        cmd += ["--executor-shape", opts["executor_shape"]]
-    if opts.get("driver_shape_config"):
-        cmd += ["--driver-shape-config", opts["driver_shape_config"]]
-    if opts.get("executor_shape_config"):
-        cmd += ["--executor-shape-config", opts["executor_shape_config"]]
-    return cmd + oci_auth_flags(opts)
+    adapter_opts = {key: value for key, value in opts.items()
+                    if key not in {"profile", "config_file", "auth", "cert_bundle"}}
+    command = oci_dataflow.build_run_create_command(
+        arguments, f"extract-bucket-{index}", adapter_opts)
+    return command + oci_auth_flags(opts)
 
 
 def bin_pack(weights: dict, num_buckets: int) -> list:

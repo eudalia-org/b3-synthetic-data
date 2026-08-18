@@ -312,6 +312,13 @@ class TestOciAuthFlags:
 
 
 class TestAuthFlagsInCommands:
+    def test_create_preserves_auth_flags_monkeypatch_seam(self, monkeypatch):
+        monkeypatch.setattr(P, "oci_auth_flags", lambda opts: ["--profile", "PATCHED"])
+        opts = dict(application_id="app", compartment_id="cmp", passthrough=[])
+
+        assert P.build_run_create_command([("S", "A")], 0, opts)[-2:] == [
+            "--profile", "PATCHED"]
+
     def test_run_create_includes_auth_flags(self):
         opts = dict(application_id="app", compartment_id="cmp", num_executors=2,
                     driver_shape="d", executor_shape="e", driver_shape_config=None,
@@ -331,6 +338,19 @@ class TestAuthFlagsInCommands:
         P.poll_run("run-x", dict(profile="DEV"))
         assert captured["cmd"][:5] == ["oci", "data-flow", "run", "get", "--run-id"]
         assert captured["cmd"][-2:] == ["--profile", "DEV"]
+
+    def test_cancel_run_preserves_oci_json_monkeypatch_seam(self, monkeypatch):
+        captured = {}
+
+        def fake_oci_json(cmd):
+            captured["cmd"] = cmd
+            return {"data": {"lifecycle-state": "CANCELING"}}
+
+        monkeypatch.setattr(P, "_oci_json", fake_oci_json)
+
+        assert P.cancel_run("run-x", dict(profile="DEV")) == "CANCELING"
+        assert captured["cmd"] == [
+            "oci", "data-flow", "run", "cancel", "--run-id", "run-x", "--profile", "DEV"]
 
 
 class TestDefaultOwner:

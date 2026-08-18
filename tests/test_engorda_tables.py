@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import sys
 from datetime import date, datetime, timedelta
@@ -5,6 +6,7 @@ from datetime import date, datetime, timedelta
 import pytest
 
 from datagen import engorda_tables
+from scripts import run_pipeline
 
 
 def test_module_imports():
@@ -13,6 +15,277 @@ def test_module_imports():
         "DATAGEN_SYNTHETIC_BASE_URI",
         "DATAGEN_SPECS_URI",
     )
+
+
+def test_rdb_inclusao_enables_observed_integrity_checks():
+    profile = engorda_tables.get_product_profile("rdb_inclusao")
+
+    assert profile.integrity.invalid_num_if_checks == frozenset({
+        engorda_tables.CHECK_RESGATE_COVERAGE,
+        engorda_tables.CHECK_RESGATE_PARENT,
+        engorda_tables.CHECK_RESGATE_VALUES,
+        engorda_tables.CHECK_DATE_ORDER,
+    })
+
+
+class TestEngordaPhaseCli:
+    def test_pipeline_argv_matches_real_engorda_parser(self):
+        paths = {
+            "selection_plan": "oci://bucket@ns/run/plan.json",
+            "reservations": "oci://bucket@ns/run/reservation.json",
+            "synthetic": "oci://bucket@ns/run/synthetic/cdb_resgate",
+        }
+        options = {"n_instrumentos": 10, "fator_k": 2, "seed": 7}
+
+        planned = engorda_tables.parse_arguments(
+            run_pipeline.build_engorda_plan_argv(
+                "cdb_resgate",
+                "oci://bucket@ns/run/raw",
+                "oci://bucket@ns/run/faltantes",
+                paths,
+                options,
+            )
+        )
+        materialized = engorda_tables.parse_arguments(
+            run_pipeline.build_engorda_materialize_argv(
+                "cdb_resgate",
+                "oci://bucket@ns/run/raw",
+                "oci://bucket@ns/run/faltantes",
+                paths,
+                options,
+            )
+        )
+
+        assert planned.phase == "plan"
+        assert planned.plan_uri == paths["selection_plan"]
+        assert materialized.phase == "materialize"
+        assert materialized.reservation_uri == paths["reservations"]
+        assert materialized.output_uri == paths["synthetic"]
+
+    def test_all_is_default_and_keeps_selection_contract(self):
+        args = engorda_tables.parse_arguments([
+            "--produto", "cdb_simplificado",
+            "--num-ifs", "123",
+            "--meu-numero-prefix", "321",
+        ])
+
+        assert args.phase == "all"
+        assert args.num_ifs == [123]
+        assert args.raw_uri is None
+        assert args.output_uri is None
+
+    def test_materialize_uses_artifacts_and_rejects_resampling(self):
+        args = engorda_tables.parse_arguments([
+            "--phase", "materialize",
+            "--produto", "cdb_simplificado",
+            "--plan-uri", "oci://bucket@ns/run/plan",
+            "--reservation-uri", "oci://bucket@ns/run/reservation",
+            "--raw-uri", "oci://raw@ns/run/RAW",
+            "--output-uri", "oci://out@ns/run/synthetic/cdb",
+        ])
+
+        assert args.num_ifs is None
+        assert args.n_instrumentos is None
+        assert args.raw_uri == "oci://raw@ns/run/RAW"
+        assert args.output_uri == "oci://out@ns/run/synthetic/cdb"
+
+        with pytest.raises(SystemExit):
+            engorda_tables.parse_arguments([
+                "--phase", "materialize",
+                "--produto", "cdb_simplificado",
+                "--plan-uri", "plan.json",
+                "--reservation-uri", "reservation.json",
+                "--num-ifs", "123",
+            ])
+
+    def test_main_forwards_public_artifact_contract(self, monkeypatch):
+        captured = []
+        monkeypatch.setattr(
+            engorda_tables, "executar_job", lambda job: captured.append(job)
+        )
+
+        engorda_tables.main([
+            "--phase", "plan",
+            "--produto", "cdb_simplificado",
+            "--n-instrumentos", "2",
+            "--plan-uri", "plan.json",
+            "--raw-uri", "oci://raw@ns/exact",
+            "--output-uri", "oci://out@ns/exact",
+        ])
+
+        assert captured == [engorda_tables.EngordaJob(
+            produto="cdb_simplificado",
+            n_instrumentos=2,
+            phase="plan",
+            plan_uri="plan.json",
+            raw_uri="oci://raw@ns/exact",
+            output_uri="oci://out@ns/exact",
+        )]
+
+
+class TestEngordaArtifacts:
+    @staticmethod
+    def _plan():
+        body = {
+            "artifact_type": engorda_tables.ENGORDA_PLAN_ARTIFACT,
+            "schema_version": engorda_tables.ENGORDA_ARTIFACT_SCHEMA_VERSION,
+            "product": "cdb_simplificado",
+            "selected_num_ifs": [10],
+            "fator_k": 2,
+            "seed": 42,
+            "engorda_timestamp": "2026-08-18T10:00:00",
+            "controle_operacional_date": "2026-08-18",
+            "raw_uri": "oci://raw@ns/run/RAW",
+            "output_uri": "oci://out@ns/run/synthetic/cdb",
+            "specs_uri": "oci://cfg@ns/spec.json",
+            "faltantes_uri": "oci://cfg@ns/faltantes",
+            "tables": {
+                "INSTRUMENTO_FINANCEIRO": {
+                    "source_count": 1,
+                    "synthetic_count": 2,
+                    "pk": {
+                        "rule": "OFFSET_PROPRIO",
+                        "count_demand": 2,
+                        "step": 1,
+                        "minimum_start": 101,
+                    },
+                },
+            },
+            "cod_if": {"count": 2, "oracle_type": 49},
+            "cod_operacao": {"count": 2},
+            "meu_numero": {"ordinal_count_demand": 3},
+        }
+        return {**body, "plan_id": engorda_tables._plan_id(body)}
+
+    def test_local_json_is_deterministic_and_tamper_evident(self, tmp_path):
+        path = tmp_path / "plan.json"
+        plan = self._plan()
+
+        engorda_tables._write_json_artifact(object(), str(path), plan)
+
+        assert engorda_tables._read_json_artifact(object(), str(path)) == plan
+        assert list(json.loads(path.read_text()).keys()) == sorted(plan)
+        tampered = dict(plan, fator_k=3)
+        with pytest.raises(ValueError, match="plan_id"):
+            engorda_tables._validate_plan_artifact(tampered)
+
+    def test_plan_builder_freezes_exact_public_demands(self):
+        class CountFrame:
+            def __init__(self, count):
+                self._count = count
+
+            def count(self):
+                return self._count
+
+        profile = engorda_tables.get_product_profile("cdb_simplificado")
+        profile = dataclasses.replace(
+            profile,
+            business_keys=dataclasses.replace(
+                profile.business_keys, operation=None
+            ),
+        )
+        plan = engorda_tables._build_engorda_plan(
+            config={
+                "DATAGEN_RAW_BASE_URI": "oci://raw@ns/run/RAW",
+                "DATAGEN_RAW_PREFIX": "",
+                "DATAGEN_SYNTHETIC_BASE_URI": "oci://out@ns",
+                "DATAGEN_CLONE_PREFIX": "run/synthetic/cdb",
+            },
+            specs_uri="oci://cfg@ns/spec.json",
+            product_profile=profile,
+            valores=[20, 10],
+            fator_k=3,
+            seed=7,
+            engorda_ts=datetime(2026, 8, 18, 10, 11, 12, 123456),
+            controle_operacional_date=date(2026, 8, 18),
+            tipo_derivado=49,
+            planos={
+                "INSTRUMENTO_FINANCEIRO": engorda_tables.PlanoTabela(
+                    name="INSTRUMENTO_FINANCEIRO",
+                    pk_cols=("NUM_IF",),
+                    pk_regra="OFFSET_PROPRIO",
+                    pk_start=1000,
+                    pk_passo=10,
+                ),
+            },
+            lotes={"INSTRUMENTO_FINANCEIRO": CountFrame(2)},
+            faltantes_uri="oci://cfg@ns/faltantes",
+        )
+
+        assert plan["selected_num_ifs"] == [10, 20]
+        assert plan["engorda_timestamp"] == "2026-08-18T10:11:12.123456"
+        assert plan["tables"]["INSTRUMENTO_FINANCEIRO"] == {
+            "source_count": 2,
+            "synthetic_count": 6,
+            "pk": {
+                "rule": "OFFSET_PROPRIO",
+                "count_demand": 6,
+                "step": 10,
+                "minimum_start": 1000,
+            },
+        }
+        assert plan["cod_if"] == {"count": 6, "oracle_type": 49}
+        assert plan["cod_operacao"] == {"count": 0}
+        assert plan["meu_numero"] == {"ordinal_count_demand": 0}
+        assert engorda_tables._validate_plan_artifact(plan) == plan
+
+    def test_reservation_links_exact_counts_and_keeps_oracle_operation_allocator(self):
+        plan = self._plan()
+        reservation = {
+            "artifact_type": engorda_tables.ENGORDA_RESERVATION_ARTIFACT,
+            "schema_version": engorda_tables.ENGORDA_ARTIFACT_SCHEMA_VERSION,
+            "plan_id": plan["plan_id"],
+            "product": "cdb_simplificado",
+            "table_pks": {
+                "INSTRUMENTO_FINANCEIRO": {
+                    "start": 200,
+                    "end": 201,
+                    "count": 2,
+                    "step": 1,
+                },
+            },
+            "cod_operacao": {"strategy": "oracle_allocator", "count": 2},
+            "meu_numero": {
+                "prefix": "321",
+                "start": 50,
+                "end": 52,
+                "count": 3,
+            },
+        }
+
+        validated = engorda_tables._validate_reservation_artifact(
+            plan, reservation
+        )
+        plano = engorda_tables.PlanoTabela(
+            name="INSTRUMENTO_FINANCEIRO",
+            pk_cols=("NUM_IF",),
+            pk_regra="OFFSET_PROPRIO",
+            pk_start=101,
+        )
+        engorda_tables._inject_reserved_pk_starts(
+            {"INSTRUMENTO_FINANCEIRO": plano}, validated
+        )
+
+        assert plano.pk_start == 200
+        assert validated["cod_operacao"] == {
+            "strategy": "oracle_allocator", "count": 2,
+        }
+
+    def test_reservation_rejects_wrong_plan_or_count(self):
+        plan = self._plan()
+        reservation = {
+            "artifact_type": engorda_tables.ENGORDA_RESERVATION_ARTIFACT,
+            "schema_version": engorda_tables.ENGORDA_ARTIFACT_SCHEMA_VERSION,
+            "plan_id": "other",
+            "product": "cdb_simplificado",
+            "table_pks": {},
+            "cod_operacao": {"strategy": "oracle_allocator", "count": 2},
+            "meu_numero": {
+                "prefix": "321", "start": 1, "end": 3, "count": 3,
+            },
+        }
+        with pytest.raises(ValueError, match="plan_id"):
+            engorda_tables._validate_reservation_artifact(plan, reservation)
 
 
 class TestPaths:
@@ -67,6 +340,25 @@ class TestGetEngordaEnv:
             monkeypatch.delenv(name, raising=False)
         with pytest.raises(SystemExit):
             engorda_tables.get_engorda_env()
+
+    def test_exact_raw_and_output_overrides_do_not_require_base_envs(
+        self, monkeypatch
+    ):
+        monkeypatch.delenv("DATAGEN_RAW_BASE_URI", raising=False)
+        monkeypatch.delenv("DATAGEN_SYNTHETIC_BASE_URI", raising=False)
+        monkeypatch.setenv("DATAGEN_SPECS_URI", "oci://cfg@ns/spec.json")
+        monkeypatch.setenv("DATAGEN_RAW_PREFIX", "ignored/raw")
+
+        config = engorda_tables.get_engorda_env(
+            raw_uri_override="oci://raw@ns/run/RAW/",
+            output_uri_override="oci://out@ns/run/synthetic/cdb/",
+        )
+
+        assert config["DATAGEN_RAW_BASE_URI"] == "oci://raw@ns/run/RAW"
+        assert config["DATAGEN_RAW_PREFIX"] == ""
+        assert engorda_tables.clone_base_path(config) == (
+            "oci://out@ns/run/synthetic/cdb"
+        )
 
 
 class TestNormalizeSpecs:
@@ -681,6 +973,36 @@ def spark():
     session.stop()
 
 
+def test_meu_numero_uses_reserved_ordinal_interval(spark):
+    operation = spark.createDataFrame(
+        [(
+            1,
+            datetime(2020, 1, 1),
+            "100",
+            "100",
+            "old-p1",
+            "old-p2",
+            7,
+        )],
+        "NUM_ID_OPERACAO long, DAT_OPERACAO timestamp, "
+        "NUM_CONTA_PARTICIPANTE_P1 string, NUM_CONTA_PARTICIPANTE_P2 string, "
+        "NUM_CONTROLE_LANCAMENTO_P1 string, "
+        "NUM_CONTROLE_LANCAMENTO_P2 string, "
+        "NUM_ID_TIPO_OPER_OBJETO_SERV long",
+    )
+
+    row = engorda_tables._generate_meu_numeros(
+        operation,
+        "321",
+        date(2026, 8, 18),
+        ordinal_start=50,
+        ordinal_end=51,
+    ).first()
+
+    assert row.NUM_CONTROLE_LANCAMENTO_P1 == "3210000050"
+    assert row.NUM_CONTROLE_LANCAMENTO_P2 == "3210000051"
+
+
 class TestEngordaDateRules:
     ENGORDA_TS = datetime(2026, 8, 8, 10, 19, 6, 340_000)
     OPERATIONAL_DATE = date(2026, 5, 8)
@@ -840,6 +1162,22 @@ class TestEngordaDateRules:
 
 
 class TestContiguousRowId:
+    def test_reserved_pk_mapping_is_stable_across_input_partitions(self, spark):
+        schema = "ID long, __clone_k int"
+        rows = [(3, 2), (1, 1), (2, 2), (3, 1), (1, 2), (2, 1)]
+        plan = engorda_tables.PlanoTabela(
+            name="T", pk_cols=("ID",), pk_regra="OFFSET_PROPRIO", pk_start=100
+        )
+
+        def mapped(partitions):
+            frame = spark.createDataFrame(rows, schema).repartition(partitions)
+            return {
+                (row.old_ID, row[engorda_tables.K_COL]): row.new_ID
+                for row in engorda_tables._monta_mapeamento_pk(frame, plan, {}).collect()
+            }
+
+        assert mapped(2) == mapped(5)
+
     def test_ids_are_contiguous_and_unique_across_partitions(self, spark):
         df = spark.range(0, 1000).repartition(7).withColumnRenamed("id", "val")
         out = engorda_tables._with_contiguous_row_id(df, "rid")
