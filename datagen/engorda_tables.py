@@ -101,9 +101,8 @@ USO RECOMENDADO:
 CLI DIRETA (OCI Data Flow — mesmas envs do engorda_tables.py):
     envs: DATAGEN_RAW_BASE_URI, DATAGEN_SPECS_URI, DATAGEN_SYNTHETIC_BASE_URI,
           DATAGEN_SOURCE_JDBC_URL, DATAGEN_SOURCE_DB_USER,
-          DATAGEN_SOURCE_DB_PASSWORD (nomes legados: apontam para o Oracle
-          receptor; no --dry-run elas só são dispensadas para produtos sem
-          validações de integridade no Oracle alvo)
+          DATAGEN_SOURCE_DB_PASSWORD (usadas apenas fora do --dry-run para data
+          operacional, alocação de códigos e preflight de meu-número)
           (+ opcionais DATAGEN_RAW_PREFIX, DATAGEN_SYNTHETIC_PREFIX,
            DATAGEN_CLONE_PREFIX — default derivado do nome do produto)
     argumentos:
@@ -131,8 +130,8 @@ CLI DIRETA (OCI Data Flow — mesmas envs do engorda_tables.py):
                                     # itens 3/4: poda NUM_IF por padrão; para a
                                     #   allowlist nullable, anula só sintéticos casados
       --faltantes-parquet oci://.../faltantes  # idem, TABELA/COLUNA/VALOR (listas grandes)
-      # Checks de TOS/conta/FK consultam automaticamente o Oracle receptor
-      # configurado em DATAGEN_SOURCE_JDBC_*.
+      # Checks de TOS/conta usam somente snapshots RAW; nenhuma consulta Oracle
+      # é feita por esses checks. Drift do destino continua em --faltantes-*.
       --anular-cols 'TAB.COL,COL2;...'  # item 2 (extra): colunas nullable a anular
 
 REGRAS DO SCHEMA:
@@ -233,10 +232,11 @@ VALID_CONDITION_DATE_STRATEGIES = frozenset({
     CONDITION_DATE_STRATEGY_SHIFT_BY_EMISSION,
 })
 
-TARGET_LOOKUP_TOS_CDB = "TOS_REGISTRO_CDB_APROVADO"
-TARGET_LOOKUP_ACCOUNT_CDB = "CONTA_CDB_ELEGIVEL"
-TARGET_LOOKUP_NAME_COL = "LOOKUP"
-TARGET_LOOKUP_VALUE_COL = "VALOR"
+OFFLINE_LOOKUP_TOS_CDB_APPROVED = "TOS_REGISTRO_CDB_APROVADO"
+OFFLINE_LOOKUP_TOS_CDB_INVALID = "TOS_REGISTRO_CDB_INVALIDO"
+OFFLINE_LOOKUP_ACCOUNT_CDB = "CONTA_CDB_ELEGIVEL"
+OFFLINE_LOOKUP_NAME_COL = "LOOKUP"
+OFFLINE_LOOKUP_VALUE_COL = "VALOR"
 TARGET_SNAPSHOT_ID_COL = "SNAPSHOT_ID"
 
 REQUIRED_TABLES_BY_CHECK: Dict[str, Set[str]] = {
@@ -250,7 +250,7 @@ REQUIRED_TABLES_BY_CHECK: Dict[str, Set[str]] = {
         TABELA_RAIZ, "CONDICAO_IF", "RESGATE", "CONDICAO_RESGATE",
     },
     CHECK_ESCALONAMENTO_SOURCE_DATES: {
-        TABELA_RAIZ, "CONDICAO_IF", "TITULO",
+        TABELA_RAIZ, "CONDICAO_IF", "TITULO", "JUROS_FLUTUANTE",
     },
     CHECK_OPERATION_TOS_CDB: {TABELA_RAIZ, "OPERACAO"},
     CHECK_ACTIVE_ACCOUNT_CDB: {
@@ -402,7 +402,6 @@ MAPA_NUM_IF_TABLE = "MAPA_CLONE_NUM_IF"
 MAPA_COD_IF_TABLE = "MAPA_CLONE_COD_IF"
 MAPA_COD_OPERACAO_TABLE = "MAPA_CLONE_COD_OPERACAO"
 DEFAULT_ORACLE_CODE_BATCH_SIZE = 50_000
-ORACLE_TARGET_KEY_BATCH_SIZE = 900
 MAX_MEU_NUMERO_ORDINAL = 9_999_999
 MEU_PREFIX_PATTERN = re.compile(r"^[1-9][0-9]{2}$")
 PRODUTO_NOME_RE = re.compile(r"[a-z][a-z0-9_]*")
@@ -757,24 +756,34 @@ CONDITION_DATE_STRATEGY_BY_PRODUCT: Dict[str, str] = {
     "cdb_escalonamento": CONDITION_DATE_STRATEGY_SHIFT_BY_EMISSION,
 }
 
-TARGET_LOOKUPS_REQUIRED_BY_PRODUCT: Dict[str, frozenset[str]] = {
+OFFLINE_LOOKUPS_REQUIRED_BY_PRODUCT: Dict[str, frozenset[str]] = {
     "cdb_resgate": frozenset({
-        TARGET_LOOKUP_TOS_CDB,
-        TARGET_LOOKUP_ACCOUNT_CDB,
+        OFFLINE_LOOKUP_TOS_CDB_APPROVED,
+        OFFLINE_LOOKUP_TOS_CDB_INVALID,
+        OFFLINE_LOOKUP_ACCOUNT_CDB,
     }),
-    "cdb_escalonamento": frozenset({TARGET_LOOKUP_TOS_CDB}),
+    "cdb_escalonamento": frozenset({
+        OFFLINE_LOOKUP_TOS_CDB_APPROVED,
+        OFFLINE_LOOKUP_TOS_CDB_INVALID,
+    }),
 }
 
-TARGET_FK_COVERAGE_REQUIRED_BY_PRODUCT: Dict[
+OFFLINE_FK_COVERAGE_REQUIRED_BY_PRODUCT: Dict[
     str, frozenset[Tuple[str, str]]
 ] = {
-    "cdb_resgate": frozenset({
-        ("OPERACAO", "NUM_ID_CTX_MSG_P1"),
-    }),
     "rdb_resgate": frozenset({
         ("CARTEIRA_COMITENTE", "NUM_ID_ENTIDADE"),
         ("ESPECIFICACAO_COMITENTE", "NUM_ID_ENTIDADE"),
     }),
+}
+
+# Correcao independente do estado do destino. P1 e nullable no contrato; a
+# nulificacao fica restrita ao produto que apresentou o orphan e nao altera o
+# cdb_simplificado.
+NULLIFY_COLUMNS_BY_PRODUCT: Dict[str, Mapping[str, Sequence[str]]] = {
+    "cdb_resgate": {
+        "OPERACAO": ("NUM_ID_CTX_MSG_P1",),
+    },
 }
 
 
@@ -983,6 +992,22 @@ def _build_product_profile(
             )
             if column not in target:
                 target.append(column)
+    for raw_table, raw_columns in NULLIFY_COLUMNS_BY_PRODUCT.get(
+        produto, {}
+    ).items():
+        table = _normalize_rule_identifier(
+            raw_table,
+            f"NULLIFY_COLUMNS_BY_PRODUCT[{produto!r}]",
+            table=True,
+        )
+        target = normalized_nullify.setdefault(table, [])
+        for raw_column in raw_columns:
+            column = _normalize_rule_identifier(
+                raw_column,
+                f"NULLIFY_COLUMNS_BY_PRODUCT[{produto!r}][{table!r}]",
+            )
+            if column not in target:
+                target.append(column)
     nullify_columns = tuple(
         (table, tuple(columns))
         for table, columns in normalized_nullify.items()
@@ -1171,7 +1196,7 @@ def _validate_product_profile(profile: ProductProfile) -> None:
         protected_tables.update(REQUIRED_TABLES_BY_CHECK[check])
     protected_tables.update(
         table
-        for table, _ in TARGET_FK_COVERAGE_REQUIRED_BY_PRODUCT.get(
+        for table, _ in OFFLINE_FK_COVERAGE_REQUIRED_BY_PRODUCT.get(
             profile.name,
             frozenset(),
         )
@@ -1617,6 +1642,36 @@ def _null_efetivo_pred(df: DataFrame, col: str):
     return pred
 
 
+def _active_optional_dat_exclusao(df: DataFrame) -> DataFrame:
+    """Aplica a mesma atividade do validator quando DAT_EXCLUSAO existe."""
+    if "DAT_EXCLUSAO" not in df.columns:
+        return df
+    return df.where(_null_efetivo_pred(df, "DAT_EXCLUSAO"))
+
+
+def _validator_code_col(col):
+    """Normalizacao usada por validate_products._norm_code."""
+    return F.regexp_replace(F.trim(col.cast("string")), r"\.0$", "")
+
+
+def _schedule_active_pred(df: DataFrame):
+    """CONDICAO_RESGATE usa IND_EXCLUIDO; DAT_EXCLUSAO nao faz parte do contrato."""
+    if "IND_EXCLUIDO" not in df.columns:
+        return F.lit(True)
+    excluded = _validator_code_col(F.col("IND_EXCLUIDO")).isin("S", "Y", "1")
+    return F.coalesce(~excluded, F.lit(True))
+
+
+def _try_cast_column(reference: str, sql_type: str):
+    """TRY_CAST por nome, inclusive referencia qualificada, sem excecao ANSI."""
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", reference):
+        raise ValueError(f"referencia de coluna insegura para try_cast: {reference!r}")
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*(?:\([^)]*\))?", sql_type):
+        raise ValueError(f"tipo SQL inseguro para try_cast: {sql_type!r}")
+    quoted = ".".join(f"`{part}`" for part in reference.split("."))
+    return F.expr(f"try_cast({quoted} AS {sql_type})")
+
+
 # ---------------------------------------------------------------------------
 # Regras de engorda (datas) — ver bloco de constantes ENGORDA_COL_* no topo.
 # ---------------------------------------------------------------------------
@@ -1707,8 +1762,8 @@ def aplica_regras_engorda(df: DataFrame, tabela: str, *, engorda_ts: datetime,
             prazo_expr = F.lit(int(prazo_fixo)).cast("int")
         elif tem_emissao:
             prazo_expr = F.datediff(
-                F.to_date(F.col(ENGORDA_COL_DAT_VENCIMENTO)),
-                F.to_date(F.col(ENGORDA_COL_DAT_EMISSAO)),
+                _try_cast_column(ENGORDA_COL_DAT_VENCIMENTO, "DATE"),
+                _try_cast_column(ENGORDA_COL_DAT_EMISSAO, "DATE"),
             ).cast("int")
         else:
             prazo_expr = padrao
@@ -1780,9 +1835,17 @@ def ajusta_datas_condicao_if(
     """Desloca somente segmentos EMISSAO pelo delta, sem inventar datas."""
     date_columns = (
         "DAT_INICIO_CONDICAO_IF",
-        "DAT_FIM_CONDICAO_IF",
+        *(
+            ("DAT_FIM_CONDICAO_IF",)
+            if "DAT_FIM_CONDICAO_IF" in conditions.columns
+            else ()
+        ),
     )
-    required_condition = {COL_NUM_IF, *date_columns}
+    required_condition = {
+        COL_NUM_IF,
+        CONDICAO_IF_TIPO_COL,
+        "DAT_INICIO_CONDICAO_IF",
+    }
     required_root = {COL_NUM_IF, ENGORDA_COL_DAT_EMISSAO}
     required_title = {COL_NUM_IF, "COD_TIPO_ESCALONAMENTO"}
     required_map = {f"old_{COL_NUM_IF}", f"new_{COL_NUM_IF}"}
@@ -1808,7 +1871,7 @@ def ajusta_datas_condicao_if(
 
     original = original_roots.select(
         _norm_key_col(F.col(COL_NUM_IF)).alias("__old_num_if"),
-        F.to_date(F.col(ENGORDA_COL_DAT_EMISSAO)).alias("__old_emission"),
+        _try_cast_column(ENGORDA_COL_DAT_EMISSAO, "DATE").alias("__old_emission"),
     ).dropDuplicates(["__old_num_if"])
     emission_roots = (
         original_titles.select(
@@ -1831,7 +1894,7 @@ def ajusta_datas_condicao_if(
     )
     shifted = cloned_roots.select(
         _norm_key_col(F.col(COL_NUM_IF)).alias("__new_num_if"),
-        F.to_date(F.col(ENGORDA_COL_DAT_EMISSAO)).alias("__new_emission"),
+        _try_cast_column(ENGORDA_COL_DAT_EMISSAO, "DATE").alias("__new_emission"),
     ).dropDuplicates(["__new_num_if"])
     shifts = (
         mapping.join(original, "__old_num_if", "inner")
@@ -1863,14 +1926,20 @@ def ajusta_datas_condicao_if(
         if column not in date_columns:
             projections.append(F.col(f"source.{column}").alias(column))
             continue
-        parsed = F.to_date(F.col(f"source.{column}"))
+        parsed = _try_cast_column(f"source.{column}", "DATE")
         shifted_date = F.date_add(
             parsed,
             F.col("context.__shift_days"),
         )
         projections.append(
             F.when(
-                parsed.isNotNull()
+                (
+                    _validator_code_col(
+                        F.col(f"source.{CONDICAO_IF_TIPO_COL}")
+                    )
+                    == F.lit("3")
+                )
+                & parsed.isNotNull()
                 & F.col("context.__shift_days").isNotNull(),
                 _date_expression_for_type(shifted_date, date_types[column]),
             )
@@ -1908,7 +1977,7 @@ def ajusta_datas_resgate(
 
     original_roots = lote_instrumentos.select(
         _norm_key_col(F.col(COL_NUM_IF)).alias("__old_num_if"),
-        F.to_date(F.col(ENGORDA_COL_DAT_EMISSAO)).alias("__old_emission"),
+        _try_cast_column(ENGORDA_COL_DAT_EMISSAO, "DATE").alias("__old_emission"),
     ).dropDuplicates(["__old_num_if"])
     root_map = mapa_num_if.select(
         _norm_key_col(F.col(f"old_{COL_NUM_IF}")).alias("__old_num_if"),
@@ -1916,7 +1985,7 @@ def ajusta_datas_resgate(
     ).dropDuplicates(["__old_num_if", "__new_num_if"])
     shifted_roots = roots.select(
         _norm_key_col(F.col(COL_NUM_IF)).alias("__new_num_if"),
-        F.to_date(F.col(ENGORDA_COL_DAT_EMISSAO)).alias("__new_emission"),
+        _try_cast_column(ENGORDA_COL_DAT_EMISSAO, "DATE").alias("__new_emission"),
     ).dropDuplicates(["__new_num_if"])
     shifts = (
         root_map.join(original_roots, "__old_num_if", "inner")
@@ -1955,7 +2024,7 @@ def ajusta_datas_resgate(
         ).alias("source")
         context = condition_shifts.alias("context")
         joined = source.join(F.broadcast(context), "__condition_key", "left")
-        parsed = F.to_date(F.col("source.DAT_RESGATE"))
+        parsed = _try_cast_column("source.DAT_RESGATE", "DATE")
         shifted = F.date_add(parsed, F.col("context.__shift_days"))
         shifted_for_type = _date_expression_for_type(shifted, date_type)
         adjusted = joined.select(*[
@@ -2349,7 +2418,7 @@ def _num_if_invalidos_cronograma(
     dominio: DataFrame,
     checks: frozenset[str],
 ) -> List[Tuple[str, DataFrame]]:
-    """Detecta violações do cronograma sem remover linhas filhas isoladamente."""
+    """Espelha os checks 2b/2c do validator e poda sempre o NUM_IF inteiro."""
     requested = checks & {
         CHECK_RESGATE_COVERAGE,
         CHECK_RESGATE_PARENT,
@@ -2361,96 +2430,114 @@ def _num_if_invalidos_cronograma(
     condition_source = _read_source(spark, config, CONDICAO_IF_TABLE)
     redemption_source = _read_source(spark, config, "RESGATE")
     schedule_source = _read_source(spark, config, "CONDICAO_RESGATE")
+    need_parent = bool(requested & {
+        CHECK_RESGATE_COVERAGE,
+        CHECK_RESGATE_PARENT,
+    })
+    condition_required = [COL_NUM_IF, CONDICAO_IF_PK]
+    redemption_required = [CONDICAO_IF_PK]
+    schedule_required = [CONDICAO_IF_PK]
+    if need_parent:
+        condition_required.append(CONDICAO_IF_TIPO_COL)
+        redemption_required.append("COD_COND_RESGATE")
+    if CHECK_RESGATE_VALUES in requested:
+        schedule_required.extend(("DAT_RESGATE", "VAL_PERCENTUAL"))
     _require_columns(
-        condition_source,
-        CONDICAO_IF_TABLE,
-        (
-            COL_NUM_IF,
-            CONDICAO_IF_PK,
-            CONDICAO_IF_TIPO_COL,
-            "DAT_EXCLUSAO",
-        ),
+        condition_source, CONDICAO_IF_TABLE, condition_required,
         "validar cronograma de resgate",
     )
     _require_columns(
-        redemption_source,
-        "RESGATE",
-        (CONDICAO_IF_PK, "COD_COND_RESGATE", "DAT_EXCLUSAO"),
+        redemption_source, "RESGATE", redemption_required,
         "validar cronograma de resgate",
     )
     _require_columns(
-        schedule_source,
-        "CONDICAO_RESGATE",
-        (
-            CONDICAO_IF_PK,
-            "DAT_RESGATE",
-            "VAL_PERCENTUAL",
-            "DAT_EXCLUSAO",
-        ),
+        schedule_source, "CONDICAO_RESGATE", schedule_required,
         "validar cronograma de resgate",
     )
 
-    conditions = (
-        condition_source.select(
-            F.col(COL_NUM_IF),
-            _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__condition_key"),
-            F.col("DAT_EXCLUSAO").isNull().alias("__condition_active"),
-            (F.col(CONDICAO_IF_TIPO_COL).cast("int") == F.lit(20)).alias(
-                "__condition_type_20"
-            ),
-        )
-        .join(
-            dominio.select(COL_NUM_IF).dropDuplicates(),
-            on=COL_NUM_IF,
-            how="left_semi",
-        )
+    scoped_conditions = condition_source.join(
+        dominio.select(COL_NUM_IF).dropDuplicates(),
+        on=COL_NUM_IF,
+        how="left_semi",
     )
-    redemptions = redemption_source.select(
+    condition_owners = scoped_conditions.select(
+        F.col(COL_NUM_IF),
         _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__condition_key"),
-        F.col("DAT_EXCLUSAO").isNull().alias("__redemption_active"),
-        (
-            F.upper(F.trim(F.col("COD_COND_RESGATE").cast("string")))
-            == F.lit("COM TABELA")
-        ).alias("__with_schedule"),
-    )
-    parents = (
-        conditions.join(redemptions, "__condition_key", "left")
-        .withColumn(
-            "__parent_valid",
-            F.coalesce(F.col("__condition_active"), F.lit(False))
-            & F.coalesce(F.col("__condition_type_20"), F.lit(False))
-            & F.coalesce(F.col("__redemption_active"), F.lit(False))
-            & F.coalesce(F.col("__with_schedule"), F.lit(False)),
-        )
-    )
+    ).dropDuplicates()
+    redemption_keys = redemption_source.select(
+        _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__condition_key")
+    ).dropDuplicates()
 
-    schedules = (
-        schedule_source.select(
-            _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__condition_key"),
-            F.col("DAT_EXCLUSAO").isNull().alias("__schedule_active"),
+    valid_parent_keys = None
+    if need_parent:
+        active_conditions = _active_optional_dat_exclusao(scoped_conditions)
+        active_redemptions = _active_optional_dat_exclusao(redemption_source)
+        valid_parent_keys = (
+            active_conditions.where(
+                _validator_code_col(F.col(CONDICAO_IF_TIPO_COL)) == F.lit("20")
+            )
+            .select(
+                F.col(COL_NUM_IF),
+                _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__condition_key"),
+            )
+            .join(
+                active_redemptions.where(
+                    _validator_code_col(F.col("COD_COND_RESGATE"))
+                    == F.lit("COM TABELA")
+                ).select(
+                    _norm_key_col(F.col(CONDICAO_IF_PK)).alias(
+                        "__condition_key"
+                    )
+                ),
+                "__condition_key",
+                "inner",
+            )
+            .dropDuplicates()
+        )
+
+    schedule_columns = [
+        _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__condition_key")
+    ]
+    if CHECK_RESGATE_VALUES in requested:
+        schedule_columns.extend((
             F.col("DAT_RESGATE").alias("__date_raw"),
             F.col("VAL_PERCENTUAL").alias("__percent_raw"),
+        ))
+    active_schedules = schedule_source.where(
+        _schedule_active_pred(schedule_source)
+    ).select(*schedule_columns)
+    if CHECK_RESGATE_VALUES in requested:
+        active_schedules = (
+            active_schedules
+            .withColumn(
+                "__date_parsed", _try_cast_column("__date_raw", "DATE")
+            )
+            .withColumn(
+                "__percent_parsed",
+                _try_cast_column("__percent_raw", "DOUBLE"),
+            )
+            .withColumn(
+                "__percent_valid",
+                F.col("__percent_parsed").isNotNull()
+                & ~F.isnan(F.col("__percent_parsed"))
+                & (F.col("__percent_parsed") <= F.lit(sys.float_info.max))
+                & (F.col("__percent_parsed") >= F.lit(-sys.float_info.max)),
+            )
         )
-        .where(F.col("__schedule_active"))
-        .withColumn("__date_parsed", F.to_date(F.col("__date_raw")))
-        .withColumn(
-            "__percent_parsed",
-            F.expr("try_cast(__percent_raw AS DOUBLE)"),
-        )
-        .withColumn(
-            "__percent_valid",
-            F.col("__percent_parsed").isNotNull()
-            & ~F.isnan(F.col("__percent_parsed"))
-            & (F.col("__percent_parsed") <= F.lit(sys.float_info.max))
-            & (F.col("__percent_parsed") >= F.lit(-sys.float_info.max)),
-        )
+
+    # O motor so clona CONDICAO_RESGATE alcancavel por RESGATE.
+    clonable_schedules = (
+        active_schedules.join(redemption_keys, "__condition_key", "left_semi")
+        .join(condition_owners, "__condition_key", "inner")
     )
-    active_schedule_keys = schedules.select("__condition_key").dropDuplicates()
+    active_schedule_keys = clonable_schedules.select(
+        "__condition_key"
+    ).dropDuplicates()
     results: List[Tuple[str, DataFrame]] = []
 
     if CHECK_RESGATE_COVERAGE in requested:
         uncovered = (
-            parents.where(F.col("__parent_valid"))
+            valid_parent_keys
             .join(active_schedule_keys, "__condition_key", "left_anti")
             .select(COL_NUM_IF)
         )
@@ -2459,14 +2546,11 @@ def _num_if_invalidos_cronograma(
             _restrict_invalid_num_if(uncovered, dominio),
         ))
 
-    schedule_parents = schedules.join(
-        parents.select("__condition_key", COL_NUM_IF, "__parent_valid"),
-        "__condition_key",
-        "inner",
-    )
     if CHECK_RESGATE_PARENT in requested:
-        invalid_parent = schedule_parents.where(
-            ~F.coalesce(F.col("__parent_valid"), F.lit(False))
+        invalid_parent = clonable_schedules.join(
+            valid_parent_keys.select("__condition_key").dropDuplicates(),
+            "__condition_key",
+            "left_anti",
         ).select(COL_NUM_IF)
         results.append((
             CHECK_RESGATE_PARENT,
@@ -2474,12 +2558,7 @@ def _num_if_invalidos_cronograma(
         ))
 
     if CHECK_RESGATE_VALUES in requested:
-        schedule_values = schedules.join(
-            conditions.select("__condition_key", COL_NUM_IF),
-            "__condition_key",
-            "inner",
-        )
-        invalid_values = schedule_values.where(
+        invalid_values = clonable_schedules.where(
             F.col("__date_parsed").isNull()
             | ~F.col("__percent_valid")
         ).select(COL_NUM_IF)
@@ -2500,6 +2579,7 @@ def _num_if_invalidos_escalonamento_origem(
     roots_source = _read_source(spark, config, TABELA_RAIZ)
     condition_source = _read_source(spark, config, CONDICAO_IF_TABLE)
     title_source = _read_source(spark, config, "TITULO")
+    interest_source = _read_source(spark, config, "JUROS_FLUTUANTE")
     _require_columns(
         roots_source,
         TABELA_RAIZ,
@@ -2507,7 +2587,6 @@ def _num_if_invalidos_escalonamento_origem(
             COL_NUM_IF,
             ENGORDA_COL_DAT_EMISSAO,
             ENGORDA_COL_DAT_VENCIMENTO,
-            "DAT_EXCLUSAO",
         ),
         "validar datas de escalonamento",
     )
@@ -2516,8 +2595,9 @@ def _num_if_invalidos_escalonamento_origem(
         CONDICAO_IF_TABLE,
         (
             COL_NUM_IF,
+            CONDICAO_IF_PK,
+            CONDICAO_IF_TIPO_COL,
             "DAT_INICIO_CONDICAO_IF",
-            "DAT_EXCLUSAO",
         ),
         "validar datas de escalonamento",
     )
@@ -2527,12 +2607,18 @@ def _num_if_invalidos_escalonamento_origem(
         (COL_NUM_IF, "COD_TIPO_ESCALONAMENTO"),
         "validar datas de escalonamento",
     )
+    _require_columns(
+        interest_source,
+        "JUROS_FLUTUANTE",
+        (CONDICAO_IF_PK,),
+        "validar datas de escalonamento",
+    )
 
     emission_titles = (
-        title_source.select(
+        _active_optional_dat_exclusao(title_source).select(
             F.col(COL_NUM_IF),
-            F.upper(
-                F.trim(F.col("COD_TIPO_ESCALONAMENTO").cast("string"))
+            _validator_code_col(
+                F.col("COD_TIPO_ESCALONAMENTO")
             ).alias("__escalonamento"),
         )
         .where(F.col("__escalonamento") == F.lit("EMISSAO"))
@@ -2540,48 +2626,61 @@ def _num_if_invalidos_escalonamento_origem(
         .dropDuplicates()
     )
     roots = (
-        roots_source.join(
+        _active_optional_dat_exclusao(roots_source).join(
             dominio.select(COL_NUM_IF).dropDuplicates(),
             on=COL_NUM_IF,
             how="left_semi",
         )
-        .where(F.col("DAT_EXCLUSAO").isNull())
         .select(
             F.col(COL_NUM_IF),
-            F.to_date(F.col(ENGORDA_COL_DAT_EMISSAO)).alias("__issue"),
-            F.to_date(F.col(ENGORDA_COL_DAT_VENCIMENTO)).alias("__maturity"),
+            F.col(ENGORDA_COL_DAT_EMISSAO).alias("__issue_raw"),
+            F.col(ENGORDA_COL_DAT_VENCIMENTO).alias("__maturity_raw"),
         )
         .join(emission_titles, COL_NUM_IF, "left_semi")
+        .withColumn("__issue", _try_cast_column("__issue_raw", "DATE"))
+        .withColumn("__maturity", _try_cast_column("__maturity_raw", "DATE"))
     )
-    conditions = (
-        condition_source.join(
+    interest_keys = interest_source.select(
+        _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__condition_key")
+    ).dropDuplicates()
+    segments = (
+        _active_optional_dat_exclusao(condition_source).join(
             dominio.select(COL_NUM_IF).dropDuplicates(),
             on=COL_NUM_IF,
             how="left_semi",
         )
-        .where(F.col("DAT_EXCLUSAO").isNull())
+        .where(
+            _validator_code_col(F.col(CONDICAO_IF_TIPO_COL)) == F.lit("3")
+        )
         .select(
             F.col(COL_NUM_IF),
-            F.to_date(F.col("DAT_INICIO_CONDICAO_IF")).alias("__start"),
+            _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__condition_key"),
+            F.col("DAT_INICIO_CONDICAO_IF").alias("__start_raw"),
         )
+        .join(interest_keys, "__condition_key", "inner")
         .join(roots.select(COL_NUM_IF), COL_NUM_IF, "left_semi")
+        .withColumn("__start", _try_cast_column("__start_raw", "DATE"))
     )
-    joined = conditions.join(roots, COL_NUM_IF, "inner")
-    invalid_segments = joined.where(
-        F.col("__issue").isNull()
-        | F.col("__maturity").isNull()
-        | F.col("__start").isNull()
-        | (F.col("__issue") > F.col("__maturity"))
-        | (F.col("__start") < F.col("__issue"))
-        | (F.col("__start") > F.col("__maturity"))
+    dated = segments.join(roots, COL_NUM_IF, "inner")
+    invalid_segments = dated.where(
+        F.col("__start").isNull()
+        | (
+            F.col("__issue").isNotNull()
+            & (F.col("__start") < F.col("__issue"))
+        )
+        | (
+            F.col("__maturity").isNotNull()
+            & (F.col("__start") > F.col("__maturity"))
+        )
     ).select(COL_NUM_IF)
-    first_start = conditions.groupBy(COL_NUM_IF).agg(
-        F.min(F.col("__start")).alias("__first_start")
-    )
     invalid_first = (
-        roots.join(first_start, COL_NUM_IF, "left")
+        dated.groupBy(COL_NUM_IF).agg(
+            F.min(F.col("__start")).alias("__first_start"),
+            F.min(F.col("__issue")).alias("__issue"),
+        )
         .where(
             F.col("__first_start").isNull()
+            | F.col("__issue").isNull()
             | (F.col("__first_start") != F.col("__issue"))
         )
         .select(COL_NUM_IF)
@@ -2592,15 +2691,176 @@ def _num_if_invalidos_escalonamento_origem(
     )
 
 
+def _build_offline_reference_lookups(
+    spark,
+    config,
+    required: frozenset[str],
+) -> Optional[DataFrame]:
+    """Constroi os lookups dos checks somente com snapshots RAW, sem Oracle."""
+    if not required:
+        return None
+    schema = T.StructType([
+        T.StructField(OFFLINE_LOOKUP_NAME_COL, T.StringType(), False),
+        T.StructField(OFFLINE_LOOKUP_VALUE_COL, T.StringType(), False),
+    ])
+    pieces: List[DataFrame] = []
+
+    tos_lookups = {
+        OFFLINE_LOOKUP_TOS_CDB_APPROVED,
+        OFFLINE_LOOKUP_TOS_CDB_INVALID,
+    }
+    if required & tos_lookups:
+        tos = _read_source(spark, config, "TIPO_OPER_OBJETO_SERV")
+        operation_types = _read_source(spark, config, "TIPO_OPERACAO")
+        _require_columns(
+            tos,
+            "TIPO_OPER_OBJETO_SERV",
+            (
+                "NUM_ID_TIPO_OPER_OBJETO_SERV",
+                "NUM_ID_TIPO_OPERACAO",
+                "NUM_ID_OBJETO_SERVICO",
+                "IND_DISPONIVEL_IDENTIFICACAO",
+            ),
+            "classificar TOS CDB pelo snapshot RAW",
+        )
+        _require_columns(
+            operation_types,
+            "TIPO_OPERACAO",
+            ("NUM_ID_TIPO_OPERACAO", "COD_TIPO_OPERACAO"),
+            "classificar TOS CDB pelo snapshot RAW",
+        )
+        classified = (
+            tos.select(
+                _norm_key_col(
+                    F.col("NUM_ID_TIPO_OPER_OBJETO_SERV")
+                ).alias("__tos_key"),
+                _norm_key_col(F.col("NUM_ID_TIPO_OPERACAO")).alias(
+                    "__operation_type_key"
+                ),
+                _norm_key_col(F.col("NUM_ID_OBJETO_SERVICO")).alias(
+                    "__object_key"
+                ),
+                F.trim(
+                    F.col("IND_DISPONIVEL_IDENTIFICACAO").cast("string")
+                ).alias("__identification_flag"),
+            )
+            .join(
+                operation_types.select(
+                    _norm_key_col(F.col("NUM_ID_TIPO_OPERACAO")).alias(
+                        "__operation_type_key"
+                    ),
+                    F.col("COD_TIPO_OPERACAO").cast("string").alias(
+                        "__operation_type_code"
+                    ),
+                ),
+                "__operation_type_key",
+                "inner",
+            )
+            .where(F.col("__tos_key").isNotNull())
+            .dropDuplicates(["__tos_key"])
+        )
+        registration = classified.where(
+            F.col("__operation_type_code") == F.lit("1")
+        )
+        approved_pred = (
+            (F.col("__object_key") == F.lit("44"))
+            & (F.col("__identification_flag") == F.lit("S"))
+        )
+        if OFFLINE_LOOKUP_TOS_CDB_APPROVED in required:
+            pieces.append(
+                registration.where(approved_pred).select(
+                    F.lit(OFFLINE_LOOKUP_TOS_CDB_APPROVED).alias(
+                        OFFLINE_LOOKUP_NAME_COL
+                    ),
+                    F.col("__tos_key").alias(OFFLINE_LOOKUP_VALUE_COL),
+                )
+            )
+        if OFFLINE_LOOKUP_TOS_CDB_INVALID in required:
+            pieces.append(
+                registration.where(~F.coalesce(approved_pred, F.lit(False))).select(
+                    F.lit(OFFLINE_LOOKUP_TOS_CDB_INVALID).alias(
+                        OFFLINE_LOOKUP_NAME_COL
+                    ),
+                    F.col("__tos_key").alias(OFFLINE_LOOKUP_VALUE_COL),
+                )
+            )
+
+    if OFFLINE_LOOKUP_ACCOUNT_CDB in required:
+        accounts = _read_source(spark, config, "CONTA_PARTICIPANTE")
+        try:
+            families = _read_source(spark, config, "V_FAMILIA_CONTAS")
+        except Exception as exc:
+            raise ValueError(
+                "active_account_cdb: RAW V_FAMILIA_CONTAS e obrigatoria; "
+                "nenhuma consulta Oracle sera usada como fallback"
+            ) from exc
+        _require_columns(
+            accounts,
+            "CONTA_PARTICIPANTE",
+            (
+                "NUM_CONTA_PARTICIPANTE",
+                "NUM_ID_SITUACAO_CONTA",
+                "COD_CONTA_PARTICIPANTE",
+            ),
+            "validar conta CDB pelo snapshot RAW",
+        )
+        _require_columns(
+            families,
+            "V_FAMILIA_CONTAS",
+            ("COD_CONTA_MEMBRO", "NUM_ID_AREA_ATUACAO", "COD_TIPO_ACESSO"),
+            "validar conta CDB pelo snapshot RAW",
+        )
+        eligible = (
+            accounts.alias("cp")
+            .join(
+                families.alias("vf"),
+                F.col("cp.COD_CONTA_PARTICIPANTE")
+                == F.col("vf.COD_CONTA_MEMBRO"),
+                "inner",
+            )
+            .where(
+                (_norm_key_col(F.col("cp.NUM_ID_SITUACAO_CONTA")) == F.lit("1"))
+                & F.trim(
+                    F.col("cp.COD_CONTA_PARTICIPANTE").cast("string")
+                ).rlike(r"^[0-9]{5}\.(40|10)-[0-9]$")
+                & (_norm_key_col(F.col("vf.NUM_ID_AREA_ATUACAO")) == F.lit("1"))
+                & (F.col("vf.COD_TIPO_ACESSO").cast("string") == F.lit("L"))
+            )
+            .select(
+                F.lit(OFFLINE_LOOKUP_ACCOUNT_CDB).alias(
+                    OFFLINE_LOOKUP_NAME_COL
+                ),
+                _norm_key_col(F.col("cp.NUM_CONTA_PARTICIPANTE")).alias(
+                    OFFLINE_LOOKUP_VALUE_COL
+                ),
+            )
+            .where(F.col(OFFLINE_LOOKUP_VALUE_COL).isNotNull())
+            .dropDuplicates()
+        )
+        pieces.append(eligible)
+
+    if not pieces:
+        return spark.createDataFrame([], schema)
+    lookups = pieces[0]
+    for piece in pieces[1:]:
+        lookups = lookups.unionByName(piece)
+    lookups = lookups.dropDuplicates().localCheckpoint(eager=True)
+    logger.info(
+        "Lookups offline carregados exclusivamente do RAW: %s.",
+        sorted(required),
+    )
+    return lookups
+
+
 def _num_if_sem_tos_aprovado_cdb(
     spark,
     config,
     dominio: DataFrame,
-    target_lookups: Optional[DataFrame],
+    offline_lookups: Optional[DataFrame],
 ) -> DataFrame:
-    if target_lookups is None:
+    if offline_lookups is None:
         raise ValueError(
-            f"{TARGET_LOOKUP_TOS_CDB}: lookup do Oracle alvo não carregado"
+            f"{OFFLINE_LOOKUP_TOS_CDB_APPROVED}: lookup RAW nao carregado"
         )
     operations = _read_source(spark, config, "OPERACAO")
     _require_columns(
@@ -2609,28 +2869,43 @@ def _num_if_sem_tos_aprovado_cdb(
         (COL_NUM_IF, "NUM_ID_TIPO_OPER_OBJETO_SERV"),
         "validar TOS de registro CDB",
     )
-    approved_tos = _target_lookup_keys(
-        target_lookups,
-        TARGET_LOOKUP_TOS_CDB,
+    approved_tos = _offline_lookup_keys(
+        offline_lookups,
+        OFFLINE_LOOKUP_TOS_CDB_APPROVED,
         "__tos_key",
     )
+    invalid_tos = _offline_lookup_keys(
+        offline_lookups,
+        OFFLINE_LOOKUP_TOS_CDB_INVALID,
+        "__tos_key",
+    )
+    operation_refs = operations.select(
+        F.col(COL_NUM_IF),
+        F.col("NUM_ID_TIPO_OPER_OBJETO_SERV").cast("string").alias("__raw_tos"),
+        _norm_key_col(
+            F.col("NUM_ID_TIPO_OPER_OBJETO_SERV")
+        ).alias("__tos_key"),
+    )
     valid_roots = (
-        operations.select(
-            F.col(COL_NUM_IF),
-            _norm_key_col(
-                F.col("NUM_ID_TIPO_OPER_OBJETO_SERV")
-            ).alias("__tos_key"),
+        operation_refs
+        .where(
+            F.col("__raw_tos").isNotNull()
+            & (F.trim(F.col("__raw_tos")) != F.lit(""))
         )
         .join(approved_tos, "__tos_key", "left_semi")
         .select(COL_NUM_IF)
         .dropDuplicates()
     )
-    return _restrict_invalid_num_if(
-        dominio.select(COL_NUM_IF).join(
+    missing_approved = dominio.select(COL_NUM_IF).join(
             valid_roots,
             on=COL_NUM_IF,
             how="left_anti",
-        ),
+        )
+    bad_registration = operation_refs.join(
+        invalid_tos, "__tos_key", "left_semi"
+    ).select(COL_NUM_IF)
+    return _restrict_invalid_num_if(
+        missing_approved.unionByName(bad_registration),
         dominio,
     )
 
@@ -2639,15 +2914,15 @@ def _num_if_com_conta_inelegivel_cdb(
     spark,
     config,
     dominio: DataFrame,
-    target_lookups: Optional[DataFrame],
+    offline_lookups: Optional[DataFrame],
 ) -> DataFrame:
-    if target_lookups is None:
+    if offline_lookups is None:
         raise ValueError(
-            f"{TARGET_LOOKUP_ACCOUNT_CDB}: lookup do Oracle alvo não carregado"
+            f"{OFFLINE_LOOKUP_ACCOUNT_CDB}: lookup RAW nao carregado"
         )
-    eligible_accounts = _target_lookup_keys(
-        target_lookups,
-        TARGET_LOOKUP_ACCOUNT_CDB,
+    eligible_accounts = _offline_lookup_keys(
+        offline_lookups,
+        OFFLINE_LOOKUP_ACCOUNT_CDB,
         "__account_key",
     )
 
@@ -2699,7 +2974,7 @@ def _num_if_invalidos_por_politica(
     config,
     dominio: DataFrame,
     checks: frozenset[str],
-    target_lookups: Optional[DataFrame],
+    offline_lookups: Optional[DataFrame],
 ) -> List[Tuple[str, DataFrame]]:
     if not checks:
         return []
@@ -2726,14 +3001,14 @@ def _num_if_invalidos_por_politica(
         results.append((
             CHECK_OPERATION_TOS_CDB,
             _num_if_sem_tos_aprovado_cdb(
-                spark, config, dominio, target_lookups
+                spark, config, dominio, offline_lookups
             ),
         ))
     if CHECK_ACTIVE_ACCOUNT_CDB in checks:
         results.append((
             CHECK_ACTIVE_ACCOUNT_CDB,
             _num_if_com_conta_inelegivel_cdb(
-                spark, config, dominio, target_lookups
+                spark, config, dominio, offline_lookups
             ),
         ))
     return results
@@ -2804,16 +3079,16 @@ def _carrega_faltantes(spark, config, faltantes_arg: Optional[str],
                      F.col(TARGET_SNAPSHOT_ID_COL)).dropDuplicates()
 
 
-def _target_lookup_keys(
-    target_lookups: DataFrame,
+def _offline_lookup_keys(
+    offline_lookups: DataFrame,
     lookup_name: str,
     alias: str,
 ) -> DataFrame:
     return (
-        target_lookups.where(
-            F.col(TARGET_LOOKUP_NAME_COL) == F.lit(lookup_name)
+        offline_lookups.where(
+            F.col(OFFLINE_LOOKUP_NAME_COL) == F.lit(lookup_name)
         )
-        .select(F.col(TARGET_LOOKUP_VALUE_COL).alias(alias))
+        .select(F.col(OFFLINE_LOOKUP_VALUE_COL).alias(alias))
         .where(F.col(alias).isNotNull())
         .dropDuplicates()
     )
@@ -3118,7 +3393,7 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
                            profile: ProductProfile,
                            query_num_if_path: Optional[str] = None,
                            faltantes: Optional[DataFrame] = None,
-                           target_lookups: Optional[DataFrame] = None,
+                           offline_lookups: Optional[DataFrame] = None,
                            poda_subtipo: bool = True,
                            dominio_precalculado: Optional[DataFrame] = None,
                            ) -> List:
@@ -3169,7 +3444,7 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
             config,
             fonte,
             profile.integrity.invalid_num_if_checks,
-            target_lookups,
+            offline_lookups,
         )
     )
     if faltantes is not None:
@@ -3178,7 +3453,7 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
                                                           faltantes, fonte,
                                                           profile.integrity.selective_missing_keys,
                                                           profile.name,
-                                                          TARGET_FK_COVERAGE_REQUIRED_BY_PRODUCT.get(
+                                                          OFFLINE_FK_COVERAGE_REQUIRED_BY_PRODUCT.get(
                                                               profile.name,
                                                               frozenset(),
                                                           ))))
@@ -3210,8 +3485,10 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
             if fora:
                 partes.append(f"fora do domínio do produto: {fora}")
             if podados:
-                partes.append("no domínio mas PODADOS (subtipo dangling e/ou "
-                              f"chave inexistente no destino): {podados}")
+                partes.append(
+                    "no domínio mas PODADOS por regra de integridade: "
+                    f"{podados}"
+                )
             raise ValueError("NUM_IF(s) não sintetizáveis — " + "; ".join(partes))
         valores = sorted(validos)
     else:
@@ -3698,94 +3975,7 @@ def _read_controle_operacional_date(jvm, jdbc_url: str, user: str,
         connection.close()
 
 
-def _normalize_python_key(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    normalized = re.sub(r"\.0+$", "", str(value).strip())
-    return normalized or None
-
-
-def _oracle_match_numeric_candidates(
-    spark: SparkSession,
-    connection,
-    candidates: DataFrame,
-    sql_before_in: str,
-    sql_after_in: str = "",
-    batch_size: int = ORACLE_TARGET_KEY_BATCH_SIZE,
-) -> DataFrame:
-    """Retorna as chaves candidatas que satisfazem uma consulta no Oracle alvo."""
-    if batch_size < 1 or batch_size > 900:
-        raise ValueError("batch_size da consulta Oracle deve estar entre 1 e 900")
-    if "__candidate_key" not in candidates.columns:
-        raise ValueError("candidatos Oracle precisam da coluna __candidate_key")
-
-    jvm = spark.sparkContext._jvm
-    found: Set[str] = set()
-    batch: List[Tuple[str, Any]] = []
-    invalid_numeric = 0
-
-    def _execute_batch(values: Sequence[Tuple[str, Any]]) -> None:
-        if not values:
-            return
-        placeholders = ",".join("?" for _ in values)
-        sql = f"{sql_before_in} ({placeholders}) {sql_after_in}"
-        statement = result_set = None
-        try:
-            statement = connection.prepareStatement(sql)
-            statement.setFetchSize(max(len(values), 1))
-            for index, (_, decimal_value) in enumerate(values, 1):
-                statement.setBigDecimal(index, decimal_value)
-            result_set = statement.executeQuery()
-            while result_set.next():
-                normalized = _normalize_python_key(result_set.getString(1))
-                if normalized is not None:
-                    found.add(normalized)
-        finally:
-            if result_set is not None:
-                result_set.close()
-            if statement is not None:
-                statement.close()
-
-    rows = (
-        candidates.select("__candidate_key")
-        .where(
-            F.col("__candidate_key").isNotNull()
-            & (F.length(F.col("__candidate_key")) > F.lit(0))
-        )
-        .dropDuplicates()
-        .toLocalIterator()
-    )
-    for row in rows:
-        normalized = _normalize_python_key(row["__candidate_key"])
-        if normalized is None:
-            continue
-        try:
-            decimal_value = jvm.java.math.BigDecimal(normalized)
-        except Exception:
-            invalid_numeric += 1
-            continue
-        batch.append((normalized, decimal_value))
-        if len(batch) >= batch_size:
-            _execute_batch(batch)
-            batch = []
-    _execute_batch(batch)
-    if invalid_numeric:
-        logger.warning(
-            "Oracle alvo: %d chave(s) candidata(s) não numérica(s) serão "
-            "consideradas inválidas.",
-            invalid_numeric,
-        )
-
-    schema = T.StructType([
-        T.StructField("__target_key", T.StringType(), False),
-    ])
-    return spark.createDataFrame(
-        [(value,) for value in sorted(found)],
-        schema,
-    )
-
-
-def _target_reference_candidates(
+def _raw_reference_candidates(
     spark: SparkSession,
     config: Mapping[str, str],
     produto: str,
@@ -3793,13 +3983,13 @@ def _target_reference_candidates(
     column: str,
     dominio: DataFrame,
 ) -> DataFrame:
-    """Chaves RAW do domínio que precisam existir no Oracle receptor."""
+    """Chaves filhas RAW, restritas ao domínio, para checagem offline."""
     source = _read_source(spark, config, table)
     _require_columns(
         source,
         table,
         (column,),
-        "comparar referência automaticamente com o Oracle alvo",
+        "comparar referência com o pai no snapshot RAW",
     )
     if COL_NUM_IF in source.columns:
         return (
@@ -3888,333 +4078,72 @@ def _target_reference_candidates(
     )
 
 
-def _target_lookup_candidates(
-    spark: SparkSession,
-    config: Mapping[str, str],
-    lookup_name: str,
-    dominio: DataFrame,
-) -> DataFrame:
-    """Materializa no Spark somente as chaves RAW relevantes ao lookup alvo."""
-    scoped_domain = dominio.select(COL_NUM_IF).dropDuplicates()
-    if lookup_name == TARGET_LOOKUP_TOS_CDB:
-        operations = _read_source(spark, config, "OPERACAO")
-        _require_columns(
-            operations,
-            "OPERACAO",
-            (COL_NUM_IF, "NUM_ID_TIPO_OPER_OBJETO_SERV"),
-            "consultar TOS aprovado no Oracle alvo",
-        )
-        candidates = (
-            operations.join(scoped_domain, COL_NUM_IF, "left_semi")
-            .select(
-                _norm_key_col(
-                    F.col("NUM_ID_TIPO_OPER_OBJETO_SERV")
-                ).alias("__candidate_key")
-            )
-        )
-    elif lookup_name == TARGET_LOOKUP_ACCOUNT_CDB:
-        account_columns = {
-            "TITULO": ("NUM_CONTA_PARTICIPANTE",),
-            "DEPOSITO_AUTOMATICO_IF": ("NUM_CONTA_PARTICIPANTE",),
-            "OPERACAO": (
-                "NUM_CONTA_PARTICIPANTE_P1",
-                "NUM_CONTA_PARTICIPANTE_P2",
-            ),
-        }
-        pieces: List[DataFrame] = []
-        for table, columns in account_columns.items():
-            source = _read_source(spark, config, table)
-            _require_columns(
-                source,
-                table,
-                (COL_NUM_IF, *columns),
-                "consultar conta elegível no Oracle alvo",
-            )
-            scoped = source.join(scoped_domain, COL_NUM_IF, "left_semi")
-            pieces.extend(
-                scoped.select(
-                    _norm_key_col(F.col(column)).alias("__candidate_key")
-                )
-                for column in columns
-            )
-        candidates = pieces[0]
-        for piece in pieces[1:]:
-            candidates = candidates.unionByName(piece)
-    else:
-        raise ValueError(f"lookup Oracle alvo desconhecido: {lookup_name}")
-
-    materialized = (
-        candidates.where(
-            F.col("__candidate_key").isNotNull()
-            & (F.length(F.col("__candidate_key")) > F.lit(0))
-        )
-        .dropDuplicates()
-        .localCheckpoint(eager=True)
-    )
-    logger.info(
-        "Oracle alvo: lookup %s possui %d chave(s) candidata(s) no domínio.",
-        lookup_name,
-        materialized.count(),
-    )
-    return materialized
-
-
-def _read_oracle_target_constraints_live(
+def _raw_missing_references(
     spark: SparkSession,
     config: Mapping[str, str],
     produto: str,
     dominio: DataFrame,
-    credentials: Tuple[str, str, str],
-) -> Tuple[DataFrame, DataFrame]:
-    """Consulta lookups e FKs no Oracle receptor sem novos argumentos públicos."""
-    required_lookups = TARGET_LOOKUPS_REQUIRED_BY_PRODUCT.get(
+) -> Optional[DataFrame]:
+    """Detecta órfãos já presentes no RAW; drift do destino segue em faltantes."""
+    required_pairs = OFFLINE_FK_COVERAGE_REQUIRED_BY_PRODUCT.get(
         produto, frozenset()
     )
-    required_pairs = TARGET_FK_COVERAGE_REQUIRED_BY_PRODUCT.get(
-        produto, frozenset()
-    )
-    lookup_schema = T.StructType([
-        T.StructField(TARGET_LOOKUP_NAME_COL, T.StringType(), False),
-        T.StructField(TARGET_LOOKUP_VALUE_COL, T.StringType(), False),
-    ])
-    missing_schema = T.StructType([
-        T.StructField("TABELA", T.StringType(), False),
-        T.StructField("COLUNA", T.StringType(), False),
-        T.StructField("VALOR", T.StringType(), False),
-        T.StructField(TARGET_SNAPSHOT_ID_COL, T.StringType(), True),
-    ])
-    if not required_lookups and not required_pairs:
-        return (
-            spark.createDataFrame([], lookup_schema),
-            spark.createDataFrame([], missing_schema),
-        )
-
-    # Todos os jobs Spark sobre o RAW terminam antes de abrir a transação
-    # read-only no Oracle. Durante a transação restam apenas consultas JDBC
-    # parametrizadas sobre conjuntos já materializados.
-    lookup_candidates = {
-        lookup_name: _target_lookup_candidates(
-            spark,
-            config,
-            lookup_name,
-            dominio,
-        )
-        for lookup_name in sorted(required_lookups)
+    if not required_pairs:
+        return None
+    parent_by_pair = {
+        ("CARTEIRA_COMITENTE", "NUM_ID_ENTIDADE"): (
+            "COMITENTE", "NUM_ID_ENTIDADE"
+        ),
+        ("ESPECIFICACAO_COMITENTE", "NUM_ID_ENTIDADE"): (
+            "COMITENTE", "NUM_ID_ENTIDADE"
+        ),
     }
-    fk_candidates: Dict[Tuple[str, str], DataFrame] = {}
+    pieces: List[DataFrame] = []
     for table, column in sorted(required_pairs):
-        candidates = _target_reference_candidates(
-            spark,
-            config,
-            produto,
-            table,
-            column,
-            dominio,
-        ).localCheckpoint(eager=True)
-        logger.info(
-            "Oracle alvo: FK %s.%s possui %d chave(s) candidata(s) no domínio.",
-            table,
-            column,
-            candidates.count(),
-        )
-        fk_candidates[(table, column)] = candidates
-
-    jdbc_url, user, password = credentials
-    connection = _open_oracle_connection(
-        spark.sparkContext._jvm,
-        jdbc_url,
-        user,
-        password,
-    )
-    lookup_pieces: List[DataFrame] = []
-    missing_pieces: List[DataFrame] = []
-    transaction_statement = None
-    try:
-        connection.setAutoCommit(False)
-        transaction_statement = connection.createStatement()
-        transaction_statement.execute("SET TRANSACTION READ ONLY")
-        transaction_statement.close()
-        transaction_statement = None
-
-        target_id_statement = target_id_result = None
-        try:
-            target_id_statement = connection.prepareStatement(
-                "SELECT SYS_CONTEXT('USERENV','DB_UNIQUE_NAME'), "
-                "SYS_CONTEXT('USERENV','CON_NAME') FROM DUAL"
-            )
-            target_id_result = target_id_statement.executeQuery()
-            if target_id_result.next():
-                logger.info(
-                    "Validação automática no Oracle alvo: DB=%s CON=%s.",
-                    target_id_result.getString(1),
-                    target_id_result.getString(2),
-                )
-        finally:
-            if target_id_result is not None:
-                target_id_result.close()
-            if target_id_statement is not None:
-                target_id_statement.close()
-
-        if TARGET_LOOKUP_TOS_CDB in required_lookups:
-            approved = _oracle_match_numeric_candidates(
-                spark,
-                connection,
-                lookup_candidates[TARGET_LOOKUP_TOS_CDB],
-                "SELECT tos.NUM_ID_TIPO_OPER_OBJETO_SERV "
-                "FROM CETIP.TIPO_OPER_OBJETO_SERV tos "
-                "JOIN CETIP.TIPO_OPERACAO top "
-                "ON top.NUM_ID_TIPO_OPERACAO = tos.NUM_ID_TIPO_OPERACAO "
-                "WHERE tos.NUM_ID_TIPO_OPER_OBJETO_SERV IN",
-                "AND TRIM(top.COD_TIPO_OPERACAO) = '1' "
-                "AND tos.NUM_ID_OBJETO_SERVICO = 44 "
-                "AND TRIM(tos.IND_DISPONIVEL_IDENTIFICACAO) = 'S'",
-            )
-            lookup_pieces.append(
-                approved.select(
-                    F.lit(TARGET_LOOKUP_TOS_CDB).alias(
-                        TARGET_LOOKUP_NAME_COL
-                    ),
-                    F.col("__target_key").alias(TARGET_LOOKUP_VALUE_COL),
-                )
-            )
-
-        if TARGET_LOOKUP_ACCOUNT_CDB in required_lookups:
-            # Este é o vínculo usado pelo contrato do validador. Valida o
-            # schema da view diretamente (também funciona quando ela é synonym)
-            # e falha fechado se o Oracle receptor divergir.
-            probe_statement = probe_result = None
-            try:
-                probe_statement = connection.prepareStatement(
-                    "SELECT fc.COD_CONTA_PARTICIPANTE, "
-                    "fc.NUM_ID_AREA_ATUACAO, fc.COD_TIPO_ACESSO "
-                    "FROM CETIP.V_FAMILIA_CONTAS fc WHERE 1 = 0"
-                )
-                probe_result = probe_statement.executeQuery()
-            finally:
-                if probe_result is not None:
-                    probe_result.close()
-                if probe_statement is not None:
-                    probe_statement.close()
-            family_join = (
-                "TRIM(fc.COD_CONTA_PARTICIPANTE) = "
-                "TRIM(cp.COD_CONTA_PARTICIPANTE)"
-            )
-            eligible = _oracle_match_numeric_candidates(
-                spark,
-                connection,
-                lookup_candidates[TARGET_LOOKUP_ACCOUNT_CDB],
-                "SELECT cp.NUM_CONTA_PARTICIPANTE "
-                "FROM CETIP.CONTA_PARTICIPANTE cp "
-                "WHERE cp.NUM_CONTA_PARTICIPANTE IN",
-                "AND cp.NUM_ID_SITUACAO_CONTA = 1 "
-                "AND REGEXP_LIKE(TRIM(cp.COD_CONTA_PARTICIPANTE), "
-                "'^[0-9]{5}[.](40|10)-[0-9]$') "
-                "AND EXISTS (SELECT 1 FROM CETIP.V_FAMILIA_CONTAS fc "
-                f"WHERE {family_join} "
-                "AND fc.NUM_ID_AREA_ATUACAO = 1 "
-                "AND TRIM(fc.COD_TIPO_ACESSO) = 'L')",
-            )
-            lookup_pieces.append(
-                eligible.select(
-                    F.lit(TARGET_LOOKUP_ACCOUNT_CDB).alias(
-                        TARGET_LOOKUP_NAME_COL
-                    ),
-                    F.col("__target_key").alias(TARGET_LOOKUP_VALUE_COL),
-                )
-            )
-
-        for table, column in sorted(required_pairs):
-            candidates = fk_candidates[(table, column)]
-            if table == "OPERACAO" and column == "NUM_ID_CTX_MSG_P1":
-                sql_before = (
-                    "SELECT NUM_ID_CTX_MSG FROM CETIP.CONTEXTO_MENSAGEM "
-                    "WHERE NUM_ID_CTX_MSG IN"
-                )
-            elif column == "NUM_ID_ENTIDADE" and table in {
-                "CARTEIRA_COMITENTE",
-                "ESPECIFICACAO_COMITENTE",
-            }:
-                sql_before = (
-                    "SELECT NUM_ID_ENTIDADE FROM CETIP.COMITENTE "
-                    "WHERE NUM_ID_ENTIDADE IN"
-                )
-            else:
-                raise ValueError(
-                    f"consulta Oracle não declarada para {table}.{column}"
-                )
-            present = _oracle_match_numeric_candidates(
-                spark,
-                connection,
-                candidates,
-                sql_before,
-            )
-            missing_pieces.append(
-                candidates.join(
-                    present,
-                    candidates["__candidate_key"]
-                    == present["__target_key"],
-                    "left_anti",
-                ).select(
-                    F.lit(table).alias("TABELA"),
-                    F.lit(column).alias("COLUNA"),
-                    F.col("__candidate_key").alias("VALOR"),
-                    F.lit(None).cast("string").alias(
-                        TARGET_SNAPSHOT_ID_COL
-                    ),
-                )
-            )
-
-    finally:
-        if transaction_statement is not None:
-            transaction_statement.close()
-        try:
-            connection.rollback()
-        except Exception:
-            pass
-        connection.close()
-
-    # Os joins/checkpoints Spark ficam fora da transação Oracle. Os DataFrames
-    # de chaves presentes já são locais e não dependem da conexão encerrada.
-    target_lookups = (
-        spark.createDataFrame([], lookup_schema)
-        if not lookup_pieces
-        else lookup_pieces[0]
-    )
-    for piece in lookup_pieces[1:]:
-        target_lookups = target_lookups.unionByName(piece)
-    target_lookups = target_lookups.dropDuplicates().localCheckpoint(eager=True)
-    for lookup_name in sorted(required_lookups):
-        n_lookup = (
-            target_lookups.where(
-                F.col(TARGET_LOOKUP_NAME_COL) == F.lit(lookup_name)
-            )
-            .select(TARGET_LOOKUP_VALUE_COL)
-            .dropDuplicates()
-            .count()
-        )
-        if n_lookup == 0:
+        parent = parent_by_pair.get((table, column))
+        if parent is None:
             raise ValueError(
-                f"Oracle alvo não retornou nenhuma chave elegível para "
-                f"{lookup_name}; a execução foi interrompida antes da amostragem"
+                f"checagem RAW sem pai declarado para {table}.{column}"
             )
-
-    automatic_missing = (
-        spark.createDataFrame([], missing_schema)
-        if not missing_pieces
-        else missing_pieces[0]
-    )
-    for piece in missing_pieces[1:]:
-        automatic_missing = automatic_missing.unionByName(piece)
-    automatic_missing = automatic_missing.dropDuplicates().localCheckpoint(
-        eager=True
-    )
+        parent_table, parent_column = parent
+        candidates = _raw_reference_candidates(
+            spark, config, produto, table, column, dominio
+        )
+        parent_source = _read_source(spark, config, parent_table)
+        _require_columns(
+            parent_source,
+            parent_table,
+            (parent_column,),
+            f"validar pai RAW de {table}.{column}",
+        )
+        parent_keys = (
+            parent_source.select(
+                _norm_key_col(F.col(parent_column)).alias("__candidate_key")
+            )
+            .where(
+                F.col("__candidate_key").isNotNull()
+                & (F.length(F.col("__candidate_key")) > F.lit(0))
+            )
+            .dropDuplicates()
+        )
+        missing = candidates.join(
+            parent_keys, "__candidate_key", "left_anti"
+        ).select(
+            F.lit(table).alias("TABELA"),
+            F.lit(column).alias("COLUNA"),
+            F.col("__candidate_key").alias("VALOR"),
+            F.lit(None).cast("string").alias(TARGET_SNAPSHOT_ID_COL),
+        )
+        pieces.append(missing)
+    result = pieces[0]
+    for piece in pieces[1:]:
+        result = result.unionByName(piece)
+    result = result.dropDuplicates().localCheckpoint(eager=True)
     logger.info(
-        "Oracle alvo: %d lookup(s) positivo(s) e %d referência(s) "
-        "faltante(s) materializados automaticamente.",
-        target_lookups.count(),
-        automatic_missing.count(),
+        "Checagem offline de FKs pelo RAW: %d chave(s) órfã(s).",
+        result.count(),
     )
-    return target_lookups, automatic_missing
+    return result
 
 
 def _allocation_sql(code_kind: str, batch_count: int,
@@ -4747,110 +4676,101 @@ def _validate_resgate_sintetico(
     }
     missing_tables = sorted(required_tables - set(resultados))
     if missing_tables:
-        return [
-            f"cronograma de resgate: tabelas ausentes {missing_tables}"
-        ]
+        return [f"cronograma de resgate: tabelas ausentes {missing_tables}"]
+
     conditions = resultados[CONDICAO_IF_TABLE][0]
     redemptions = resultados["RESGATE"][0]
     schedules = resultados["CONDICAO_RESGATE"][0]
+    need_parent = bool(requested & {
+        CHECK_RESGATE_COVERAGE,
+        CHECK_RESGATE_PARENT,
+    })
+    condition_required = [COL_NUM_IF, CONDICAO_IF_PK]
+    redemption_required = [CONDICAO_IF_PK]
+    schedule_required = [CONDICAO_IF_PK]
+    if need_parent:
+        condition_required.append(CONDICAO_IF_TIPO_COL)
+        redemption_required.append("COD_COND_RESGATE")
+    if CHECK_RESGATE_VALUES in requested:
+        schedule_required.extend(("DAT_RESGATE", "VAL_PERCENTUAL"))
     try:
         _require_columns(
-            conditions,
-            CONDICAO_IF_TABLE,
-            (
-                COL_NUM_IF,
-                CONDICAO_IF_PK,
-                CONDICAO_IF_TIPO_COL,
-                "DAT_EXCLUSAO",
-            ),
+            conditions, CONDICAO_IF_TABLE, condition_required,
             "validação final do cronograma",
         )
         _require_columns(
-            redemptions,
-            "RESGATE",
-            (CONDICAO_IF_PK, "COD_COND_RESGATE", "DAT_EXCLUSAO"),
+            redemptions, "RESGATE", redemption_required,
             "validação final do cronograma",
         )
         _require_columns(
-            schedules,
-            "CONDICAO_RESGATE",
-            (
-                CONDICAO_IF_PK,
-                "DAT_RESGATE",
-                "VAL_PERCENTUAL",
-                "DAT_EXCLUSAO",
-            ),
+            schedules, "CONDICAO_RESGATE", schedule_required,
             "validação final do cronograma",
         )
     except ValueError as exc:
         return [str(exc)]
 
-    parent_rows = (
-        conditions.select(
-            F.col(COL_NUM_IF),
-            _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__condition_key"),
-            F.col("DAT_EXCLUSAO").isNull().alias("__condition_active"),
-            (F.col(CONDICAO_IF_TIPO_COL).cast("int") == F.lit(20)).alias(
-                "__condition_type_20"
-            ),
-        )
-        .join(
-            redemptions.select(
-                _norm_key_col(F.col(CONDICAO_IF_PK)).alias(
-                    "__condition_key"
-                ),
-                F.col("DAT_EXCLUSAO").isNull().alias("__redemption_active"),
-                (
-                    F.upper(
-                        F.trim(F.col("COD_COND_RESGATE").cast("string"))
-                    )
+    valid_parent_keys = None
+    if need_parent:
+        valid_parent_keys = (
+            _active_optional_dat_exclusao(conditions)
+            .where(
+                _validator_code_col(F.col(CONDICAO_IF_TIPO_COL)) == F.lit("20")
+            )
+            .select(
+                F.col(COL_NUM_IF),
+                _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__condition_key"),
+            )
+            .join(
+                _active_optional_dat_exclusao(redemptions)
+                .where(
+                    _validator_code_col(F.col("COD_COND_RESGATE"))
                     == F.lit("COM TABELA")
-                ).alias("__with_schedule"),
-            ),
-            "__condition_key",
-            "left",
+                )
+                .select(
+                    _norm_key_col(F.col(CONDICAO_IF_PK)).alias(
+                        "__condition_key"
+                    )
+                ),
+                "__condition_key",
+                "inner",
+            )
+            .dropDuplicates()
         )
-        .withColumn(
-            "__parent_valid",
-            F.coalesce(F.col("__condition_active"), F.lit(False))
-            & F.coalesce(F.col("__condition_type_20"), F.lit(False))
-            & F.coalesce(F.col("__redemption_active"), F.lit(False))
-            & F.coalesce(F.col("__with_schedule"), F.lit(False)),
-        )
-    )
-    active_schedules = (
-        schedules.select(
-            _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__condition_key"),
-            F.col("DAT_EXCLUSAO").isNull().alias("__schedule_active"),
-            F.to_date(F.col("DAT_RESGATE")).alias("__date_parsed"),
+
+    schedule_columns = [
+        _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__condition_key")
+    ]
+    if CHECK_RESGATE_VALUES in requested:
+        schedule_columns.extend((
+            F.col("DAT_RESGATE").alias("__date_raw"),
             F.col("VAL_PERCENTUAL").alias("__percent_raw"),
+        ))
+    active_schedules = schedules.where(
+        _schedule_active_pred(schedules)
+    ).select(*schedule_columns)
+    if CHECK_RESGATE_VALUES in requested:
+        active_schedules = (
+            active_schedules
+            .withColumn(
+                "__date_parsed", _try_cast_column("__date_raw", "DATE")
+            )
+            .withColumn(
+                "__percent_parsed",
+                _try_cast_column("__percent_raw", "DOUBLE"),
+            )
+            .withColumn(
+                "__percent_valid",
+                F.col("__percent_parsed").isNotNull()
+                & ~F.isnan(F.col("__percent_parsed"))
+                & (F.col("__percent_parsed") <= F.lit(sys.float_info.max))
+                & (F.col("__percent_parsed") >= F.lit(-sys.float_info.max)),
+            )
         )
-        .where(F.col("__schedule_active"))
-        .withColumn(
-            "__percent_parsed",
-            F.expr("try_cast(__percent_raw AS DOUBLE)"),
-        )
-        .withColumn(
-            "__percent_valid",
-            F.col("__percent_parsed").isNotNull()
-            & ~F.isnan(F.col("__percent_parsed"))
-            & (F.col("__percent_parsed") <= F.lit(sys.float_info.max))
-            & (F.col("__percent_parsed") >= F.lit(-sys.float_info.max)),
-        )
-    )
-    schedule_parents = active_schedules.join(
-        parent_rows.select(
-            "__condition_key",
-            COL_NUM_IF,
-            "__parent_valid",
-        ),
-        "__condition_key",
-        "left",
-    )
+
     errors: List[str] = []
     if CHECK_RESGATE_COVERAGE in requested:
         count = (
-            parent_rows.where(F.col("__parent_valid"))
+            valid_parent_keys
             .join(
                 active_schedules.select("__condition_key").dropDuplicates(),
                 "__condition_key",
@@ -4864,133 +4784,145 @@ def _validate_resgate_sintetico(
             errors.append(
                 f"{CHECK_RESGATE_COVERAGE}: {count} NUM_IF sintético(s)"
             )
+
     if CHECK_RESGATE_PARENT in requested:
-        invalid_roots = (
-            schedule_parents.where(
-                F.col(COL_NUM_IF).isNotNull()
-                &
-                ~F.coalesce(F.col("__parent_valid"), F.lit(False))
-            )
-            .select(COL_NUM_IF)
-            .dropDuplicates()
-            .count()
+        invalid_rows = (
+            active_schedules.join(
+                valid_parent_keys.select("__condition_key").dropDuplicates(),
+                "__condition_key",
+                "left_anti",
+            ).count()
         )
-        unattributed = schedule_parents.where(
-            F.col(COL_NUM_IF).isNull()
-        ).count()
-        if invalid_roots or unattributed:
+        if invalid_rows:
             errors.append(
-                f"{CHECK_RESGATE_PARENT}: {invalid_roots} NUM_IF sintético(s); "
-                f"{unattributed} linha(s) sem pai atribuível"
+                f"{CHECK_RESGATE_PARENT}: {invalid_rows} linha(s) ativa(s) "
+                "sem pai type-20 COM TABELA"
             )
+
     if CHECK_RESGATE_VALUES in requested:
-        schedule_values = active_schedules.join(
-            parent_rows.select("__condition_key", COL_NUM_IF).dropDuplicates(),
-            "__condition_key",
-            "left",
-        )
-        invalid_value_rows = schedule_values.where(
-                F.col("__date_parsed").isNull()
-                | ~F.col("__percent_valid")
-        )
-        count = (
-            invalid_value_rows.where(F.col(COL_NUM_IF).isNotNull())
-            .select(COL_NUM_IF)
-            .dropDuplicates()
-            .count()
-        )
-        unattributed_values = invalid_value_rows.where(
-            F.col(COL_NUM_IF).isNull()
+        invalid_rows = active_schedules.where(
+            F.col("__date_parsed").isNull()
+            | ~F.col("__percent_valid")
         ).count()
-        if count or unattributed_values:
+        if invalid_rows:
             errors.append(
-                f"{CHECK_RESGATE_VALUES}: {count} NUM_IF sintético(s); "
-                f"{unattributed_values} linha(s) sem NUM_IF atribuível"
+                f"{CHECK_RESGATE_VALUES}: {invalid_rows} linha(s) ativa(s) "
+                "com data/percentual inválido"
             )
     return errors
-
 
 def _validate_escalonamento_sintetico(
     resultados: Mapping[str, Tuple[DataFrame, int]],
 ) -> List[str]:
-    required_tables = {TABELA_RAIZ, CONDICAO_IF_TABLE, "TITULO"}
+    required_tables = {
+        TABELA_RAIZ,
+        CONDICAO_IF_TABLE,
+        "TITULO",
+        "JUROS_FLUTUANTE",
+    }
     missing_tables = sorted(required_tables - set(resultados))
     if missing_tables:
-        return [
-            f"escalonamento_dates: tabelas ausentes {missing_tables}"
-        ]
+        return [f"escalonamento_dates: tabelas ausentes {missing_tables}"]
+
     roots = resultados[TABELA_RAIZ][0]
     conditions = resultados[CONDICAO_IF_TABLE][0]
     titles = resultados["TITULO"][0]
-    root_required = {
-        COL_NUM_IF,
-        ENGORDA_COL_DAT_EMISSAO,
-        ENGORDA_COL_DAT_VENCIMENTO,
-        "DAT_EXCLUSAO",
-    }
-    condition_required = {
-        COL_NUM_IF,
-        "DAT_INICIO_CONDICAO_IF",
-        "DAT_EXCLUSAO",
-    }
-    title_required = {COL_NUM_IF, "COD_TIPO_ESCALONAMENTO"}
-    missing_root = sorted(root_required - set(roots.columns))
-    missing_condition = sorted(condition_required - set(conditions.columns))
-    missing_title = sorted(title_required - set(titles.columns))
-    if missing_root or missing_condition or missing_title:
-        return [
-            "escalonamento_dates: colunas ausentes "
-            f"raiz={missing_root}, condicao={missing_condition}, "
-            f"titulo={missing_title}"
-        ]
+    interests = resultados["JUROS_FLUTUANTE"][0]
+    try:
+        _require_columns(
+            roots,
+            TABELA_RAIZ,
+            (
+                COL_NUM_IF,
+                ENGORDA_COL_DAT_EMISSAO,
+                ENGORDA_COL_DAT_VENCIMENTO,
+            ),
+            "validação final de escalonamento",
+        )
+        _require_columns(
+            conditions,
+            CONDICAO_IF_TABLE,
+            (
+                COL_NUM_IF,
+                CONDICAO_IF_PK,
+                CONDICAO_IF_TIPO_COL,
+                "DAT_INICIO_CONDICAO_IF",
+            ),
+            "validação final de escalonamento",
+        )
+        _require_columns(
+            titles,
+            "TITULO",
+            (COL_NUM_IF, "COD_TIPO_ESCALONAMENTO"),
+            "validação final de escalonamento",
+        )
+        _require_columns(
+            interests,
+            "JUROS_FLUTUANTE",
+            (CONDICAO_IF_PK,),
+            "validação final de escalonamento",
+        )
+    except ValueError as exc:
+        return [str(exc)]
 
     emission_titles = (
-        titles.select(
-            F.col(COL_NUM_IF),
-            F.upper(
-                F.trim(F.col("COD_TIPO_ESCALONAMENTO").cast("string"))
-            ).alias("__escalonamento"),
+        _active_optional_dat_exclusao(titles)
+        .where(
+            _validator_code_col(F.col("COD_TIPO_ESCALONAMENTO"))
+            == F.lit("EMISSAO")
         )
-        .where(F.col("__escalonamento") == F.lit("EMISSAO"))
         .select(COL_NUM_IF)
         .dropDuplicates()
     )
     root_dates = (
-        roots.where(F.col("DAT_EXCLUSAO").isNull())
+        _active_optional_dat_exclusao(roots)
         .select(
             F.col(COL_NUM_IF),
-            F.to_date(F.col(ENGORDA_COL_DAT_EMISSAO)).alias("__issue"),
-            F.to_date(F.col(ENGORDA_COL_DAT_VENCIMENTO)).alias("__maturity"),
+            F.col(ENGORDA_COL_DAT_EMISSAO).alias("__issue_raw"),
+            F.col(ENGORDA_COL_DAT_VENCIMENTO).alias("__maturity_raw"),
         )
         .join(emission_titles, COL_NUM_IF, "left_semi")
+        .withColumn("__issue", _try_cast_column("__issue_raw", "DATE"))
+        .withColumn("__maturity", _try_cast_column("__maturity_raw", "DATE"))
     )
-    condition_dates = (
-        conditions.where(F.col("DAT_EXCLUSAO").isNull())
+    interest_keys = interests.select(
+        _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__condition_key")
+    ).dropDuplicates()
+    segments = (
+        _active_optional_dat_exclusao(conditions)
+        .where(
+            _validator_code_col(F.col(CONDICAO_IF_TIPO_COL)) == F.lit("3")
+        )
         .select(
             F.col(COL_NUM_IF),
-            F.to_date(F.col("DAT_INICIO_CONDICAO_IF")).alias("__start"),
+            _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__condition_key"),
+            F.col("DAT_INICIO_CONDICAO_IF").alias("__start_raw"),
         )
+        .join(interest_keys, "__condition_key", "inner")
         .join(root_dates.select(COL_NUM_IF), COL_NUM_IF, "left_semi")
+        .withColumn("__start", _try_cast_column("__start_raw", "DATE"))
     )
-    invalid_segments = (
-        condition_dates.join(root_dates, COL_NUM_IF, "inner")
-        .where(
-            F.col("__issue").isNull()
-            | F.col("__maturity").isNull()
-            | F.col("__start").isNull()
-            | (F.col("__issue") > F.col("__maturity"))
-            | (F.col("__start") < F.col("__issue"))
-            | (F.col("__start") > F.col("__maturity"))
+    dated = segments.join(root_dates, COL_NUM_IF, "inner")
+    invalid_segments = dated.where(
+        F.col("__start").isNull()
+        | (
+            F.col("__issue").isNotNull()
+            & (F.col("__start") < F.col("__issue"))
         )
-        .select(COL_NUM_IF)
-    )
-    first_start = condition_dates.groupBy(COL_NUM_IF).agg(
-        F.min(F.col("__start")).alias("__first_start")
-    )
+        | (
+            F.col("__maturity").isNotNull()
+            & (F.col("__start") > F.col("__maturity"))
+        )
+    ).select(COL_NUM_IF)
     invalid_first = (
-        root_dates.join(first_start, COL_NUM_IF, "left")
+        dated.groupBy(COL_NUM_IF)
+        .agg(
+            F.min(F.col("__start")).alias("__first_start"),
+            F.min(F.col("__issue")).alias("__issue"),
+        )
         .where(
             F.col("__first_start").isNull()
+            | F.col("__issue").isNull()
             | (F.col("__first_start") != F.col("__issue"))
         )
         .select(COL_NUM_IF)
@@ -5006,13 +4938,12 @@ def _validate_escalonamento_sintetico(
         else []
     )
 
-
 def _validate_operation_tos_cdb_sintetico(
     resultados: Mapping[str, Tuple[DataFrame, int]],
-    target_lookups: Optional[DataFrame],
+    offline_lookups: Optional[DataFrame],
 ) -> List[str]:
-    if target_lookups is None:
-        return [f"{CHECK_OPERATION_TOS_CDB}: lookup alvo ausente"]
+    if offline_lookups is None:
+        return [f"{CHECK_OPERATION_TOS_CDB}: lookup RAW ausente"]
     missing_tables = sorted({TABELA_RAIZ, "OPERACAO"} - set(resultados))
     if missing_tables:
         return [
@@ -5024,7 +4955,7 @@ def _validate_operation_tos_cdb_sintetico(
         _require_columns(
             roots,
             TABELA_RAIZ,
-            (COL_NUM_IF, "DAT_EXCLUSAO"),
+            (COL_NUM_IF,),
             "validação final de TOS CDB",
         )
         _require_columns(
@@ -5035,32 +4966,48 @@ def _validate_operation_tos_cdb_sintetico(
         )
     except ValueError as exc:
         return [str(exc)]
-    approved = _target_lookup_keys(
-        target_lookups,
-        TARGET_LOOKUP_TOS_CDB,
+    approved = _offline_lookup_keys(
+        offline_lookups,
+        OFFLINE_LOOKUP_TOS_CDB_APPROVED,
+        "__tos_key",
+    )
+    invalid_registration = _offline_lookup_keys(
+        offline_lookups,
+        OFFLINE_LOOKUP_TOS_CDB_INVALID,
         "__tos_key",
     )
     active_roots = (
-        roots.where(F.col("DAT_EXCLUSAO").isNull())
+        _active_optional_dat_exclusao(roots)
         .select(COL_NUM_IF)
         .dropDuplicates()
+    )
+    operation_refs = operations.select(
+        F.col(COL_NUM_IF),
+        F.col("NUM_ID_TIPO_OPER_OBJETO_SERV").cast("string").alias(
+            "__raw_tos"
+        ),
+        _norm_key_col(
+            F.col("NUM_ID_TIPO_OPER_OBJETO_SERV")
+        ).alias("__tos_key"),
     )
     valid_roots = (
-        operations.select(
-            F.col(COL_NUM_IF),
-            _norm_key_col(
-                F.col("NUM_ID_TIPO_OPER_OBJETO_SERV")
-            ).alias("__tos_key"),
+        operation_refs.where(
+            F.col("__raw_tos").isNotNull()
+            & (F.trim(F.col("__raw_tos")) != F.lit(""))
         )
-        .join(F.broadcast(approved), "__tos_key", "left_semi")
+        .join(approved, "__tos_key", "left_semi")
         .select(COL_NUM_IF)
         .dropDuplicates()
     )
-    invalid_count = active_roots.join(
-        valid_roots,
-        COL_NUM_IF,
-        "left_anti",
-    ).count()
+    missing_approved = active_roots.join(
+        valid_roots, COL_NUM_IF, "left_anti"
+    )
+    bad_registration = operation_refs.join(
+        invalid_registration, "__tos_key", "left_semi"
+    ).select(COL_NUM_IF)
+    invalid_count = missing_approved.unionByName(
+        bad_registration
+    ).dropDuplicates().count()
     return (
         [f"{CHECK_OPERATION_TOS_CDB}: {invalid_count} NUM_IF sintético(s)"]
         if invalid_count
@@ -5070,10 +5017,10 @@ def _validate_operation_tos_cdb_sintetico(
 
 def _validate_active_accounts_cdb_sintetico(
     resultados: Mapping[str, Tuple[DataFrame, int]],
-    target_lookups: Optional[DataFrame],
+    offline_lookups: Optional[DataFrame],
 ) -> List[str]:
-    if target_lookups is None:
-        return [f"{CHECK_ACTIVE_ACCOUNT_CDB}: lookup alvo ausente"]
+    if offline_lookups is None:
+        return [f"{CHECK_ACTIVE_ACCOUNT_CDB}: lookup RAW ausente"]
     account_columns = {
         "TITULO": ("NUM_CONTA_PARTICIPANTE",),
         "DEPOSITO_AUTOMATICO_IF": ("NUM_CONTA_PARTICIPANTE",),
@@ -5114,13 +5061,13 @@ def _validate_active_accounts_cdb_sintetico(
         return [str(exc)]
     if references is None:
         return []
-    eligible = _target_lookup_keys(
-        target_lookups,
-        TARGET_LOOKUP_ACCOUNT_CDB,
+    eligible = _offline_lookup_keys(
+        offline_lookups,
+        OFFLINE_LOOKUP_ACCOUNT_CDB,
         "__account_key",
     )
     invalid = references.join(
-        F.broadcast(eligible),
+        eligible,
         "__account_key",
         "left_anti",
     )
@@ -5745,7 +5692,7 @@ def executa_clonagem(spark, config, spec: dict, *,
         protected_runtime_tables.update(REQUIRED_TABLES_BY_CHECK[check])
     protected_runtime_tables.update(
         table
-        for table, _ in TARGET_FK_COVERAGE_REQUIRED_BY_PRODUCT.get(
+        for table, _ in OFFLINE_FK_COVERAGE_REQUIRED_BY_PRODUCT.get(
             produto,
             frozenset(),
         )
@@ -5770,11 +5717,11 @@ def executa_clonagem(spark, config, spec: dict, *,
                 spec[table]["static"] = True
 
     faltantes = _carrega_faltantes(spark, config, faltantes_arg, faltantes_parquet)
-    required_target_lookups = TARGET_LOOKUPS_REQUIRED_BY_PRODUCT.get(
+    required_offline_lookups = OFFLINE_LOOKUPS_REQUIRED_BY_PRODUCT.get(
         produto,
         frozenset(),
     )
-    required_target_fk_pairs = TARGET_FK_COVERAGE_REQUIRED_BY_PRODUCT.get(
+    required_offline_fk_pairs = OFFLINE_FK_COVERAGE_REQUIRED_BY_PRODUCT.get(
         produto,
         frozenset(),
     )
@@ -5789,31 +5736,41 @@ def executa_clonagem(spark, config, spec: dict, *,
         .dropDuplicates()
         .localCheckpoint(eager=True)
     )
-    target_lookups: Optional[DataFrame] = None
-    if required_target_lookups or required_target_fk_pairs:
-        target_read_credentials = (
-            credentials if credentials is not None else _oracle_credentials(config)
+    offline_lookups = _build_offline_reference_lookups(
+        spark,
+        config,
+        required_offline_lookups,
+    )
+    if required_offline_lookups:
+        logger.warning(
+            "Checks %s usam somente o snapshot RAW. Para equivalência com "
+            "validate_products, mantenha os lookups RAW sincronizados com o "
+            "ambiente validado.",
+            sorted(required_offline_lookups),
         )
-        target_lookups, automatic_missing = (
-            _read_oracle_target_constraints_live(
-                spark,
-                config,
-                produto,
-                dominio_precalculado,
-                target_read_credentials,
+    automatic_missing = _raw_missing_references(
+        spark,
+        config,
+        produto,
+        dominio_precalculado,
+    )
+    if automatic_missing is not None:
+        # A lista informada pelo usuário continua relevante para drift entre o
+        # snapshot RAW e o destino; a checagem RAW apenas acrescenta órfãos de
+        # origem e nunca descarta evidência externa já conhecida.
+        faltantes = (
+            automatic_missing
+            if faltantes is None
+            else faltantes.unionByName(automatic_missing)
+        )
+        faltantes = faltantes.dropDuplicates().localCheckpoint(eager=True)
+        if not faltantes_arg and not faltantes_parquet:
+            logger.warning(
+                "FKs %s foram conferidas apenas contra pais RAW. Drift do "
+                "destino deve ser realimentado pelo --faltantes-parquet "
+                "emitido por validate_products.py.",
+                sorted(required_offline_fk_pairs),
             )
-        )
-        if required_target_fk_pairs:
-            if faltantes is not None:
-                # Para estes pares, a comparação Oracle do próprio run é
-                # autoritativa; descarta listas manuais possivelmente antigas.
-                faltantes = faltantes.where(
-                    ~_pred_faltante_seletivo(required_target_fk_pairs)
-                )
-                faltantes = faltantes.unionByName(automatic_missing)
-            else:
-                faltantes = automatic_missing
-            faltantes = faltantes.dropDuplicates().localCheckpoint(eager=True)
     if faltantes is not None:
         logger.info("Filtro de faltantes (itens 3/4) ativo: %d chave(s) de "
                     "referência inexistentes no destino.", faltantes.count())
@@ -5827,7 +5784,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                                      seed, product_profile,
                                      query_num_if_path=query_num_if_path,
                                      faltantes=faltantes,
-                                     target_lookups=target_lookups,
+                                     offline_lookups=offline_lookups,
                                      poda_subtipo=poda_subtipo,
                                      dominio_precalculado=dominio_precalculado)
 
@@ -5887,7 +5844,17 @@ def executa_clonagem(spark, config, spec: dict, *,
                     mapeamentos[TABELA_RAIZ],
                 )
                 cols_data.extend(shifted_condition_columns)
-            if t in {"RESGATE", "CONDICAO_RESGATE"}:
+            if (
+                t in {"RESGATE", "CONDICAO_RESGATE"}
+                and bool(
+                    product_profile.integrity.invalid_num_if_checks
+                    & {
+                        CHECK_RESGATE_COVERAGE,
+                        CHECK_RESGATE_PARENT,
+                        CHECK_RESGATE_VALUES,
+                    }
+                )
+            ):
                 date_context = dict(resultados)
                 date_context[t] = (clones, n_lote)
                 adjusted, changed = ajusta_datas_resgate(
@@ -5913,6 +5880,17 @@ def executa_clonagem(spark, config, spec: dict, *,
         # checkpoint/validação: a gravação precisa enxergar o valor já nulo.
         clones, cols_anuladas_integrais = aplica_nulificacao(
             clones, t, anular_cols, _not_null_cols(spec[t]))
+        required_product_nulls = set(
+            NULLIFY_COLUMNS_BY_PRODUCT.get(product_profile.name, {}).get(t, ())
+        )
+        missing_required_nulls = sorted(
+            required_product_nulls - set(cols_anuladas_integrais)
+        )
+        if missing_required_nulls:
+            raise ValueError(
+                f"{product_profile.name}.{t}: correção obrigatória não aplicada "
+                f"às colunas {missing_required_nulls}; confira schema e NOT NULL"
+            )
         cols_anuladas = _colunas_anuladas_resumo(
             cols_anuladas_integrais, cols_anuladas_seletivas
         )
@@ -5950,13 +5928,13 @@ def executa_clonagem(spark, config, spec: dict, *,
                 product_profile.integrity.invalid_num_if_checks,
             )
         )
-    if faltantes is not None or required_target_fk_pairs:
+    if faltantes is not None or required_offline_fk_pairs:
         erros_globais.extend(
             _validate_no_known_missing_references(
                 resultados,
                 faltantes,
                 product_profile.integrity.selective_missing_keys,
-                required_target_fk_pairs,
+                required_offline_fk_pairs,
             )
         )
     if CHECK_OPERATION_TOS_CDB in (
@@ -5965,7 +5943,7 @@ def executa_clonagem(spark, config, spec: dict, *,
         erros_globais.extend(
             _validate_operation_tos_cdb_sintetico(
                 resultados,
-                target_lookups,
+                offline_lookups,
             )
         )
     if CHECK_ACTIVE_ACCOUNT_CDB in (
@@ -5974,7 +5952,7 @@ def executa_clonagem(spark, config, spec: dict, *,
         erros_globais.extend(
             _validate_active_accounts_cdb_sintetico(
                 resultados,
-                target_lookups,
+                offline_lookups,
             )
         )
 
@@ -6233,7 +6211,7 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
         protected_tables.update(REQUIRED_TABLES_BY_CHECK[check])
     protected_tables.update(
         table
-        for table, _ in TARGET_FK_COVERAGE_REQUIRED_BY_PRODUCT.get(
+        for table, _ in OFFLINE_FK_COVERAGE_REQUIRED_BY_PRODUCT.get(
             profile.name,
             frozenset(),
         )
