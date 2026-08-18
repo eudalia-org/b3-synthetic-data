@@ -4,12 +4,17 @@ The first tracer runs immutable `engorda -> validate` branches through OCI Data 
 Copy `docs/pipeline-config.example.json`, replace its OCI values, and keep one config
 file per environment.
 
+`scripts/run_pipeline.py` is self-contained for operator distribution. Copy that one
+Python file to the Windows workstation; `oci_dataflow.py` and
+`pipeline_reservations.py` remain repository compatibility facades and are not needed
+beside the distributed runner.
+
 ## Adopt existing inputs
 
 Register an existing RAW and faltantes snapshot before starting at engorda:
 
 ```powershell
-uv run --allow-insecure-host pypi.org `
+uv run --python 3.11 --allow-insecure-host pypi.org `
   --allow-insecure-host files.pythonhosted.org `
   --no-project `
   scripts/run_pipeline.py adopt-inputs `
@@ -30,7 +35,7 @@ Add `--dry-run` to validate and print the adoption plan without OCI calls.
 ## Run engorda through validation
 
 ```powershell
-uv run --allow-insecure-host pypi.org `
+uv run --python 3.11 --allow-insecure-host pypi.org `
   --allow-insecure-host files.pythonhosted.org `
   --no-project `
   scripts/run_pipeline.py run `

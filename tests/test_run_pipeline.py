@@ -1,4 +1,7 @@
 import json
+import os
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -277,6 +280,47 @@ def test_manifest_upload_is_create_once_not_force_overwrite(tmp_path):
 
     assert "--no-overwrite" in commands[0]
     assert "--force" not in commands[0]
+
+
+def test_single_copied_script_adopts_inputs_without_sibling_modules(tmp_path):
+    standalone = tmp_path / "run_pipeline.py"
+    shutil.copy(Path(P.__file__), standalone)
+    config = write_config(tmp_path)
+    output = tmp_path / "adopted.json"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_oci = fake_bin / "oci"
+    fake_oci.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' '{\"data\":[{\"name\":\"part-0\","
+        "\"etag\":\"etag-1\",\"size\":42}]}'\n"
+    )
+    fake_oci.chmod(0o755)
+    environment = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"}
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(standalone),
+            "adopt-inputs",
+            "--config",
+            str(config),
+            "--product",
+            "cdb_resgate",
+            "--raw-uri",
+            "oci://source@namespace/raw",
+            "--faltantes-uri",
+            "oci://source@namespace/faltantes",
+            "--output-manifest",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(output.read_text())["status"] == "ADOPTED"
 
 
 def test_dry_run_is_offline_and_prints_resolved_argv(tmp_path, capsys):
