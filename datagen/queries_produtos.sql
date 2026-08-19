@@ -1,6 +1,43 @@
 -- Catálogo único de queries de domínio por produto.
 -- O engorda_tables.py seleciona automaticamente o bloco de --produto.
 -- Cada query preenchida deve retornar somente uma coluna chamada NUM_IF.
+--
+-- ===========================================================================
+-- ALTERAÇÃO 2026-08: CTE OPER_REGISTRO nos blocos cdb_simplificado,
+-- cdb_resgate e cdb_escalonamento.
+--
+-- MOTIVO: o validador (check_required_lookup_frames / 6.required.operation_tos)
+-- exige que TODO instrumento ativo tenha ao menos uma operação de REGISTRO cuja
+-- rota resolva para:
+--     TIPO_OPERACAO.COD_TIPO_OPERACAO       = '1'
+--     TIPO_OPER_OBJETO_SERV.NUM_ID_OBJETO_SERVICO = 44   (objeto de serviço CDB)
+--     TIPO_OPER_OBJETO_SERV.IND_DISPONIVEL_IDENTIFICACAO = 'S'
+-- O SELECT final destas queries exigia apenas "existe ALGUMA operação com
+-- cluster completo (DADO_OPERACAO + LANCAMENTO + ESPECIFICACAO + comitente)",
+-- que é condição DIFERENTE e mais fraca. Daí os erros
+--     [ERROR] 6.required.operation_tos  (67414 no escalonamento, 60043 no resgate)
+--
+-- ATENÇÃO — ESTE FILTRO AINDA NÃO FOI VALIDADO CONTRA O DADO:
+--   * se OPER_REGISTRO ZERAR (ou reduzir drasticamente) o domínio, então os
+--     instrumentos deste produto NÃO usam a rota 44/'S' e o predicado precisa
+--     ser revisto junto à B3 — não force o filtro;
+--   * o TIPO_OPER_OBJETO_SERV consultado aqui é o da ORIGEM (RAW); o validador
+--     resolve o mesmo ID contra o DESTINO (QAB). Se houver divergência de
+--     configuração entre os dois ambientes, este filtro passa e o validador
+--     continua reprovando — nesse caso o problema é do QAB, não da query.
+--
+-- PARA REVERTER: remova o CTE OPER_REGISTRO e o respectivo
+--     INNER JOIN OPER_REGISTRO ORG ON ORG.NUM_IF = F.NUM_IF
+-- do SELECT final. Nada mais depende dele.
+--
+-- PRÉ-REQUISITO: exige os Parquets RAW de TIPO_OPER_OBJETO_SERV e TIPO_OPERACAO
+-- (ambas static no spec). Confirme com um spark.read.parquet nos dois paths
+-- antes de rodar valendo.
+--
+-- NÃO aplicado aos blocos rdb_*: o objeto de serviço do RDB é 45 (não 44) e o
+-- validador marca CAP_LOOKUP_TOS como NÃO SUPORTADA para RDB, então esse check
+-- sai como WARN e não como ERROR. Aplicar 44 ali seria ativamente errado.
+-- ===========================================================================
 
 -- BEGIN QUERY: cdb_simplificado
 -- Query Spark SQL que define o domínio de instrumentos a clonar.
@@ -37,11 +74,26 @@ DEP_IF AS (
         INNER JOIN FILTRO_BASE FB
             ON FB.NUM_IF = DP.NUM_IF
     WHERE DP.NUM_IF IS NOT NULL
+),
+OPER_REGISTRO AS (
+    -- Instrumentos que possuem operação de REGISTRO na rota exigida pelo app.
+    -- Ver cabeçalho do arquivo antes de alterar/remover.
+    SELECT DISTINCT O.NUM_IF
+    FROM {{RAW_OPERACAO}} O
+        INNER JOIN {{RAW_TIPO_OPER_OBJETO_SERV}} TOS
+            ON TOS.NUM_ID_TIPO_OPER_OBJETO_SERV = O.NUM_ID_TIPO_OPER_OBJETO_SERV
+        INNER JOIN {{RAW_TIPO_OPERACAO}} TOP
+            ON TOP.NUM_ID_TIPO_OPERACAO = TOS.NUM_ID_TIPO_OPERACAO
+    WHERE TRIM(TOP.COD_TIPO_OPERACAO) = '1'
+        AND TOS.NUM_ID_OBJETO_SERVICO = 44
+        AND TRIM(TOS.IND_DISPONIVEL_IDENTIFICACAO) = 'S'
 )
 SELECT DISTINCT F.NUM_IF
 FROM FLAGS_IF F
     INNER JOIN DEP_IF DEP
         ON DEP.NUM_IF = F.NUM_IF
+    INNER JOIN OPER_REGISTRO ORG
+        ON ORG.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_OPERACAO}} O
         ON O.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_DADO_OPERACAO}} DOP
@@ -94,11 +146,26 @@ DEP_IF AS (
         INNER JOIN FILTRO_BASE FB
             ON FB.NUM_IF = DP.NUM_IF
     WHERE DP.NUM_IF IS NOT NULL
+),
+OPER_REGISTRO AS (
+    -- Instrumentos que possuem operação de REGISTRO na rota exigida pelo app.
+    -- Ver cabeçalho do arquivo antes de alterar/remover.
+    SELECT DISTINCT O.NUM_IF
+    FROM {{RAW_OPERACAO}} O
+        INNER JOIN {{RAW_TIPO_OPER_OBJETO_SERV}} TOS
+            ON TOS.NUM_ID_TIPO_OPER_OBJETO_SERV = O.NUM_ID_TIPO_OPER_OBJETO_SERV
+        INNER JOIN {{RAW_TIPO_OPERACAO}} TOP
+            ON TOP.NUM_ID_TIPO_OPERACAO = TOS.NUM_ID_TIPO_OPERACAO
+    WHERE TRIM(TOP.COD_TIPO_OPERACAO) = '1'
+        AND TOS.NUM_ID_OBJETO_SERVICO = 44
+        AND TRIM(TOS.IND_DISPONIVEL_IDENTIFICACAO) = 'S'
 )
 SELECT DISTINCT F.NUM_IF
 FROM FLAGS_IF F
     INNER JOIN DEP_IF DEP
         ON DEP.NUM_IF = F.NUM_IF
+    INNER JOIN OPER_REGISTRO ORG
+        ON ORG.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_OPERACAO}} O
         ON O.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_DADO_OPERACAO}} DOP
@@ -147,11 +214,26 @@ DEP_IF AS (
         INNER JOIN FILTRO_BASE FB
             ON FB.NUM_IF = DP.NUM_IF
     WHERE DP.NUM_IF IS NOT NULL
+),
+OPER_REGISTRO AS (
+    -- Instrumentos que possuem operação de REGISTRO na rota exigida pelo app.
+    -- Ver cabeçalho do arquivo antes de alterar/remover.
+    SELECT DISTINCT O.NUM_IF
+    FROM {{RAW_OPERACAO}} O
+        INNER JOIN {{RAW_TIPO_OPER_OBJETO_SERV}} TOS
+            ON TOS.NUM_ID_TIPO_OPER_OBJETO_SERV = O.NUM_ID_TIPO_OPER_OBJETO_SERV
+        INNER JOIN {{RAW_TIPO_OPERACAO}} TOP
+            ON TOP.NUM_ID_TIPO_OPERACAO = TOS.NUM_ID_TIPO_OPERACAO
+    WHERE TRIM(TOP.COD_TIPO_OPERACAO) = '1'
+        AND TOS.NUM_ID_OBJETO_SERVICO = 44
+        AND TRIM(TOS.IND_DISPONIVEL_IDENTIFICACAO) = 'S'
 )
 SELECT DISTINCT F.NUM_IF
 FROM FLAGS_IF F
     INNER JOIN DEP_IF DEP
         ON DEP.NUM_IF = F.NUM_IF
+    INNER JOIN OPER_REGISTRO ORG
+        ON ORG.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_OPERACAO}} O
         ON O.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_DADO_OPERACAO}} DOP
@@ -169,6 +251,8 @@ FROM FLAGS_IF F
 -- Contrato: retornar somente uma coluna chamada NUM_IF, sem valores nulos.
 -- Use RAW_<TABELA> entre chaves duplas para referenciar uma fonte RAW.
 -- filtros num_tipo_if 50 e cod_cond_resgate sem tabela e tipo escalonamento nulo
+-- NB: sem OPER_REGISTRO — objeto de serviço do RDB é 45, e o validador não
+-- suporta a checagem de rota para RDB (CAP_LOOKUP_TOS não suportada -> WARN).
 WITH FILTRO_BASE AS (
     SELECT DISTINCT IFE.NUM_IF
     FROM {{RAW_INSTRUMENTO_FINANCEIRO}} IFE
@@ -221,6 +305,7 @@ FROM FLAGS_IF F
 -- Contrato: retornar somente uma coluna chamada NUM_IF, sem valores nulos.
 -- Use RAW_<TABELA> entre chaves duplas para referenciar uma fonte RAW.
 -- filtros num_tipo_if 50 e cod_cond_resgate  mercado,com tabela e especifica e tipo escalonamento nulo
+-- NB: sem OPER_REGISTRO — ver bloco rdb_inclusao.
 WITH FILTRO_BASE AS (
     SELECT DISTINCT IFE.NUM_IF
     FROM {{RAW_INSTRUMENTO_FINANCEIRO}} IFE
