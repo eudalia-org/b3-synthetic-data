@@ -4,7 +4,7 @@
 validate_products.py
 ====================
 
-Descriptive validator for CDB-simplificado, full CDB, and RDB synthetic datasets
+Descriptive validator for CDB, RDB, CCB, LCI, LCA, and credit synthetic datasets
 produced by `engorda_tables.py`. It runs on the ENGORDA OUTPUT (the synthetic Parquet under
 DATAGEN_SYNTHETIC_BASE_URI) and checks it against the ACTUAL application rules of
 the CETIP/NoMe platform, so structural/domain violations are caught BEFORE the
@@ -223,8 +223,8 @@ SEM_MODALIDADE_IDS = (6, 16)
 # Product profiles (multi-product validation contract)
 # ---------------------------------------------------------------------------
 # Evidence anchors (application source under framework/):
-#   NUM_TIPO_IF: CDB = 49 (TipoIFDO.java:49), RDB = 50 (TipoIFDO.java:56).
-#   Object service: CDB = 44 (ObjetoServicoDO.java:52), RDB = 45 (ObjetoServicoDO.java:80).
+#   NUM_TIPO_IF: CDB = 49, RDB = 50, CCB = 53.
+#   Object service: CDB = 44, RDB = 45, CCB = 47.
 #   CONDICAO_IF polymorphism: joined-subclass, no discriminator (CondicaoIFDO.hbm.xml)
 #     + type codes (TipoCondicaoIFDO.java:42-73).
 #   COD_IF allocator: CETIP.PKG_CODIGO.F_GETCODIGONOVOIF21(num_tipo_if, date)
@@ -266,6 +266,9 @@ CAP_LCI_TARGET_ELIGIBILITY = "lci_target_eligibility"
 CAP_LCA_METADATA = "lca_metadata"
 CAP_LCA_GRAPH = "lca_graph"
 CAP_LCA_TARGET_ELIGIBILITY = "lca_target_eligibility"
+CAP_CCB_METADATA = "ccb_metadata"
+CAP_CCB_GRAPH = "ccb_graph"
+CAP_CCB_TARGET_ELIGIBILITY = "ccb_target_eligibility"
 
 ALL_CAPABILITIES: Tuple[str, ...] = (
     CAP_IDENTITY, CAP_DOMAIN, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
@@ -355,6 +358,12 @@ _LCA_REQUIRED = (
     CAP_CAPACITY, CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_SHAPE,
     CAP_REGISTRATION_PROFILE, CAP_LCA_METADATA, CAP_LCA_GRAPH,
     CAP_LCA_TARGET_ELIGIBILITY,
+)
+_CCB_REQUIRED = (
+    CAP_IDENTITY, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
+    CAP_CAPACITY, CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_SHAPE,
+    CAP_REGISTRATION_PROFILE, CAP_CCB_METADATA, CAP_CCB_GRAPH,
+    CAP_CCB_TARGET_ELIGIBILITY,
 )
 
 VALIDATION_PROFILES: Dict[str, ValidationProfile] = {
@@ -454,6 +463,25 @@ VALIDATION_PROFILES: Dict[str, ValidationProfile] = {
         supported_capabilities=_LCA_REQUIRED,
         evidence_version=1,
         pipeline="lca",
+    ),
+    "ccb": ValidationProfile(
+        name="ccb",
+        num_tipo_if=53,
+        default_clone_prefix="sintetizacao_multiproduto/ccb",
+        simplified_domain=False,
+        object_service_id=47,
+        object_service_code="CCB",
+        cod_if_pattern=None,
+        sic_enabled=False,
+        platform_check_enabled=True,
+        account_check_enabled=False,
+        sem_modalidade_ids=None,
+        hard_shape_rules=(SHAPE_RULE_DISTRIBUTION,),
+        registration_constants=None,
+        required_capabilities=_CCB_REQUIRED,
+        supported_capabilities=_CCB_REQUIRED,
+        evidence_version=1,
+        pipeline="ccb",
     ),
     "credito_scr": ValidationProfile(
         name="credito_scr",
@@ -4562,6 +4590,1060 @@ def check_dicre_registration_profile(
 
 
 # ---------------------------------------------------------------------------
+# Category 0/2h/6h/8h - CCB registration-route evidence
+# ---------------------------------------------------------------------------
+CCB_CONDITION_SUBTYPES = {
+    "1": "AMORTIZACAO",
+    "2": "JUROS_FIXO",
+    "4": "ATUALIZACAO_POS",
+    "5": "SPREAD",
+    "14": "ATUALIZACAO_PRE",
+    "20": "RESGATE",
+}
+CCB_CORE_OUTPUT_TABLES = (
+    "INSTRUMENTO_FINANCEIRO", "TITULO", "CREDITO", "CONDICAO_IF", "JUROS_FIXO",
+    "HISTORICO_PU_CURVA", "HISTORICO_IF_TITULO", "ALTERACAO_IF", "TCTPIF_CCB",
+    "TCTPCRONOGRAMA_CCB", "OPERACAO", "LANCAMENTO",
+)
+CCB_OUTPUT_TABLES = CCB_CORE_OUTPUT_TABLES + (
+    "AMORTIZACAO", "ATUALIZACAO_POS", "ATUALIZACAO_PRE", "SPREAD", "RESGATE",
+    "GARANTIA", "TCTPCADEIA_IPOC",
+)
+
+
+def _ccb_active(frame: DataFrame) -> DataFrame:
+    for candidate in ("DAT_EXCLUSAO", "DATA_EXCLUSAO", "DTHR_EXCLUSAO"):
+        actual = resolve(frame, candidate)
+        if actual:
+            return frame.where(_oracle_null_equivalent(F.col(actual)))
+    deleted = resolve(frame, "IND_EXCLUIDO")
+    if deleted:
+        return frame.where(F.upper(F.trim(F.col(deleted).cast("string"))) == "N")
+    return frame
+
+
+def _ccb_unavailable(check_id: str, missing: Sequence[str], severity: str = SEV_ERROR) -> Finding:
+    return Finding(
+        check_id, "CCB validation", severity,
+        ",".join(sorted({item.split(".")[0] for item in missing})), False,
+        hint="Export the complete CCB aggregate and required columns." if missing else "",
+        message=f"Check unavailable; missing required input: {', '.join(missing)}.",
+    )
+
+
+def check_ccb_metadata(
+    meta: Metadata, no_oracle: bool, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "ccb":
+        return []
+    if no_oracle:
+        return [Finding(
+            "0.ccb_metadata", "Coverage", SEV_WARN, "Oracle metadata", False,
+            hint="Rerun with live Oracle metadata for the complete CCB table union.",
+            message="Live Oracle metadata for CCB is unavailable under --no-oracle.",
+        )]
+    missing_tables = [table for table in CCB_OUTPUT_TABLES if table not in meta.tables]
+    missing_pk = [
+        table for table in CCB_OUTPUT_TABLES
+        if table in meta.tables and table not in PK_METADATA_WARN_TABLES and not meta.pk.get(table)
+    ]
+    failed = bool(missing_tables or missing_pk)
+    return [Finding(
+        "0.ccb_metadata", "Coverage", SEV_ERROR if failed else SEV_INFO,
+        ",".join(CCB_OUTPUT_TABLES), not failed,
+        count=len(missing_tables) + len(missing_pk),
+        hint="Load live table and PK metadata for every CCB core/variant table."
+             if failed else "",
+        message=(
+            f"Missing Oracle tables={missing_tables}; missing PK metadata={missing_pk}."
+            if failed else "Live Oracle metadata covers the CCB table union."
+        ),
+    )]
+
+
+def _ccb_edge_finding(
+    check_id: str, parents: DataFrame, child: DataFrame, parent_column: str,
+    sample: int, child_column: Optional[str] = None,
+) -> Finding:
+    parent_ids = parents.select("parent_id").dropDuplicates()
+    child_ids = _ccb_active(child).select(
+        _canon_key_col(F.col(parent_column)).alias("parent_id"),
+        _canon_key_col(F.col(child_column or parent_column)).alias("child_id"),
+    )
+    bad = child_ids.join(parent_ids, "parent_id", "left_anti")
+    count = bad.count()
+    return Finding(
+        check_id, "CCB graph", SEV_ERROR if count else SEV_INFO,
+        check_id.split(".")[1].upper(), count == 0, count=count,
+        column=parent_column, sample=_sample_keys(bad, ["child_id", "parent_id"], sample),
+        hint="Remove the orphan row or export its active CCB parent." if count else "",
+        message="Present CCB child rows must resolve to an active type-53 parent.",
+    )
+
+
+def check_ccb_graph(
+    tables: Dict[str, DataFrame], sample: int, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "ccb":
+        return []
+    missing_tables = [table for table in CCB_CORE_OUTPUT_TABLES if table not in tables]
+    if missing_tables:
+        return [_ccb_unavailable("2h.output_tables", missing_tables, SEV_WARN)]
+    requirements = {
+        "INSTRUMENTO_FINANCEIRO": ("NUM_IF", "NUM_TIPO_IF", "COD_IF"),
+        "TITULO": ("NUM_IF",),
+        "CREDITO": ("NUM_IF",),
+        "CONDICAO_IF": ("NUM_CONDICAO_IF", "NUM_IF"),
+        "HISTORICO_PU_CURVA": ("NUM_IF",),
+        "HISTORICO_IF_TITULO": ("COD_IF",),
+        "ALTERACAO_IF": ("NUM_IF",),
+        "TCTPIF_CCB": ("NUM_IF",),
+        "TCTPCRONOGRAMA_CCB": ("NUM_EVENTO_CCB", "NUM_IF"),
+        "OPERACAO": ("NUM_ID_OPERACAO", "NUM_IF"),
+        "LANCAMENTO": ("NUM_ID_OPERACAO",),
+    }
+    columns, missing = _credito_scr_columns(tables, requirements)
+    if missing:
+        return [_ccb_unavailable("2h.graph.availability", missing, SEV_WARN)]
+
+    root_cols = columns["INSTRUMENTO_FINANCEIRO"]
+    root_frame = _ccb_active(tables["INSTRUMENTO_FINANCEIRO"]).where(
+        _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if)
+    )
+    roots = root_frame.select(
+        _canon_key_col(F.col(root_cols["NUM_IF"])).alias("parent_id"),
+        F.trim(F.col(root_cols["COD_IF"]).cast("string")).alias("business_code"),
+    )
+    out: List[Finding] = []
+    for name, table, child_column in (
+        ("title", "TITULO", None),
+        ("credit", "CREDITO", None),
+        ("condition", "CONDICAO_IF", "NUM_CONDICAO_IF"),
+        ("history", "HISTORICO_PU_CURVA", None),
+        ("alteration", "ALTERACAO_IF", None),
+        ("ccb_extension", "TCTPIF_CCB", None),
+        ("schedule", "TCTPCRONOGRAMA_CCB", "NUM_EVENTO_CCB"),
+        ("operation", "OPERACAO", "NUM_ID_OPERACAO"),
+    ):
+        out.append(_ccb_edge_finding(
+            f"2h.{name}.edge", roots, tables[table], columns[table]["NUM_IF"], sample,
+            columns[table].get(child_column) if child_column else None,
+        ))
+
+    root_codes = roots.select("business_code").where(
+        F.col("business_code").isNotNull() & (F.col("business_code") != "")
+    ).dropDuplicates()
+    history_code = columns["HISTORICO_IF_TITULO"]["COD_IF"]
+    histories = _ccb_active(tables["HISTORICO_IF_TITULO"]).select(
+        F.trim(F.col(history_code).cast("string")).alias("business_code")
+    )
+    bad_history = histories.join(root_codes, "business_code", "left_anti")
+    count = bad_history.count()
+    out.append(Finding(
+        "2h.title_history.edge", "CCB graph", SEV_ERROR if count else SEV_INFO,
+        "HISTORICO_IF_TITULO", count == 0, count=count, column="COD_IF",
+        sample=_sample_keys(bad_history, ["business_code"], sample),
+        hint="Preserve the exact trimmed root COD_IF in title history." if count else "",
+        message="CCB title-history rows must resolve to an active root COD_IF.",
+    ))
+
+    operation_ids = _ccb_active(tables["OPERACAO"]).select(
+        _canon_key_col(F.col(columns["OPERACAO"]["NUM_ID_OPERACAO"])).alias("parent_id")
+    )
+    out.append(_ccb_edge_finding(
+        "2h.launch.edge", operation_ids, tables["LANCAMENTO"],
+        columns["LANCAMENTO"]["NUM_ID_OPERACAO"], sample,
+    ))
+
+    for name, table, child_id in (
+        ("guarantee", "GARANTIA", "NUM_ID_GARANTIA"),
+        ("ipoc", "TCTPCADEIA_IPOC", "NUM_CADEIA_IPOC"),
+    ):
+        frame = tables.get(table)
+        if frame is None:
+            continue
+        parent_col, id_col = resolve(frame, "NUM_IF"), resolve(frame, child_id)
+        if not parent_col or not id_col:
+            out.append(_ccb_unavailable(
+                f"2h.{name}.availability", [f"{table}.NUM_IF/{child_id}"]
+            ))
+            continue
+        out.append(_ccb_edge_finding(
+            f"2h.{name}.edge", roots, frame, parent_col, sample, id_col,
+        ))
+
+    chain = tables.get("TCTPCADEIA_IPOC")
+    if chain is not None:
+        chain_id = resolve(chain, "NUM_CADEIA_IPOC")
+        previous = resolve(chain, "NUM_IPOC_ANTERIOR")
+        chain_if = resolve(chain, "NUM_IF")
+        if all((chain_id, previous, chain_if)):
+            active_chain = _ccb_active(chain).select(
+                _canon_key_col(F.col(chain_id)).alias("chain_id"),
+                _canon_key_col(F.col(previous)).alias("previous_id"),
+                _canon_key_col(F.col(chain_if)).alias("root_id"),
+            )
+            parents = active_chain.select(
+                F.col("chain_id").alias("previous_id"),
+                F.col("root_id").alias("parent_root_id"),
+            )
+            bad_parent = active_chain.where(F.col("previous_id").isNotNull()).join(
+                parents, "previous_id", "left"
+            ).where(
+                F.col("parent_root_id").isNull()
+                | (F.col("parent_root_id") != F.col("root_id"))
+            )
+            count = bad_parent.count()
+            out.append(Finding(
+                "2h.ipoc_parent", "CCB graph", SEV_ERROR if count else SEV_INFO,
+                "TCTPCADEIA_IPOC", count == 0, count=count,
+                column="NUM_IPOC_ANTERIOR",
+                sample=_sample_keys(bad_parent, ["chain_id", "previous_id", "root_id"], sample),
+                hint="Keep each IPOC predecessor inside the same CCB chain." if count else "",
+                message="Present IPOC predecessor links must resolve inside the same CCB.",
+            ))
+    return out
+
+
+def check_ccb_polymorphism(
+    tables: Dict[str, DataFrame], sample: int, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "ccb":
+        return []
+    condition = tables.get("CONDICAO_IF")
+    if condition is None:
+        return [_ccb_unavailable("2h.condition.availability", ["CONDICAO_IF"])]
+    condition_id = resolve(condition, "NUM_CONDICAO_IF")
+    condition_type = resolve(condition, "COD_TIPO_CONDICAO_IF")
+    if not condition_id or not condition_type:
+        return [_ccb_unavailable(
+            "2h.condition.availability",
+            ["CONDICAO_IF.NUM_CONDICAO_IF/COD_TIPO_CONDICAO_IF"],
+        )]
+    conditions = _ccb_active(condition).select(
+        _canon_key_col(F.col(condition_id)).alias("condition_id"),
+        F.trim(F.col(condition_type).cast("string")).alias("condition_type"),
+    )
+    membership = None
+    for table in CCB_CONDITION_SUBTYPES.values():
+        frame = tables.get(table)
+        subtype_id = resolve(frame, "NUM_CONDICAO_IF") if frame is not None else None
+        if frame is None or subtype_id is None:
+            continue
+        part = _ccb_active(frame).select(
+            _canon_key_col(F.col(subtype_id)).alias("condition_id"),
+            F.lit(table).alias("physical_table"),
+        )
+        membership = part if membership is None else membership.unionByName(part)
+    if membership is None:
+        membership = condition.sparkSession.createDataFrame(
+            [], "condition_id string, physical_table string"
+        )
+    member_counts = membership.groupBy("condition_id").agg(
+        F.count(F.lit(1)).alias("physical_count"),
+        F.collect_set("physical_table").alias("physical_tables"),
+    )
+    expected_pairs = []
+    for code, table in CCB_CONDITION_SUBTYPES.items():
+        expected_pairs.extend((F.lit(code), F.lit(table)))
+    known = conditions.where(F.col("condition_type").isin(*CCB_CONDITION_SUBTYPES)).withColumn(
+        "expected_table", F.create_map(*expected_pairs)[F.col("condition_type")]
+    )
+    joined = known.join(member_counts, "condition_id", "left").withColumn(
+        "physical_count", F.coalesce(F.col("physical_count"), F.lit(0))
+    ).withColumn(
+        "physical_tables",
+        F.coalesce(F.col("physical_tables"), F.array().cast("array<string>")),
+    )
+    bad = joined.where(
+        (F.col("physical_count") != 1)
+        | ~F.array_contains(F.col("physical_tables"), F.col("expected_table"))
+    )
+    bad_count = bad.count()
+    unknown = conditions.where(
+        F.col("condition_type").isNull()
+        | (F.col("condition_type") == "")
+        | ~F.col("condition_type").isin(*CCB_CONDITION_SUBTYPES)
+    )
+    unknown_count = unknown.count()
+    orphan = membership.join(
+        conditions.select("condition_id").dropDuplicates(), "condition_id", "left_anti"
+    )
+    orphan_count = orphan.count()
+    return [
+        Finding(
+            "2h.condition_polymorphism", "CCB condition polymorphism",
+            SEV_ERROR if bad_count else SEV_INFO, "CONDICAO_IF", bad_count == 0,
+            count=bad_count, column="COD_TIPO_CONDICAO_IF,NUM_CONDICAO_IF",
+            sample=_sample_keys(bad, ["condition_id", "condition_type"], sample),
+            hint="Emit exactly one expected shared-key physical subtype row."
+                 if bad_count else "",
+            message="Known CCB conditions with missing, duplicate, or wrong physical subtype.",
+        ),
+        Finding(
+            "2h.unknown_condition_type", "CCB condition polymorphism",
+            SEV_WARN if unknown_count else SEV_INFO, "CONDICAO_IF", unknown_count == 0,
+            count=unknown_count, column="COD_TIPO_CONDICAO_IF",
+            sample=_sample_keys(unknown, ["condition_id", "condition_type"], sample),
+            hint="Capture and map the CCB condition subtype before enforcing it."
+                 if unknown_count else "",
+            message="CCB condition types outside the six log-proven mappings.",
+        ),
+        Finding(
+            "2h.subtype_orphan", "CCB condition polymorphism",
+            SEV_ERROR if orphan_count else SEV_INFO, "CONDICAO_IF", orphan_count == 0,
+            count=orphan_count, column="NUM_CONDICAO_IF",
+            sample=_sample_keys(orphan, ["condition_id", "physical_table"], sample),
+            hint="Remove physical subtype rows without an active condition parent."
+                 if orphan_count else "",
+            message="Known CCB physical subtype rows without a condition parent.",
+        ),
+    ]
+
+
+def check_ccb_variant_rules(
+    tables: Dict[str, DataFrame], sample: int, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "ccb":
+        return []
+    requirements = {
+        "INSTRUMENTO_FINANCEIRO": ("NUM_IF", "NUM_TIPO_IF"),
+        "CONDICAO_IF": ("NUM_IF", "COD_TIPO_CONDICAO_IF"),
+        "TCTPIF_CCB": ("NUM_IF", "IND_BAIXA_VENCIMENTO"),
+        "TCTPCRONOGRAMA_CCB": (
+            "NUM_EVENTO_CCB", "NUM_IF", "NUM_TIPO_EVENTO_LEGADO",
+        ),
+    }
+    columns, missing = _credito_scr_columns(tables, requirements)
+    if missing:
+        return [_ccb_unavailable("2h.variant.availability", missing, SEV_WARN)]
+    root_cols = columns["INSTRUMENTO_FINANCEIRO"]
+    roots = _ccb_active(tables["INSTRUMENTO_FINANCEIRO"]).where(
+        _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if)
+    ).select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"))
+    cond_cols = columns["CONDICAO_IF"]
+    resgate = _ccb_active(tables["CONDICAO_IF"]).where(
+        F.trim(F.col(cond_cols["COD_TIPO_CONDICAO_IF"]).cast("string")) == "20"
+    ).select(_canon_key_col(F.col(cond_cols["NUM_IF"])).alias("root_id")) \
+        .groupBy("root_id").count().withColumnRenamed("count", "resgate_count")
+    extension_cols = columns["TCTPIF_CCB"]
+    extension = _ccb_active(tables["TCTPIF_CCB"]).select(
+        _canon_key_col(F.col(extension_cols["NUM_IF"])).alias("root_id"),
+        F.when(
+            F.upper(F.trim(F.col(extension_cols["IND_BAIXA_VENCIMENTO"])
+                           .cast("string"))) == "S", 1,
+        ).otherwise(0).alias("baixa"),
+    ).groupBy("root_id").agg(F.max("baixa").alias("baixa"))
+    schedule_cols = columns["TCTPCRONOGRAMA_CCB"]
+    terminal = _ccb_active(tables["TCTPCRONOGRAMA_CCB"]).where(
+        F.trim(F.col(schedule_cols["NUM_TIPO_EVENTO_LEGADO"]).cast("string")) == "85"
+    ).select(_canon_key_col(F.col(schedule_cols["NUM_IF"])).alias("root_id")) \
+        .groupBy("root_id").count().withColumnRenamed("count", "terminal_count")
+    topology = roots.join(resgate, "root_id", "left").join(
+        extension, "root_id", "left"
+    ).join(terminal, "root_id", "left").fillna(
+        0, ["resgate_count", "baixa", "terminal_count"]
+    )
+    bad = topology.where(
+        ((F.col("resgate_count") > 0) != (F.col("baixa") == 1))
+        | ((F.col("resgate_count") > 0) != (F.col("terminal_count") > 0))
+        | (F.col("resgate_count") > 1)
+        | (F.col("terminal_count") > 1)
+    )
+    count = bad.count()
+    return [Finding(
+        "2h.resgate_baixa_event", "CCB observed variant rules",
+        SEV_WARN if count else SEV_INFO, "TCTPIF_CCB", count == 0,
+        count=count, column="type20,IND_BAIXA_VENCIMENTO,event85",
+        sample=_sample_keys(bad, ["root_id"], sample),
+        hint="Review the inferred resgate/baixa/type-85 correlation before promotion to ERROR."
+             if count else "",
+        message="CCB rows differing from the observed resgate/baixa/type-85 correlation.",
+    )] + _check_ccb_resgate_details(tables, sample, profile)
+
+
+def _ccb_try_date(column: str):
+    escaped = column.replace("`", "``")
+    return F.expr(f"try_cast(`{escaped}` as date)")
+
+
+def _check_ccb_resgate_details(
+    tables: Dict[str, DataFrame], sample: int, profile: ValidationProfile
+) -> List[Finding]:
+    requirements = {
+        "INSTRUMENTO_FINANCEIRO": ("NUM_IF", "NUM_TIPO_IF", "DAT_VENCIMENTO"),
+        "CONDICAO_IF": ("NUM_CONDICAO_IF", "NUM_IF", "COD_TIPO_CONDICAO_IF"),
+        "RESGATE": ("NUM_CONDICAO_IF", "DAT_RESGATE", "COD_TIPO_EXERCICIO"),
+        "TCTPCRONOGRAMA_CCB": (
+            "NUM_IF", "NUM_TIPO_EVENTO_LEGADO", "DATA_ORIGINAL_EVENTO",
+        ),
+    }
+    columns, missing = _credito_scr_columns(tables, requirements)
+    if missing:
+        return [_ccb_unavailable("2h.resgate_details", missing, SEV_WARN)]
+    root_cols = columns["INSTRUMENTO_FINANCEIRO"]
+    roots = _ccb_active(tables["INSTRUMENTO_FINANCEIRO"]).where(
+        _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if)
+    ).select(
+        _canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"),
+        _ccb_try_date(root_cols["DAT_VENCIMENTO"]).alias("maturity"),
+    )
+    cond_cols = columns["CONDICAO_IF"]
+    type20 = _ccb_active(tables["CONDICAO_IF"]).where(
+        F.trim(F.col(cond_cols["COD_TIPO_CONDICAO_IF"]).cast("string")) == "20"
+    ).select(
+        _canon_key_col(F.col(cond_cols["NUM_CONDICAO_IF"])).alias("condition_id"),
+        _canon_key_col(F.col(cond_cols["NUM_IF"])).alias("root_id"),
+    )
+    res_cols = columns["RESGATE"]
+    resgate = _ccb_active(tables["RESGATE"]).select(
+        _canon_key_col(F.col(res_cols["NUM_CONDICAO_IF"])).alias("condition_id"),
+        _ccb_try_date(res_cols["DAT_RESGATE"]).alias("event_date"),
+        F.upper(F.trim(F.col(res_cols["COD_TIPO_EXERCICIO"])
+                       .cast("string"))).alias("exercise"),
+    ).join(type20, "condition_id", "inner").join(roots, "root_id", "inner")
+    bad_resgate = resgate.where(
+        F.col("event_date").isNull()
+        | (F.col("maturity").isNull())
+        | (F.col("event_date") != F.col("maturity"))
+        | (F.coalesce(F.col("exercise"), F.lit("")) != "EUROPEIA")
+    ).select("root_id").withColumn("source", F.lit("RESGATE"))
+    schedule_cols = columns["TCTPCRONOGRAMA_CCB"]
+    terminal = _ccb_active(tables["TCTPCRONOGRAMA_CCB"]).where(
+        F.trim(F.col(schedule_cols["NUM_TIPO_EVENTO_LEGADO"])
+               .cast("string")) == "85"
+    ).select(
+        _canon_key_col(F.col(schedule_cols["NUM_IF"])).alias("root_id"),
+        _ccb_try_date(schedule_cols["DATA_ORIGINAL_EVENTO"]).alias("event_date"),
+    ).join(roots, "root_id", "inner")
+    bad_terminal = terminal.where(
+        F.col("event_date").isNull()
+        | F.col("maturity").isNull()
+        | (F.col("event_date") != F.col("maturity"))
+    ).select("root_id").withColumn("source", F.lit("TCTPCRONOGRAMA_CCB"))
+    bad = bad_resgate.unionByName(bad_terminal)
+    count = bad.count()
+    return [Finding(
+        "2h.resgate_details", "CCB observed variant rules",
+        SEV_WARN if count else SEV_INFO, "RESGATE,TCTPCRONOGRAMA_CCB",
+        count == 0, count=count, column="maturity,EUROPEIA",
+        sample=_sample_keys(bad, ["root_id", "source"], sample),
+        hint="Review maturity/exercise drift against broader CCB evidence."
+             if count else "",
+        message="CCB resgate/type-85 details differ from the observed maturity profile.",
+    )]
+
+
+def check_ccb_dates(
+    tables: Dict[str, DataFrame], sample: int, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "ccb":
+        return []
+    requirements = {
+        "INSTRUMENTO_FINANCEIRO": (
+            "NUM_IF", "DAT_EMISSAO", "DAT_REGISTRO", "DAT_VENCIMENTO",
+        ),
+        "CREDITO": ("NUM_IF", "DAT_INICIO_RENTABILIDADE", "DAT_VENCIMENTO_CREDITO"),
+    }
+    columns, missing = _credito_scr_columns(tables, requirements)
+    if missing:
+        return [_ccb_unavailable("5h.date_availability", missing)]
+
+    parse_bad = None
+    parsed: Dict[str, DataFrame] = {}
+    for table, date_columns in (
+        ("INSTRUMENTO_FINANCEIRO", ("DAT_EMISSAO", "DAT_REGISTRO", "DAT_VENCIMENTO")),
+        ("CREDITO", ("DAT_INICIO_RENTABILIDADE", "DAT_VENCIMENTO_CREDITO")),
+    ):
+        frame = _ccb_active(tables[table])
+        table_cols = columns[table]
+        projections = [_canon_key_col(F.col(table_cols["NUM_IF"])).alias("root_id")]
+        for name in date_columns:
+            projections.extend((
+                F.col(table_cols[name]).alias(f"{name}_raw"),
+                _ccb_try_date(table_cols[name]).alias(name),
+            ))
+        parsed[table] = frame.select(*projections)
+        for name in date_columns:
+            bad = parsed[table].where(
+                ~_oracle_null_equivalent(F.col(f"{name}_raw")) & F.col(name).isNull()
+            ).select("root_id", F.col(f"{name}_raw").cast("string").alias("raw_value")) \
+                .withColumn("field", F.lit(f"{table}.{name}"))
+            parse_bad = bad if parse_bad is None else parse_bad.unionByName(bad)
+    parse_count = parse_bad.count()
+
+    root_dates = parsed["INSTRUMENTO_FINANCEIRO"]
+    credit_dates = parsed["CREDITO"]
+    bad_root_order = root_dates.where(
+        (F.col("DAT_EMISSAO") > F.col("DAT_VENCIMENTO"))
+        | (F.col("DAT_REGISTRO") > F.col("DAT_VENCIMENTO"))
+    ).select("root_id").withColumn("rule", F.lit("root dates <= maturity"))
+    bad_credit_order = credit_dates.where(
+        F.col("DAT_INICIO_RENTABILIDADE") > F.col("DAT_VENCIMENTO_CREDITO")
+    ).select("root_id").withColumn("rule", F.lit("credit start <= maturity"))
+    order_bad = bad_root_order.unionByName(bad_credit_order)
+    order_count = order_bad.count()
+    return [
+        Finding(
+            "5h.date_parse", "CCB date coherence", SEV_ERROR if parse_count else SEV_INFO,
+            "INSTRUMENTO_FINANCEIRO,CREDITO", parse_count == 0, count=parse_count,
+            sample=_sample_keys(parse_bad, ["root_id", "field", "raw_value"], sample),
+            hint="Export parseable CCB registration and credit dates." if parse_count else "",
+            message="Malformed nonblank CCB dates.",
+        ),
+        Finding(
+            "5h.date_order", "CCB date coherence", SEV_ERROR if order_count else SEV_INFO,
+            "INSTRUMENTO_FINANCEIRO,CREDITO", order_count == 0, count=order_count,
+            sample=_sample_keys(order_bad, ["root_id", "rule"], sample),
+            hint="Keep issuance/registration/credit starts on or before maturity."
+                 if order_count else "",
+            message="Reversed CCB root or credit date ranges.",
+        ),
+    ]
+
+
+def check_ccb_registration_profile(
+    tables: Dict[str, DataFrame], sample: int, enabled: bool, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "ccb" or not enabled:
+        return []
+    requirements = {
+        "INSTRUMENTO_FINANCEIRO": (
+            "NUM_IF", "NUM_TIPO_IF", "COD_IF", "NUM_ID_FORMA_PAGAMENTO",
+            "IND_AGENDA_CONSTANTE",
+        ),
+        "TITULO": ("NUM_IF",),
+        "CREDITO": ("NUM_IF",),
+        "CONDICAO_IF": ("NUM_IF", "COD_TIPO_CONDICAO_IF"),
+        "HISTORICO_PU_CURVA": ("NUM_IF",),
+        "HISTORICO_IF_TITULO": ("COD_IF",),
+        "ALTERACAO_IF": ("NUM_IF", "COD_TIPO_ALTERACAO"),
+        "TCTPIF_CCB": ("NUM_IF",),
+        "TCTPCRONOGRAMA_CCB": (
+            "NUM_EVENTO_CCB", "NUM_IF", "NUM_TIPO_EVENTO_LEGADO",
+        ),
+        "OPERACAO": ("NUM_ID_OPERACAO", "NUM_IF"),
+        "LANCAMENTO": ("NUM_ID_OPERACAO",),
+    }
+    columns, missing = _credito_scr_columns(tables, requirements)
+    if missing:
+        return [_ccb_unavailable("8h.profile.availability", missing, SEV_WARN)]
+    root_cols = columns["INSTRUMENTO_FINANCEIRO"]
+    roots = _ccb_active(tables["INSTRUMENTO_FINANCEIRO"]).where(
+        _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if)
+    ).select(
+        _canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"),
+        _canon_key_col(F.col(root_cols["NUM_ID_FORMA_PAGAMENTO"])).alias("payment_form"),
+        F.upper(F.trim(F.col(root_cols["IND_AGENDA_CONSTANTE"]).cast("string"))).alias("agenda"),
+        F.trim(F.col(root_cols["COD_IF"]).cast("string")).alias("business_code"),
+    )
+    coded_roots = roots.withColumn(
+        "code_count", F.count(F.lit(1)).over(Window.partitionBy("business_code"))
+    )
+    bad_root_codes = coded_roots.where(
+        F.col("business_code").isNull()
+        | (F.col("business_code") == "")
+        | (F.col("code_count") > 1)
+    )
+    root_code_count = bad_root_codes.count()
+
+    counts = roots.select("root_id")
+    for table in (
+        "TITULO", "CREDITO", "HISTORICO_PU_CURVA", "ALTERACAO_IF", "TCTPIF_CCB",
+        "TCTPCRONOGRAMA_CCB", "OPERACAO",
+    ):
+        frame = _ccb_active(tables[table])
+        root_column = columns[table]["NUM_IF"]
+        per_root = frame.select(
+            _canon_key_col(F.col(root_column)).alias("root_id")
+        ).groupBy("root_id").count().withColumnRenamed("count", f"{table}_count")
+        counts = counts.join(per_root, "root_id", "left")
+    history_cols = columns["HISTORICO_IF_TITULO"]
+    history_per_root = _ccb_active(tables["HISTORICO_IF_TITULO"]).select(
+        F.trim(F.col(history_cols["COD_IF"]).cast("string")).alias("business_code")
+    ).join(
+        roots.select("root_id", "business_code"), "business_code", "inner"
+    ).groupBy("root_id").count().withColumnRenamed("count", "HISTORICO_IF_TITULO_count")
+    counts = counts.join(history_per_root, "root_id", "left")
+    alteration_cols = columns["ALTERACAO_IF"]
+    registration_alterations = _ccb_active(tables["ALTERACAO_IF"]).where(
+        F.upper(F.trim(F.col(alteration_cols["COD_TIPO_ALTERACAO"])
+                       .cast("string"))) == "R"
+    ).select(
+        _canon_key_col(F.col(alteration_cols["NUM_IF"])).alias("root_id")
+    ).groupBy("root_id").count().withColumnRenamed("count", "ALTERACAO_IF_R_count")
+    counts = counts.join(registration_alterations, "root_id", "left")
+    op_cols = columns["OPERACAO"]
+    launch_cols = columns["LANCAMENTO"]
+    launch_per_root = _ccb_active(tables["LANCAMENTO"]).select(
+        _canon_key_col(F.col(launch_cols["NUM_ID_OPERACAO"])).alias("operation_id")
+    ).join(
+        _ccb_active(tables["OPERACAO"]).select(
+            _canon_key_col(F.col(op_cols["NUM_ID_OPERACAO"])).alias("operation_id"),
+            _canon_key_col(F.col(op_cols["NUM_IF"])).alias("root_id"),
+        ),
+        "operation_id", "inner",
+    ).groupBy("root_id").count().withColumnRenamed("count", "LANCAMENTO_count")
+    counts = counts.join(launch_per_root, "root_id", "left").fillna(0)
+    bad_core = counts.where(
+        (F.col("TITULO_count") != 1)
+        | (F.col("CREDITO_count") != 1)
+        | (F.col("HISTORICO_PU_CURVA_count") != 1)
+        | (F.col("HISTORICO_IF_TITULO_count") != 1)
+        | (F.col("ALTERACAO_IF_count") != 1)
+        | (F.col("ALTERACAO_IF_R_count") != 1)
+        | (F.col("TCTPIF_CCB_count") != 1)
+        | (F.col("TCTPCRONOGRAMA_CCB_count") < 1)
+        | (F.col("OPERACAO_count") != 1)
+        | (F.col("LANCAMENTO_count") != 1)
+    )
+    core_count = bad_core.count()
+
+    cond_cols = columns["CONDICAO_IF"]
+    mixes = _ccb_active(tables["CONDICAO_IF"]).select(
+        _canon_key_col(F.col(cond_cols["NUM_IF"])).alias("root_id"),
+        F.trim(F.col(cond_cols["COD_TIPO_CONDICAO_IF"]).cast("string")).alias("condition_type"),
+    ).groupBy("root_id").agg(
+        F.concat_ws(",", F.sort_array(F.collect_list("condition_type"))).alias("condition_mix"),
+        F.count(F.lit(1)).alias("condition_count"),
+        F.sum(F.when(F.col("condition_type") == "2", 1).otherwise(0)).alias("fixed_count"),
+    )
+    variants = roots.join(mixes, "root_id", "left")
+    valid_variant = (
+        ((F.col("payment_form") == "3253") & (F.col("agenda") == "S")
+         & F.col("condition_mix").isin("1,2,4", "1,2,20,4"))
+        | ((F.col("payment_form") == "3253") & (F.col("agenda") == "N")
+           & F.col("condition_mix").isin("1,2", "1,2,20"))
+        | ((F.col("payment_form") == "229") & (F.col("agenda") == "S")
+           & (F.col("condition_mix") == "14,2,20,5"))
+        | ((F.col("payment_form") == "8") & (F.col("agenda") == "N")
+           & F.col("condition_mix").isin("2,4", "2,20,4"))
+        | ((F.col("payment_form") == "3261") & (F.col("agenda") == "S")
+           & (F.col("condition_mix") == "14,2,20"))
+    )
+    known_form = F.col("payment_form").isin("3253", "229", "8", "3261")
+    bad_variant = variants.where(known_form & ~F.coalesce(valid_variant, F.lit(False)))
+    variant_count = bad_variant.count()
+    bad_common_conditions = variants.where(
+        (F.coalesce(F.col("condition_count"), F.lit(0)) < 2)
+        | (F.coalesce(F.col("fixed_count"), F.lit(0)) != 1)
+    )
+    common_condition_count = bad_common_conditions.count()
+    unknown_forms = variants.where(~known_form)
+    unknown_form_count = unknown_forms.count()
+    schedule_cols = columns["TCTPCRONOGRAMA_CCB"]
+    event_mixes = _ccb_active(tables["TCTPCRONOGRAMA_CCB"]).select(
+        _canon_key_col(F.col(schedule_cols["NUM_IF"])).alias("root_id"),
+        F.trim(F.col(schedule_cols["NUM_TIPO_EVENTO_LEGADO"])
+               .cast("string")).alias("event_type"),
+    ).groupBy("root_id").agg(F.collect_set("event_type").alias("event_types"))
+    event_variants = roots.join(event_mixes, "root_id", "left")
+
+    def has_event(code: str):
+        return F.array_contains(F.col("event_types"), code)
+
+    allowed_3253 = F.size(F.array_except(
+        F.col("event_types"), F.array(F.lit("83"), F.lit("84"), F.lit("85"))
+    )) == 0
+    allowed_157 = F.size(F.array_except(
+        F.col("event_types"), F.array(F.lit("157"), F.lit("85"))
+    )) == 0
+    allowed_90 = F.size(F.array_except(
+        F.col("event_types"), F.array(F.lit("90"), F.lit("85"))
+    )) == 0
+    valid_events = (
+        ((F.col("payment_form") == "3253") & has_event("83") & has_event("84")
+         & allowed_3253)
+        | ((F.col("payment_form") == "229") & has_event("157") & has_event("85")
+           & allowed_157)
+        | ((F.col("payment_form") == "8") & has_event("90") & allowed_90)
+        | ((F.col("payment_form") == "3261") & has_event("157") & has_event("85")
+           & allowed_157)
+    )
+    bad_events = event_variants.where(known_form & ~F.coalesce(valid_events, F.lit(False)))
+    event_count = bad_events.count()
+    return [
+        Finding(
+            "8h.profile.core_counts", "CCB observed registration profile",
+            SEV_WARN if core_count else SEV_INFO, "INSTRUMENTO_FINANCEIRO",
+            core_count == 0, count=core_count,
+            sample=_sample_keys(bad_core, ["root_id"], sample),
+            hint="Keep exact registration counts advisory; lifecycle snapshots may differ."
+                 if core_count else "",
+            message="CCB core cardinality differs from all 22 insertion snapshots.",
+        ),
+        Finding(
+            "8h.profile.root_code", "CCB observed registration profile",
+            SEV_WARN if root_code_count else SEV_INFO, "INSTRUMENTO_FINANCEIRO",
+            root_code_count == 0, count=root_code_count, column="COD_IF",
+            sample=_sample_keys(bad_root_codes, ["root_id", "business_code"], sample),
+            hint="Review blank or duplicate active CCB COD_IF values before loading."
+                 if root_code_count else "",
+            message="Observed CCB registration profile uses nonblank unique COD_IF values.",
+        ),
+        Finding(
+            "8h.profile.variant_condition_mix", "CCB observed registration profile",
+            SEV_WARN if variant_count else SEV_INFO, "CONDICAO_IF",
+            variant_count == 0, count=variant_count,
+            sample=_sample_keys(
+                bad_variant, ["root_id", "payment_form", "agenda", "condition_mix"], sample
+            ),
+            hint="Capture another successful variant before extending the observed matrix."
+                 if variant_count else "",
+            message="CCB payment-form/agenda condition mix outside the observed matrix.",
+        ),
+        Finding(
+            "8h.profile.common_conditions", "CCB observed registration profile",
+            SEV_WARN if common_condition_count else SEV_INFO, "CONDICAO_IF",
+            common_condition_count == 0, count=common_condition_count,
+            sample=_sample_keys(
+                bad_common_conditions, ["root_id", "condition_count", "fixed_count"], sample
+            ),
+            hint="Keep at least two conditions and exactly one type-2 pair advisory."
+                 if common_condition_count else "",
+            message="CCB condition count or fixed-interest multiplicity differs from the corpus.",
+        ),
+        Finding(
+            "8h.profile.unknown_payment_form", "CCB observed registration profile",
+            SEV_WARN if unknown_form_count else SEV_INFO, "INSTRUMENTO_FINANCEIRO",
+            unknown_form_count == 0, count=unknown_form_count,
+            sample=_sample_keys(unknown_forms, ["root_id", "payment_form"], sample),
+            hint="Capture the new form before adding it to the advisory matrix."
+                 if unknown_form_count else "",
+            message="CCB payment forms outside the five observed route families.",
+        ),
+        Finding(
+            "8h.profile.variant_event_mix", "CCB observed registration profile",
+            SEV_WARN if event_count else SEV_INFO, "TCTPCRONOGRAMA_CCB",
+            event_count == 0, count=event_count,
+            sample=_sample_keys(bad_events, ["root_id", "payment_form", "event_types"], sample),
+            hint="Keep schedule families advisory until broader CCB evidence is captured."
+                 if event_count else "",
+            message="CCB payment-form schedule family outside the observed matrix.",
+        ),
+    ] + _check_ccb_schedule_profile(tables, roots, columns, sample)
+
+
+def _check_ccb_schedule_profile(
+    tables: Dict[str, DataFrame], roots: DataFrame,
+    columns: Dict[str, Dict[str, str]], sample: int,
+) -> List[Finding]:
+    root = tables["INSTRUMENTO_FINANCEIRO"]
+    schedule = _ccb_active(tables["TCTPCRONOGRAMA_CCB"])
+    issue_col = resolve(root, "DAT_EMISSAO")
+    maturity_col = resolve(root, "DAT_VENCIMENTO")
+    original_col = resolve(schedule, "DATA_ORIGINAL_EVENTO")
+    if not all((issue_col, maturity_col, original_col)):
+        return [_ccb_unavailable(
+            "8h.profile.schedule_dates",
+            ["INSTRUMENTO_FINANCEIRO.DAT_EMISSAO/DAT_VENCIMENTO",
+             "TCTPCRONOGRAMA_CCB.DATA_ORIGINAL_EVENTO"],
+            SEV_WARN,
+        )]
+    root_id = columns["INSTRUMENTO_FINANCEIRO"]["NUM_IF"]
+    schedule_id = columns["TCTPCRONOGRAMA_CCB"]["NUM_EVENTO_CCB"]
+    schedule_if = columns["TCTPCRONOGRAMA_CCB"]["NUM_IF"]
+    date_bounds = _ccb_active(root).select(
+        _canon_key_col(F.col(root_id)).alias("root_id"),
+        _ccb_try_date(issue_col).alias("issuance"),
+        _ccb_try_date(maturity_col).alias("maturity"),
+    ).join(roots.select("root_id"), "root_id", "leftsemi")
+    dated = schedule.select(
+        _canon_key_col(F.col(schedule_if)).alias("root_id"),
+        _canon_key_col(F.col(schedule_id)).alias("event_id"),
+        F.col(original_col).alias("raw_date"),
+        _ccb_try_date(original_col).alias("original_date"),
+    ).join(date_bounds, "root_id", "inner")
+    bad_dates = dated.where(
+        (~_oracle_null_equivalent(F.col("raw_date")) & F.col("original_date").isNull())
+        | F.col("issuance").isNull()
+        | F.col("maturity").isNull()
+        | (F.col("original_date") < F.col("issuance"))
+        | (F.col("original_date") > F.col("maturity"))
+    )
+    date_count = bad_dates.count()
+
+    parcel_col = resolve(schedule, "COD_PARCELA")
+    if parcel_col:
+        parcels = schedule.select(
+            _canon_key_col(F.col(schedule_if)).alias("root_id"),
+            F.trim(F.col(parcel_col).cast("string")).alias("parcel"),
+        ).where(F.col("parcel").isNotNull() & (F.col("parcel") != ""))
+        bad_parcels = parcels.groupBy("root_id", "parcel").count().where(F.col("count") > 1)
+        parcel_count = bad_parcels.count()
+    else:
+        bad_parcels = schedule.sparkSession.createDataFrame(
+            [], "root_id string, parcel string, count long"
+        )
+        parcel_count = 0
+    parcel_unavailable = parcel_col is None
+
+    bad_values = None
+    missing_value_columns = []
+    for candidate in ("VAL_EVENTO", "VAL_PU_EVENTO"):
+        actual = resolve(schedule, candidate)
+        if not actual:
+            missing_value_columns.append(candidate)
+            continue
+        escaped = actual.replace("`", "``")
+        parsed_value = F.expr(f"try_cast(`{escaped}` as double)")
+        bad = schedule.where(
+            ~_oracle_null_equivalent(F.col(actual))
+            & (
+                parsed_value.isNull()
+                | F.isnan(parsed_value)
+                | (F.abs(parsed_value) == float("inf"))
+                | (parsed_value < 0)
+            )
+        ).select(
+            _canon_key_col(F.col(schedule_if)).alias("root_id"),
+            _canon_key_col(F.col(schedule_id)).alias("event_id"),
+        ).withColumn("field", F.lit(candidate))
+        bad_values = bad if bad_values is None else bad_values.unionByName(bad)
+    if bad_values is None:
+        bad_values = schedule.sparkSession.createDataFrame(
+            [], "root_id string, event_id string, field string"
+        )
+    value_count = bad_values.count()
+    return [
+        Finding(
+            "8h.profile.schedule_dates", "CCB observed registration profile",
+            SEV_WARN if date_count else SEV_INFO, "TCTPCRONOGRAMA_CCB",
+            date_count == 0, count=date_count,
+            sample=_sample_keys(bad_dates, ["root_id", "event_id", "raw_date"], sample),
+            hint="Keep original event dates parseable and within issuance/maturity."
+                 if date_count else "",
+            message="CCB original schedule dates outside the observed bounds.",
+        ),
+        Finding(
+            "8h.profile.schedule_parcels", "CCB observed registration profile",
+            SEV_WARN if parcel_count or parcel_unavailable else SEV_INFO,
+            "TCTPCRONOGRAMA_CCB", parcel_count == 0 and not parcel_unavailable,
+            count=parcel_count,
+            sample=_sample_keys(bad_parcels, ["root_id", "parcel"], sample),
+            hint="Export COD_PARCELA and keep nonblank values unique within each CCB."
+                 if parcel_count or parcel_unavailable else "",
+            message=("COD_PARCELA unavailable."
+                     if parcel_unavailable else "Duplicate nonblank CCB parcel codes."),
+        ),
+        Finding(
+            "8h.profile.schedule_values", "CCB observed registration profile",
+            SEV_WARN if value_count or missing_value_columns else SEV_INFO,
+            "TCTPCRONOGRAMA_CCB", value_count == 0 and not missing_value_columns,
+            count=value_count,
+            sample=_sample_keys(bad_values, ["root_id", "event_id", "field"], sample),
+            hint="Export schedule values and keep populated values finite and nonnegative."
+                 if value_count or missing_value_columns else "",
+            message=(f"Missing schedule value columns: {missing_value_columns}."
+                     if missing_value_columns else
+                     "Malformed, non-finite, or negative CCB schedule values."),
+        ),
+    ]
+
+
+def check_ccb_target_frames(
+    tables: Dict[str, DataFrame], lookup_frames: Dict[str, DataFrame], sample: int,
+    profile: ValidationProfile, lookup_errors: Optional[Dict[str, str]] = None,
+) -> List[Finding]:
+    if profile.pipeline != "ccb":
+        return []
+    lookup_errors = lookup_errors or {}
+    out: List[Finding] = []
+
+    tipo = lookup_frames.get("CCB_TIPO_IF")
+    tipo_required = ("NUM_TIPO_IF", "COD_TIPO_IF", "DAT_EXCLUSAO")
+    tipo_cols = {name: resolve(tipo, name) if tipo is not None else None for name in tipo_required}
+    if tipo is None or any(value is None for value in tipo_cols.values()):
+        out.append(_ccb_unavailable(
+            "6h.lookup.tipo_if", [lookup_errors.get("CCB_TIPO_IF", "CCB_TIPO_IF")], SEV_WARN
+        ))
+    else:
+        matches = _ccb_active(tipo).where(
+            (_canon_key_col(F.col(tipo_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if))
+            & (F.trim(F.col(tipo_cols["COD_TIPO_IF"]).cast("string")) == "CCB")
+        ).limit(2).count()
+        out.append(Finding(
+            "6h.lookup.tipo_if", "CCB target eligibility",
+            SEV_INFO if matches == 1 else SEV_ERROR, "TIPO_IF", matches == 1,
+            count=0 if matches == 1 else matches,
+            hint="Provide exactly one active target TIPO_IF 53/CCB row."
+                 if matches != 1 else "",
+            message="Target CCB type identity is active and unambiguous.",
+        ))
+
+    platform = lookup_frames.get("CCB_OBJECT_SERVICE")
+    platform_cols = {
+        name: resolve(platform, name) if platform is not None else None
+        for name in ("COD_OBJETO_SERVICO", "IND_PLATAFORMA_BAIXA")
+    }
+    if platform is None or any(value is None for value in platform_cols.values()):
+        out.append(_ccb_unavailable(
+            "6h.lookup.platform",
+            [lookup_errors.get("CCB_OBJECT_SERVICE", "CCB_OBJECT_SERVICE")], SEV_WARN,
+        ))
+    else:
+        enabled = platform.where(
+            (F.trim(F.col(platform_cols["COD_OBJETO_SERVICO"]).cast("string")) == "CCB")
+            & (F.upper(F.trim(F.col(platform_cols["IND_PLATAFORMA_BAIXA"])
+                              .cast("string"))) == "S")
+        ).limit(1).count()
+        out.append(Finding(
+            "6h.lookup.platform", "CCB target eligibility",
+            SEV_INFO if enabled else SEV_ERROR, "V_OBJETOS_SERVICO", bool(enabled),
+            count=0 if enabled else 1,
+            hint="Enable COD_OBJETO_SERVICO='CCB' on the baixa platform." if not enabled else "",
+            message="Target CCB object service is enabled for the baixa platform.",
+        ))
+
+    requirements = {
+        "INSTRUMENTO_FINANCEIRO": ("NUM_IF", "NUM_TIPO_IF"),
+        "OPERACAO": (
+            "NUM_IF", "NUM_ID_TIPO_OPER_OBJETO_SERV", "NUM_ID_MODALIDADE_LIQUIDACAO",
+        ),
+    }
+    columns, missing = _credito_scr_columns(tables, requirements)
+    routes = lookup_frames.get("CCB_ROUTES")
+    route_required = (
+        "NUM_ID_TIPO_OPER_OBJETO_SERV", "NUM_ID_OBJETO_SERVICO",
+        "COD_TIPO_OPERACAO", "IND_DISPONIVEL_IDENTIFICACAO",
+    )
+    route_cols = {
+        name: resolve(routes, name) if routes is not None else None for name in route_required
+    }
+    if missing or routes is None or any(value is None for value in route_cols.values()):
+        unavailable = missing or [lookup_errors.get("CCB_ROUTES", "CCB_ROUTES")]
+        out.append(_ccb_unavailable("6h.lookup.registration_route", unavailable, SEV_WARN))
+        return out
+    root_cols = columns["INSTRUMENTO_FINANCEIRO"]
+    roots = _ccb_active(tables["INSTRUMENTO_FINANCEIRO"]).where(
+        _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if)
+    ).select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id")).dropDuplicates()
+    operation_cols = columns["OPERACAO"]
+    operations = _ccb_active(tables["OPERACAO"]).select(
+        _canon_key_col(F.col(operation_cols["NUM_IF"])).alias("root_id"),
+        _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias("route_id"),
+        _canon_key_col(F.col(operation_cols["NUM_ID_MODALIDADE_LIQUIDACAO"])).alias("modality"),
+    )
+    route_semantics = routes.select(
+        _canon_key_col(F.col(route_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias("route_id"),
+        _canon_key_col(F.col(route_cols["NUM_ID_OBJETO_SERVICO"])).alias("object_id"),
+        F.trim(F.col(route_cols["COD_TIPO_OPERACAO"]).cast("string")).alias("operation_type"),
+        F.upper(F.trim(F.col(route_cols["IND_DISPONIVEL_IDENTIFICACAO"])
+                       .cast("string"))).alias("identification"),
+    ).dropDuplicates(["route_id"])
+    classified = operations.join(F.broadcast(route_semantics), "route_id", "left")
+    registration = classified.where(F.col("operation_type") == "1")
+    valid = registration.where(
+        (F.col("object_id") == str(profile.object_service_id))
+        & (F.col("identification") == "S")
+    )
+    valid_roots = valid.select("root_id").dropDuplicates()
+    invalid = registration.where(
+        (F.coalesce(F.col("object_id"), F.lit("")) != str(profile.object_service_id))
+        | (F.coalesce(F.col("identification"), F.lit("")) != "S")
+    ).select("root_id").unionByName(
+        roots.join(valid_roots, "root_id", "left_anti")
+    ).dropDuplicates()
+    count = invalid.count()
+    out.append(Finding(
+        "6h.lookup.registration_route", "CCB target eligibility",
+        SEV_ERROR if count else SEV_INFO, "TIPO_OPER_OBJETO_SERV", count == 0,
+        count=count, column="object=47,operation_type=1,identification=S",
+        sample=_sample_keys(invalid, ["root_id"], sample),
+        hint="Give every active CCB an approved operation-type-1 route on object 47."
+             if count else "",
+        message="Every active CCB has an approved registration route; historical routes ignored.",
+    ))
+    modality_bad = valid.where(F.col("modality") != "6")
+    modality_count = modality_bad.count()
+    out.append(Finding(
+        "6h.profile.registration_modality", "CCB target eligibility",
+        SEV_WARN if modality_count else SEV_INFO, "OPERACAO", modality_count == 0,
+        count=modality_count, column="NUM_ID_MODALIDADE_LIQUIDACAO",
+        sample=_sample_keys(modality_bad, ["root_id", "route_id", "modality"], sample),
+        hint="Review the observed registration modalidade 6 before promotion to ERROR."
+             if modality_count else "",
+        message="CCB registration operations outside observed modalidade 6.",
+    ))
+    return out
+
+
+def load_ccb_target_frames(
+    spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame],
+    skip_prefixes: Optional[Sequence[str]] = None, max_route_keys: int = 10_000,
+) -> Tuple[Dict[str, DataFrame], Dict[str, str]]:
+    skip_prefixes = list(skip_prefixes or [])
+    if _check_group_is_skipped(("6h.lookup",), skip_prefixes):
+        return {}, {}
+    queries = {
+        "CCB_TIPO_IF": (
+            "SELECT NUM_TIPO_IF, COD_TIPO_IF, DAT_EXCLUSAO "
+            f"FROM {cfg.schema}.TIPO_IF WHERE NUM_TIPO_IF = 53"
+        ),
+        "CCB_OBJECT_SERVICE": (
+            "SELECT COD_OBJETO_SERVICO, IND_PLATAFORMA_BAIXA "
+            f"FROM {cfg.schema}.V_OBJETOS_SERVICO WHERE COD_OBJETO_SERVICO = 'CCB'"
+        ),
+    }
+    operation = tables.get("OPERACAO")
+    route_col = resolve(operation, "NUM_ID_TIPO_OPER_OBJETO_SERV") \
+        if operation is not None else None
+    route_ids = []
+    if operation is not None and route_col:
+        route_ids = [
+            _canon_key(row["route_id"])
+            for row in operation.select(
+                _canon_key_col(F.col(route_col)).alias("route_id")
+            ).where(F.col("route_id").isNotNull()).dropDuplicates() \
+                .limit(max_route_keys + 1).collect()
+        ]
+    frames: Dict[str, DataFrame] = {}
+    errors: Dict[str, str] = {}
+    for name, query in queries.items():
+        try:
+            remote = _jdbc(spark, cfg, query)
+            rows = remote.collect()
+            frames[name] = spark.createDataFrame(rows, remote.schema)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("CCB target lookup failed for %s: %s", name, exc)
+            errors[name] = str(exc)
+    if len(route_ids) > max_route_keys:
+        errors["CCB_ROUTES"] = (
+            f"more than {max_route_keys} distinct synthetic route keys; lookup skipped"
+        )
+    elif route_ids:
+        route_rows = []
+        route_schema = None
+        try:
+            for offset in range(0, len(route_ids), 1000):
+                literals = ", ".join(
+                    _sql_literal(value) for value in route_ids[offset:offset + 1000]
+                )
+                query = (
+                    "SELECT tos.NUM_ID_TIPO_OPER_OBJETO_SERV, tos.NUM_ID_OBJETO_SERVICO, "
+                    "tipo.COD_TIPO_OPERACAO, tos.IND_DISPONIVEL_IDENTIFICACAO "
+                    f"FROM {cfg.schema}.TIPO_OPER_OBJETO_SERV tos "
+                    f"JOIN {cfg.schema}.TIPO_OPERACAO tipo "
+                    "ON tipo.NUM_ID_TIPO_OPERACAO = tos.NUM_ID_TIPO_OPERACAO "
+                    f"WHERE tos.NUM_ID_TIPO_OPER_OBJETO_SERV IN ({literals})"
+                )
+                remote = _jdbc(spark, cfg, query)
+                route_rows.extend(remote.collect())
+                route_schema = route_schema or remote.schema
+            frames["CCB_ROUTES"] = spark.createDataFrame(route_rows, route_schema)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("CCB target route lookup failed: %s", exc)
+            errors["CCB_ROUTES"] = str(exc)
+    else:
+        frames["CCB_ROUTES"] = spark.createDataFrame(
+            [],
+            "NUM_ID_TIPO_OPER_OBJETO_SERV string, NUM_ID_OBJETO_SERVICO string, "
+            "COD_TIPO_OPERACAO string, IND_DISPONIVEL_IDENTIFICACAO string",
+        )
+    return frames, errors
+
+
+# ---------------------------------------------------------------------------
 # Category 0/2e/6e/8e - LCI registration-route evidence
 # ---------------------------------------------------------------------------
 LCI_OUTPUT_TABLES = (
@@ -8097,6 +9179,7 @@ SHAPE_ROOT_KEY = "NUM_IF"
 SHAPE_TIPO_IF = 49
 # metric/table -> (bridge table, bridge key) for children not keyed by NUM_IF.
 SHAPE_VIA: Dict[str, Tuple[str, str]] = {
+    "AMORTIZACAO": ("CONDICAO_IF", "NUM_CONDICAO_IF"),
     "RESGATE": ("CONDICAO_IF", "NUM_CONDICAO_IF"),
     "JUROS_FLUTUANTE": ("CONDICAO_IF", "NUM_CONDICAO_IF"),
     "JUROS_FIXO": ("CONDICAO_IF", "NUM_CONDICAO_IF"),
@@ -8117,9 +9200,27 @@ SHAPE_FILTERED: Dict[str, Tuple[str, str, str]] = {
     "EVENTO_TIPO85": ("EVENTO", "NUM_TIPO_EVENTO_LEGADO", "85"),
     "EVENTO_TIPO84": ("EVENTO", "NUM_TIPO_EVENTO_LEGADO", "84"),
     "CONDICAO_IF_TIPO1": ("CONDICAO_IF", "COD_TIPO_CONDICAO_IF", "1"),
+    "CONDICAO_IF_TIPO2": ("CONDICAO_IF", "COD_TIPO_CONDICAO_IF", "2"),
     "CONDICAO_IF_TIPO3": ("CONDICAO_IF", "COD_TIPO_CONDICAO_IF", "3"),
+    "CONDICAO_IF_TIPO4": ("CONDICAO_IF", "COD_TIPO_CONDICAO_IF", "4"),
     "CONDICAO_IF_TIPO5": ("CONDICAO_IF", "COD_TIPO_CONDICAO_IF", "5"),
+    "CONDICAO_IF_TIPO14": ("CONDICAO_IF", "COD_TIPO_CONDICAO_IF", "14"),
     "CONDICAO_IF_TIPO20": ("CONDICAO_IF", "COD_TIPO_CONDICAO_IF", "20"),
+    "TCTPCRONOGRAMA_CCB_TIPO83": (
+        "TCTPCRONOGRAMA_CCB", "NUM_TIPO_EVENTO_LEGADO", "83",
+    ),
+    "TCTPCRONOGRAMA_CCB_TIPO84": (
+        "TCTPCRONOGRAMA_CCB", "NUM_TIPO_EVENTO_LEGADO", "84",
+    ),
+    "TCTPCRONOGRAMA_CCB_TIPO85": (
+        "TCTPCRONOGRAMA_CCB", "NUM_TIPO_EVENTO_LEGADO", "85",
+    ),
+    "TCTPCRONOGRAMA_CCB_TIPO90": (
+        "TCTPCRONOGRAMA_CCB", "NUM_TIPO_EVENTO_LEGADO", "90",
+    ),
+    "TCTPCRONOGRAMA_CCB_TIPO157": (
+        "TCTPCRONOGRAMA_CCB", "NUM_TIPO_EVENTO_LEGADO", "157",
+    ),
 }
 DEFAULT_SHAPE_METRICS: List[str] = [
     "TITULO", "CREDITO", "CONDICAO_IF", "RESGATE", "JUROS_FLUTUANTE", "JUROS_FIXO",
@@ -8140,18 +9241,33 @@ LCA_SHAPE_METRICS = [
     "OPERACAO", "DADO_OPERACAO", "LANCAMENTO", "ESPECIFICACAO",
     "ESPECIFICACAO_COMITENTE", "CARTEIRA_COMITENTE", "CARTEIRA_PARTICIPANTE",
 ]
+CCB_SHAPE_METRICS = [
+    "TITULO", "CREDITO", "TCTPIF_CCB", "CONDICAO_IF", "CONDICAO_IF_TIPO1",
+    "CONDICAO_IF_TIPO2", "CONDICAO_IF_TIPO4", "CONDICAO_IF_TIPO5",
+    "CONDICAO_IF_TIPO14", "CONDICAO_IF_TIPO20", "AMORTIZACAO", "JUROS_FIXO",
+    "ATUALIZACAO_POS", "ATUALIZACAO_PRE", "SPREAD", "RESGATE",
+    "TCTPCRONOGRAMA_CCB", "TCTPCRONOGRAMA_CCB_TIPO83",
+    "TCTPCRONOGRAMA_CCB_TIPO84", "TCTPCRONOGRAMA_CCB_TIPO85",
+    "TCTPCRONOGRAMA_CCB_TIPO90", "TCTPCRONOGRAMA_CCB_TIPO157",
+    "HISTORICO_PU_CURVA", "HISTORICO_IF_TITULO", "ALTERACAO_IF", "OPERACAO",
+    "LANCAMENTO", "GARANTIA", "TCTPCADEIA_IPOC",
+]
 SHAPE_METRICS_BY_PIPELINE = {
     "instrumento_financeiro": DEFAULT_SHAPE_METRICS,
     "lci": LCI_SHAPE_METRICS,
     "lca": LCA_SHAPE_METRICS,
+    "ccb": CCB_SHAPE_METRICS,
 }
 BASELINE_DOMAIN_VERSION = 1
 BASELINE_METRIC_VERSION = 2
 
 
 def _shape_active(df: DataFrame) -> DataFrame:
-    col = resolve(df, "DAT_EXCLUSAO")
-    return df.where(_oracle_null_equivalent(F.col(col))) if col else df
+    for candidate in ("DAT_EXCLUSAO", "DATA_EXCLUSAO", "DTHR_EXCLUSAO"):
+        col = resolve(df, candidate)
+        if col:
+            return df.where(_oracle_null_equivalent(F.col(col)))
+    return df
 
 
 def _shape_universe(
@@ -8239,6 +9355,19 @@ def _shape_counts(
                     ).join(specifications, "spec_id", "inner").join(
                         operations, "operation_id", "inner"
                     ).select(SHAPE_ROOT_KEY)
+            elif name == "HISTORICO_IF_TITULO":
+                root = tables.get(SHAPE_ROOT_TABLE)
+                child_code = resolve(df, "COD_IF")
+                root_code = resolve(root, "COD_IF") if root is not None else None
+                root_key = resolve(root, SHAPE_ROOT_KEY) if root is not None else None
+                if all((root is not None, child_code, root_code, root_key)):
+                    root_codes = _shape_active(root).select(
+                        F.trim(F.col(root_code).cast("string")).alias("business_code"),
+                        F.col(root_key).cast("long").alias(SHAPE_ROOT_KEY),
+                    ).join(universe, SHAPE_ROOT_KEY, "leftsemi")
+                    keyed = df.select(
+                        F.trim(F.col(child_code).cast("string")).alias("business_code")
+                    ).join(root_codes, "business_code", "inner").select(SHAPE_ROOT_KEY)
             elif name in SHAPE_VIA:
                 bridge_table, bridge_key = SHAPE_VIA[name]
                 bridge = tables.get(bridge_table)
@@ -8267,13 +9396,19 @@ def _shape_counts(
     return result, skipped
 
 
-def _load_shape_baseline(spark: SparkSession, path: str) -> dict:
+def _load_shape_baseline(
+    spark: SparkSession, path: str, profile: Optional[ValidationProfile] = None
+) -> dict:
     """Load a baseline without deriving metrics from an untrusted shape signature."""
     baseline = json.loads(read_text(spark, path))
     shapes = baseline.get("shapes") or []
     if not shapes:
         raise ValueError(f"Baseline {path} has no 'shapes' section.")
-    if not baseline.get("filtros_fonte_applied"):
+    if (
+        profile is not None
+        and profile.name in {"cdb_simplificado", "cdb", "rdb"}
+        and not baseline.get("filtros_fonte_applied")
+    ):
         logger.warning(
             "Shape baseline %s was built WITHOUT --apply-filtros-fonte; the comparison "
             "conflates filter effects with generation distortions.", path)
@@ -8352,6 +9487,8 @@ def _baseline_incompatibility(
         return (f"baseline metric_version={baseline['metric_version']} != validator "
                 f"metric_version={BASELINE_METRIC_VERSION}")
     expected_metrics = SHAPE_METRICS_BY_PIPELINE.get(profile.pipeline, DEFAULT_SHAPE_METRICS)
+    if baseline.get("metrics_skipped"):
+        return f"baseline skipped metric(s): {baseline['metrics_skipped']}"
     if baseline["metrics"] != expected_metrics:
         return "baseline metrics do not match the validator metric contract"
     if current_identity is not None:
@@ -8399,7 +9536,7 @@ def check_shapes(
     metric_names = SHAPE_METRICS_BY_PIPELINE.get(profile.pipeline, DEFAULT_SHAPE_METRICS)
     if baseline_path:
         try:
-            baseline_raw = _load_shape_baseline(spark, baseline_path)
+            baseline_raw = _load_shape_baseline(spark, baseline_path, profile)
             current_identity = _current_baseline_identity(tables)
             incompat = _baseline_incompatibility(baseline_raw, profile, current_identity)
             if incompat:
@@ -8447,10 +9584,11 @@ def check_shapes(
     counts, skipped = _shape_counts(universe, tables, metric_names)
     if skipped:
         out.append(Finding("7.metrics_skipped", cat, SEV_WARN, ",".join(skipped), False,
-                           hint="Missing tables count as 0 rows per IF, which distorts the "
-                                "shape comparison. Include them in the output/tables list.",
-                           message=f"Shape metrics counted as 0 (table/columns unavailable): "
+                           hint="Include every metric table/column before comparing shapes.",
+                           message=f"Shape metrics unavailable; distribution comparison stopped: "
                                    f"{skipped}"))
+        if run_distribution and baseline_path:
+            return out
     counts = counts.cache()
     total = counts.count()
     if total == 0:
@@ -9300,6 +10438,7 @@ def main() -> None:
     is_dicre = profile.pipeline == "dicre"
     is_lci = profile.pipeline == "lci"
     is_lca = profile.pipeline == "lca"
+    is_ccb = profile.pipeline == "ccb"
     is_non_if = is_credito_scr or is_dicre
     skip_prefixes = [prefix.strip() for prefix in args.skip_check if prefix.strip()]
     if _check_is_skipped("0.identity", skip_prefixes):
@@ -9373,7 +10512,8 @@ def main() -> None:
             if is_credito_scr else check_dicre_metadata(meta, args.no_oracle, profile)
             if is_dicre else check_lci_metadata(meta, args.no_oracle, profile)
             if is_lci else check_lca_metadata(meta, args.no_oracle, profile)
-            if is_lca else []
+            if is_lca else check_ccb_metadata(meta, args.no_oracle, profile)
+            if is_ccb else []
         ),
     )
     if is_credito_scr:
@@ -9388,7 +10528,12 @@ def main() -> None:
             + check_dicre_irop_graph(tables, args.sample_size, profile),
         )
     else:
-        if is_lci:
+        if is_ccb:
+            findings += _run_check_group(
+                "category 2h CCB graph", ("2h.",), skip_prefixes,
+                lambda: check_ccb_graph(tables, args.sample_size, profile),
+            )
+        elif is_lci:
             findings += _run_check_group(
                 "category 2e LCI graph", ("2e.",), skip_prefixes,
                 lambda: check_lci_graph(tables, args.sample_size, profile),
@@ -9402,14 +10547,17 @@ def main() -> None:
             ("2e.condition_polymorphism", "2e.unknown_condition_type", "2e.subtype_orphan")
             if is_lci else
             ("2g.condition_polymorphism", "2g.unknown_condition_type", "2g.subtype_orphan")
-            if is_lca else ("1.", "1a.", "1b.", "1c.")
+            if is_lca else
+            ("2h.condition_polymorphism", "2h.unknown_condition_type", "2h.subtype_orphan")
+            if is_ccb else ("1.", "1a.", "1b.", "1c.")
         )
         findings += _run_check_group(
             "category 1 polymorphism", polymorphism_prefixes, skip_prefixes,
             lambda: (
                 check_lci_polymorphism(tables, args.sample_size, profile)
                 if is_lci else check_lca_polymorphism(tables, args.sample_size, profile)
-                if is_lca else check_polymorphism(tables, meta, args.sample_size)
+                if is_lca else check_ccb_polymorphism(tables, args.sample_size, profile)
+                if is_ccb else check_polymorphism(tables, meta, args.sample_size)
             ),
         )
         if args.shape_baseline:
@@ -9426,18 +10574,24 @@ def main() -> None:
             logger.info(
                 "Production subtype-map audit skipped; use --verify-subtype-map to run it."
             )
-        findings += _run_check_group(
-            "category 2 domain", ("2.domain",), skip_prefixes,
-            lambda: check_domain(tables, meta, args.sample_size, profile),
-        )
-        findings += _run_check_group(
-            "category 2b CDB variants", ("2b.",), skip_prefixes,
-            lambda: check_cdb_variant_rules(tables, args.sample_size, profile),
-        )
-        findings += _run_check_group(
-            "category 2c RDB resgate schedules", ("2c.",), skip_prefixes,
-            lambda: check_rdb_resgate_schedule_rules(tables, args.sample_size, profile),
-        )
+        if is_ccb:
+            findings += _run_check_group(
+                "category 2h CCB variants", ("2h.resgate", "2h.variant"), skip_prefixes,
+                lambda: check_ccb_variant_rules(tables, args.sample_size, profile),
+            )
+        else:
+            findings += _run_check_group(
+                "category 2 domain", ("2.domain",), skip_prefixes,
+                lambda: check_domain(tables, meta, args.sample_size, profile),
+            )
+            findings += _run_check_group(
+                "category 2b CDB variants", ("2b.",), skip_prefixes,
+                lambda: check_cdb_variant_rules(tables, args.sample_size, profile),
+            )
+            findings += _run_check_group(
+                "category 2c RDB resgate schedules", ("2c.",), skip_prefixes,
+                lambda: check_rdb_resgate_schedule_rules(tables, args.sample_size, profile),
+            )
     if args.max_parent_keys is not None:
         logger.warning("--max-parent-keys is deprecated and ignored; "
                        "see --max-residual-keys.")
@@ -9484,6 +10638,11 @@ def main() -> None:
         "category 5 dates", ("5.",), skip_prefixes,
         lambda: check_dates(tables, meta, args.sample_size),
     )
+    if is_ccb:
+        findings += _run_check_group(
+            "category 5h CCB dates", ("5h.",), skip_prefixes,
+            lambda: check_ccb_dates(tables, args.sample_size, profile),
+        )
     if is_credito_scr:
         if args.no_oracle:
             credito_lookups, credito_lookup_errors = {}, {
@@ -9542,6 +10701,42 @@ def main() -> None:
         findings += _run_check_group(
             "category 8f DICRE insertion profile", ("8f.",), skip_prefixes,
             lambda: check_dicre_registration_profile(
+                tables, args.sample_size, args.registration_profile, profile,
+            ),
+        )
+    elif is_ccb:
+        if _check_group_is_skipped(("6h.",), skip_prefixes):
+            logger.info("Skipped category 6h CCB target lookup setup (--skip-check).")
+        else:
+            if args.no_oracle:
+                ccb_lookups, ccb_lookup_errors = {}, {
+                    name: "No Oracle connection"
+                    for name in ("CCB_TIPO_IF", "CCB_OBJECT_SERVICE", "CCB_ROUTES")
+                }
+            else:
+                ccb_lookups, ccb_lookup_errors = _timed(
+                    "category 6h CCB target lookup setup",
+                    lambda: load_ccb_target_frames(
+                        spark, cfg, tables, skip_prefixes=skip_prefixes
+                    ),
+                )
+            findings += _run_check_group(
+                "category 6h CCB target eligibility", ("6h.",), skip_prefixes,
+                lambda: check_ccb_target_frames(
+                    tables, ccb_lookups, args.sample_size, profile, ccb_lookup_errors,
+                ),
+            )
+        findings += _run_check_group(
+            "category 7 CCB shapes", ("7.", "7a.", "7b."), skip_prefixes,
+            lambda: check_shapes(
+                spark, tables, args.shape_baseline, args.sample_size,
+                args.shape_unseen_tol, args.shape_drift_tol, args.shape_op_ratio_tol, profile,
+                skip_prefixes,
+            ),
+        )
+        findings += _run_check_group(
+            "category 8h CCB insertion profile", ("8h.",), skip_prefixes,
+            lambda: check_ccb_registration_profile(
                 tables, args.sample_size, args.registration_profile, profile,
             ),
         )

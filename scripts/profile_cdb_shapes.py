@@ -76,13 +76,14 @@ BASELINE_SCHEMA_VERSION = 2
 DOMAIN_VERSION = 1
 METRIC_VERSION = 2
 
-# Explicit product selection — no inference. num_tipo_if per TipoIFDO.java (CDB=49, RDB=50);
-# `simplified` gates the SEM TABELA / non-escalonado domain predicates.
+# Explicit product selection. `simplified` gates the CDB/RDB SEM TABELA and
+# non-escalonado domain predicates; CCB supports only the all/explicit-key universe.
 PRODUCTS: Dict[str, Dict[str, object]] = {
     "cdb_simplificado": {"num_tipo_if": 49, "simplified": True},
     "cdb": {"num_tipo_if": 49, "simplified": False},
     "lci": {"num_tipo_if": 81, "simplified": True},
     "lca": {"num_tipo_if": 96, "simplified": True},
+    "ccb": {"num_tipo_if": 53, "simplified": False},
     "rdb": {"num_tipo_if": 50, "simplified": False},
 }
 
@@ -118,11 +119,10 @@ SUBTYPE_TABLES = [
 class Metric:
     """One count in the shape vector: rows of `table` per NUM_IF.
 
-    via: None        -> table has NUM_IF, join directly;
-         "CONDICAO_IF" -> table keys on NUM_CONDICAO_IF, resolve NUM_IF through
-                          the (active) CONDICAO_IF rows of the universe;
-         "OPERACAO"    -> table keys on NUM_ID_OPERACAO, resolve through the
-                          OPERACAO rows of the universe.
+    via: None           -> table has NUM_IF, join directly;
+         "CONDICAO_IF"  -> resolve NUM_IF through the active condition;
+         "OPERACAO"     -> resolve NUM_IF through the operation;
+         "ROOT_COD_IF"  -> resolve NUM_IF through the root's exact trimmed COD_IF.
     where: optional (column, normalized value) equality filter applied to the
          table's rows before counting (e.g. EVENTO by NUM_TIPO_EVENTO_LEGADO).
     """
@@ -190,6 +190,53 @@ LCA_METRICS: List[Metric] = [
     Metric("CARTEIRA_PARTICIPANTE", "CARTEIRA_PARTICIPANTE"),
 ]
 
+CCB_METRICS: List[Metric] = [
+    Metric("TITULO", "TITULO"),
+    Metric("CREDITO", "CREDITO"),
+    Metric("TCTPIF_CCB", "TCTPIF_CCB"),
+    Metric("CONDICAO_IF", "CONDICAO_IF"),
+    Metric("CONDICAO_IF_TIPO1", "CONDICAO_IF", where=("COD_TIPO_CONDICAO_IF", "1")),
+    Metric("CONDICAO_IF_TIPO2", "CONDICAO_IF", where=("COD_TIPO_CONDICAO_IF", "2")),
+    Metric("CONDICAO_IF_TIPO4", "CONDICAO_IF", where=("COD_TIPO_CONDICAO_IF", "4")),
+    Metric("CONDICAO_IF_TIPO5", "CONDICAO_IF", where=("COD_TIPO_CONDICAO_IF", "5")),
+    Metric("CONDICAO_IF_TIPO14", "CONDICAO_IF", where=("COD_TIPO_CONDICAO_IF", "14")),
+    Metric("CONDICAO_IF_TIPO20", "CONDICAO_IF", where=("COD_TIPO_CONDICAO_IF", "20")),
+    Metric("AMORTIZACAO", "AMORTIZACAO", via="CONDICAO_IF"),
+    Metric("JUROS_FIXO", "JUROS_FIXO", via="CONDICAO_IF"),
+    Metric("ATUALIZACAO_POS", "ATUALIZACAO_POS", via="CONDICAO_IF"),
+    Metric("ATUALIZACAO_PRE", "ATUALIZACAO_PRE", via="CONDICAO_IF"),
+    Metric("SPREAD", "SPREAD", via="CONDICAO_IF"),
+    Metric("RESGATE", "RESGATE", via="CONDICAO_IF"),
+    Metric("TCTPCRONOGRAMA_CCB", "TCTPCRONOGRAMA_CCB"),
+    Metric(
+        "TCTPCRONOGRAMA_CCB_TIPO83", "TCTPCRONOGRAMA_CCB",
+        where=("NUM_TIPO_EVENTO_LEGADO", "83"),
+    ),
+    Metric(
+        "TCTPCRONOGRAMA_CCB_TIPO84", "TCTPCRONOGRAMA_CCB",
+        where=("NUM_TIPO_EVENTO_LEGADO", "84"),
+    ),
+    Metric(
+        "TCTPCRONOGRAMA_CCB_TIPO85", "TCTPCRONOGRAMA_CCB",
+        where=("NUM_TIPO_EVENTO_LEGADO", "85"),
+    ),
+    Metric(
+        "TCTPCRONOGRAMA_CCB_TIPO90", "TCTPCRONOGRAMA_CCB",
+        where=("NUM_TIPO_EVENTO_LEGADO", "90"),
+    ),
+    Metric(
+        "TCTPCRONOGRAMA_CCB_TIPO157", "TCTPCRONOGRAMA_CCB",
+        where=("NUM_TIPO_EVENTO_LEGADO", "157"),
+    ),
+    Metric("HISTORICO_PU_CURVA", "HISTORICO_PU_CURVA"),
+    Metric("HISTORICO_IF_TITULO", "HISTORICO_IF_TITULO", via="ROOT_COD_IF"),
+    Metric("ALTERACAO_IF", "ALTERACAO_IF"),
+    Metric("OPERACAO", "OPERACAO"),
+    Metric("LANCAMENTO", "LANCAMENTO", via="OPERACAO"),
+    Metric("GARANTIA", "GARANTIA"),
+    Metric("TCTPCADEIA_IPOC", "TCTPCADEIA_IPOC"),
+]
+
 PRODUCT_METRICS: Dict[str, List[Metric]] = {
     "cdb_simplificado": METRICS,
     "cdb": METRICS,
@@ -198,6 +245,7 @@ PRODUCT_METRICS: Dict[str, List[Metric]] = {
         metric for metric in METRICS if metric.name not in {"ATUALIZACAO_PRE", "SPREAD"}
     ],
     "lca": LCA_METRICS,
+    "ccb": CCB_METRICS,
 }
 
 
@@ -313,11 +361,14 @@ def _ci(df: DataFrame, name: str) -> Optional[str]:
 
 
 def active_rows(df: DataFrame, notes: List[str], table: str) -> DataFrame:
-    """Drop logically deleted rows (DAT_EXCLUSAO IS NOT NULL) when the column exists."""
-    col = _ci(df, "DAT_EXCLUSAO")
-    if col:
-        notes.append(f"{table}: filtered DAT_EXCLUSAO IS NULL")
-        return df.where(F.col(col).isNull())
+    """Drop logically deleted rows when a known exclusion column exists."""
+    for candidate in ("DAT_EXCLUSAO", "DATA_EXCLUSAO", "DTHR_EXCLUSAO"):
+        col = _ci(df, candidate)
+        if col:
+            notes.append(f"{table}: filtered Oracle-null-equivalent {candidate}")
+            return df.where(
+                F.col(col).isNull() | (F.trim(F.col(col).cast("string")) == "")
+            )
     return df
 
 
@@ -477,7 +528,8 @@ def build_subtype_map_snapshot(
 
 
 def _keyed_by_num_if(
-    tables: Dict[str, DataFrame], metric: Metric, notes: List[str]
+    tables: Dict[str, DataFrame], metric: Metric, notes: List[str],
+    universe: Optional[DataFrame] = None,
 ) -> Optional[DataFrame]:
     """Return a DF with one row per counted child row, keyed by NUM_IF."""
     df = tables.get(metric.table)
@@ -555,6 +607,22 @@ def _keyed_by_num_if(
                 F.col(entity_key).cast("long").alias("entity_id")
             ).join(active_representatives, "entity_id", "inner")
         return child.join(route_entities, "entity_id", "inner").select(ROOT_KEY)
+    elif metric.via == "ROOT_COD_IF":
+        root = tables.get(ROOT_TABLE)
+        child_code = _ci(df, "COD_IF")
+        root_code = _ci(root, "COD_IF") if root is not None else None
+        root_key = _ci(root, ROOT_KEY) if root is not None else None
+        if not all((root is not None, child_code, root_code, root_key)):
+            return None
+        roots = active_rows(root, [], ROOT_TABLE).select(
+            F.trim(F.col(root_code).cast("string")).alias("business_code"),
+            F.col(root_key).cast("long").alias(ROOT_KEY),
+        )
+        if universe is not None:
+            roots = roots.join(universe, ROOT_KEY, "leftsemi")
+        return df.select(
+            F.trim(F.col(child_code).cast("string")).alias("business_code")
+        ).join(roots, "business_code", "inner").select(ROOT_KEY)
     else:
         raise ValueError(f"Unknown via: {metric.via}")
     if bridge is None:
@@ -581,7 +649,7 @@ def build_counts(
     result = universe
     skipped: List[str] = []
     for metric in metrics or METRICS:
-        keyed = _keyed_by_num_if(tables, metric, notes)
+        keyed = _keyed_by_num_if(tables, metric, notes, universe)
         if keyed is None:
             skipped.append(metric.name)
             result = result.withColumn(metric.name, F.lit(None).cast("long"))
@@ -910,6 +978,12 @@ def source_key_provenance(universe_keys: DataFrame) -> tuple[int, str]:
 # Comparison
 # ---------------------------------------------------------------------------
 def compare_profiles(current: dict, other: dict, other_label: str) -> dict:
+    identity = ("product", "num_tipo_if", "domain_version", "metric_version", "metrics")
+    mismatched = [key for key in identity if current.get(key) != other.get(key)]
+    if mismatched:
+        raise ValueError(
+            f"Cannot compare incompatible shape profiles; mismatched identity: {mismatched}"
+        )
     cur = {s["shape"]: s for s in current["shapes"]}
     oth = {s["shape"]: s for s in other.get("shapes", [])}
     only_current = [
@@ -1176,19 +1250,19 @@ def run_selftest(spark: SparkSession) -> None:
 # CLI / main
 # ---------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Profile per-IF cardinalities of a CDB/RDB domain.")
+    p = argparse.ArgumentParser(description="Profile per-IF financial-product cardinalities.")
     p.add_argument("--product", required=True, choices=sorted(PRODUCTS),
-                   help="Product profile: selects NUM_TIPO_IF (CDB=49, RDB=50) and the "
-                        "domain predicates. The emitted baseline is tagged with it so the "
+                   help="Product profile: selects NUM_TIPO_IF and metric/domain rules. "
+                        "The emitted baseline is tagged so the "
                         "validator rejects a cross-product baseline.")
     p.add_argument("--base-uri", default=None,
                    help="Parquet base URI holding one folder per table (raw or synthetic).")
     p.add_argument("--self-test", action="store_true",
                    help="Verify the profiler against a built-in in-memory fixture and exit.")
     p.add_argument("--apply-filtros-fonte", action="store_true",
-                   help="Pre-filter the source tables with engorda's FILTROS_FONTE row "
-                        "predicates, so the profile is the engorda-input image (use as "
-                        "the --compare-with baseline for the synthetic run).")
+                   help="Pre-filter CDB/RDB source tables with engorda's FILTROS_FONTE row "
+                        "predicates (not supported for CCB), so the profile is the input image "
+                        "(use as the --compare-with baseline for the synthetic run).")
     p.add_argument("--universe-keys", default=None,
                    help="Parquet path/URI with the NUM_IFs to restrict the universe to "
                         "(e.g. a clone run's MAPA_CLONE_NUM_IF) — builds a baseline over "
@@ -1197,8 +1271,8 @@ def parse_args() -> argparse.Namespace:
                    help="Column holding the NUM_IF in --universe-keys "
                         "(e.g. NUM_IF_ORIG for MAPA_CLONE_NUM_IF).")
     p.add_argument("--universe", default="all", choices=["all", "domain"],
-                   help="'all' = every active CDB (NUM_TIPO_IF=49). 'domain' = the "
-                        "IF-level product domain: non-escalonado TITULO and >=1 active "
+                   help="'all' = every active root of the selected type. 'domain' = the "
+                        "CDB/RDB IF-level domain: non-escalonado TITULO and >=1 active "
                         "CONDICAO_IF with an active RESGATE 'SEM TABELA' (team "
                         "FILTRO_BASE query). Composes with --universe-keys (intersection).")
     p.add_argument("--prefix", default="", help="Optional sub-prefix under the base URI.")
@@ -1213,6 +1287,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    if args.product == "ccb" and args.apply_filtros_fonte:
+        raise SystemExit("--apply-filtros-fonte is CDB-specific and is not supported for CCB.")
+    if args.product == "ccb" and args.universe == "domain":
+        raise SystemExit("--universe domain is CDB/RDB-specific; use all or --universe-keys.")
 
     spark = SparkSession.builder.appName("profile_cdb_shapes").getOrCreate()
     # Spark 3.5.0 (OCI Data Flow) + AQE + cached DataFrames silently LOSES JOIN
@@ -1235,9 +1314,10 @@ def main() -> None:
     if args.prefix.strip("/"):
         base = f"{base}/{args.prefix.strip('/')}"
 
+    selected_metrics = metrics_for_product(args.product)
     needed = sorted(
         {ROOT_TABLE, CONDICAO_IF_TABLE, OPERACAO_TABLE}
-        | {m.table for metrics in PRODUCT_METRICS.values() for m in metrics}
+        | {metric.table for metric in selected_metrics}
         | set(EXTRA_TABLES)
         | set(SUBTYPE_TABLES)
     )
