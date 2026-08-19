@@ -541,9 +541,29 @@ WHERE I.NUM_TIPO_IF = 53
 -- END QUERY: gravame
 
 -- BEGIN QUERY: lastro
-
+-- Domínio de instrumentos com crédito SCR ativo.
+-- Contrato: retornar somente uma coluna chamada NUM_IF, sem valores nulos.
+-- Diagnóstico separado dos tipos presentes:
+-- SELECT DISTINCT SCR.NUM_TIPO_IF
+-- FROM {{RAW_CREDITO_SCR}} SCR
+-- WHERE SCR.DAT_EXCLUSAO IS NULL
+--     AND SCR.NUM_TIPO_IF IS NOT NULL;
+SELECT DISTINCT SCR.NUM_IF
+FROM {{RAW_CREDITO_SCR}} SCR
+WHERE SCR.DAT_EXCLUSAO IS NULL
+    AND SCR.NUM_IF IS NOT NULL;
 -- END QUERY: lastro
 
 -- BEGIN QUERY: direito_creditorio
-
+-- Domínio de instrumentos com direito creditório ativo.
+-- Contrato: retornar somente uma coluna chamada NUM_IF, sem valores nulos.
+-- Diagnóstico separado dos tipos presentes:
+-- SELECT DISTINCT CDC.NUM_TIPO_IF
+-- FROM {{RAW_CREDITO_DC}} CDC
+-- WHERE CDC.DAT_EXCLUSAO IS NULL
+--     AND CDC.NUM_TIPO_IF IS NOT NULL;
+SELECT DISTINCT CDC.NUM_IF
+FROM {{RAW_CREDITO_DC}} CDC
+WHERE CDC.DAT_EXCLUSAO IS NULL
+    AND CDC.NUM_IF IS NOT NULL;
 -- END QUERY: direito_creditorio
