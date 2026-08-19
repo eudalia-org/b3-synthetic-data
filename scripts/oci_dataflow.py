@@ -41,7 +41,7 @@ def build_run_cancel_command(
 
 
 def run_json(command: Sequence[str]) -> dict[str, Any]:
-    return _implementation.run_json(command)
+    return _implementation.run_json(command, wrap_errors=False)
 
 
 def create_run(arguments: Sequence[str], display_name: str, opts: Mapping[str, Any]) -> str:

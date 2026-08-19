@@ -17,6 +17,7 @@ import tempfile
 import threading
 from collections.abc import Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from configparser import ConfigParser
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -54,6 +55,7 @@ _AUTH_OPTIONS = (
     ("config_file", "--config-file"),
     ("auth", "--auth"),
     ("cert_bundle", "--cert-bundle"),
+    ("region", "--region"),
 )
 _AUTH_FAILURE_MARKERS = (
     "notauthenticated",
@@ -178,20 +180,122 @@ def _build_session_refresh_command(command: Sequence[str]) -> list[str]:
     return refresh
 
 
-def _run(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(list(command), capture_output=True, text=True, check=True)
+def _session_command(operation: str, auth: Mapping[str, Any]) -> list[str]:
+    command = ["oci", "session", operation]
+    for key, option in (
+        ("profile", "--profile"),
+        ("config_file", "--config-file"),
+        ("cert_bundle", "--cert-bundle"),
+    ):
+        if auth.get(key):
+            command.extend((option, str(auth[key])))
+    return command
 
 
-def run_json(command: Sequence[str]) -> dict[str, Any]:
+def _profile_region(auth: Mapping[str, Any]) -> str | None:
+    if auth.get("region"):
+        return str(auth["region"])
+    config_file = Path(
+        str(auth.get("config_file") or Path.home() / ".oci" / "config")
+    ).expanduser()
+    parser = ConfigParser(interpolation=None)
+    if not parser.read(config_file):
+        return None
+    profile = str(auth.get("profile") or "DEFAULT")
+    section = profile if parser.has_section(profile) else "DEFAULT"
+    return parser.get(section, "region", fallback=None)
+
+
+def _session_authenticate_command(auth: Mapping[str, Any], region: str) -> list[str]:
+    command = ["oci", "session", "authenticate", "--region", region]
+    if auth.get("profile"):
+        command.extend(("--profile-name", str(auth["profile"])))
+    if auth.get("config_file"):
+        command.extend(("--config-location", str(auth["config_file"])))
+    if auth.get("cert_bundle"):
+        command.extend(("--cert-bundle", str(auth["cert_bundle"])))
+    return command
+
+
+def _command_label(command: Sequence[str]) -> str:
+    parts = list(command)
+    if parts and parts[0] == "oci":
+        return " ".join(parts[1:4])
+    return parts[0] if parts else "command"
+
+
+def _run(
+    command: Sequence[str], *, timeout_seconds: float | None = None
+) -> subprocess.CompletedProcess[str]:
+    options: dict[str, Any] = {
+        "capture_output": True,
+        "text": True,
+        "check": True,
+    }
+    if timeout_seconds is not None:
+        options["timeout"] = timeout_seconds
+    try:
+        return subprocess.run(list(command), **options)
+    except subprocess.TimeoutExpired as exc:
+        raise OciExecutionError(
+            f"OCI command {_command_label(command)!r} timed out after "
+            f"{timeout_seconds:g}s",
+            stdout=exc.stdout,
+            stderr=exc.stderr,
+        ) from exc
+
+
+def _oci_failure(error: subprocess.CalledProcessError, command: Sequence[str]) -> OciExecutionError:
+    detail = str(error.stderr or error.stdout or "").strip().replace("\n", " ")
+    suffix = f": {detail[:400]}" if detail else ""
+    return OciExecutionError(
+        f"OCI command {_command_label(command)!r} failed with exit code "
+        f"{error.returncode}{suffix}",
+        returncode=error.returncode,
+        stdout=error.stdout,
+        stderr=error.stderr,
+    )
+
+
+def run_json(
+    command: Sequence[str],
+    *,
+    timeout_seconds: float | None = None,
+    progress: Any | None = None,
+    wrap_errors: bool = True,
+) -> dict[str, Any]:
     """Run OCI JSON transport, refreshing one expired security-token session once."""
     command = list(command)
+    if progress is not None:
+        progress.emit(
+            f"[oci] {_command_label(command)} timeout="
+            f"{timeout_seconds:g}s" if timeout_seconds is not None
+            else f"[oci] {_command_label(command)} timeout=none"
+        )
     try:
-        completed = _run(command)
+        completed = _run(command, timeout_seconds=timeout_seconds)
     except subprocess.CalledProcessError as error:
         if not (_uses_security_token(command) and _is_authentication_error(error)):
-            raise
-        _run(_build_session_refresh_command(command))
-        completed = _run(command)
+            if not wrap_errors:
+                raise
+            raise _oci_failure(error, command) from error
+        refresh = _build_session_refresh_command(command)
+        if progress is not None:
+            progress.emit("[auth] security token expired; refreshing OCI session")
+        try:
+            _run(refresh, timeout_seconds=timeout_seconds)
+        except subprocess.CalledProcessError as refresh_error:
+            if not wrap_errors:
+                raise
+            raise _oci_failure(refresh_error, refresh) from refresh_error
+        if progress is not None:
+            progress.emit("[auth] OCI session refreshed; retrying command once")
+        try:
+            completed = _run(command, timeout_seconds=timeout_seconds)
+        except subprocess.CalledProcessError as retry_error:
+            if not wrap_errors:
+                raise
+            raise _oci_failure(retry_error, command) from retry_error
     return json.loads(completed.stdout) if completed.stdout.strip() else {}
 
 
@@ -251,12 +355,30 @@ class PipelineError(ValueError):
     """Operator-correctable planning or execution error."""
 
 
+class OciExecutionError(RuntimeError):
+    """OCI command failed without exposing its complete argv."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        returncode: int | None = None,
+        stdout: str | bytes | None = None,
+        stderr: str | bytes | None = None,
+    ):
+        super().__init__(message)
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
 @dataclass(frozen=True)
 class AuthOptions:
     profile: str | None = None
     config_file: str | None = None
     auth: str | None = None
     cert_bundle: str | None = None
+    region: str | None = None
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -266,6 +388,7 @@ class AuthOptions:
                 "config_file": self.config_file,
                 "auth": self.auth,
                 "cert_bundle": self.cert_bundle,
+                "region": self.region,
             }.items()
             if value is not None
         }
@@ -291,6 +414,9 @@ class ProgressReporter:
         tag = message.partition("]")[0] + "]"
         color = {
             "[run]": "bright_white",
+            "[preflight]": "bright_blue",
+            "[oci]": "bright_black",
+            "[auth]": "yellow",
             "[launch]": "bright_cyan",
             "[submit]": "cyan",
             "[poll]": "blue",
@@ -346,6 +472,101 @@ class AtomicManifest:
 class ModuleAdapter:
     """Live adapter backed entirely by functions in this standalone module."""
 
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float = 60,
+        progress: ProgressReporter | None = None,
+    ):
+        self.timeout_seconds = timeout_seconds
+        self.progress = progress
+
+    def _auth_run(
+        self,
+        command: Sequence[str],
+        *,
+        timeout_seconds: float | None = None,
+        wrap_errors: bool = True,
+    ) -> None:
+        if self.progress is not None:
+            self.progress.emit(
+                f"[auth] {_command_label(command)} timeout="
+                f"{(timeout_seconds or self.timeout_seconds):g}s"
+            )
+        try:
+            _run(
+                command,
+                timeout_seconds=timeout_seconds or self.timeout_seconds,
+            )
+        except subprocess.CalledProcessError as error:
+            if not wrap_errors:
+                raise
+            raise _oci_failure(error, command) from error
+
+    def ensure_auth(
+        self,
+        auth: Mapping[str, Any],
+        *,
+        allow_prompt: bool,
+        prompt: Callable[[str], bool],
+    ) -> None:
+        if auth.get("auth") != "security_token":
+            if self.progress is not None:
+                self.progress.emit(
+                    f"[auth] mode={auth.get('auth') or 'api_key'}; "
+                    "first OCI request will validate credentials"
+                )
+            return
+
+        validate = _session_command("validate", auth)
+        if self.progress is not None:
+            self.progress.emit("[auth] validating OCI security-token session")
+        try:
+            self._auth_run(validate, wrap_errors=False)
+        except subprocess.CalledProcessError:
+            if not allow_prompt:
+                raise OciExecutionError(
+                    "OCI security-token session is invalid and prompting is disabled "
+                    "by --no-auth-prompt"
+                )
+            if not prompt("OCI security-token session is invalid. Refresh it now?"):
+                raise OciExecutionError("OCI authentication was declined by the operator")
+
+            refresh = _session_command("refresh", auth)
+            if self.progress is not None:
+                self.progress.emit("[auth] refreshing OCI security-token session")
+            refresh_succeeded = True
+            try:
+                self._auth_run(refresh, wrap_errors=False)
+                self._auth_run(validate, wrap_errors=False)
+            except (subprocess.CalledProcessError, OciExecutionError) as refresh_error:
+                refresh_succeeded = False
+                region = _profile_region(auth)
+                if not region:
+                    raise OciExecutionError(
+                        "OCI session refresh failed and browser authentication needs "
+                        "--region or a region in the OCI profile"
+                    ) from refresh_error
+                if not prompt(
+                    "OCI session refresh failed. Start browser authentication now?"
+                ):
+                    raise OciExecutionError(
+                        "OCI browser authentication was declined by the operator"
+                    ) from refresh_error
+                authenticate = _session_authenticate_command(auth, region)
+                if self.progress is not None:
+                    self.progress.emit(
+                        f"[auth] starting OCI browser authentication region={region}"
+                    )
+                self._auth_run(
+                    authenticate,
+                )
+                self._auth_run(validate)
+            if refresh_succeeded and self.progress is not None:
+                self.progress.emit("[auth] OCI session refreshed and revalidated")
+        if self.progress is not None:
+            self.progress.emit("[auth] OCI security-token session is valid")
+
     def _compat_operation(self, name: str, default: Callable[..., Any]) -> Callable[..., Any]:
         module = getattr(self, "module", None)
         return getattr(module, name, default) if module is not None else default
@@ -353,16 +574,34 @@ class ModuleAdapter:
     def create_run(
         self, arguments: Sequence[str], display_name: str, opts: dict[str, Any]
     ) -> Any:
-        return self._compat_operation("create_run", create_run)(arguments, display_name, opts)
+        operation = self._compat_operation("create_run", None)
+        if operation is not None:
+            return operation(arguments, display_name, opts)
+        return _create_run(arguments, display_name, opts, self._transport())
 
     def get_run_state(self, run_id: str, opts: dict[str, Any]) -> Any:
-        return self._compat_operation("get_run_state", get_run_state)(run_id, opts)
+        operation = self._compat_operation("get_run_state", None)
+        if operation is not None:
+            return operation(run_id, opts)
+        return _get_run_state(run_id, opts, self._transport())
 
     def cancel_run(self, run_id: str, opts: dict[str, Any]) -> Any:
-        return self._compat_operation("cancel_run", cancel_run)(run_id, opts)
+        operation = self._compat_operation("cancel_run", None)
+        if operation is not None:
+            return operation(run_id, opts)
+        return _cancel_run(run_id, opts, self._transport())
 
     def _transport(self) -> Callable[[Sequence[str]], dict[str, Any]]:
-        return self._compat_operation("run_json", run_json)
+        operation = self._compat_operation("run_json", None)
+        if operation is not None:
+            return operation
+        timeout_seconds = getattr(self, "timeout_seconds", 60)
+        progress = getattr(self, "progress", None)
+        return lambda command: run_json(
+            command,
+            timeout_seconds=timeout_seconds,
+            progress=progress,
+        )
 
     def _auth_flags(self, auth: dict[str, str]) -> list[str]:
         return self._compat_operation("oci_auth_flags", oci_auth_flags)(auth)
@@ -436,6 +675,14 @@ class ModuleAdapter:
         return self._transport()(command)
 
     def reserve_ranges(self, **kwargs: Any) -> Any:
+        kwargs.setdefault(
+            "storage",
+            OciCliStorage(
+                kwargs["auth"],
+                transport=self._transport(),
+                auth_builder=self._auth_flags,
+            ),
+        )
         return reserve_ranges(**kwargs)
 
 
@@ -565,7 +812,7 @@ class OciCliStorage:
         ]
 
     @staticmethod
-    def _translate_error(error: subprocess.CalledProcessError) -> None:
+    def _translate_error(error: subprocess.CalledProcessError | OciExecutionError) -> None:
         output = f"{error.stdout or ''}\n{error.stderr or ''}".lower()
         if any(marker in output for marker in ("status: 404", '"status": 404', "notfound")):
             raise ObjectNotFound("Object Storage object does not exist") from error
@@ -579,7 +826,7 @@ class OciCliStorage:
     def _run(self, command: list[str]) -> dict[str, Any]:
         try:
             return self._transport(command)
-        except subprocess.CalledProcessError as error:
+        except (subprocess.CalledProcessError, OciExecutionError) as error:
             self._translate_error(error)
             raise AssertionError("unreachable")
 
@@ -1821,7 +2068,29 @@ def _initial_manifest(plan: dict[str, Any], upstream_path: str) -> dict[str, Any
 
 
 def _auth_from_args(args: SimpleNamespace) -> dict[str, str]:
-    return AuthOptions(args.profile, args.config_file, args.auth, args.cert_bundle).as_dict()
+    return AuthOptions(
+        args.profile,
+        args.config_file,
+        args.auth,
+        args.cert_bundle,
+        args.region,
+    ).as_dict()
+
+
+def _ensure_adapter_auth(
+    adapter: Any,
+    auth: dict[str, str],
+    *,
+    allow_prompt: bool,
+) -> None:
+    ensure = getattr(adapter, "ensure_auth", None)
+    if ensure is None:
+        return
+    ensure(
+        auth,
+        allow_prompt=allow_prompt,
+        prompt=lambda message: click.confirm(message, default=True, err=True),
+    )
 
 
 def run_command(
@@ -1849,11 +2118,17 @@ def run_command(
         progress.emit("[done] dry-run complete (no remote calls)")
         return 0
 
-    adapter = adapter or ModuleAdapter()
+    adapter = adapter or ModuleAdapter(
+        timeout_seconds=args.oci_timeout_seconds,
+        progress=progress,
+    )
     auth = _auth_from_args(args)
+    _ensure_adapter_auth(adapter, auth, allow_prompt=args.auth_prompt)
     for label, uri in (("run path", plan["run_root"]), ("manifest", plan["manifest_uri"])):
+        progress.emit(f"[preflight] checking OCI {label}: {uri}")
         if adapter.uri_exists(uri, auth=auth):
             raise PipelineError(f"immutable OCI {label} already exists: {uri}")
+    progress.emit("[preflight] OCI paths are available")
     store = AtomicManifest(manifest_path, _initial_manifest(plan, args.upstream_manifest))
     result = execute_plan(
         plan,
@@ -1921,14 +2196,20 @@ def adopt_inputs_command(
         print(json.dumps({"dry_run": True, "output_manifest": str(output), **payload}, indent=2))
         progress.emit("[done] dry-run complete (no remote calls)")
         return 0
-    adapter = adapter or ModuleAdapter()
+    adapter = adapter or ModuleAdapter(
+        timeout_seconds=args.oci_timeout_seconds,
+        progress=progress,
+    )
     auth = _auth_from_args(args)
+    _ensure_adapter_auth(adapter, auth, allow_prompt=args.auth_prompt)
     for name, uri in (("raw", args.raw_uri), ("faltantes", args.faltantes_uri)):
+        progress.emit(f"[preflight] inspecting {name}: {uri}")
         describe = getattr(adapter, "describe_uri", None)
         if describe is not None:
             payload["artifacts"][name].update(describe(uri, auth=auth))
         elif not adapter.uri_exists(uri, auth=auth):
             raise PipelineError(f"OCI input URI does not exist: {uri}")
+    progress.emit("[preflight] adopted input paths are readable")
     atomic_write_json(output, payload)
     print(str(output))
     return 0
@@ -1938,9 +2219,25 @@ def _auth_options(command: Callable[..., Any]) -> Callable[..., Any]:
     command = click.option("--profile", help="OCI CLI profile name.")(command)
     command = click.option("--config-file", help="OCI CLI config file path.")(command)
     command = click.option(
+        "--region", help="OCI region; defaults to the selected profile region."
+    )(command)
+    command = click.option(
         "--auth", help="OCI auth mode, for example security_token."
     )(command)
-    return click.option("--cert-bundle", help="CA certificate bundle path.")(command)
+    command = click.option("--cert-bundle", help="CA certificate bundle path.")(command)
+    command = click.option(
+        "--oci-timeout-seconds",
+        type=click.FloatRange(min=0.1),
+        default=60.0,
+        show_default=True,
+        help="Timeout for each OCI CLI command.",
+    )(command)
+    return click.option(
+        "--auth-prompt/--no-auth-prompt",
+        default=True,
+        show_default=True,
+        help="Prompt to refresh/authenticate an invalid security-token session.",
+    )(command)
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -1997,6 +2294,8 @@ def run_cli(context: click.Context, **options: Any) -> None:
         result = run_command(args, context.obj["adapter"], progress)
     except PipelineError as exc:
         raise click.UsageError(str(exc), context) from exc
+    except OciExecutionError as exc:
+        raise click.ClickException(str(exc)) from exc
     if result:
         context.exit(result)
 
@@ -2020,6 +2319,8 @@ def adopt_inputs_cli(context: click.Context, **options: Any) -> None:
         result = adopt_inputs_command(args, context.obj["adapter"], progress)
     except PipelineError as exc:
         raise click.UsageError(str(exc), context) from exc
+    except OciExecutionError as exc:
+        raise click.ClickException(str(exc)) from exc
     if result:
         context.exit(result)
 

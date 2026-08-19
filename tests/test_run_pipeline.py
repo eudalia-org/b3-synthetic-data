@@ -245,6 +245,8 @@ def test_click_cli_reports_submission_and_each_mocked_poll(tmp_path):
     assert result.exit_code == 0, result.output
     assert "[run] id=run-001" in result.output
     assert "poll=0.001s" in result.output
+    assert "[preflight] checking OCI run path" in result.output
+    assert "[preflight] OCI paths are available" in result.output
     assert "[submit] cdb_simplificado.engorda.plan" in result.output
     assert "[poll] cdb_simplificado.engorda.plan" in result.output
     assert "ACCEPTED" in result.output
@@ -264,6 +266,10 @@ def test_click_help_exposes_commands_and_polling_default():
     assert run.exit_code == 0
     assert "--poll-seconds" in run.output
     assert "30" in run.output
+    assert "--oci-timeout-seconds" in run.output
+    assert "60" in run.output
+    assert "--auth-prompt / --no-auth-prompt" in run.output
+    assert "--region" in run.output
 
 
 def test_click_dry_run_finishes_without_submitting_jobs(tmp_path):
@@ -395,6 +401,197 @@ def test_single_copied_script_adopts_inputs_without_sibling_modules(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert json.loads(output.read_text())["status"] == "ADOPTED"
+    assert "[oci] os object list" in result.stderr
+
+
+def test_oci_subprocess_timeout_is_reported(monkeypatch):
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(P.subprocess, "run", timeout)
+
+    with pytest.raises(P.OciExecutionError, match="timed out after 0.1s"):
+        P._run(["oci", "os", "object", "list"], timeout_seconds=0.1)
+
+
+def test_preflight_oci_failure_is_operational_not_usage_error(tmp_path):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+
+    class FailedPreflight(FakeAdapter):
+        def uri_exists(self, uri, *, auth):
+            raise P.OciExecutionError("OCI command 'os object list' timed out after 1s")
+
+    result = CliRunner().invoke(
+        P.cli,
+        run_args(tmp_path, config, upstream),
+        obj={"adapter": FailedPreflight()},
+    )
+
+    assert result.exit_code == 1
+    assert "timed out after 1s" in result.output
+    assert "Usage:" not in result.output
+
+
+def test_security_token_refresh_has_visible_feedback(monkeypatch):
+    calls = []
+
+    def run(command, *, timeout_seconds=None):
+        calls.append(list(command))
+        if len(calls) == 1:
+            raise subprocess.CalledProcessError(
+                1, command, stderr="status: 401 NotAuthenticated"
+            )
+        stdout = '{"data": []}' if len(calls) == 3 else ""
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(P, "_run", run)
+    messages = []
+
+    class Progress:
+        def emit(self, message):
+            messages.append(message)
+
+    assert P.run_json(
+        ["oci", "os", "object", "list", "--auth", "security_token"],
+        timeout_seconds=5,
+        progress=Progress(),
+    ) == {"data": []}
+
+    assert calls[1][:3] == ["oci", "session", "refresh"]
+    assert messages == [
+        "[oci] os object list timeout=5s",
+        "[auth] security token expired; refreshing OCI session",
+        "[auth] OCI session refreshed; retrying command once",
+    ]
+
+
+def test_invalid_security_token_prompts_refresh_before_preflight(monkeypatch):
+    calls = []
+    prompts = []
+
+    def run(command, *, timeout_seconds=None):
+        calls.append(list(command))
+        if command[1:3] == ["session", "validate"] and len(calls) == 1:
+            raise subprocess.CalledProcessError(1, command, stderr="session expired")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    class Progress:
+        def __init__(self):
+            self.messages = []
+
+        def emit(self, message):
+            self.messages.append(message)
+
+    monkeypatch.setattr(P, "_run", run)
+    progress = Progress()
+    adapter = P.ModuleAdapter(timeout_seconds=5, progress=progress)
+
+    adapter.ensure_auth(
+        {
+            "profile": "p-lmirabella",
+            "config_file": "C:\\Users\\p-lmirabella\\.oci\\config",
+            "auth": "security_token",
+        },
+        allow_prompt=True,
+        prompt=lambda message: prompts.append(message) or True,
+    )
+
+    assert [command[1:3] for command in calls] == [
+        ["session", "validate"],
+        ["session", "refresh"],
+        ["session", "validate"],
+    ]
+    assert prompts == ["OCI security-token session is invalid. Refresh it now?"]
+    assert progress.messages[-1] == "[auth] OCI security-token session is valid"
+
+
+def test_auth_prompt_can_be_disabled(monkeypatch):
+    def invalid(command, *, timeout_seconds=None):
+        raise subprocess.CalledProcessError(1, command, stderr="session expired")
+
+    monkeypatch.setattr(P, "_run", invalid)
+    adapter = P.ModuleAdapter(timeout_seconds=5)
+
+    with pytest.raises(P.OciExecutionError, match="--no-auth-prompt"):
+        adapter.ensure_auth(
+            {"profile": "QAB", "auth": "security_token"},
+            allow_prompt=False,
+            prompt=lambda _message: pytest.fail("must not prompt"),
+        )
+
+
+def test_failed_refresh_prompts_browser_authentication(monkeypatch, tmp_path):
+    config_file = tmp_path / "oci-config"
+    config_file.write_text("[QAB]\nregion=sa-saopaulo-1\n")
+    calls = []
+    prompts = []
+    validations = 0
+
+    def run(command, *, timeout_seconds=None):
+        nonlocal validations
+        calls.append(list(command))
+        operation = command[1:3]
+        if operation == ["session", "validate"]:
+            validations += 1
+            if validations == 1:
+                raise subprocess.CalledProcessError(1, command, stderr="expired")
+        elif operation == ["session", "refresh"]:
+            raise subprocess.CalledProcessError(1, command, stderr="refresh expired")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(P, "_run", run)
+    adapter = P.ModuleAdapter(timeout_seconds=5)
+    adapter.ensure_auth(
+        {
+            "profile": "QAB",
+            "config_file": str(config_file),
+            "auth": "security_token",
+        },
+        allow_prompt=True,
+        prompt=lambda message: prompts.append(message) or True,
+    )
+
+    authenticate = next(
+        command for command in calls if command[1:3] == ["session", "authenticate"]
+    )
+    assert prompts == [
+        "OCI security-token session is invalid. Refresh it now?",
+        "OCI session refresh failed. Start browser authentication now?",
+    ]
+    assert authenticate[authenticate.index("--region") + 1] == "sa-saopaulo-1"
+    assert authenticate[authenticate.index("--profile-name") + 1] == "QAB"
+
+
+def test_refresh_that_leaves_session_invalid_falls_back_to_browser(monkeypatch):
+    validations = 0
+    calls = []
+
+    def run(command, *, timeout_seconds=None):
+        nonlocal validations
+        calls.append(list(command))
+        if command[1:3] == ["session", "validate"]:
+            validations += 1
+            if validations <= 2:
+                raise subprocess.CalledProcessError(1, command, stderr="still expired")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(P, "_run", run)
+    adapter = P.ModuleAdapter(timeout_seconds=5)
+    adapter.ensure_auth(
+        {
+            "profile": "QAB",
+            "region": "sa-saopaulo-1",
+            "auth": "security_token",
+        },
+        allow_prompt=True,
+        prompt=lambda _message: True,
+    )
+
+    assert any(
+        command[1:3] == ["session", "authenticate"] for command in calls
+    )
+    assert validations == 3
 
 
 def test_dry_run_is_offline_and_prints_resolved_argv(tmp_path, capsys):

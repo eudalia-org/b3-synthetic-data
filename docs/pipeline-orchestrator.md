@@ -50,6 +50,7 @@ uv run --allow-insecure-host pypi.org `
   --fator-k 1 `
   --max-concurrency 4 `
   --poll-seconds 30 `
+  --oci-timeout-seconds 60 `
   --profile p-lmirabella `
   --auth security_token `
   --config-file C:\Users\p-lmirabella\.oci\config `
@@ -59,7 +60,12 @@ uv run --allow-insecure-host pypi.org `
 Use `--dry-run` first. It performs no OCI or Oracle calls and prints the resolved
 DAG, immutable paths, Data Flow application arguments, and reservation contract.
 Live execution prints every submission and every observed Data Flow state. Change
-`--poll-seconds 30` to control the status interval.
+`--poll-seconds 30` to control the status interval. Every OCI CLI call announces
+itself and fails after `--oci-timeout-seconds 60` instead of waiting indefinitely.
+With `--auth security_token`, the runner validates the OCI session before Object
+Storage preflight. An invalid session prompts for refresh and, if refresh fails,
+offers browser authentication. Use `--no-auth-prompt` for non-interactive automation;
+`--region` overrides the region read from the OCI profile when browser auth is needed.
 
 The first tracer supports `cdb_simplificado`, `cdb_resgate`, `cdb_escalonamento`,
 `rdb_inclusao`, `rdb_resgate`, `lci`, and `lca`. Validation accepts `PASS` or
