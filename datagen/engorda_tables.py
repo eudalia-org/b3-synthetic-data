@@ -350,11 +350,31 @@ CONDICAO_IF_SHIFT_DAYS_COL = "__shift_days_cif"
 # ficam órfãos POR CONSTRUÇÃO (resgate_schedule_parent / coverage).
 COL_DAT_EXCLUSAO = "DAT_EXCLUSAO"
 COL_IND_EXCLUIDO = "IND_EXCLUIDO"
-FECHO_SOMENTE_ATIVOS_TABELAS = frozenset({
-    "CONDICAO_IF",
-    "RESGATE",
-    "CONDICAO_RESGATE",
-})
+# A coluna de exclusão é declarada POR TABELA e espelha exatamente o predicado
+# que o validador usa. NÃO existe fallback entre as duas colunas: uma tabela que
+# tenha DAT_EXCLUSAO e IND_EXCLUIDO e seja filtrada pela coluna "errada" descarta
+# linhas que o validador considera ATIVAS — o pai COM TABELA fica sem cronograma
+# e o erro migra de resgate_schedule_parent para resgate_schedule_coverage.
+#   CONDICAO_IF / RESGATE   -> _active()  = DAT_EXCLUSAO nula/''
+#   CONDICAO_RESGATE        -> IND_EXCLUIDO fora de {S,Y,1} (NULL conta ativo)
+FECHO_COLUNA_EXCLUSAO_POR_TABELA: Dict[str, str] = {
+    "CONDICAO_IF": COL_DAT_EXCLUSAO,
+    "RESGATE": COL_DAT_EXCLUSAO,
+    "CONDICAO_RESGATE": COL_IND_EXCLUIDO,
+}
+
+# ---------------------------------------------------------------------------
+# Poda do cronograma de resgate.
+#
+# O FILTRO_BASE das queries qualifica o INSTRUMENTO por EXISTS ("tem ao menos um
+# resgate SEM TABELA"), mas o fecho clona TODAS as CONDICAO_IF type-20 dele —
+# inclusive as de outro COD_COND_RESGATE. O app só aceita cronograma sob resgate
+# COM TABELA, então CONDICAO_RESGATE pendurada em SEM TABELA/MERCADO/ESPECIFICA
+# é órfã lógica por construção (resgate_schedule_parent).
+CRONOGRAMA_TABELA = "CONDICAO_RESGATE"
+RESGATE_TABELA = "RESGATE"
+COL_COD_COND_RESGATE = "COD_COND_RESGATE"
+COD_COND_RESGATE_COM_TABELA = "COM TABELA"
 
 CONTROLE_OPERACIONAL_DATE_SQL = (
     "SELECT DAT_CTL_OPER "
@@ -2741,22 +2761,60 @@ def _deriva_tipo_oracle(spark, config, num_if_valores: List,
 def _filtra_ativos(df: DataFrame, tabela: str) -> Tuple[DataFrame, Optional[str]]:
     """Remove linhas logicamente excluídas. Devolve (df, coluna usada ou None).
 
-    Preferência DAT_EXCLUSAO > IND_EXCLUIDO, na mesma semântica do validador:
-    DAT_EXCLUSAO nula/'' = ativa; IND_EXCLUIDO fora de {S,Y,1} = ativa (NULL
-    conta como ativa, via coalesce)."""
-    if COL_DAT_EXCLUSAO in df.columns:
+    A coluna vem de FECHO_COLUNA_EXCLUSAO_POR_TABELA e NÃO tem fallback: filtrar
+    pela coluna errada descarta linhas que o validador considera ativas (ver o
+    comentário do mapa). Coluna declarada mas ausente no Parquet -> WARN e no-op,
+    porque adivinhar a outra coluna é justamente o erro que se quer evitar."""
+    coluna = FECHO_COLUNA_EXCLUSAO_POR_TABELA.get(tabela)
+    if coluna is None:
+        return df, None
+    if coluna not in df.columns:
+        logger.warning("fecho ativos: %s não expõe a coluna declarada %s; filtro "
+                       "NÃO aplicado (sem fallback proposital).", tabela, coluna)
+        return df, None
+    if coluna == COL_DAT_EXCLUSAO:
         col = F.col(COL_DAT_EXCLUSAO)
         pred = col.isNull()
         if isinstance(df.schema[COL_DAT_EXCLUSAO].dataType, T.StringType):
             pred = pred | (F.trim(col) == F.lit(""))
         return df.where(pred), COL_DAT_EXCLUSAO
-    if COL_IND_EXCLUIDO in df.columns:
-        norm = F.upper(F.trim(F.col(COL_IND_EXCLUIDO).cast("string")))
-        return df.where(F.coalesce(~norm.isin("S", "Y", "1"), F.lit(True))), \
-            COL_IND_EXCLUIDO
-    logger.warning("fecho ativos: %s não expõe %s nem %s; filtro não aplicado.",
-                   tabela, COL_DAT_EXCLUSAO, COL_IND_EXCLUIDO)
-    return df, None
+    norm = F.upper(F.trim(F.col(COL_IND_EXCLUIDO).cast("string")))
+    return df.where(F.coalesce(~norm.isin("S", "Y", "1"), F.lit(True))), \
+        COL_IND_EXCLUIDO
+
+
+def _poda_cronograma_sem_tabela(lotes: Dict[str, DataFrame]) -> Optional[int]:
+    """Remove do lote as CONDICAO_RESGATE cujo RESGATE pai não é COM TABELA.
+
+    Devolve o nº de linhas podadas, ou None quando a poda não é aplicável
+    (tabela fora do fecho / coluna ausente). Tolerante por construção."""
+    cronograma = lotes.get(CRONOGRAMA_TABELA)
+    resgate = lotes.get(RESGATE_TABELA)
+    if cronograma is None or resgate is None:
+        return None
+    if CONDICAO_IF_PK not in cronograma.columns:
+        return None
+    if {CONDICAO_IF_PK, COL_COD_COND_RESGATE} - set(resgate.columns):
+        logger.warning("poda cronograma: %s sem %s/%s; poda NÃO aplicada.",
+                       RESGATE_TABELA, CONDICAO_IF_PK, COL_COD_COND_RESGATE)
+        return None
+    pais_com_tabela = (
+        resgate.where(
+            F.upper(F.trim(F.col(COL_COD_COND_RESGATE).cast("string")))
+            == F.lit(COD_COND_RESGATE_COM_TABELA)
+        )
+        .select(_norm_key_col(F.col(CONDICAO_IF_PK)).alias("__cron_key"))
+        .dropDuplicates()
+    )
+    marcado = cronograma.withColumn(
+        "__cron_key", _norm_key_col(F.col(CONDICAO_IF_PK))
+    )
+    mantido = marcado.join(F.broadcast(pais_com_tabela), "__cron_key", "left_semi")
+    mantido = mantido.select(*cronograma.columns).localCheckpoint(eager=True)
+    antes = cronograma.count()
+    depois = mantido.count()
+    lotes[CRONOGRAMA_TABELA] = mantido
+    return antes - depois
 
 
 def calcula_lotes(spark, config, spec: dict, planos: Dict[str, PlanoTabela],
@@ -2852,6 +2910,17 @@ def calcula_lotes(spark, config, spec: dict, planos: Dict[str, PlanoTabela],
             # Sem caminho principal até a raiz nesta execução: nada a sintetizar.
             lotes[t] = _fonte(t).limit(0)
             contagens[t] = 0
+    if somente_ativos:
+        podadas = _poda_cronograma_sem_tabela(lotes)
+        if podadas is None:
+            logger.info("poda cronograma: não aplicável neste fecho.")
+        else:
+            contagens[CRONOGRAMA_TABELA] = lotes[CRONOGRAMA_TABELA].count()
+            logger.info("poda cronograma [%s]: %d linha(s) removida(s) por pai "
+                        "%s <> '%s'; restam %d.", CRONOGRAMA_TABELA, podadas,
+                        COL_COD_COND_RESGATE, COD_COND_RESGATE_COM_TABELA,
+                        contagens[CRONOGRAMA_TABELA])
+    for t in ordem:
         logger.info("Lote %s: %d linha(s).", t, contagens[t])
     return lotes
 
