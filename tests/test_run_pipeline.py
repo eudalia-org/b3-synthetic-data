@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import run_pipeline as P  # noqa: E402, I001
@@ -209,8 +210,79 @@ class NoCallsAdapter:
         raise AssertionError(f"offline command called adapter.{name}")
 
 
+class PollingAdapter(FakeAdapter):
+    def __init__(self):
+        super().__init__()
+        self.polls = {}
+
+    def get_run_state(self, run_id, opts):
+        states = ("ACCEPTED", "IN_PROGRESS", "SUCCEEDED")
+        index = self.polls.get(run_id, 0)
+        self.polls[run_id] = index + 1
+        if states[index] == "SUCCEEDED":
+            with self._lock:
+                self._active.discard(run_id)
+        return states[index]
+
+
 def read_run_manifest(tmp_path):
     return json.loads((tmp_path / "local-runs" / "qab" / "run-001" / "manifest.json").read_text())
+
+
+def test_click_cli_reports_submission_and_each_mocked_poll(tmp_path):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+    adapter = PollingAdapter()
+
+    arguments = run_args(tmp_path, config, upstream)
+    arguments[arguments.index("--poll-seconds") + 1] = "0.001"
+    result = CliRunner().invoke(
+        P.cli,
+        arguments,
+        obj={"adapter": adapter},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "[run] id=run-001" in result.output
+    assert "poll=0.001s" in result.output
+    assert "[submit] cdb_simplificado.engorda.plan" in result.output
+    assert "[poll] cdb_simplificado.engorda.plan" in result.output
+    assert "ACCEPTED" in result.output
+    assert "IN_PROGRESS" in result.output
+    assert "[done] cdb_simplificado.validate SUCCEEDED" in result.output
+
+
+def test_click_help_exposes_commands_and_polling_default():
+    runner = CliRunner()
+
+    root = runner.invoke(P.cli, ["--help"])
+    run = runner.invoke(P.cli, ["run", "--help"])
+
+    assert root.exit_code == 0
+    assert "adopt-inputs" in root.output
+    assert "run" in root.output
+    assert run.exit_code == 0
+    assert "--poll-seconds" in run.output
+    assert "30" in run.output
+
+
+def test_click_dry_run_finishes_without_submitting_jobs(tmp_path):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+
+    result = CliRunner().invoke(
+        P.cli,
+        [*run_args(tmp_path, config, upstream), "--dry-run"],
+        obj={"adapter": NoCallsAdapter()},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["dry_run"] is True
+    assert result.stdout.lstrip().startswith("{")
+    assert "[dry-run] resolved pipeline plan" in result.output
+    assert "[dry-run] resolved pipeline plan" in result.stderr
+    assert "[done] dry-run complete" in result.output
+    assert "[submit]" not in result.output
 
 
 def test_live_wrapper_matches_shared_oci_dataflow_operation_signatures():
@@ -300,7 +372,9 @@ def test_single_copied_script_adopts_inputs_without_sibling_modules(tmp_path):
 
     result = subprocess.run(
         [
-            sys.executable,
+            "uv",
+            "run",
+            "--no-project",
             str(standalone),
             "adopt-inputs",
             "--config",

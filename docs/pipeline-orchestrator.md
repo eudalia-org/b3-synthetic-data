@@ -4,8 +4,9 @@ The first tracer runs immutable `engorda -> validate` branches through OCI Data 
 Copy `docs/pipeline-config.example.json`, replace its OCI values, and keep one config
 file per environment.
 
-`scripts/run_pipeline.py` is self-contained for operator distribution. Copy that one
-Python file to the Windows workstation; `oci_dataflow.py` and
+`scripts/run_pipeline.py` is self-contained for operator distribution and includes
+PEP 723 metadata for Python 3.11 and Click. Copy that one Python file to the Windows
+workstation; `uv run` installs Click automatically. `oci_dataflow.py` and
 `pipeline_reservations.py` remain repository compatibility facades and are not needed
 beside the distributed runner.
 
@@ -14,10 +15,10 @@ beside the distributed runner.
 Register an existing RAW and faltantes snapshot before starting at engorda:
 
 ```powershell
-uv run --python 3.11 --allow-insecure-host pypi.org `
+uv run --allow-insecure-host pypi.org `
   --allow-insecure-host files.pythonhosted.org `
   --no-project `
-  scripts/run_pipeline.py adopt-inputs `
+  .\run_pipeline.py adopt-inputs `
   --config .\pipeline-qab.json `
   --product cdb_resgate `
   --product rdb_resgate `
@@ -35,10 +36,10 @@ Add `--dry-run` to validate and print the adoption plan without OCI calls.
 ## Run engorda through validation
 
 ```powershell
-uv run --python 3.11 --allow-insecure-host pypi.org `
+uv run --allow-insecure-host pypi.org `
   --allow-insecure-host files.pythonhosted.org `
   --no-project `
-  scripts/run_pipeline.py run `
+  .\run_pipeline.py run `
   --config .\pipeline-qab.json `
   --product cdb_resgate `
   --product rdb_resgate `
@@ -48,6 +49,7 @@ uv run --python 3.11 --allow-insecure-host pypi.org `
   --n-instrumentos 100 `
   --fator-k 1 `
   --max-concurrency 4 `
+  --poll-seconds 30 `
   --profile p-lmirabella `
   --auth security_token `
   --config-file C:\Users\p-lmirabella\.oci\config `
@@ -56,6 +58,8 @@ uv run --python 3.11 --allow-insecure-host pypi.org `
 
 Use `--dry-run` first. It performs no OCI or Oracle calls and prints the resolved
 DAG, immutable paths, Data Flow application arguments, and reservation contract.
+Live execution prints every submission and every observed Data Flow state. Change
+`--poll-seconds 30` to control the status interval.
 
 The first tracer supports `cdb_simplificado`, `cdb_resgate`, `cdb_escalonamento`,
 `rdb_inclusao`, `rdb_resgate`, `lci`, and `lca`. Validation accepts `PASS` or

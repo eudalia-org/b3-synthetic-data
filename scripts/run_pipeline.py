@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["click>=8.1,<9"]
+# ///
 """Standalone OCI Data Flow pipeline orchestrator for the first tracer slice."""
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import os
@@ -18,7 +21,10 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Protocol, Sequence
+
+import click
 
 MANIFEST_VERSION = 1
 CONFIG_VERSION = 1
@@ -270,6 +276,36 @@ class NodeResult:
     state: str
     attempts: list[dict[str, Any]]
     detail: dict[str, Any]
+
+
+class ProgressReporter:
+    """Serialize operator output emitted by concurrent pipeline workers."""
+
+    def __init__(self, enabled: bool = True):
+        self.enabled = enabled
+        self._lock = threading.Lock()
+
+    def emit(self, message: str) -> None:
+        if not self.enabled:
+            return
+        tag = message.partition("]")[0] + "]"
+        color = {
+            "[run]": "bright_white",
+            "[launch]": "bright_cyan",
+            "[submit]": "cyan",
+            "[poll]": "blue",
+            "[reserve]": "magenta",
+            "[done]": "green",
+            "[failed]": "red",
+            "[dry-run]": "yellow",
+        }.get(tag)
+        with self._lock:
+            click.secho(
+                message,
+                fg=color,
+                bold=tag in {"[run]", "[done]", "[failed]"},
+                err=True,
+            )
 
 
 class AtomicManifest:
@@ -1267,7 +1303,7 @@ def _product_paths(run_root: str, product: str) -> dict[str, str]:
 
 
 def build_pipeline_plan(
-    config: dict[str, Any], args: argparse.Namespace, upstream: dict[str, Any]
+    config: dict[str, Any], args: SimpleNamespace, upstream: dict[str, Any]
 ) -> dict[str, Any]:
     products = parse_products(args.product)
     upstream_products = upstream.get("products")
@@ -1496,6 +1532,7 @@ def _execute_remote_node(
     active_lock: threading.Lock,
     stop: threading.Event,
     on_attempt: Callable[[str, dict[str, Any]], None],
+    progress: ProgressReporter,
 ) -> NodeResult:
     attempts: list[dict[str, Any]] = []
     for attempt_number in range(1, max_retries + 2):
@@ -1511,12 +1548,18 @@ def _execute_remote_node(
             **runtime_options,
             **auth,
         }
+        progress.emit(
+            f"[launch] {node['id']} attempt={attempt_number}"
+        )
         response = adapter.create_run(
             list(node["arguments"]),
             display_name,
             data_flow_options,
         )
         data_flow_run_id = _run_id_from_response(response)
+        progress.emit(
+            f"[submit] {node['id']} attempt={attempt_number} run_id={data_flow_run_id}"
+        )
         attempt = {
             "attempt": attempt_number,
             "run_id": data_flow_run_id,
@@ -1541,6 +1584,10 @@ def _execute_remote_node(
                 state = _state_from_response(
                     adapter.get_run_state(data_flow_run_id, data_flow_options)
                 )
+                progress.emit(
+                    f"[poll] {node['id']} attempt={attempt_number} "
+                    f"run_id={data_flow_run_id} state={state}"
+                )
                 if state in TERMINAL_SUCCESS | TERMINAL_FAILURE:
                     break
                 if state not in RUNNING_STATES:
@@ -1564,21 +1611,38 @@ def _execute_remote_node(
                     expected_input=node["input_uri"],
                 )
                 if not detail["validation"]["accepted"]:
+                    progress.emit(
+                        f"[failed] {node['id']} FAILED attempt={attempt_number} "
+                        f"run_id={data_flow_run_id} validation-gate"
+                    )
                     return NodeResult("FAILED", attempts, detail)
             describe = getattr(adapter, "describe_uri", None)
             if describe is not None and node.get("output_uri"):
                 detail["output_metadata"] = describe(
                     node["output_uri"], auth=auth
                 )
+            progress.emit(f"[done] {node['id']} SUCCEEDED")
             return NodeResult("SUCCEEDED", attempts, detail)
+        progress.emit(
+            f"[failed] {node['id']} {state} attempt={attempt_number} "
+            f"run_id={data_flow_run_id}"
+        )
         if stop.is_set():
             return NodeResult("CANCELLED", attempts, {})
     return NodeResult("FAILED", attempts, {})
 
 
 def _execute_reservation_node(
-    node: dict[str, Any], plan: dict[str, Any], adapter: Any, auth: dict[str, str]
+    node: dict[str, Any],
+    plan: dict[str, Any],
+    adapter: Any,
+    auth: dict[str, str],
+    progress: ProgressReporter,
 ) -> NodeResult:
+    progress.emit(
+        f"[reserve] {node['id']} request={node['request_uri']} "
+        f"output={node['output_uri']}"
+    )
     result = adapter.reserve_ranges(
         environment=plan["environment"],
         run_id=plan["run_id"],
@@ -1589,6 +1653,8 @@ def _execute_reservation_node(
         ledger_uri=plan["reservation_contract"]["ledger_uri"],
         auth=auth,
     )
+    progress.emit(f"[reserve] {node['id']} reservation complete")
+    progress.emit(f"[done] {node['id']} SUCCEEDED")
     return NodeResult("SUCCEEDED", [], {"reservation": result or {}})
 
 
@@ -1601,7 +1667,9 @@ def execute_plan(
     max_concurrency: int,
     max_retries: int,
     poll_seconds: float,
+    progress: ProgressReporter | None = None,
 ) -> int:
+    progress = progress or ProgressReporter(enabled=False)
     active: dict[str, str] = {}
     active_lock = threading.Lock()
     stop = threading.Event()
@@ -1645,7 +1713,9 @@ def execute_plan(
                     continue
                 set_node(node_id, state="RUNNING", started_at=utc_now())
                 if node["operation"] == "reserve":
-                    future = executor.submit(_execute_reservation_node, node, plan, adapter, auth)
+                    future = executor.submit(
+                        _execute_reservation_node, node, plan, adapter, auth, progress
+                    )
                 else:
                     future = executor.submit(
                         _execute_remote_node,
@@ -1661,6 +1731,7 @@ def execute_plan(
                         active_lock,
                         stop,
                         record_attempt,
+                        progress,
                     )
                 futures[future] = node_id
 
@@ -1677,6 +1748,9 @@ def execute_plan(
                 try:
                     result = future.result()
                 except Exception as exc:  # branch-local isolation
+                    progress.emit(
+                        f"[failed] {node_id} {type(exc).__name__}: {exc}"
+                    )
                     set_node(
                         node_id,
                         state="FAILED",
@@ -1746,11 +1820,16 @@ def _initial_manifest(plan: dict[str, Any], upstream_path: str) -> dict[str, Any
     }
 
 
-def _auth_from_args(args: argparse.Namespace) -> dict[str, str]:
+def _auth_from_args(args: SimpleNamespace) -> dict[str, str]:
     return AuthOptions(args.profile, args.config_file, args.auth, args.cert_bundle).as_dict()
 
 
-def run_command(args: argparse.Namespace, adapter: Any | None) -> int:
+def run_command(
+    args: SimpleNamespace,
+    adapter: Any | None,
+    progress: ProgressReporter | None = None,
+) -> int:
+    progress = progress or ProgressReporter(enabled=False)
     config = load_config(args.config)
     upstream = read_upstream_manifest(args.upstream_manifest, config["environment"])
     plan = build_pipeline_plan(config, args, upstream)
@@ -1758,8 +1837,16 @@ def run_command(args: argparse.Namespace, adapter: Any | None) -> int:
     manifest_path = local_run_dir / "manifest.json"
     if local_run_dir.exists():
         raise PipelineError(f"immutable local run path already exists: {local_run_dir}")
+    progress.emit(
+        f"[run] id={args.run_id} environment={config['environment']} "
+        f"products={','.join(plan['products'])} "
+        f"stages={plan['interval']['from']}..{plan['interval']['to']} "
+        f"poll={args.poll_seconds:g}s concurrency={args.max_concurrency}"
+    )
     if args.dry_run:
+        progress.emit("[dry-run] resolved pipeline plan (no remote calls)")
         print(json.dumps({"dry_run": True, **plan}, indent=2, sort_keys=True))
+        progress.emit("[done] dry-run complete (no remote calls)")
         return 0
 
     adapter = adapter or ModuleAdapter()
@@ -1777,6 +1864,7 @@ def run_command(args: argparse.Namespace, adapter: Any | None) -> int:
         args.max_concurrency,
         args.max_retries,
         args.poll_seconds,
+        progress,
     )
     status = "CANCELLED" if result == 130 else ("SUCCEEDED" if result == 0 else "FAILED")
     store.update(lambda payload: payload.update(status=status, finished_at=utc_now()))
@@ -1789,11 +1877,25 @@ def run_command(args: argparse.Namespace, adapter: Any | None) -> int:
                 manifest_upload_error=upload_error, status="FAILED"
             )
         )
+        progress.emit(
+            f"[failed] pipeline run_id={args.run_id} manifest upload failed: {exc}"
+        )
         return 1
+    if result == 0:
+        progress.emit(f"[done] pipeline SUCCEEDED run_id={args.run_id}")
+    elif result == 130:
+        progress.emit(f"[failed] pipeline CANCELLED run_id={args.run_id}")
+    else:
+        progress.emit(f"[failed] pipeline FAILED run_id={args.run_id}")
     return result
 
 
-def adopt_inputs_command(args: argparse.Namespace, adapter: Any | None) -> int:
+def adopt_inputs_command(
+    args: SimpleNamespace,
+    adapter: Any | None,
+    progress: ProgressReporter | None = None,
+) -> int:
+    progress = progress or ProgressReporter(enabled=False)
     config = load_config(args.config)
     products = parse_products(args.product)
     for label, uri in (("raw", args.raw_uri), ("faltantes", args.faltantes_uri)):
@@ -1815,7 +1917,9 @@ def adopt_inputs_command(args: argparse.Namespace, adapter: Any | None) -> int:
         },
     }
     if args.dry_run:
+        progress.emit("[dry-run] resolved input adoption (no remote calls)")
         print(json.dumps({"dry_run": True, "output_manifest": str(output), **payload}, indent=2))
+        progress.emit("[done] dry-run complete (no remote calls)")
         return 0
     adapter = adapter or ModuleAdapter()
     auth = _auth_from_args(args)
@@ -1830,75 +1934,128 @@ def adopt_inputs_command(args: argparse.Namespace, adapter: Any | None) -> int:
     return 0
 
 
-def _add_auth_flags(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--profile", help="OCI CLI profile name")
-    parser.add_argument("--config-file", help="OCI CLI config file path")
-    parser.add_argument("--auth", help="OCI auth mode, for example security_token")
-    parser.add_argument("--cert-bundle", help="CA certificate bundle path")
+def _auth_options(command: Callable[..., Any]) -> Callable[..., Any]:
+    command = click.option("--profile", help="OCI CLI profile name.")(command)
+    command = click.option("--config-file", help="OCI CLI config file path.")(command)
+    command = click.option(
+        "--auth", help="OCI auth mode, for example security_token."
+    )(command)
+    return click.option("--cert-bundle", help="CA certificate bundle path.")(command)
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest="command", required=True)
+@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+@click.pass_context
+def cli(context: click.Context) -> None:
+    """Plan and orchestrate OCI Data Flow pipeline runs."""
+    context.ensure_object(dict)
+    context.obj.setdefault("adapter", None)
+    context.obj.setdefault("polished", True)
 
-    run = commands.add_parser("run", help="plan or execute the first tracer pipeline")
-    run.add_argument("--config", required=True)
-    run.add_argument("--product", action="append", required=True, help="repeat or use commas")
-    run.add_argument("--from", dest="from_stage", required=True, choices=PUBLIC_STAGES)
-    run.add_argument("--to", dest="to_stage", required=True, choices=PUBLIC_STAGES)
-    run.add_argument("--upstream-manifest", required=True)
-    run.add_argument("--run-id", default=None)
-    run.add_argument("--local-run-root", default=".pipeline-runs")
-    run.add_argument("--max-concurrency", type=int, default=4)
-    run.add_argument("--max-retries", type=int, default=1)
-    run.add_argument("--poll-seconds", type=float, default=30)
-    run.add_argument("--num-executors", type=int)
-    run.add_argument("--driver-shape")
-    run.add_argument("--executor-shape")
-    run.add_argument("--driver-shape-config")
-    run.add_argument("--executor-shape-config")
-    run.add_argument("--n-instrumentos", type=int)
-    run.add_argument("--fator-k", type=int)
-    run.add_argument("--seed", type=int)
-    run.add_argument(
-        "--set", dest="set_values", action="append", default=[],
-        help="validated product.stage.key=value override",
-    )
-    run.add_argument("--dry-run", action="store_true")
-    _add_auth_flags(run)
 
-    adopt = commands.add_parser("adopt-inputs", help="register existing RAW/faltantes lineage")
-    adopt.add_argument("--config", required=True)
-    adopt.add_argument("--product", action="append", required=True, help="repeat or use commas")
-    adopt.add_argument("--raw-uri", required=True)
-    adopt.add_argument("--faltantes-uri", required=True)
-    adopt.add_argument("--output-manifest", required=True)
-    adopt.add_argument("--dry-run", action="store_true")
-    _add_auth_flags(adopt)
-    return parser
+@cli.command("run")
+@click.option("--config", required=True, type=click.Path(dir_okay=False, path_type=str))
+@click.option("--product", multiple=True, required=True, help="Repeat or use commas.")
+@click.option(
+    "--from", "from_stage", required=True, type=click.Choice(PUBLIC_STAGES)
+)
+@click.option("--to", "to_stage", required=True, type=click.Choice(PUBLIC_STAGES))
+@click.option(
+    "--upstream-manifest", required=True, type=click.Path(dir_okay=False, path_type=str)
+)
+@click.option("--run-id")
+@click.option("--local-run-root", default=".pipeline-runs", show_default=True)
+@click.option(
+    "--max-concurrency", type=click.IntRange(min=1), default=4, show_default=True
+)
+@click.option("--max-retries", type=click.IntRange(min=0), default=1, show_default=True)
+@click.option(
+    "--poll-seconds", type=click.FloatRange(min=0), default=30.0, show_default=True
+)
+@click.option("--num-executors", type=click.IntRange(min=1))
+@click.option("--driver-shape")
+@click.option("--executor-shape")
+@click.option("--driver-shape-config")
+@click.option("--executor-shape-config")
+@click.option("--n-instrumentos", type=int)
+@click.option("--fator-k", type=int)
+@click.option("--seed", type=int)
+@click.option(
+    "--set",
+    "set_values",
+    multiple=True,
+    help="Validated product.stage.key=value override; repeat as needed.",
+)
+@click.option("--dry-run", is_flag=True, help="Resolve the plan without remote calls.")
+@_auth_options
+@click.pass_context
+def run_cli(context: click.Context, **options: Any) -> None:
+    """Plan or execute the first tracer pipeline."""
+    options["run_id"] = options["run_id"] or default_run_id()
+    args = SimpleNamespace(**options)
+    progress = ProgressReporter(enabled=context.obj["polished"])
+    try:
+        result = run_command(args, context.obj["adapter"], progress)
+    except PipelineError as exc:
+        raise click.UsageError(str(exc), context) from exc
+    if result:
+        context.exit(result)
+
+
+@cli.command("adopt-inputs")
+@click.option("--config", required=True, type=click.Path(dir_okay=False, path_type=str))
+@click.option("--product", multiple=True, required=True, help="Repeat or use commas.")
+@click.option("--raw-uri", required=True)
+@click.option("--faltantes-uri", required=True)
+@click.option(
+    "--output-manifest", required=True, type=click.Path(dir_okay=False, path_type=str)
+)
+@click.option("--dry-run", is_flag=True, help="Resolve the adoption without remote calls.")
+@_auth_options
+@click.pass_context
+def adopt_inputs_cli(context: click.Context, **options: Any) -> None:
+    """Register existing RAW and faltantes lineage."""
+    args = SimpleNamespace(**options)
+    progress = ProgressReporter(enabled=context.obj["polished"])
+    try:
+        result = adopt_inputs_command(args, context.obj["adapter"], progress)
+    except PipelineError as exc:
+        raise click.UsageError(str(exc), context) from exc
+    if result:
+        context.exit(result)
 
 
 def main(argv: Sequence[str] | None = None, *, adapter: Any | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if args.command == "run":
-        args.run_id = args.run_id or default_run_id()
-        if args.max_concurrency < 1:
-            parser.error("--max-concurrency must be >= 1")
-        if args.max_retries < 0:
-            parser.error("--max-retries must be >= 0")
-        if args.poll_seconds < 0:
-            parser.error("--poll-seconds must be >= 0")
-        if args.num_executors is not None and args.num_executors < 1:
-            parser.error("--num-executors must be >= 1")
+    """Compatibility facade that invokes Click without terminating the caller."""
     try:
-        if args.command == "run":
-            return run_command(args, adapter)
-        return adopt_inputs_command(args, adapter)
-    except PipelineError as exc:
-        print(f"run_pipeline: error: {exc}", file=sys.stderr)
-        return 2
+        result = cli.main(
+            args=list(argv) if argv is not None else None,
+            prog_name="run_pipeline",
+            obj={"adapter": adapter, "polished": False},
+            standalone_mode=False,
+        )
+    except click.ClickException as exc:
+        exc.show(file=sys.stderr)
+        return exc.exit_code
+    except (click.Abort, KeyboardInterrupt):
+        return 130
+    return int(result or 0)
+
+
+def _entrypoint() -> int:
+    try:
+        result = cli.main(
+            prog_name="run_pipeline",
+            obj={"adapter": None, "polished": True},
+            standalone_mode=False,
+        )
+    except click.ClickException as exc:
+        exc.show(file=sys.stderr)
+        return exc.exit_code
+    except (click.Abort, KeyboardInterrupt):
+        click.echo("Aborted!", err=True)
+        return 130
+    return int(result or 0)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_entrypoint())
