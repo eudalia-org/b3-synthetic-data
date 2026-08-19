@@ -318,6 +318,44 @@ ENGORDA_EVENT_DERIVED_COLS = (
     "DAT_OCORRENCIA_EVENTO",
     "DAT_ORIGINAL_EVENTO",
 )
+
+# ---------------------------------------------------------------------------
+# Deslocamento Δ das datas de vigência de CONDICAO_IF.
+#
+# A raiz tem DAT_EMISSAO reescrita para a data operacional, mas as condições
+# filhas ficavam com a data ORIGINAL — anos antes da nova emissão. Toda
+# DAT_INICIO_CONDICAO_IF caía fora de [DAT_EMISSAO, DAT_VENCIMENTO]
+# (2b.escalonamento_dates).
+#
+# Carimbar a data do run NÃO serve: um instrumento escalonado tem N segmentos
+# com N datas distintas, e carimbar colapsaria os N num valor só, trocando um
+# erro por outro (2b.escalonamento_unique_dates). A única regra que preserva a
+# ordem E o vínculo com a emissão é o mesmo deslocamento relativo já usado em
+# ajusta_datas_resgate:
+#     Δ = nova DAT_EMISSAO - DAT_EMISSAO original (por instrumento)
+# Assim min(DAT_INICIO) == DAT_EMISSAO continua valendo se valia na origem.
+ENGORDA_CONDICAO_IF_SHIFT_COLS = (
+    "DAT_INICIO_CONDICAO_IF",
+    "DAT_FIM_CONDICAO_IF",
+)
+CONDICAO_IF_SHIFT_KEY_COL = "__shift_num_if"
+CONDICAO_IF_SHIFT_DAYS_COL = "__shift_days_cif"
+
+# ---------------------------------------------------------------------------
+# Filtro de linhas logicamente excluídas no fecho.
+#
+# calcula_lotes desce a árvore por FK PURA, sem olhar DAT_EXCLUSAO. Uma
+# CONDICAO_IF soft-deleted, seu RESGATE e o CONDICAO_RESGATE correspondente
+# entram todos no lote. O validador descarta pais inativos, então esses filhos
+# ficam órfãos POR CONSTRUÇÃO (resgate_schedule_parent / coverage).
+COL_DAT_EXCLUSAO = "DAT_EXCLUSAO"
+COL_IND_EXCLUIDO = "IND_EXCLUIDO"
+FECHO_SOMENTE_ATIVOS_TABELAS = frozenset({
+    "CONDICAO_IF",
+    "RESGATE",
+    "CONDICAO_RESGATE",
+})
+
 CONTROLE_OPERACIONAL_DATE_SQL = (
     "SELECT DAT_CTL_OPER "
     "FROM CETIP.CONTROLE_OPERACIONAL "
@@ -465,6 +503,7 @@ class EngordaJob:
     faltantes_arg: Optional[str] = None
     faltantes_parquet: Optional[str] = None
     poda_subtipo: bool = True
+    somente_ativos: bool = True
     anular_cols: Optional[Mapping[str, Sequence[str]]] = None
     oracle_code_batch_size: int = DEFAULT_ORACLE_CODE_BATCH_SIZE
     dry_run: bool = False
@@ -710,7 +749,11 @@ REGRAS_SCHEMA_CETIP: Dict[str, Any] = {
             ),
         },
         # () desliga as nulificações seletivas de faltantes.
+        # P1 e P2 têm as MESMAS propriedades no spec: FK filha para
+        # CONTEXTO_MENSAGEM (static) e ausentes de not_null_cols de OPERACAO.
+        # Só P2 estava listada — daí os órfãos de NUM_ID_CTX_MSG_P1 (Cat 3).
         "faltantes_seletivos": (
+            ("OPERACAO", "NUM_ID_CTX_MSG_P1"),
             ("OPERACAO", "NUM_ID_CTX_MSG_P2"),
         ),
     },
@@ -1717,6 +1760,96 @@ def ajusta_datas_resgate(
     return updated, changed
 
 
+def ajusta_datas_condicao_if(
+    clones: DataFrame,
+    lote_instrumentos: DataFrame,
+    raiz_sintetica: DataFrame,
+    mapa_num_if: DataFrame,
+) -> Tuple[DataFrame, List[str]]:
+    """Desloca as datas de vigência de CONDICAO_IF pelo mesmo Δ da emissão.
+
+    Mesma mecânica de ajusta_datas_resgate, porém direta: CONDICAO_IF já carrega
+    NUM_IF, então não é preciso a ponte por NUM_CONDICAO_IF.
+
+    Tolerante por construção: se faltar qualquer insumo (coluna ausente, mapa
+    incompleto), devolve o DataFrame intacto e lista vazia — nunca corrompe."""
+    cols_alvo = [c for c in ENGORDA_CONDICAO_IF_SHIFT_COLS if c in clones.columns]
+    if not cols_alvo or COL_NUM_IF not in clones.columns:
+        return clones, []
+    if {f"old_{COL_NUM_IF}", f"new_{COL_NUM_IF}"} - set(mapa_num_if.columns):
+        return clones, []
+    if {COL_NUM_IF, ENGORDA_COL_DAT_EMISSAO} - set(lote_instrumentos.columns):
+        return clones, []
+    if {COL_NUM_IF, ENGORDA_COL_DAT_EMISSAO} - set(raiz_sintetica.columns):
+        return clones, []
+    colisao = [c for c in (CONDICAO_IF_SHIFT_KEY_COL, CONDICAO_IF_SHIFT_DAYS_COL)
+               if c in clones.columns]
+    if colisao:
+        raise ValueError(
+            f"{CONDICAO_IF_TABLE}: colisão de coluna temporária {colisao}.")
+
+    tipos = {c: clones.schema[c].dataType for c in cols_alvo}
+    nao_datavel = [c for c in cols_alvo if not _tipo_data_engordavel(tipos[c])]
+    if nao_datavel:
+        logger.warning("%s: coluna(s) %s não são data/hora/string; deslocamento "
+                       "IGNORADO nelas.", CONDICAO_IF_TABLE, nao_datavel)
+        cols_alvo = [c for c in cols_alvo if c not in nao_datavel]
+        if not cols_alvo:
+            return clones, []
+
+    original_roots = lote_instrumentos.select(
+        _norm_key_col(F.col(COL_NUM_IF)).alias("__old_num_if"),
+        F.to_date(F.col(ENGORDA_COL_DAT_EMISSAO)).alias("__old_emission"),
+    ).dropDuplicates(["__old_num_if"])
+    root_map = mapa_num_if.select(
+        _norm_key_col(F.col(f"old_{COL_NUM_IF}")).alias("__old_num_if"),
+        _norm_key_col(F.col(f"new_{COL_NUM_IF}")).alias(CONDICAO_IF_SHIFT_KEY_COL),
+    ).dropDuplicates(["__old_num_if", CONDICAO_IF_SHIFT_KEY_COL])
+    shifted_roots = raiz_sintetica.select(
+        _norm_key_col(F.col(COL_NUM_IF)).alias(CONDICAO_IF_SHIFT_KEY_COL),
+        F.to_date(F.col(ENGORDA_COL_DAT_EMISSAO)).alias("__new_emission"),
+    ).dropDuplicates([CONDICAO_IF_SHIFT_KEY_COL])
+    shifts = (
+        root_map.join(original_roots, "__old_num_if", "inner")
+        .join(shifted_roots, CONDICAO_IF_SHIFT_KEY_COL, "inner")
+        .where(F.col("__old_emission").isNotNull()
+               & F.col("__new_emission").isNotNull())
+        .select(
+            CONDICAO_IF_SHIFT_KEY_COL,
+            F.datediff("__new_emission", "__old_emission").alias(
+                CONDICAO_IF_SHIFT_DAYS_COL),
+        )
+        .dropDuplicates([CONDICAO_IF_SHIFT_KEY_COL])
+    )
+
+    source = clones.withColumn(
+        CONDICAO_IF_SHIFT_KEY_COL, _norm_key_col(F.col(COL_NUM_IF))
+    ).alias("source")
+    context = shifts.alias("context")
+    joined = source.join(F.broadcast(context), CONDICAO_IF_SHIFT_KEY_COL, "left")
+
+    projecao = []
+    for column in clones.columns:
+        if column in cols_alvo:
+            parsed = F.to_date(F.col(f"source.{column}"))
+            deslocada = _date_expression_for_type(
+                F.date_add(parsed, F.col(f"context.{CONDICAO_IF_SHIFT_DAYS_COL}")),
+                tipos[column],
+            )
+            projecao.append(
+                F.when(
+                    parsed.isNotNull()
+                    & F.col(f"context.{CONDICAO_IF_SHIFT_DAYS_COL}").isNotNull(),
+                    deslocada,
+                ).otherwise(F.col(f"source.{column}")).alias(column)
+            )
+        else:
+            projecao.append(F.col(f"source.{column}").alias(column))
+    logger.info("%s: deslocamento Δ-emissão aplicado em %s.",
+                CONDICAO_IF_TABLE, cols_alvo)
+    return joined.select(*projecao), cols_alvo
+
+
 # ---------------------------------------------------------------------------
 # Plano de sintetização: classificação de tabelas/PKs/FKs a partir do spec + dos
 # schemas Parquet. Nenhuma decisão implícita: o que não tem regra ABORTA.
@@ -2490,16 +2623,59 @@ def _deriva_tipo_oracle(spark, config, num_if_valores: List,
 # ---------------------------------------------------------------------------
 # Pertencimento (membership): que linhas de cada tabela pertencem ao lote.
 # ---------------------------------------------------------------------------
+def _filtra_ativos(df: DataFrame, tabela: str) -> Tuple[DataFrame, Optional[str]]:
+    """Remove linhas logicamente excluídas. Devolve (df, coluna usada ou None).
+
+    Preferência DAT_EXCLUSAO > IND_EXCLUIDO, na mesma semântica do validador:
+    DAT_EXCLUSAO nula/'' = ativa; IND_EXCLUIDO fora de {S,Y,1} = ativa (NULL
+    conta como ativa, via coalesce)."""
+    if COL_DAT_EXCLUSAO in df.columns:
+        col = F.col(COL_DAT_EXCLUSAO)
+        pred = col.isNull()
+        if isinstance(df.schema[COL_DAT_EXCLUSAO].dataType, T.StringType):
+            pred = pred | (F.trim(col) == F.lit(""))
+        return df.where(pred), COL_DAT_EXCLUSAO
+    if COL_IND_EXCLUIDO in df.columns:
+        norm = F.upper(F.trim(F.col(COL_IND_EXCLUIDO).cast("string")))
+        return df.where(F.coalesce(~norm.isin("S", "Y", "1"), F.lit(True))), \
+            COL_IND_EXCLUIDO
+    logger.warning("fecho ativos: %s não expõe %s nem %s; filtro não aplicado.",
+                   tabela, COL_DAT_EXCLUSAO, COL_IND_EXCLUIDO)
+    return df, None
+
+
 def calcula_lotes(spark, config, spec: dict, planos: Dict[str, PlanoTabela],
                   ordem: List[str], num_if_valores: List,
-                  max_passadas: int) -> Dict[str, DataFrame]:
+                  max_passadas: int,
+                  somente_ativos: bool = True) -> Dict[str, DataFrame]:
     """Desce a árvore a partir da raiz pelas FKs de vínculo principal,
     pais-antes-de-filhos; repete a passada até estabilizar (ciclos), até
     max_passadas. Cada lote é pequeno (linhas de N instrumentos) -> persist +
-    localCheckpoint para cortar a linhagem entre passadas."""
+    localCheckpoint para cortar a linhagem entre passadas.
+
+    Com somente_ativos, as tabelas de FECHO_SOMENTE_ATIVOS_TABELAS são lidas já
+    sem as linhas logicamente excluídas. Sem isso o fecho puxa CONDICAO_IF /
+    RESGATE soft-deleted e seus CONDICAO_RESGATE, que o validador descarta por
+    inatividade do pai — gerando órfãos por construção. A raiz NÃO é filtrada
+    aqui: o domínio da query já a restringe."""
     fontes: Dict[str, DataFrame] = {}
     lotes: Dict[str, DataFrame] = {}
     contagens: Dict[str, int] = {}
+
+    def _fonte(tabela: str) -> DataFrame:
+        if tabela in fontes:
+            return fontes[tabela]
+        src = _read_source(spark, config, tabela)
+        if somente_ativos and tabela in FECHO_SOMENTE_ATIVOS_TABELAS:
+            antes = src.count()
+            src, coluna = _filtra_ativos(src, tabela)
+            if coluna is not None:
+                depois = src.count()
+                logger.info("fecho ativos [%s]: %d linha(s) excluída(s) por %s "
+                            "(%d -> %d).", tabela, antes - depois, coluna,
+                            antes, depois)
+        fontes[tabela] = src
+        return src
 
     raiz_src = _read_source(spark, config, TABELA_RAIZ)
     sel = spark.createDataFrame([(v,) for v in num_if_valores], [COL_NUM_IF])
@@ -2522,9 +2698,7 @@ def calcula_lotes(spark, config, spec: dict, planos: Dict[str, PlanoTabela],
                          if fk.principal and fk.parent_table in lotes]
             if not fks_uteis:
                 continue  # pai ainda sem lote nesta passada (ciclo); tenta na próxima
-            if t not in fontes:
-                fontes[t] = _read_source(spark, config, t)
-            src = fontes[t]
+            src = _fonte(t)
             partes: List[DataFrame] = []
             for fk in fks_uteis:
                 chaves_pai = (lotes[fk.parent_table]
@@ -2561,7 +2735,7 @@ def calcula_lotes(spark, config, spec: dict, planos: Dict[str, PlanoTabela],
     for t in ordem:
         if t not in lotes:
             # Sem caminho principal até a raiz nesta execução: nada a sintetizar.
-            lotes[t] = fontes.get(t, _read_source(spark, config, t)).limit(0)
+            lotes[t] = _fonte(t).limit(0)
             contagens[t] = 0
         logger.info("Lote %s: %d linha(s).", t, contagens[t])
     return lotes
@@ -3820,6 +3994,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                      anular_cols: Optional[Mapping[str, Sequence[str]]] = None,
                      oracle_code_batch_size: int = DEFAULT_ORACLE_CODE_BATCH_SIZE,
                      tipo_oracle: Optional[int] = None,
+                     somente_ativos: bool = True,
                      dry_run: bool = False) -> Dict[str, dict]:
     """Roda a sintetização fim a fim; devolve {tabela: estatísticas} (para uso em
     notebook). Aborta sem gravar NADA se qualquer validação falhar.
@@ -3949,7 +4124,8 @@ def executa_clonagem(spark, config, spec: dict, *,
     ordem = ordem_topologica(planos)
     logger.info("Ordem de sintetização (%d tabela(s)): %s", len(ordem), ordem)
 
-    lotes = calcula_lotes(spark, config, spec, planos, ordem, valores, max_passadas)
+    lotes = calcula_lotes(spark, config, spec, planos, ordem, valores, max_passadas,
+                          somente_ativos=somente_ativos)
 
     mapeamentos: Dict[str, DataFrame] = {}
     resultados: Dict[str, Tuple[DataFrame, int]] = {}
@@ -3970,6 +4146,14 @@ def executa_clonagem(spark, config, spec: dict, *,
                 clones, t, engorda_ts=engorda_ts,
                 controle_operacional_date=controle_operacional_date,
                 prazo_vencimento_dias=prazo_vencimento_dias)
+            if t == CONDICAO_IF_TABLE and TABELA_RAIZ in resultados:
+                clones, cols_shift = ajusta_datas_condicao_if(
+                    clones,
+                    lotes[TABELA_RAIZ],
+                    resultados[TABELA_RAIZ][0],
+                    mapeamentos[TABELA_RAIZ],
+                )
+                cols_data.extend(cols_shift)
             if t in {"RESGATE", "CONDICAO_RESGATE"}:
                 date_context = dict(resultados)
                 date_context[t] = (clones, n_lote)
@@ -4276,7 +4460,7 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
         raise ValueError("controle_operacional_date precisa ser date")
     if job.controle_operacional_date is not None and not job.dry_run:
         raise ValueError("controle_operacional_date só pode ser informado no dry-run")
-    for field_name in ("poda_subtipo", "dry_run"):
+    for field_name in ("poda_subtipo", "dry_run", "somente_ativos"):
         if type(getattr(job, field_name)) is not bool:
             raise ValueError(f"{field_name} precisa ser booleano")
     if job.anular_cols is not None:
@@ -4346,6 +4530,7 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
             ),
             oracle_code_batch_size=job.oracle_code_batch_size,
             tipo_oracle=job.tipo_oracle,
+            somente_ativos=job.somente_ativos,
             dry_run=job.dry_run,
         )
     finally:
@@ -4510,6 +4695,12 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                              "NUM_IF que gerariam CONDICAO_IF dangling são tirados "
                              "do domínio e repostos por outra amostra). Use só p/ "
                              "depurar — o sintético pode sair com dangling (Cat 1).")
+    parser.add_argument("--sem-filtro-ativos", action="store_true",
+                        help="DESLIGA o filtro de linhas logicamente excluídas no "
+                             "fecho (por padrão CONDICAO_IF/RESGATE/CONDICAO_RESGATE "
+                             "entram só com DAT_EXCLUSAO nula / IND_EXCLUIDO<>S). "
+                             "Use só p/ depurar: sem o filtro, cronogramas de "
+                             "resgate saem com pai inativo.")
     parser.add_argument("--faltantes-arg", default=None,
                         help="Itens 3/4: chaves de referência inexistentes no "
                              "destino (QAB), inline: "
@@ -4586,6 +4777,7 @@ def main() -> None:
         faltantes_arg=args.faltantes_arg,
         faltantes_parquet=args.faltantes_parquet,
         poda_subtipo=not args.sem_poda_subtipo,
+        somente_ativos=not args.sem_filtro_ativos,
         anular_cols=(
             _merge_anular_cols({}, args.anular_cols)
             if args.anular_cols else None
