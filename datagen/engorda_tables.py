@@ -2826,7 +2826,7 @@ def calcula_lotes(spark, config, spec: dict, planos: Dict[str, PlanoTabela],
     max_passadas. Cada lote é pequeno (linhas de N instrumentos) -> persist +
     localCheckpoint para cortar a linhagem entre passadas.
 
-    Com somente_ativos, as tabelas de FECHO_SOMENTE_ATIVOS_TABELAS são lidas já
+    Com somente_ativos, as tabelas de FECHO_COLUNA_EXCLUSAO_POR_TABELA são lidas já
     sem as linhas logicamente excluídas. Sem isso o fecho puxa CONDICAO_IF /
     RESGATE soft-deleted e seus CONDICAO_RESGATE, que o validador descarta por
     inatividade do pai — gerando órfãos por construção. A raiz NÃO é filtrada
@@ -2839,7 +2839,7 @@ def calcula_lotes(spark, config, spec: dict, planos: Dict[str, PlanoTabela],
         if tabela in fontes:
             return fontes[tabela]
         src = _read_source(spark, config, tabela)
-        if somente_ativos and tabela in FECHO_SOMENTE_ATIVOS_TABELAS:
+        if somente_ativos and tabela in FECHO_COLUNA_EXCLUSAO_POR_TABELA:
             antes = src.count()
             src, coluna = _filtra_ativos(src, tabela)
             if coluna is not None:
