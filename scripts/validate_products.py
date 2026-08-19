@@ -4,7 +4,7 @@
 validate_products.py
 ====================
 
-Descriptive validator for CDB, RDB, CCB, LCI, LCA, and credit synthetic datasets
+Descriptive validator for CDB, RDB, CCB, Gravame, LCI, LCA, and credit datasets
 produced by `engorda_tables.py`. It runs on the ENGORDA OUTPUT (the synthetic Parquet under
 DATAGEN_SYNTHETIC_BASE_URI) and checks it against the ACTUAL application rules of
 the CETIP/NoMe platform, so structural/domain violations are caught BEFORE the
@@ -223,8 +223,8 @@ SEM_MODALIDADE_IDS = (6, 16)
 # Product profiles (multi-product validation contract)
 # ---------------------------------------------------------------------------
 # Evidence anchors (application source under framework/):
-#   NUM_TIPO_IF: CDB = 49, RDB = 50, CCB = 53.
-#   Object service: CDB = 44, RDB = 45, CCB = 47.
+#   NUM_TIPO_IF: CDB = 49, RDB = 50, CCB = 53, Gravame = 175.
+#   Object service: CDB = 44, RDB = 45, CCB = 47, Gravame = 1132.
 #   CONDICAO_IF polymorphism: joined-subclass, no discriminator (CondicaoIFDO.hbm.xml)
 #     + type codes (TipoCondicaoIFDO.java:42-73).
 #   COD_IF allocator: CETIP.PKG_CODIGO.F_GETCODIGONOVOIF21(num_tipo_if, date)
@@ -269,6 +269,9 @@ CAP_LCA_TARGET_ELIGIBILITY = "lca_target_eligibility"
 CAP_CCB_METADATA = "ccb_metadata"
 CAP_CCB_GRAPH = "ccb_graph"
 CAP_CCB_TARGET_ELIGIBILITY = "ccb_target_eligibility"
+CAP_GRAVAME_METADATA = "gravame_metadata"
+CAP_GRAVAME_GRAPH = "gravame_graph"
+CAP_GRAVAME_TARGET_ELIGIBILITY = "gravame_target_eligibility"
 
 ALL_CAPABILITIES: Tuple[str, ...] = (
     CAP_IDENTITY, CAP_DOMAIN, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
@@ -364,6 +367,11 @@ _CCB_REQUIRED = (
     CAP_CAPACITY, CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_SHAPE,
     CAP_REGISTRATION_PROFILE, CAP_CCB_METADATA, CAP_CCB_GRAPH,
     CAP_CCB_TARGET_ELIGIBILITY,
+)
+_GRAVAME_REQUIRED = (
+    CAP_IDENTITY, CAP_REFERENTIAL, CAP_NOT_NULL, CAP_CAPACITY, CAP_DATES,
+    CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_SHAPE, CAP_REGISTRATION_PROFILE,
+    CAP_GRAVAME_METADATA, CAP_GRAVAME_GRAPH, CAP_GRAVAME_TARGET_ELIGIBILITY,
 )
 
 VALIDATION_PROFILES: Dict[str, ValidationProfile] = {
@@ -482,6 +490,25 @@ VALIDATION_PROFILES: Dict[str, ValidationProfile] = {
         supported_capabilities=_CCB_REQUIRED,
         evidence_version=1,
         pipeline="ccb",
+    ),
+    "gravame": ValidationProfile(
+        name="gravame",
+        num_tipo_if=175,
+        default_clone_prefix="sintetizacao_multiproduto/gravame",
+        simplified_domain=False,
+        object_service_id=1132,
+        object_service_code="GRVM",
+        cod_if_pattern=None,
+        sic_enabled=False,
+        platform_check_enabled=True,
+        account_check_enabled=False,
+        sem_modalidade_ids=None,
+        hard_shape_rules=(SHAPE_RULE_DISTRIBUTION,),
+        registration_constants=None,
+        required_capabilities=_GRAVAME_REQUIRED,
+        supported_capabilities=_GRAVAME_REQUIRED,
+        evidence_version=1,
+        pipeline="gravame",
     ),
     "credito_scr": ValidationProfile(
         name="credito_scr",
@@ -5644,6 +5671,933 @@ def load_ccb_target_frames(
 
 
 # ---------------------------------------------------------------------------
+# Category 0/2i/5i/6i/8i - Gravame registration-route evidence
+# ---------------------------------------------------------------------------
+GRAVAME_CORE_OUTPUT_TABLES = (
+    "INSTRUMENTO_FINANCEIRO", "COMPLEMENTO_CONTRATO", "IF_GRVM",
+    "PARAMETRO_PONTA", "CONTA", "OPERACAO", "LANCAMENTO", "DADO_OPERACAO",
+    "ARQUIVO_TRANSF", "ARQUIVO_TRANSF_CONTEUDO", "ARQUIVO_IF", "PROTOCOLO",
+)
+GRAVAME_OUTPUT_TABLES = GRAVAME_CORE_OUTPUT_TABLES + (
+    "GRAVAME_GRAU_PENHOR", "ALERTA",
+)
+
+
+def check_gravame_metadata(
+    meta: Metadata, no_oracle: bool, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "gravame":
+        return []
+    if no_oracle:
+        return [Finding(
+            "0.gravame_metadata", "Coverage", SEV_WARN, "Oracle metadata", False,
+            hint="Rerun with live Oracle metadata for the complete Gravame table union.",
+            message="Live Oracle metadata for Gravame is unavailable under --no-oracle.",
+        )]
+    missing_tables = [table for table in GRAVAME_OUTPUT_TABLES if table not in meta.tables]
+    missing_pk = [
+        table for table in GRAVAME_OUTPUT_TABLES
+        if table in meta.tables and table not in PK_METADATA_WARN_TABLES and not meta.pk.get(table)
+    ]
+    failed = bool(missing_tables or missing_pk)
+    return [Finding(
+        "0.gravame_metadata", "Coverage", SEV_ERROR if failed else SEV_INFO,
+        ",".join(GRAVAME_OUTPUT_TABLES), not failed,
+        count=len(missing_tables) + len(missing_pk),
+        hint="Load live table and PK metadata for every Gravame core/variant table."
+             if failed else "",
+        message=(
+            f"Missing Oracle tables={missing_tables}; missing PK metadata={missing_pk}."
+            if failed else "Live Oracle metadata covers the Gravame table union."
+        ),
+    )]
+
+
+def _gravame_operation_chain(
+    tables: Dict[str, DataFrame], roots: DataFrame
+) -> Optional[DataFrame]:
+    operation = tables.get("OPERACAO")
+    if operation is None:
+        return None
+    operation_id = resolve(operation, "NUM_ID_OPERACAO")
+    operation_if = resolve(operation, "NUM_IF")
+    operation_code = resolve(operation, "COD_OPERACAO")
+    original_code = resolve(operation, "COD_OPERACAO_ORIGINAL")
+    if not all((operation_id, operation_if, operation_code, original_code)):
+        return None
+    operations = _ccb_active(operation).select(
+        _canon_key_col(F.col(operation_id)).alias("operation_id"),
+        _canon_key_col(F.col(operation_if)).alias("operation_if"),
+        F.trim(F.col(operation_code).cast("string")).alias("operation_code"),
+        F.trim(F.col(original_code).cast("string")).alias("original_code"),
+    )
+    root_ids = roots.select("root_id").dropDuplicates()
+    chain = operations.join(
+        root_ids, F.col("operation_if") == F.col("root_id"), "inner"
+    ).select("operation_id", "operation_code", "original_code", "root_id")
+    frontier = chain
+    for _ in range(4):
+        parents = frontier.select(
+            F.col("operation_code").alias("parent_code"), "root_id"
+        ).dropDuplicates()
+        children = operations.join(
+            parents, F.col("original_code") == F.col("parent_code"), "inner"
+        ).select("operation_id", "operation_code", "original_code", "root_id")
+        chain = chain.unionByName(children).dropDuplicates(["operation_id", "root_id"])
+        frontier = children
+    return chain
+
+
+def _gravame_edge(
+    check_id: str, parent_ids: DataFrame, child: DataFrame, child_parent: str,
+    child_id: str, sample: int,
+) -> Finding:
+    children = _ccb_active(child).select(
+        _canon_key_col(F.col(child_parent)).alias("parent_id"),
+        _canon_key_col(F.col(child_id)).alias("child_id"),
+    )
+    bad = children.join(parent_ids.select("parent_id").dropDuplicates(), "parent_id", "left_anti")
+    count = bad.count()
+    return Finding(
+        check_id, "Gravame graph", SEV_ERROR if count else SEV_INFO,
+        check_id.split(".")[1].upper(), count == 0, count=count,
+        sample=_sample_keys(bad, ["child_id", "parent_id"], sample),
+        hint="Remove the orphan or include its parent in the Gravame closure." if count else "",
+        message="Present Gravame child rows must resolve to their aggregate parent.",
+    )
+
+
+def check_gravame_graph(
+    tables: Dict[str, DataFrame], sample: int, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "gravame":
+        return []
+    missing_tables = [table for table in GRAVAME_CORE_OUTPUT_TABLES if table not in tables]
+    if missing_tables:
+        return [_ccb_unavailable("2i.output_tables", missing_tables, SEV_WARN)]
+    requirements = {
+        "INSTRUMENTO_FINANCEIRO": ("NUM_IF", "NUM_TIPO_IF"),
+        "COMPLEMENTO_CONTRATO": ("NUM_IF",),
+        "IF_GRVM": ("NUM_IF",),
+        "PARAMETRO_PONTA": ("NUM_ID_PARAMETRO_PONTA", "NUM_IF", "NUM_CONTA"),
+        "CONTA": ("NUM_CONTA",),
+        "OPERACAO": (
+            "NUM_ID_OPERACAO", "NUM_IF", "COD_OPERACAO", "COD_OPERACAO_ORIGINAL",
+            "NUM_ID_TIPO_OPER_OBJETO_SERV",
+            "NUM_ID_PARAMETRO_PONTA_P1", "NUM_ID_PARAMETRO_PONTA_P2",
+        ),
+        "LANCAMENTO": ("NUM_ID_LANCAMENTO", "NUM_ID_OPERACAO"),
+        "DADO_OPERACAO": ("NUM_ID_DADO_OPERACAO", "NUM_ID_OPERACAO"),
+        "ARQUIVO_TRANSF": ("NUM_ID_ARQUIVO_TRANSF",),
+        "ARQUIVO_TRANSF_CONTEUDO": ("NUM_ID_ARQUIVO_TRANSF_CONT",),
+        "ARQUIVO_IF": ("NUM_ID_ARQUIVO_IF", "NUM_IF", "NUM_ID_ARQUIVO_TRANSF"),
+        "PROTOCOLO": ("NUM_ID_PROTOCOLO", "NUM_IF"),
+    }
+    columns, missing = _credito_scr_columns(tables, requirements)
+    if missing:
+        return [_ccb_unavailable("2i.graph.availability", missing, SEV_WARN)]
+    root_cols = columns["INSTRUMENTO_FINANCEIRO"]
+    roots = _ccb_active(tables["INSTRUMENTO_FINANCEIRO"]).where(
+        _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if)
+    ).select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"))
+    root_parents = roots.select(F.col("root_id").alias("parent_id"))
+    out: List[Finding] = []
+    for name, table, child_id in (
+        ("contract", "COMPLEMENTO_CONTRATO", "NUM_IF"),
+        ("extension", "IF_GRVM", "NUM_IF"),
+        ("endpoint", "PARAMETRO_PONTA", "NUM_ID_PARAMETRO_PONTA"),
+        ("document", "ARQUIVO_IF", "NUM_ID_ARQUIVO_IF"),
+        ("protocol", "PROTOCOLO", "NUM_ID_PROTOCOLO"),
+    ):
+        out.append(_gravame_edge(
+            f"2i.{name}.edge", root_parents, tables[table], columns[table]["NUM_IF"],
+            columns[table][child_id], sample,
+        ))
+
+    operation_cols = columns["OPERACAO"]
+    operation_parents = _ccb_active(tables["OPERACAO"]).select(
+        _canon_key_col(F.col(operation_cols["NUM_ID_OPERACAO"])).alias("parent_id")
+    )
+    out.append(_gravame_edge(
+        "2i.launch.edge", operation_parents, tables["LANCAMENTO"],
+        columns["LANCAMENTO"]["NUM_ID_OPERACAO"],
+        columns["LANCAMENTO"]["NUM_ID_LANCAMENTO"], sample,
+    ))
+    out.append(_gravame_edge(
+        "2i.operation_data.edge", operation_parents, tables["DADO_OPERACAO"],
+        columns["DADO_OPERACAO"]["NUM_ID_OPERACAO"],
+        columns["DADO_OPERACAO"]["NUM_ID_DADO_OPERACAO"], sample,
+    ))
+
+    account_parents = _ccb_active(tables["CONTA"]).select(
+        _canon_key_col(F.col(columns["CONTA"]["NUM_CONTA"])).alias("parent_id")
+    )
+    endpoints = _ccb_active(tables["PARAMETRO_PONTA"])
+    endpoint_account = endpoints.where(
+        ~_oracle_null_equivalent(F.col(columns["PARAMETRO_PONTA"]["NUM_CONTA"]))
+    ).select(
+        _canon_key_col(F.col(columns["PARAMETRO_PONTA"]["NUM_CONTA"])).alias("parent_id"),
+        _canon_key_col(F.col(columns["PARAMETRO_PONTA"]["NUM_ID_PARAMETRO_PONTA"]))
+        .alias("child_id"),
+    )
+    bad_accounts = endpoint_account.join(account_parents, "parent_id", "left_anti")
+    count = bad_accounts.count()
+    out.append(Finding(
+        "2i.endpoint_account", "Gravame graph", SEV_ERROR if count else SEV_INFO,
+        "PARAMETRO_PONTA", count == 0, count=count,
+        sample=_sample_keys(bad_accounts, ["child_id", "parent_id"], sample),
+        hint="Include each generated Gravame endpoint account in the local closure."
+             if count else "",
+        message="Generated endpoint account references not resolved inside the Gravame closure.",
+    ))
+
+    endpoint_parents = endpoints.select(
+        _canon_key_col(F.col(columns["PARAMETRO_PONTA"]["NUM_ID_PARAMETRO_PONTA"]))
+        .alias("parent_id")
+    )
+    operation_endpoint_bad = None
+    for role in ("NUM_ID_PARAMETRO_PONTA_P1", "NUM_ID_PARAMETRO_PONTA_P2"):
+        part = _ccb_active(tables["OPERACAO"]).where(
+            ~_oracle_null_equivalent(F.col(operation_cols[role]))
+        ).select(
+            _canon_key_col(F.col(operation_cols[role])).alias("parent_id"),
+            _canon_key_col(F.col(operation_cols["NUM_ID_OPERACAO"])).alias("child_id"),
+        ).join(endpoint_parents, "parent_id", "left_anti").withColumn("role", F.lit(role))
+        operation_endpoint_bad = (
+            part if operation_endpoint_bad is None else operation_endpoint_bad.unionByName(part)
+        )
+    count = operation_endpoint_bad.count()
+    out.append(Finding(
+        "2i.operation_endpoint", "Gravame graph", SEV_ERROR if count else SEV_INFO,
+        "OPERACAO", count == 0, count=count,
+        sample=_sample_keys(operation_endpoint_bad, ["child_id", "parent_id", "role"], sample),
+        hint="Keep operation endpoint pointers inside the Gravame closure." if count else "",
+        message="Operation endpoint pointers without PARAMETRO_PONTA parent.",
+    ))
+
+    transfer_parents = _ccb_active(tables["ARQUIVO_TRANSF"]).select(
+        _canon_key_col(F.col(columns["ARQUIVO_TRANSF"]["NUM_ID_ARQUIVO_TRANSF"]))
+        .alias("parent_id")
+    )
+    out.append(_gravame_edge(
+        "2i.document_transfer", transfer_parents, tables["ARQUIVO_IF"],
+        columns["ARQUIVO_IF"]["NUM_ID_ARQUIVO_TRANSF"],
+        columns["ARQUIVO_IF"]["NUM_ID_ARQUIVO_IF"], sample,
+    ))
+    out.append(_gravame_edge(
+        "2i.transfer_content", transfer_parents, tables["ARQUIVO_TRANSF_CONTEUDO"],
+        columns["ARQUIVO_TRANSF_CONTEUDO"]["NUM_ID_ARQUIVO_TRANSF_CONT"],
+        columns["ARQUIVO_TRANSF_CONTEUDO"]["NUM_ID_ARQUIVO_TRANSF_CONT"], sample,
+    ))
+
+    operations = _ccb_active(tables["OPERACAO"]).select(
+        _canon_key_col(F.col(operation_cols["NUM_ID_OPERACAO"])).alias("operation_id"),
+        F.trim(F.col(operation_cols["COD_OPERACAO"]).cast("string")).alias("operation_code"),
+        F.trim(F.col(operation_cols["COD_OPERACAO_ORIGINAL"])
+               .cast("string")).alias("original_code"),
+    )
+    duplicate_codes = operations.where(
+        F.col("operation_code").isNull() | (F.col("operation_code") == "")
+    ).unionByName(
+        operations.withColumn(
+            "code_count", F.count(F.lit(1)).over(Window.partitionBy("operation_code"))
+        ).where(F.col("code_count") > 1).select(operations.columns)
+    ).dropDuplicates(["operation_id"])
+    duplicate_count = duplicate_codes.count()
+    out.append(Finding(
+        "2i.operation_code", "Gravame operation closure",
+        SEV_ERROR if duplicate_count else SEV_INFO, "OPERACAO", duplicate_count == 0,
+        count=duplicate_count,
+        sample=_sample_keys(duplicate_codes, ["operation_id", "operation_code"], sample),
+        hint="Keep operation codes nonblank and unique inside the closure."
+             if duplicate_count else "",
+        message="Blank or duplicate operation codes in the Gravame closure.",
+    ))
+    code_parents = operations.select(
+        F.col("operation_code").alias("original_code")
+    ).where(F.col("original_code").isNotNull() & (F.col("original_code") != "")).dropDuplicates()
+    broken_chain = operations.where(
+        F.col("original_code").isNotNull() & (F.col("original_code") != "")
+    ).join(code_parents, "original_code", "left_anti")
+    links = operations.where(
+        F.col("operation_code").isNotNull()
+        & F.col("original_code").isNotNull()
+        & (F.col("original_code") != "")
+    ).select(
+        F.col("operation_id"), F.col("operation_code").alias("start_code"),
+        F.col("original_code").alias("next_code"),
+    )
+    cycles = links.where(F.col("start_code") == F.col("next_code")).select("operation_id")
+    paths = links
+    parent_links = links.select(
+        F.col("start_code").alias("parent_child_code"),
+        F.col("next_code").alias("parent_next_code"),
+    )
+    for _ in range(4):
+        paths = paths.join(
+            parent_links, F.col("next_code") == F.col("parent_child_code"), "inner"
+        ).select(
+            "operation_id", "start_code", F.col("parent_next_code").alias("next_code")
+        )
+        cycles = cycles.unionByName(
+            paths.where(F.col("start_code") == F.col("next_code")).select("operation_id")
+        )
+    cycle_rows = cycles.dropDuplicates().join(
+        operations, "operation_id", "inner"
+    ).select(operations.columns)
+    broken_chain = broken_chain.unionByName(cycle_rows).dropDuplicates(["operation_id"])
+    chain_count = broken_chain.count()
+    out.append(Finding(
+        "2i.operation_chain", "Gravame operation closure",
+        SEV_ERROR if chain_count else SEV_INFO, "OPERACAO", chain_count == 0,
+        count=chain_count,
+        sample=_sample_keys(broken_chain, ["operation_id", "original_code"], sample),
+        hint="Include the original operation and remove self-cycles." if chain_count else "",
+        message="Broken original-operation references in the Gravame closure.",
+    ))
+    depth_probe = paths.join(
+        parent_links, F.col("next_code") == F.col("parent_child_code"), "inner"
+    ).limit(1).count()
+    out.append(Finding(
+        "2i.operation_chain_depth", "Gravame operation closure",
+        SEV_WARN if depth_probe else SEV_INFO, "OPERACAO", depth_probe == 0,
+        count=depth_probe,
+        hint="Increase the audited closure depth after inspecting this historical chain."
+             if depth_probe else "",
+        message="Operation chain exceeds the five-link validation/profile boundary.",
+    ))
+
+    pledge = tables.get("GRAVAME_GRAU_PENHOR")
+    pledge_pairs = None
+    if pledge is not None:
+        pledge_id = resolve(pledge, "NUM_ID_GRAVAME_GRAU_PENHOR")
+        pledge_root = resolve(pledge, "NUM_IF_GRAVAME")
+        pledge_guarantee = resolve(pledge, "NUM_IF_GARANTIA")
+        if pledge_id and pledge_root and pledge_guarantee:
+            out.append(_gravame_edge(
+                "2i.pledge.edge", root_parents, pledge, pledge_root, pledge_id, sample,
+            ))
+            pledge_pairs = _ccb_active(pledge).select(
+                _canon_key_col(F.col(pledge_root)).alias("root_id"),
+                _canon_key_col(F.col(pledge_guarantee)).alias("operation_if"),
+            ).dropDuplicates()
+        else:
+            out.append(_ccb_unavailable(
+                "2i.pledge.availability",
+                ["GRAVAME_GRAU_PENHOR ID/NUM_IF_GRAVAME/NUM_IF_GARANTIA"],
+                SEV_WARN,
+            ))
+    chain = _gravame_operation_chain(tables, roots)
+    if chain is not None:
+        operation_targets = _ccb_active(tables["OPERACAO"]).select(
+            _canon_key_col(F.col(operation_cols["NUM_ID_OPERACAO"])).alias("operation_id"),
+            _canon_key_col(F.col(operation_cols["NUM_IF"])).alias("operation_if"),
+            _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
+            .alias("route_id"),
+        )
+        known_routes = ("15394", "15512", "15422", "15464", "15035", "15046")
+        known_operations = operation_targets.where(F.col("route_id").isin(*known_routes))
+        chain_ids = chain.select("operation_id").dropDuplicates()
+        unchained = known_operations.join(chain_ids, "operation_id", "left_anti")
+        unchained_count = unchained.count()
+        out.append(Finding(
+            "2i.operation_route_membership", "Gravame operation closure",
+            SEV_ERROR if unchained_count else SEV_INFO, "OPERACAO",
+            unchained_count == 0, count=unchained_count,
+            sample=_sample_keys(unchained, ["operation_id", "operation_if", "route_id"], sample),
+            hint="Attach known 520/527/541/529 route operations to the original-code chain."
+                 if unchained_count else "",
+            message="Known Gravame route operations outside the rooted operation chain.",
+        ))
+        attributed = operation_targets.join(
+            chain.select("operation_id", "root_id"), "operation_id", "inner"
+        )
+        root_route_bad = attributed.where(
+            F.col("route_id").isin("15394", "15512")
+            & (F.col("operation_if") != F.col("root_id"))
+        )
+        root_route_count = root_route_bad.count()
+        out.append(Finding(
+            "2i.root_operation_target", "Gravame operation closure",
+            SEV_ERROR if root_route_count else SEV_INFO, "OPERACAO",
+            root_route_count == 0, count=root_route_count,
+            sample=_sample_keys(
+                root_route_bad, ["root_id", "operation_id", "operation_if", "route_id"], sample
+            ),
+            hint="Keep routes 15394/15512 on the Gravame root NUM_IF."
+                 if root_route_count else "",
+            message="Root-side Gravame operation routes targeting another instrument.",
+        ))
+        external = attributed.where(
+            F.col("route_id").isin("15422", "15464", "15035", "15046")
+        )
+        if pledge_pairs is None:
+            bad_external = external
+        else:
+            bad_external = external.join(
+                pledge_pairs, ["root_id", "operation_if"], "left_anti"
+            )
+        external_count = bad_external.count()
+        out.append(Finding(
+            "2i.external_operation_target", "Gravame operation closure",
+            SEV_ERROR if external_count else SEV_INFO, "OPERACAO",
+            external_count == 0, count=external_count,
+            sample=_sample_keys(
+                bad_external, ["root_id", "operation_id", "operation_if"], sample
+            ),
+            hint="Point external chain operations to a pledged NUM_IF_GARANTIA."
+                 if external_count else "",
+            message="External Gravame operations without a matching pledge target.",
+        ))
+    return out
+
+
+def check_gravame_dates(
+    tables: Dict[str, DataFrame], sample: int, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "gravame":
+        return []
+    root = tables.get("INSTRUMENTO_FINANCEIRO")
+    contract = tables.get("COMPLEMENTO_CONTRATO")
+    required = ("NUM_IF", "DAT_EMISSAO", "DAT_REGISTRO", "DAT_VENCIMENTO")
+    columns = {name: resolve(root, name) if root is not None else None for name in required}
+    contract_columns = {
+        name: resolve(contract, name) if contract is not None else None
+        for name in ("NUM_IF", "DAT_INCLUSAO")
+    }
+    missing = [f"INSTRUMENTO_FINANCEIRO.{name}" for name, value in columns.items() if not value]
+    missing.extend(
+        f"COMPLEMENTO_CONTRATO.{name}"
+        for name, value in contract_columns.items() if not value
+    )
+    if missing:
+        return [_ccb_unavailable("5i.date_availability", missing)]
+    parsed = _ccb_active(root).select(
+        _canon_key_col(F.col(columns["NUM_IF"])).alias("root_id"),
+        *[
+            expression
+            for name in ("DAT_EMISSAO", "DAT_REGISTRO", "DAT_VENCIMENTO")
+            for expression in (
+                F.col(columns[name]).alias(f"{name}_raw"),
+                _ccb_try_date(columns[name]).alias(name),
+            )
+        ],
+    )
+    parse_bad = None
+    for name in ("DAT_EMISSAO", "DAT_REGISTRO", "DAT_VENCIMENTO"):
+        bad = parsed.where(
+            ~_oracle_null_equivalent(F.col(f"{name}_raw")) & F.col(name).isNull()
+        ).select("root_id").withColumn("field", F.lit(name))
+        parse_bad = bad if parse_bad is None else parse_bad.unionByName(bad)
+    contract_parsed = _ccb_active(contract).select(
+        _canon_key_col(F.col(contract_columns["NUM_IF"])).alias("root_id"),
+        F.col(contract_columns["DAT_INCLUSAO"]).alias("contract_date_raw"),
+        _ccb_try_date(contract_columns["DAT_INCLUSAO"]).alias("contract_date"),
+    )
+    bad_contract_parse = contract_parsed.where(
+        ~_oracle_null_equivalent(F.col("contract_date_raw"))
+        & F.col("contract_date").isNull()
+    ).select("root_id").withColumn("field", F.lit("COMPLEMENTO_CONTRATO.DAT_INCLUSAO"))
+    parse_bad = parse_bad.unionByName(bad_contract_parse)
+    parse_count = parse_bad.count()
+    order_bad = parsed.where(
+        (F.col("DAT_EMISSAO") > F.col("DAT_VENCIMENTO"))
+        | (F.col("DAT_REGISTRO") > F.col("DAT_VENCIMENTO"))
+    ).select("root_id").withColumn("rule", F.lit("root dates <= maturity"))
+    contract_order_bad = contract_parsed.join(
+        parsed.select("root_id", "DAT_VENCIMENTO"), "root_id", "inner"
+    ).where(
+        F.col("contract_date") > F.col("DAT_VENCIMENTO")
+    ).select("root_id").withColumn("rule", F.lit("contract date <= maturity"))
+    order_bad = order_bad.unionByName(contract_order_bad)
+    order_count = order_bad.count()
+    return [
+        Finding(
+            "5i.date_parse", "Gravame date coherence", SEV_ERROR if parse_count else SEV_INFO,
+            "INSTRUMENTO_FINANCEIRO", parse_count == 0, count=parse_count,
+            sample=_sample_keys(parse_bad, ["root_id", "field"], sample),
+            hint="Export parseable Gravame dates." if parse_count else "",
+            message="Malformed nonblank Gravame dates.",
+        ),
+        Finding(
+            "5i.date_order", "Gravame date coherence", SEV_ERROR if order_count else SEV_INFO,
+            "INSTRUMENTO_FINANCEIRO", order_count == 0, count=order_count,
+            sample=_sample_keys(order_bad, ["root_id", "rule"], sample),
+            hint="Keep issuance and registration on or before maturity." if order_count else "",
+            message="Reversed Gravame root date ranges.",
+        ),
+    ]
+
+
+def check_gravame_registration_profile(
+    tables: Dict[str, DataFrame], sample: int, enabled: bool, profile: ValidationProfile
+) -> List[Finding]:
+    if profile.pipeline != "gravame" or not enabled:
+        return []
+    root = tables.get("INSTRUMENTO_FINANCEIRO")
+    extension = tables.get("IF_GRVM")
+    pledge = tables.get("GRAVAME_GRAU_PENHOR")
+    launch = tables.get("LANCAMENTO")
+    operation_data_frame = tables.get("DADO_OPERACAO")
+    required = {
+        "root.NUM_IF": resolve(root, "NUM_IF") if root is not None else None,
+        "root.NUM_TIPO_IF": resolve(root, "NUM_TIPO_IF") if root is not None else None,
+        "root.COD_IF": resolve(root, "COD_IF") if root is not None else None,
+        "extension.NUM_IF": resolve(extension, "NUM_IF") if extension is not None else None,
+        "extension.NUM_ID_TIPO_CONST_GRAVAME": (
+            resolve(extension, "NUM_ID_TIPO_CONST_GRAVAME") if extension is not None else None
+        ),
+        "launch.NUM_ID_OPERACAO": (
+            resolve(launch, "NUM_ID_OPERACAO") if launch is not None else None
+        ),
+        "operation_data.NUM_ID_OPERACAO": (
+            resolve(operation_data_frame, "NUM_ID_OPERACAO")
+            if operation_data_frame is not None else None
+        ),
+        "pledge.NUM_IF_GRAVAME": (
+            resolve(pledge, "NUM_IF_GRAVAME") if pledge is not None else None
+        ),
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        return [_ccb_unavailable("8i.profile.availability", missing, SEV_WARN)]
+    roots = _ccb_active(root).where(
+        _canon_key_col(F.col(required["root.NUM_TIPO_IF"])) == str(profile.num_tipo_if)
+    ).select(
+        _canon_key_col(F.col(required["root.NUM_IF"])).alias("root_id"),
+        F.trim(F.col(required["root.COD_IF"]).cast("string")).alias("business_code"),
+    )
+    coded_roots = roots.withColumn(
+        "code_count", F.count(F.lit(1)).over(Window.partitionBy("business_code"))
+    )
+    bad_codes = coded_roots.where(
+        F.col("business_code").isNull()
+        | (F.col("business_code") == "")
+        | (F.col("code_count") > 1)
+    )
+    code_count = bad_codes.count()
+    extensions = _ccb_active(extension).select(
+        _canon_key_col(F.col(required["extension.NUM_IF"])).alias("root_id"),
+        _canon_key_col(F.col(required["extension.NUM_ID_TIPO_CONST_GRAVAME"]))
+        .alias("constitution_type"),
+    ).groupBy("root_id").agg(
+        F.count(F.lit(1)).alias("extension_count"),
+        F.collect_set("constitution_type").alias("constitution_types"),
+    ).withColumn(
+        "constitution_type",
+        F.when(
+            F.size(F.col("constitution_types")) == 1,
+            F.element_at(F.col("constitution_types"), 1),
+        ),
+    )
+    variants = roots.join(extensions, "root_id", "left")
+
+    common = roots.select("root_id")
+    for table, output in (
+        ("COMPLEMENTO_CONTRATO", "contract_count"),
+        ("PARAMETRO_PONTA", "endpoint_count"),
+        ("ARQUIVO_IF", "document_count"),
+        ("PROTOCOLO", "protocol_count"),
+    ):
+        frame = tables.get(table)
+        parent = resolve(frame, "NUM_IF") if frame is not None else None
+        if frame is None or not parent:
+            return [_ccb_unavailable(
+                "8i.profile.common_availability", [f"{table}.NUM_IF"], SEV_WARN
+            )]
+        per_root = _ccb_active(frame).select(
+            _canon_key_col(F.col(parent)).alias("root_id")
+        ).groupBy("root_id").count().withColumnRenamed("count", output)
+        common = common.join(per_root, "root_id", "left")
+    common = common.join(
+        extensions.select("root_id", "extension_count"), "root_id", "left"
+    ).fillna(0)
+    bad_common = common.where(
+        (F.col("contract_count") != 1)
+        | (F.col("extension_count") != 1)
+        | (F.col("endpoint_count") != 2)
+        | (F.col("document_count") != 1)
+        | (F.col("protocol_count") != 1)
+    )
+    common_count = bad_common.count()
+    chain = _gravame_operation_chain(tables, roots)
+    if chain is None:
+        return [_ccb_unavailable("8i.profile.operation_chain", ["OPERACAO closure"], SEV_WARN)]
+    operation_counts = chain.groupBy("root_id").count().withColumnRenamed("count", "operations")
+    chain_operations = chain.select("operation_id", "root_id")
+    operation = tables["OPERACAO"]
+    operation_id = resolve(operation, "NUM_ID_OPERACAO")
+    operation_route = resolve(operation, "NUM_ID_TIPO_OPER_OBJETO_SERV")
+    if not operation_id or not operation_route:
+        return [_ccb_unavailable(
+            "8i.profile.route_shape", ["OPERACAO route columns"], SEV_WARN
+        )]
+    route_sets = _ccb_active(operation).select(
+        _canon_key_col(F.col(operation_id)).alias("operation_id"),
+        _canon_key_col(F.col(operation_route)).alias("route_id"),
+    ).join(chain_operations, "operation_id", "inner").groupBy("root_id").agg(
+        F.sort_array(F.collect_set("route_id")).alias("route_ids")
+    )
+
+    def count_child(table: str, output: str) -> DataFrame:
+        frame = tables[table]
+        parent = resolve(frame, "NUM_ID_OPERACAO")
+        return _ccb_active(frame).select(
+            _canon_key_col(F.col(parent)).alias("operation_id")
+        ).join(chain_operations, "operation_id", "inner").groupBy("root_id").count() \
+            .withColumnRenamed("count", output)
+
+    launches = count_child("LANCAMENTO", "launches")
+    operation_data = count_child("DADO_OPERACAO", "operation_data")
+    pledges = _ccb_active(pledge).select(
+        _canon_key_col(F.col(required["pledge.NUM_IF_GRAVAME"])).alias("root_id")
+    ).groupBy("root_id").count().withColumnRenamed("count", "pledges")
+    shape = variants.join(operation_counts, "root_id", "left").join(
+        launches, "root_id", "left"
+    ).join(operation_data, "root_id", "left").join(pledges, "root_id", "left").join(
+        route_sets, "root_id", "left"
+    ).fillna(
+        0, ["operations", "launches", "operation_data", "pledges"]
+    )
+    contract_routes = F.array(F.lit("15394"), F.lit("15512"))
+    constitution_routes = F.array(F.lit("15422"), F.lit("15464"))
+    transfer_routes = F.array(F.lit("15035"), F.lit("15046"))
+    valid = (
+        ((F.col("constitution_type") == "1") & (F.col("operations") == 2)
+         & (F.col("launches") == 2) & (F.col("operation_data") == 0)
+         & (F.col("pledges") == 0) & (F.col("route_ids") == contract_routes))
+        | ((F.col("constitution_type") == "2") & (F.col("operations") == 4)
+           & (F.col("launches") == 4) & (F.col("operation_data") == 12)
+           & (F.col("pledges") == 1) & (F.size(F.col("route_ids")) == 4)
+           & (F.size(F.array_intersect(F.col("route_ids"), contract_routes)) == 2)
+           & (F.size(F.array_intersect(F.col("route_ids"), constitution_routes)) == 1)
+           & (F.size(F.array_intersect(F.col("route_ids"), transfer_routes)) == 1))
+    )
+    bad = shape.where(~F.coalesce(valid, F.lit(False)))
+    count = bad.count()
+    return [
+        Finding(
+            "8i.profile.common_shape", "Gravame observed registration profile",
+            SEV_WARN if common_count else SEV_INFO, "INSTRUMENTO_FINANCEIRO",
+            common_count == 0, count=common_count,
+            sample=_sample_keys(bad_common, ["root_id"], sample),
+            hint="Keep exact common registration cardinalities advisory."
+                 if common_count else "",
+            message="Gravame common graph differs from the ten registration snapshots.",
+        ),
+        Finding(
+            "8i.profile.root_code", "Gravame observed registration profile",
+            SEV_WARN if code_count else SEV_INFO, "INSTRUMENTO_FINANCEIRO",
+            code_count == 0, count=code_count,
+            sample=_sample_keys(bad_codes, ["root_id", "business_code"], sample),
+            hint="Review blank or duplicate active Gravame COD_IF values."
+                 if code_count else "",
+            message="Observed Gravame roots use nonblank unique COD_IF values.",
+        ),
+        Finding(
+            "8i.profile.variant_shape", "Gravame observed registration profile",
+            SEV_WARN if count else SEV_INFO, "IF_GRVM", count == 0, count=count,
+            sample=_sample_keys(
+                bad,
+                ["root_id", "constitution_type", "operations", "launches",
+                 "operation_data", "pledges", "route_ids"],
+                sample,
+            ),
+            hint="Keep exact contract-only/instrument-backed cardinalities advisory."
+                 if count else "",
+            message="Gravame graph differs from both observed registration profiles.",
+        ),
+    ]
+
+
+def check_gravame_target_frames(
+    tables: Dict[str, DataFrame], lookup_frames: Dict[str, DataFrame], sample: int,
+    profile: ValidationProfile, lookup_errors: Optional[Dict[str, str]] = None,
+) -> List[Finding]:
+    if profile.pipeline != "gravame":
+        return []
+    lookup_errors = lookup_errors or {}
+    out: List[Finding] = []
+    tipo = lookup_frames.get("GRAVAME_TIPO_IF")
+    tipo_cols = {
+        name: resolve(tipo, name) if tipo is not None else None
+        for name in ("NUM_TIPO_IF", "COD_TIPO_IF", "DAT_EXCLUSAO")
+    }
+    if tipo is None or any(value is None for value in tipo_cols.values()):
+        out.append(_ccb_unavailable(
+            "6i.lookup.tipo_if", [lookup_errors.get("GRAVAME_TIPO_IF", "GRAVAME_TIPO_IF")],
+            SEV_WARN,
+        ))
+    else:
+        matches = _ccb_active(tipo).where(
+            (_canon_key_col(F.col(tipo_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if))
+            & (F.trim(F.col(tipo_cols["COD_TIPO_IF"]).cast("string")) == "GRVM")
+        ).limit(2).count()
+        out.append(Finding(
+            "6i.lookup.tipo_if", "Gravame target eligibility",
+            SEV_INFO if matches == 1 else SEV_ERROR, "TIPO_IF", matches == 1,
+            count=0 if matches == 1 else matches,
+            hint="Provide exactly one active target TIPO_IF 175/GRVM row."
+                 if matches != 1 else "",
+            message="Target Gravame type identity is active and unambiguous.",
+        ))
+    platform = lookup_frames.get("GRAVAME_OBJECT_SERVICE")
+    platform_cols = {
+        name: resolve(platform, name) if platform is not None else None
+        for name in ("COD_OBJETO_SERVICO", "IND_PLATAFORMA_BAIXA")
+    }
+    if platform is None or any(value is None for value in platform_cols.values()):
+        out.append(_ccb_unavailable(
+            "6i.lookup.platform",
+            [lookup_errors.get("GRAVAME_OBJECT_SERVICE", "GRAVAME_OBJECT_SERVICE")],
+            SEV_WARN,
+        ))
+    else:
+        enabled = platform.where(
+            (F.trim(F.col(platform_cols["COD_OBJETO_SERVICO"]).cast("string")) == "GRVM")
+            & (F.upper(F.trim(F.col(platform_cols["IND_PLATAFORMA_BAIXA"])
+                              .cast("string"))) == "S")
+        ).limit(1).count()
+        out.append(Finding(
+            "6i.lookup.platform", "Gravame target eligibility",
+            SEV_INFO if enabled else SEV_ERROR, "V_OBJETOS_SERVICO", bool(enabled),
+            count=0 if enabled else 1,
+            hint="Enable COD_OBJETO_SERVICO='GRVM' on the baixa platform."
+                 if not enabled else "",
+            message="Target GRVM object service is enabled for baixa.",
+        ))
+
+    root = tables.get("INSTRUMENTO_FINANCEIRO")
+    operation = tables.get("OPERACAO")
+    routes = lookup_frames.get("GRAVAME_ROUTES")
+    required = {
+        "root.NUM_IF": resolve(root, "NUM_IF") if root is not None else None,
+        "root.NUM_TIPO_IF": resolve(root, "NUM_TIPO_IF") if root is not None else None,
+        "operation.NUM_IF": resolve(operation, "NUM_IF") if operation is not None else None,
+        "operation.route": (
+            resolve(operation, "NUM_ID_TIPO_OPER_OBJETO_SERV")
+            if operation is not None else None
+        ),
+    }
+    route_columns = {
+        name: resolve(routes, name) if routes is not None else None
+        for name in (
+            "NUM_ID_TIPO_OPER_OBJETO_SERV", "NUM_ID_OBJETO_SERVICO",
+            "COD_TIPO_OPERACAO",
+        )
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing or routes is None or any(value is None for value in route_columns.values()):
+        out.append(_ccb_unavailable(
+            "6i.lookup.registration_route",
+            missing or [lookup_errors.get("GRAVAME_ROUTES", "GRAVAME_ROUTES")], SEV_WARN,
+        ))
+        return out
+    roots = _ccb_active(root).where(
+        _canon_key_col(F.col(required["root.NUM_TIPO_IF"])) == str(profile.num_tipo_if)
+    ).select(_canon_key_col(F.col(required["root.NUM_IF"])).alias("root_id")).dropDuplicates()
+    operations = _ccb_active(operation).select(
+        _canon_key_col(F.col(required["operation.NUM_IF"])).alias("root_id"),
+        _canon_key_col(F.col(required["operation.route"])).alias("route_id"),
+    ).join(roots, "root_id", "inner")
+    semantics = routes.select(
+        _canon_key_col(F.col(route_columns["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
+        .alias("route_id"),
+        _canon_key_col(F.col(route_columns["NUM_ID_OBJETO_SERVICO"])).alias("object_id"),
+        F.trim(F.col(route_columns["COD_TIPO_OPERACAO"])
+               .cast("string")).alias("operation_type"),
+    ).dropDuplicates(["route_id"])
+    registration = operations.join(F.broadcast(semantics), "route_id", "left").where(
+        F.col("operation_type") == "520"
+    )
+    valid = registration.where(
+        F.col("object_id") == str(profile.object_service_id)
+    ).select("root_id").dropDuplicates()
+    invalid = roots.join(valid, "root_id", "left_anti")
+    count = invalid.count()
+    out.append(Finding(
+        "6i.lookup.registration_route", "Gravame target eligibility",
+        SEV_ERROR if count else SEV_INFO, "TIPO_OPER_OBJETO_SERV", count == 0,
+        count=count, sample=_sample_keys(invalid, ["root_id"], sample),
+        hint="Give every active Gravame an approved operation 520 route on object 1132."
+             if count else "",
+        message="Every active Gravame has an approved registration route.",
+    ))
+    pledge = tables.get("GRAVAME_GRAU_PENHOR")
+    pledge_root = resolve(pledge, "NUM_IF_GRAVAME") if pledge is not None else None
+    pledge_guarantee = resolve(pledge, "NUM_IF_GARANTIA") if pledge is not None else None
+    if pledge is not None and pledge_root and pledge_guarantee:
+        active_pledges = _ccb_active(pledge).select(
+            _canon_key_col(F.col(pledge_root)).alias("root_id"),
+            _canon_key_col(F.col(pledge_guarantee)).alias("guarantee_id"),
+        )
+        if active_pledges.limit(1).count():
+            guarantees = lookup_frames.get("GRAVAME_GUARANTEES")
+            guarantee_columns = {
+                name: resolve(guarantees, name) if guarantees is not None else None
+                for name in ("NUM_IF", "DAT_EXCLUSAO", "DAT_VENCIMENTO")
+            }
+            root_registration = resolve(root, "DAT_REGISTRO")
+            if (
+                guarantees is None
+                or any(value is None for value in guarantee_columns.values())
+                or not root_registration
+            ):
+                out.append(_ccb_unavailable(
+                    "6i.lookup.guarantee",
+                    [lookup_errors.get("GRAVAME_GUARANTEES", "GRAVAME_GUARANTEES")],
+                    SEV_WARN,
+                ))
+            else:
+                eligible = _ccb_active(guarantees).select(
+                    _canon_key_col(F.col(guarantee_columns["NUM_IF"]))
+                    .alias("guarantee_id"),
+                    _ccb_try_date(guarantee_columns["DAT_VENCIMENTO"])
+                    .alias("guarantee_maturity"),
+                )
+                registrations = _ccb_active(root).select(
+                    _canon_key_col(F.col(required["root.NUM_IF"])).alias("root_id"),
+                    _ccb_try_date(root_registration).alias("registration_date"),
+                )
+                checked = active_pledges.join(registrations, "root_id", "left").join(
+                    eligible, "guarantee_id", "left"
+                )
+                bad_guarantees = checked.where(
+                    F.col("guarantee_maturity").isNull()
+                    | F.col("registration_date").isNull()
+                    | (F.col("guarantee_maturity") < F.col("registration_date"))
+                )
+                guarantee_count = bad_guarantees.count()
+                out.append(Finding(
+                    "6i.lookup.guarantee", "Gravame target eligibility",
+                    SEV_ERROR if guarantee_count else SEV_INFO,
+                    "INSTRUMENTO_FINANCEIRO", guarantee_count == 0,
+                    count=guarantee_count,
+                    sample=_sample_keys(
+                        bad_guarantees, ["root_id", "guarantee_id"], sample
+                    ),
+                    hint="Use an active, non-matured guaranteed instrument."
+                         if guarantee_count else "",
+                    message="Pledged instruments missing, deleted, malformed, or matured.",
+                ))
+    return out
+
+
+def load_gravame_target_frames(
+    spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame],
+    skip_prefixes: Optional[Sequence[str]] = None, max_route_keys: int = 10_000,
+) -> Tuple[Dict[str, DataFrame], Dict[str, str]]:
+    skip_prefixes = list(skip_prefixes or [])
+    if _check_group_is_skipped(("6i.lookup",), skip_prefixes):
+        return {}, {}
+    queries = {
+        "GRAVAME_TIPO_IF": (
+            "SELECT NUM_TIPO_IF, COD_TIPO_IF, DAT_EXCLUSAO "
+            f"FROM {cfg.schema}.TIPO_IF WHERE NUM_TIPO_IF = 175"
+        ),
+        "GRAVAME_OBJECT_SERVICE": (
+            "SELECT COD_OBJETO_SERVICO, IND_PLATAFORMA_BAIXA "
+            f"FROM {cfg.schema}.V_OBJETOS_SERVICO WHERE COD_OBJETO_SERVICO = 'GRVM'"
+        ),
+    }
+    frames: Dict[str, DataFrame] = {}
+    errors: Dict[str, str] = {}
+    for name, query in queries.items():
+        try:
+            remote = _jdbc(spark, cfg, query)
+            frames[name] = spark.createDataFrame(remote.collect(), remote.schema)
+        except Exception as exc:  # noqa: BLE001
+            errors[name] = str(exc)
+    operation = tables.get("OPERACAO")
+    route_col = resolve(operation, "NUM_ID_TIPO_OPER_OBJETO_SERV") \
+        if operation is not None else None
+    operation_if = resolve(operation, "NUM_IF") if operation is not None else None
+    root = tables.get("INSTRUMENTO_FINANCEIRO")
+    root_if = resolve(root, "NUM_IF") if root is not None else None
+    root_type = resolve(root, "NUM_TIPO_IF") if root is not None else None
+    route_ids = []
+    if operation is not None and route_col:
+        scoped_operations = operation
+        if operation_if and root_if and root_type:
+            gravame_roots = _ccb_active(root).where(
+                _canon_key_col(F.col(root_type)) == "175"
+            ).select(_canon_key_col(F.col(root_if)).alias("root_id"))
+            scoped_operations = _ccb_active(operation).select(
+                F.col(route_col), _canon_key_col(F.col(operation_if)).alias("root_id")
+            ).join(gravame_roots, "root_id", "inner")
+        route_ids = [
+            _canon_key(row["route_id"])
+            for row in scoped_operations.select(
+                _canon_key_col(F.col(route_col)).alias("route_id")
+            ).where(F.col("route_id").isNotNull()).dropDuplicates() \
+                .limit(max_route_keys + 1).collect()
+        ]
+    if len(route_ids) > max_route_keys:
+        errors["GRAVAME_ROUTES"] = f"more than {max_route_keys} distinct route keys"
+    elif route_ids:
+        rows, schema = [], None
+        try:
+            for offset in range(0, len(route_ids), 1000):
+                literals = ", ".join(
+                    _sql_literal(value) for value in route_ids[offset:offset + 1000]
+                )
+                query = (
+                    "SELECT tos.NUM_ID_TIPO_OPER_OBJETO_SERV, tos.NUM_ID_OBJETO_SERVICO, "
+                    "tipo.COD_TIPO_OPERACAO, tos.IND_DISPONIVEL_IDENTIFICACAO "
+                    f"FROM {cfg.schema}.TIPO_OPER_OBJETO_SERV tos "
+                    f"JOIN {cfg.schema}.TIPO_OPERACAO tipo "
+                    "ON tipo.NUM_ID_TIPO_OPERACAO = tos.NUM_ID_TIPO_OPERACAO "
+                    f"WHERE tos.NUM_ID_TIPO_OPER_OBJETO_SERV IN ({literals})"
+                )
+                remote = _jdbc(spark, cfg, query)
+                rows.extend(remote.collect())
+                schema = schema or remote.schema
+            frames["GRAVAME_ROUTES"] = spark.createDataFrame(rows, schema)
+        except Exception as exc:  # noqa: BLE001
+            errors["GRAVAME_ROUTES"] = str(exc)
+    else:
+        frames["GRAVAME_ROUTES"] = spark.createDataFrame(
+            [],
+            "NUM_ID_TIPO_OPER_OBJETO_SERV string, NUM_ID_OBJETO_SERVICO string, "
+            "COD_TIPO_OPERACAO string, IND_DISPONIVEL_IDENTIFICACAO string",
+        )
+    pledge = tables.get("GRAVAME_GRAU_PENHOR")
+    guarantee_col = resolve(pledge, "NUM_IF_GARANTIA") if pledge is not None else None
+    guarantee_ids = []
+    if pledge is not None and guarantee_col:
+        guarantee_ids = [
+            _canon_key(row["guarantee_id"])
+            for row in _ccb_active(pledge).select(
+                _canon_key_col(F.col(guarantee_col)).alias("guarantee_id")
+            ).where(F.col("guarantee_id").isNotNull()).dropDuplicates() \
+                .limit(max_route_keys + 1).collect()
+        ]
+    if len(guarantee_ids) > max_route_keys:
+        errors["GRAVAME_GUARANTEES"] = (
+            f"more than {max_route_keys} distinct guaranteed instrument keys"
+        )
+    elif guarantee_ids:
+        rows, schema = [], None
+        try:
+            for offset in range(0, len(guarantee_ids), 1000):
+                literals = ", ".join(
+                    _sql_literal(value) for value in guarantee_ids[offset:offset + 1000]
+                )
+                query = (
+                    "SELECT NUM_IF, DAT_EXCLUSAO, DAT_VENCIMENTO "
+                    f"FROM {cfg.schema}.INSTRUMENTO_FINANCEIRO "
+                    f"WHERE NUM_IF IN ({literals})"
+                )
+                remote = _jdbc(spark, cfg, query)
+                rows.extend(remote.collect())
+                schema = schema or remote.schema
+            frames["GRAVAME_GUARANTEES"] = spark.createDataFrame(rows, schema)
+        except Exception as exc:  # noqa: BLE001
+            errors["GRAVAME_GUARANTEES"] = str(exc)
+    return frames, errors
+
+
+# ---------------------------------------------------------------------------
 # Category 0/2e/6e/8e - LCI registration-route evidence
 # ---------------------------------------------------------------------------
 LCI_OUTPUT_TABLES = (
@@ -9252,11 +10206,18 @@ CCB_SHAPE_METRICS = [
     "HISTORICO_PU_CURVA", "HISTORICO_IF_TITULO", "ALTERACAO_IF", "OPERACAO",
     "LANCAMENTO", "GARANTIA", "TCTPCADEIA_IPOC",
 ]
+GRAVAME_SHAPE_METRICS = [
+    "COMPLEMENTO_CONTRATO", "IF_GRVM", "PARAMETRO_PONTA", "CONTA_GRAVAME",
+    "ARQUIVO_TRANSF_GRAVAME", "ARQUIVO_TRANSF_CONTEUDO_GRAVAME", "ARQUIVO_IF",
+    "PROTOCOLO", "OPERACAO_GRAVAME_CHAIN", "LANCAMENTO_GRAVAME_CHAIN",
+    "DADO_OPERACAO_GRAVAME_CHAIN", "GRAVAME_GRAU_PENHOR",
+]
 SHAPE_METRICS_BY_PIPELINE = {
     "instrumento_financeiro": DEFAULT_SHAPE_METRICS,
     "lci": LCI_SHAPE_METRICS,
     "lca": LCA_SHAPE_METRICS,
     "ccb": CCB_SHAPE_METRICS,
+    "gravame": GRAVAME_SHAPE_METRICS,
 }
 BASELINE_DOMAIN_VERSION = 1
 BASELINE_METRIC_VERSION = 2
@@ -9288,8 +10249,18 @@ def _shape_counts(
 ) -> Tuple[DataFrame, List[str]]:
     """Left-join per-metric row counts onto the universe; returns (df, skipped)."""
     result, skipped = universe, []
+    gravame_chain = None
     for name in metric_names:
         source_table, wcol_name, wval = name, None, None
+        gravame_sources = {
+            "OPERACAO_GRAVAME_CHAIN": "OPERACAO",
+            "LANCAMENTO_GRAVAME_CHAIN": "LANCAMENTO",
+            "DADO_OPERACAO_GRAVAME_CHAIN": "DADO_OPERACAO",
+            "CONTA_GRAVAME": "CONTA",
+            "ARQUIVO_TRANSF_GRAVAME": "ARQUIVO_TRANSF",
+            "ARQUIVO_TRANSF_CONTEUDO_GRAVAME": "ARQUIVO_TRANSF_CONTEUDO",
+        }
+        source_table = gravame_sources.get(name, source_table)
         if name == "DEPOSITO":
             source_table = "DEPOSITO_AUTOMATICO_IF"
         if name in SHAPE_FILTERED:
@@ -9368,6 +10339,77 @@ def _shape_counts(
                     keyed = df.select(
                         F.trim(F.col(child_code).cast("string")).alias("business_code")
                     ).join(root_codes, "business_code", "inner").select(SHAPE_ROOT_KEY)
+            elif name in {
+                "OPERACAO_GRAVAME_CHAIN", "LANCAMENTO_GRAVAME_CHAIN",
+                "DADO_OPERACAO_GRAVAME_CHAIN",
+            }:
+                roots = universe.select(F.col(SHAPE_ROOT_KEY).cast("string").alias("root_id"))
+                if gravame_chain is None:
+                    gravame_chain = _gravame_operation_chain(tables, roots)
+                chain = gravame_chain
+                if chain is not None:
+                    if name == "OPERACAO_GRAVAME_CHAIN":
+                        keyed = chain.select(
+                            F.col("root_id").cast("long").alias(SHAPE_ROOT_KEY)
+                        )
+                    else:
+                        child_table = (
+                            "LANCAMENTO" if name == "LANCAMENTO_GRAVAME_CHAIN"
+                            else "DADO_OPERACAO"
+                        )
+                        child = tables.get(child_table)
+                        child_operation = (
+                            resolve(child, "NUM_ID_OPERACAO") if child is not None else None
+                        )
+                        if child is not None and child_operation:
+                            keyed = _shape_active(child).select(
+                                _canon_key_col(F.col(child_operation)).alias("operation_id")
+                            ).join(
+                                chain.select("operation_id", "root_id"),
+                                "operation_id", "inner",
+                            ).select(F.col("root_id").cast("long").alias(SHAPE_ROOT_KEY))
+            elif name == "GRAVAME_GRAU_PENHOR":
+                pledge_root = resolve(df, "NUM_IF_GRAVAME")
+                if pledge_root:
+                    keyed = df.select(
+                        F.col(pledge_root).cast("long").alias(SHAPE_ROOT_KEY)
+                    )
+            elif name == "CONTA_GRAVAME":
+                endpoint = tables.get("PARAMETRO_PONTA")
+                endpoint_if = resolve(endpoint, "NUM_IF") if endpoint is not None else None
+                endpoint_account = resolve(endpoint, "NUM_CONTA") if endpoint is not None else None
+                account_id = resolve(df, "NUM_CONTA")
+                if all((endpoint is not None, endpoint_if, endpoint_account, account_id)):
+                    keyed = _shape_active(endpoint).select(
+                        F.col(endpoint_if).cast("long").alias(SHAPE_ROOT_KEY),
+                        _canon_key_col(F.col(endpoint_account)).alias("account_id"),
+                    ).join(
+                        _shape_active(df).select(
+                            _canon_key_col(F.col(account_id)).alias("account_id")
+                        ),
+                        "account_id", "inner",
+                    ).select(SHAPE_ROOT_KEY)
+            elif name in {"ARQUIVO_TRANSF_GRAVAME", "ARQUIVO_TRANSF_CONTEUDO_GRAVAME"}:
+                document = tables.get("ARQUIVO_IF")
+                document_if = resolve(document, "NUM_IF") if document is not None else None
+                document_transfer = (
+                    resolve(document, "NUM_ID_ARQUIVO_TRANSF") if document is not None else None
+                )
+                transfer_id = resolve(
+                    df,
+                    "NUM_ID_ARQUIVO_TRANSF" if name == "ARQUIVO_TRANSF_GRAVAME"
+                    else "NUM_ID_ARQUIVO_TRANSF_CONT",
+                )
+                if all((document is not None, document_if, document_transfer, transfer_id)):
+                    keyed = _shape_active(document).select(
+                        F.col(document_if).cast("long").alias(SHAPE_ROOT_KEY),
+                        _canon_key_col(F.col(document_transfer)).alias("transfer_id"),
+                    ).join(
+                        _shape_active(df).select(
+                            _canon_key_col(F.col(transfer_id)).alias("transfer_id")
+                        ),
+                        "transfer_id", "inner",
+                    ).select(SHAPE_ROOT_KEY)
             elif name in SHAPE_VIA:
                 bridge_table, bridge_key = SHAPE_VIA[name]
                 bridge = tables.get(bridge_table)
@@ -10439,6 +11481,7 @@ def main() -> None:
     is_lci = profile.pipeline == "lci"
     is_lca = profile.pipeline == "lca"
     is_ccb = profile.pipeline == "ccb"
+    is_gravame = profile.pipeline == "gravame"
     is_non_if = is_credito_scr or is_dicre
     skip_prefixes = [prefix.strip() for prefix in args.skip_check if prefix.strip()]
     if _check_is_skipped("0.identity", skip_prefixes):
@@ -10513,7 +11556,8 @@ def main() -> None:
             if is_dicre else check_lci_metadata(meta, args.no_oracle, profile)
             if is_lci else check_lca_metadata(meta, args.no_oracle, profile)
             if is_lca else check_ccb_metadata(meta, args.no_oracle, profile)
-            if is_ccb else []
+            if is_ccb else check_gravame_metadata(meta, args.no_oracle, profile)
+            if is_gravame else []
         ),
     )
     if is_credito_scr:
@@ -10528,7 +11572,12 @@ def main() -> None:
             + check_dicre_irop_graph(tables, args.sample_size, profile),
         )
     else:
-        if is_ccb:
+        if is_gravame:
+            findings += _run_check_group(
+                "category 2i Gravame graph", ("2i.",), skip_prefixes,
+                lambda: check_gravame_graph(tables, args.sample_size, profile),
+            )
+        elif is_ccb:
             findings += _run_check_group(
                 "category 2h CCB graph", ("2h.",), skip_prefixes,
                 lambda: check_ccb_graph(tables, args.sample_size, profile),
@@ -10549,7 +11598,7 @@ def main() -> None:
             ("2g.condition_polymorphism", "2g.unknown_condition_type", "2g.subtype_orphan")
             if is_lca else
             ("2h.condition_polymorphism", "2h.unknown_condition_type", "2h.subtype_orphan")
-            if is_ccb else ("1.", "1a.", "1b.", "1c.")
+            if is_ccb else () if is_gravame else ("1.", "1a.", "1b.", "1c.")
         )
         findings += _run_check_group(
             "category 1 polymorphism", polymorphism_prefixes, skip_prefixes,
@@ -10557,20 +11606,22 @@ def main() -> None:
                 check_lci_polymorphism(tables, args.sample_size, profile)
                 if is_lci else check_lca_polymorphism(tables, args.sample_size, profile)
                 if is_lca else check_ccb_polymorphism(tables, args.sample_size, profile)
-                if is_ccb else check_polymorphism(tables, meta, args.sample_size)
+                if is_ccb else [] if is_gravame else check_polymorphism(
+                    tables, meta, args.sample_size
+                )
             ),
         )
-        if args.shape_baseline:
+        if args.shape_baseline and not is_gravame:
             findings += _run_check_group(
                 "category 1 baseline subtype verification", ("1.map_snapshot",), skip_prefixes,
                 lambda: verify_subtype_map_from_baseline(spark, args.shape_baseline),
             )
-        if not args.no_oracle and args.verify_subtype_map:
+        if not is_gravame and not args.no_oracle and args.verify_subtype_map:
             findings += _run_check_group(
                 "category 1 Oracle subtype verification", ("1.map_verify",), skip_prefixes,
                 lambda: verify_subtype_map_against_production(spark, cfg),
             )
-        elif not args.no_oracle:
+        elif not is_gravame and not args.no_oracle:
             logger.info(
                 "Production subtype-map audit skipped; use --verify-subtype-map to run it."
             )
@@ -10579,7 +11630,7 @@ def main() -> None:
                 "category 2h CCB variants", ("2h.resgate", "2h.variant"), skip_prefixes,
                 lambda: check_ccb_variant_rules(tables, args.sample_size, profile),
             )
-        else:
+        elif not is_gravame:
             findings += _run_check_group(
                 "category 2 domain", ("2.domain",), skip_prefixes,
                 lambda: check_domain(tables, meta, args.sample_size, profile),
@@ -10643,6 +11694,11 @@ def main() -> None:
             "category 5h CCB dates", ("5h.",), skip_prefixes,
             lambda: check_ccb_dates(tables, args.sample_size, profile),
         )
+    elif is_gravame:
+        findings += _run_check_group(
+            "category 5i Gravame dates", ("5i.",), skip_prefixes,
+            lambda: check_gravame_dates(tables, args.sample_size, profile),
+        )
     if is_credito_scr:
         if args.no_oracle:
             credito_lookups, credito_lookup_errors = {}, {
@@ -10701,6 +11757,46 @@ def main() -> None:
         findings += _run_check_group(
             "category 8f DICRE insertion profile", ("8f.",), skip_prefixes,
             lambda: check_dicre_registration_profile(
+                tables, args.sample_size, args.registration_profile, profile,
+            ),
+        )
+    elif is_gravame:
+        if _check_group_is_skipped(("6i.",), skip_prefixes):
+            logger.info("Skipped category 6i Gravame target lookup setup (--skip-check).")
+        else:
+            if args.no_oracle:
+                gravame_lookups, gravame_lookup_errors = {}, {
+                    name: "No Oracle connection"
+                    for name in (
+                        "GRAVAME_TIPO_IF", "GRAVAME_OBJECT_SERVICE", "GRAVAME_ROUTES",
+                        "GRAVAME_GUARANTEES",
+                    )
+                }
+            else:
+                gravame_lookups, gravame_lookup_errors = _timed(
+                    "category 6i Gravame target lookup setup",
+                    lambda: load_gravame_target_frames(
+                        spark, cfg, tables, skip_prefixes=skip_prefixes
+                    ),
+                )
+            findings += _run_check_group(
+                "category 6i Gravame target eligibility", ("6i.",), skip_prefixes,
+                lambda: check_gravame_target_frames(
+                    tables, gravame_lookups, args.sample_size, profile,
+                    gravame_lookup_errors,
+                ),
+            )
+        findings += _run_check_group(
+            "category 7 Gravame shapes", ("7.", "7a.", "7b."), skip_prefixes,
+            lambda: check_shapes(
+                spark, tables, args.shape_baseline, args.sample_size,
+                args.shape_unseen_tol, args.shape_drift_tol, args.shape_op_ratio_tol, profile,
+                skip_prefixes,
+            ),
+        )
+        findings += _run_check_group(
+            "category 8i Gravame insertion profile", ("8i.",), skip_prefixes,
+            lambda: check_gravame_registration_profile(
                 tables, args.sample_size, args.registration_profile, profile,
             ),
         )

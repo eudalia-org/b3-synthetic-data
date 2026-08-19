@@ -84,6 +84,7 @@ PRODUCTS: Dict[str, Dict[str, object]] = {
     "lci": {"num_tipo_if": 81, "simplified": True},
     "lca": {"num_tipo_if": 96, "simplified": True},
     "ccb": {"num_tipo_if": 53, "simplified": False},
+    "gravame": {"num_tipo_if": 175, "simplified": False},
     "rdb": {"num_tipo_if": 50, "simplified": False},
 }
 
@@ -237,6 +238,27 @@ CCB_METRICS: List[Metric] = [
     Metric("TCTPCADEIA_IPOC", "TCTPCADEIA_IPOC"),
 ]
 
+GRAVAME_METRICS: List[Metric] = [
+    Metric("COMPLEMENTO_CONTRATO", "COMPLEMENTO_CONTRATO"),
+    Metric("IF_GRVM", "IF_GRVM"),
+    Metric("PARAMETRO_PONTA", "PARAMETRO_PONTA"),
+    Metric("CONTA_GRAVAME", "CONTA", via="GRAVAME_ENDPOINT_ACCOUNT"),
+    Metric("ARQUIVO_TRANSF_GRAVAME", "ARQUIVO_TRANSF", via="GRAVAME_TRANSFER"),
+    Metric(
+        "ARQUIVO_TRANSF_CONTEUDO_GRAVAME", "ARQUIVO_TRANSF_CONTEUDO",
+        via="GRAVAME_TRANSFER_CONTENT",
+    ),
+    Metric("ARQUIVO_IF", "ARQUIVO_IF"),
+    Metric("PROTOCOLO", "PROTOCOLO"),
+    Metric("OPERACAO_GRAVAME_CHAIN", "OPERACAO", via="GRAVAME_OPERATION_CHAIN"),
+    Metric("LANCAMENTO_GRAVAME_CHAIN", "LANCAMENTO", via="GRAVAME_LAUNCH_CHAIN"),
+    Metric(
+        "DADO_OPERACAO_GRAVAME_CHAIN", "DADO_OPERACAO",
+        via="GRAVAME_OPERATION_DATA_CHAIN",
+    ),
+    Metric("GRAVAME_GRAU_PENHOR", "GRAVAME_GRAU_PENHOR", via="GRAVAME_PLEDGE"),
+]
+
 PRODUCT_METRICS: Dict[str, List[Metric]] = {
     "cdb_simplificado": METRICS,
     "cdb": METRICS,
@@ -246,6 +268,7 @@ PRODUCT_METRICS: Dict[str, List[Metric]] = {
     ],
     "lca": LCA_METRICS,
     "ccb": CCB_METRICS,
+    "gravame": GRAVAME_METRICS,
 }
 
 
@@ -527,9 +550,44 @@ def build_subtype_map_snapshot(
     return snapshot
 
 
+def _gravame_operation_chain(
+    tables: Dict[str, DataFrame], universe: DataFrame
+) -> Optional[DataFrame]:
+    operation = tables.get(OPERACAO_TABLE)
+    if operation is None:
+        return None
+    operation_id = _ci(operation, "NUM_ID_OPERACAO")
+    operation_if = _ci(operation, ROOT_KEY)
+    operation_code = _ci(operation, "COD_OPERACAO")
+    original_code = _ci(operation, "COD_OPERACAO_ORIGINAL")
+    if not all((operation_id, operation_if, operation_code, original_code)):
+        return None
+    operations = active_rows(operation, [], OPERACAO_TABLE).select(
+        _norm_code(F.col(operation_id)).alias("operation_id"),
+        F.col(operation_if).cast("long").alias("operation_if"),
+        F.trim(F.col(operation_code).cast("string")).alias("operation_code"),
+        F.trim(F.col(original_code).cast("string")).alias("original_code"),
+    )
+    chain = operations.join(
+        universe, F.col("operation_if") == F.col(ROOT_KEY), "inner"
+    ).select("operation_id", "operation_code", "original_code", ROOT_KEY)
+    frontier = chain
+    for _ in range(4):
+        parents = frontier.select(
+            F.col("operation_code").alias("parent_code"), ROOT_KEY
+        ).dropDuplicates()
+        children = operations.join(
+            parents, F.col("original_code") == F.col("parent_code"), "inner"
+        ).select("operation_id", "operation_code", "original_code", ROOT_KEY)
+        chain = chain.unionByName(children).dropDuplicates(["operation_id", ROOT_KEY])
+        frontier = children
+    return chain
+
+
 def _keyed_by_num_if(
     tables: Dict[str, DataFrame], metric: Metric, notes: List[str],
     universe: Optional[DataFrame] = None,
+    derived: Optional[Dict[str, DataFrame]] = None,
 ) -> Optional[DataFrame]:
     """Return a DF with one row per counted child row, keyed by NUM_IF."""
     df = tables.get(metric.table)
@@ -623,6 +681,73 @@ def _keyed_by_num_if(
         return df.select(
             F.trim(F.col(child_code).cast("string")).alias("business_code")
         ).join(roots, "business_code", "inner").select(ROOT_KEY)
+    elif metric.via in {
+        "GRAVAME_OPERATION_CHAIN", "GRAVAME_LAUNCH_CHAIN",
+        "GRAVAME_OPERATION_DATA_CHAIN",
+    }:
+        if universe is None:
+            return None
+        derived = derived if derived is not None else {}
+        chain = derived.get("gravame_operation_chain")
+        if chain is None:
+            chain = _gravame_operation_chain(tables, universe)
+            if chain is not None:
+                derived["gravame_operation_chain"] = chain
+        if chain is None:
+            return None
+        if metric.via == "GRAVAME_OPERATION_CHAIN":
+            return chain.select(ROOT_KEY)
+        child_operation = _ci(df, "NUM_ID_OPERACAO")
+        if not child_operation:
+            return None
+        return active_rows(df, notes, metric.table).select(
+            _norm_code(F.col(child_operation)).alias("operation_id")
+        ).join(chain.select("operation_id", ROOT_KEY), "operation_id", "inner").select(ROOT_KEY)
+    elif metric.via == "GRAVAME_PLEDGE":
+        pledge_root = _ci(df, "NUM_IF_GRAVAME")
+        return (
+            active_rows(df, notes, metric.table)
+            .select(F.col(pledge_root).cast("long").alias(ROOT_KEY))
+            if pledge_root else None
+        )
+    elif metric.via == "GRAVAME_ENDPOINT_ACCOUNT":
+        endpoint = tables.get("PARAMETRO_PONTA")
+        endpoint_if = _ci(endpoint, ROOT_KEY) if endpoint is not None else None
+        endpoint_account = _ci(endpoint, "NUM_CONTA") if endpoint is not None else None
+        account_id = _ci(df, "NUM_CONTA")
+        if not all((endpoint is not None, endpoint_if, endpoint_account, account_id)):
+            return None
+        return active_rows(endpoint, notes, "PARAMETRO_PONTA").select(
+            F.col(endpoint_if).cast("long").alias(ROOT_KEY),
+            _norm_code(F.col(endpoint_account)).alias("account_id"),
+        ).join(
+            active_rows(df, notes, metric.table).select(
+                _norm_code(F.col(account_id)).alias("account_id")
+            ),
+            "account_id", "inner",
+        ).select(ROOT_KEY)
+    elif metric.via in {"GRAVAME_TRANSFER", "GRAVAME_TRANSFER_CONTENT"}:
+        document = tables.get("ARQUIVO_IF")
+        document_if = _ci(document, ROOT_KEY) if document is not None else None
+        document_transfer = (
+            _ci(document, "NUM_ID_ARQUIVO_TRANSF") if document is not None else None
+        )
+        transfer_id = _ci(
+            df,
+            "NUM_ID_ARQUIVO_TRANSF"
+            if metric.via == "GRAVAME_TRANSFER" else "NUM_ID_ARQUIVO_TRANSF_CONT",
+        )
+        if not all((document is not None, document_if, document_transfer, transfer_id)):
+            return None
+        return active_rows(document, notes, "ARQUIVO_IF").select(
+            F.col(document_if).cast("long").alias(ROOT_KEY),
+            _norm_code(F.col(document_transfer)).alias("transfer_id"),
+        ).join(
+            active_rows(df, notes, metric.table).select(
+                _norm_code(F.col(transfer_id)).alias("transfer_id")
+            ),
+            "transfer_id", "inner",
+        ).select(ROOT_KEY)
     else:
         raise ValueError(f"Unknown via: {metric.via}")
     if bridge is None:
@@ -648,8 +773,9 @@ def build_counts(
     """Left-join per-metric counts onto the universe. Returns (df, skipped)."""
     result = universe
     skipped: List[str] = []
+    derived: Dict[str, DataFrame] = {}
     for metric in metrics or METRICS:
-        keyed = _keyed_by_num_if(tables, metric, notes, universe)
+        keyed = _keyed_by_num_if(tables, metric, notes, universe, derived)
         if keyed is None:
             skipped.append(metric.name)
             result = result.withColumn(metric.name, F.lit(None).cast("long"))
@@ -926,6 +1052,7 @@ def build_profile(
     universe = build_universe(tables, notes, universe_keys, num_tipo_if)
     counts, skipped = build_counts(universe, tables, notes, metrics)
     is_cdb = product in {"cdb", "cdb_simplificado"}
+    is_gravame = product == "gravame"
     if is_cdb:
         counts = add_simplificado_flag(counts, tables, notes)
     counts = counts.cache()
@@ -945,9 +1072,15 @@ def build_profile(
         "shapes": shape_distribution(counts, metric_names, sample_size),
         "marginals": marginals(counts, metric_names),
         "by_simplificado": {},
-        "evento_path_crosscheck": evento_path_crosscheck(universe, tables, sample_size),
-        "attribute_audits": attribute_audits(universe, tables, notes),
-        "subtype_map": build_subtype_map_snapshot(tables, universe),
+        "evento_path_crosscheck": (
+            {"status": "not applicable to Gravame"}
+            if is_gravame else evento_path_crosscheck(universe, tables, sample_size)
+        ),
+        "attribute_audits": {} if is_gravame else attribute_audits(universe, tables, notes),
+        "subtype_map": (
+            {"status": "not applicable to Gravame"}
+            if is_gravame else build_subtype_map_snapshot(tables, universe)
+        ),
     }
 
     if is_cdb:
@@ -1261,7 +1394,7 @@ def parse_args() -> argparse.Namespace:
                    help="Verify the profiler against a built-in in-memory fixture and exit.")
     p.add_argument("--apply-filtros-fonte", action="store_true",
                    help="Pre-filter CDB/RDB source tables with engorda's FILTROS_FONTE row "
-                        "predicates (not supported for CCB), so the profile is the input image "
+                        "predicates (not supported for CCB/Gravame), so this is the input image "
                         "(use as the --compare-with baseline for the synthetic run).")
     p.add_argument("--universe-keys", default=None,
                    help="Parquet path/URI with the NUM_IFs to restrict the universe to "
@@ -1288,10 +1421,15 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    if args.product == "ccb" and args.apply_filtros_fonte:
-        raise SystemExit("--apply-filtros-fonte is CDB-specific and is not supported for CCB.")
-    if args.product == "ccb" and args.universe == "domain":
-        raise SystemExit("--universe domain is CDB/RDB-specific; use all or --universe-keys.")
+    if args.product in {"ccb", "gravame"} and args.apply_filtros_fonte:
+        raise SystemExit(
+            f"--apply-filtros-fonte is CDB-specific and is not supported for {args.product}."
+        )
+    if args.product in {"ccb", "gravame"} and args.universe == "domain":
+        raise SystemExit(
+            f"--universe domain is CDB/RDB-specific for {args.product}; "
+            "use all or --universe-keys."
+        )
 
     spark = SparkSession.builder.appName("profile_cdb_shapes").getOrCreate()
     # Spark 3.5.0 (OCI Data Flow) + AQE + cached DataFrames silently LOSES JOIN
