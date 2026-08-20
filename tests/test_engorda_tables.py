@@ -232,6 +232,151 @@ class TestEngordaArtifacts:
         assert plan["meu_numero"] == {"ordinal_count_demand": 0}
         assert engorda_tables._validate_plan_artifact(plan) == plan
 
+    def test_plan_builder_uses_supplied_lote_counts_without_recounting_frames(
+        self, spark
+    ):
+        class NoCountFrame:
+            def count(self):
+                raise AssertionError("supplied lote counts must prevent frame.count()")
+
+        class SameAccountRows:
+            def count(self):
+                return 1
+
+        class OperationFrame(NoCountFrame):
+            def where(self, _predicate):
+                return SameAccountRows()
+
+        profile = engorda_tables.get_product_profile("cdb_simplificado")
+        planos = {
+            "INSTRUMENTO_FINANCEIRO": engorda_tables.PlanoTabela(
+                "INSTRUMENTO_FINANCEIRO", ("NUM_IF",)
+            ),
+            "OPERACAO": engorda_tables.PlanoTabela(
+                "OPERACAO", ("NUM_ID_OPERACAO",)
+            ),
+        }
+        plan = engorda_tables._build_engorda_plan(
+            config={
+                "DATAGEN_RAW_BASE_URI": "oci://raw@ns/run/RAW",
+                "DATAGEN_RAW_PREFIX": "",
+                "DATAGEN_SYNTHETIC_BASE_URI": "oci://out@ns",
+                "DATAGEN_CLONE_PREFIX": "run/synthetic/cdb",
+            },
+            specs_uri="oci://cfg@ns/spec.json",
+            product_profile=profile,
+            valores=[10, 20],
+            fator_k=2,
+            seed=7,
+            engorda_ts=datetime(2026, 8, 20, 10, 0),
+            controle_operacional_date=date(2026, 8, 20),
+            tipo_derivado=49,
+            planos=planos,
+            lotes={
+                "INSTRUMENTO_FINANCEIRO": NoCountFrame(),
+                "OPERACAO": OperationFrame(),
+            },
+            lote_counts={"INSTRUMENTO_FINANCEIRO": 2, "OPERACAO": 3},
+            faltantes_uri=None,
+            query_num_if_uri="oci://cfg@ns/queries_produtos.sql",
+        )
+
+        assert plan["tables"]["OPERACAO"]["source_count"] == 3
+        assert plan["cod_operacao"] == {"count": 6}
+        assert plan["meu_numero"] == {"ordinal_count_demand": 8}
+
+    def test_final_lote_counts_use_one_combined_action(self, spark, monkeypatch):
+        frames = {
+            "A": spark.createDataFrame([(1,), (2,)], "ID long"),
+            "B": spark.createDataFrame([(1,), (2,), (3,)], "ID long"),
+        }
+        frame_class = type(frames["A"])
+        original_collect = frame_class.collect
+        collect_calls = 0
+
+        def tracked_collect(frame):
+            nonlocal collect_calls
+            collect_calls += 1
+            return original_collect(frame)
+
+        monkeypatch.setattr(frame_class, "collect", tracked_collect)
+
+        assert engorda_tables._count_final_lotes(frames) == {"A": 2, "B": 3}
+        assert collect_calls == 1
+
+
+    def test_active_closure_does_not_count_full_raw_source_for_logging(
+        self, spark, monkeypatch
+    ):
+        root = spark.createDataFrame([(1,)], "NUM_IF long")
+        condition = spark.createDataFrame(
+            [(11, 1, None), (12, 1, datetime(2026, 1, 1))],
+            "NUM_CONDICAO_IF long, NUM_IF long, DAT_EXCLUSAO timestamp",
+        )
+
+        class RawSourceWithoutLoggingCount:
+            def __init__(self, frame):
+                self._frame = frame
+
+            @property
+            def columns(self):
+                return self._frame.columns
+
+            @property
+            def schema(self):
+                return self._frame.schema
+
+            def where(self, predicate):
+                return self._frame.where(predicate)
+
+            def count(self):
+                raise AssertionError("full RAW count was used only for logging")
+
+        sources = {
+            engorda_tables.TABELA_RAIZ: root,
+            "CONDICAO_IF": RawSourceWithoutLoggingCount(condition),
+        }
+        monkeypatch.setattr(
+            engorda_tables,
+            "_read_source",
+            lambda _spark, _config, table: sources[table],
+        )
+        plans = {
+            engorda_tables.TABELA_RAIZ: engorda_tables.PlanoTabela(
+                engorda_tables.TABELA_RAIZ, ("NUM_IF",)
+            ),
+            "CONDICAO_IF": engorda_tables.PlanoTabela(
+                "CONDICAO_IF",
+                ("NUM_CONDICAO_IF",),
+                [
+                    engorda_tables.FkRemap(
+                        ("NUM_IF",),
+                        engorda_tables.TABELA_RAIZ,
+                        ("NUM_IF",),
+                        True,
+                    )
+                ],
+            ),
+        }
+
+        lotes, provenances = engorda_tables._calcula_lotes_com_proveniencia(
+            spark,
+            {},
+            {
+                engorda_tables.TABELA_RAIZ: {"pk_cols": ["NUM_IF"]},
+                "CONDICAO_IF": {"pk_cols": ["NUM_CONDICAO_IF"]},
+            },
+            plans,
+            [engorda_tables.TABELA_RAIZ, "CONDICAO_IF"],
+            [1],
+            3,
+            somente_ativos=True,
+        )
+
+        assert lotes["CONDICAO_IF"].count() == 1
+        for frame in [*lotes.values(), *provenances.values()]:
+            frame.unpersist(blocking=False)
+
     def test_reservation_links_exact_counts_and_keeps_oracle_operation_allocator(self):
         plan = self._plan()
         reservation = {
