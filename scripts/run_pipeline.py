@@ -34,6 +34,7 @@ TRACER_STAGES = ("engorda", "validate")
 OVERRIDE_KEYS = {
     "engorda": {
         "n_instrumentos", "fator_k", "seed", "specs", "meu_numero_prefix",
+        "query_num_if_sql",
     },
     "validate": {
         "fail_severity", "validate_against", "shape_baseline",
@@ -1540,7 +1541,11 @@ def build_engorda_plan_argv(
         "--seed",
         str(int(options.get("seed", 42))),
     ]
-    for key, flag in (("specs", "--specs"), ("meu_numero_prefix", "--meu-numero-prefix")):
+    for key, flag in (
+        ("specs", "--specs"),
+        ("meu_numero_prefix", "--meu-numero-prefix"),
+        ("query_num_if_sql", "--query-num-if-sql"),
+    ):
         if options.get(key) is not None:
             argv += [flag, str(options[key])]
     return argv
@@ -1572,6 +1577,8 @@ def build_engorda_materialize_argv(
     ]
     if options.get("specs") is not None:
         argv += ["--specs", str(options["specs"])]
+    if options.get("query_num_if_sql") is not None:
+        argv += ["--query-num-if-sql", str(options["query_num_if_sql"])]
     return argv
 
 
@@ -1667,6 +1674,14 @@ def build_pipeline_plan(
         artifacts["products"][product] = product_artifacts
         dependency: str | None = None
         if "engorda" in stages:
+            query_num_if_sql = engorda_options.get("query_num_if_sql")
+            if not isinstance(query_num_if_sql, str) or not query_num_if_sql.startswith(
+                "oci://"
+            ):
+                raise PipelineError(
+                    f"product {product} requires engorda.query_num_if_sql as an "
+                    "oci:// URI; Data Flow cannot read the runner's local SQL file"
+                )
             for name in ("selection_plan", "reservations", "synthetic"):
                 product_artifacts[name] = {
                     "uri": paths[name],

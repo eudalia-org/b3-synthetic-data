@@ -546,6 +546,7 @@ def test_materialize_job_consumes_frozen_plan_without_resampling(tmp_path, monke
         "output_uri": "oci://out@ns/run/synthetic/cdb",
         "specs_uri": "oci://cfg@ns/spec.json",
         "faltantes_uri": "oci://cfg@ns/faltantes",
+        "query_num_if_uri": "queries_produtos.sql",
         "tables": {
             eng.TABELA_RAIZ: {
                 "source_count": 2,

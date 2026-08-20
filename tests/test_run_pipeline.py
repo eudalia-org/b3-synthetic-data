@@ -41,7 +41,12 @@ def write_config(tmp_path, *, capabilities=None, extra=None):
         },
         "products": products,
         "stage_defaults": {
-            "engorda": {"n_instrumentos": 4, "fator_k": 2, "seed": 7},
+            "engorda": {
+                "n_instrumentos": 4,
+                "fator_k": 2,
+                "seed": 7,
+                "query_num_if_sql": "oci://source@namespace/queries_produtos.sql",
+            },
             "validate": {"fail_severity": "error", "validate_against": "union"},
         },
     }
@@ -697,11 +702,17 @@ def test_dry_run_is_offline_and_prints_resolved_argv(tmp_path, capsys):
     assert "--plan-uri" in plan_argv
     assert "--raw-uri" in plan_argv
     assert "--output-uri" in plan_argv
+    assert plan_argv[plan_argv.index("--query-num-if-sql") + 1] == (
+        "oci://source@namespace/queries_produtos.sql"
+    )
     materialize_argv = output["nodes"][
         "cdb_simplificado.engorda.materialize"
     ]["arguments"]
     assert "--reservation-uri" in materialize_argv
     assert "--faltantes-parquet" in materialize_argv
+    assert materialize_argv[materialize_argv.index("--query-num-if-sql") + 1] == (
+        "oci://source@namespace/queries_produtos.sql"
+    )
     validator_argv = output["nodes"]["cdb_simplificado.validate"]["arguments"]
     assert validator_argv[validator_argv.index("--product") + 1] == "cdb_simplificado"
     assert "--allow-partial" in validator_argv

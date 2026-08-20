@@ -27,7 +27,8 @@
       "n_instrumentos": 100,
       "fator_k": 1,
       "seed": 42,
-      "specs": "oci://synthetic-data@namespace/contracts/specs.json"
+      "specs": "oci://synthetic-data@namespace/contracts/specs.json",
+      "query_num_if_sql": "oci://synthetic-data@namespace/contracts/queries_produtos.sql"
     },
     "validate": {
       "fail_severity": "error",

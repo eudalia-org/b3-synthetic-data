@@ -5016,6 +5016,7 @@ def _build_engorda_plan(
     planos: Mapping[str, PlanoTabela],
     lotes: Mapping[str, DataFrame],
     faltantes_uri: Optional[str],
+    query_num_if_uri: str,
     prazo_vencimento_dias: Optional[int] = None,
     anular_cols: Optional[Mapping[str, Sequence[str]]] = None,
     meu_numero_prefix: Optional[str] = None,
@@ -5066,6 +5067,7 @@ def _build_engorda_plan(
         "output_uri": clone_base_path(dict(config)),
         "specs_uri": specs_uri,
         "faltantes_uri": faltantes_uri,
+        "query_num_if_uri": query_num_if_uri,
         "prazo_vencimento_dias": prazo_vencimento_dias,
         "anular_cols": {
             table: list(columns)
@@ -5101,7 +5103,7 @@ def _validate_plan_artifact(plan: Mapping[str, Any]) -> dict[str, Any]:
         "product", "selected_num_ifs", "fator_k", "seed",
         "engorda_timestamp", "controle_operacional_date", "raw_uri",
         "output_uri", "specs_uri", "faltantes_uri", "tables", "cod_if",
-        "cod_operacao", "meu_numero",
+        "cod_operacao", "meu_numero", "query_num_if_uri",
     }
     missing = sorted(required - set(plan))
     if missing:
@@ -5487,6 +5489,7 @@ def executa_clonagem(spark, config, spec: dict, *,
         planos=planos,
         lotes=lotes,
         faltantes_uri=faltantes_parquet,
+        query_num_if_uri=query_num_if_path or product_profile.query_filename,
         prazo_vencimento_dias=prazo_vencimento_dias,
         anular_cols=anular_cols,
         meu_numero_prefix=requested_meu_numero_prefix,
@@ -5943,6 +5946,7 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
                 "output_uri": clone_base_path(config),
                 "specs_uri": specs_uri,
                 "faltantes_uri": job.faltantes_parquet,
+                "query_num_if_uri": job.query_num_if_path or profile.query_filename,
             }
             mismatches = {
                 key: (planned_artifact[key], value)

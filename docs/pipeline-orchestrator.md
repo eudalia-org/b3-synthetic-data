@@ -59,6 +59,9 @@ uv run --allow-insecure-host pypi.org `
 
 Use `--dry-run` first. It performs no OCI or Oracle calls and prints the resolved
 DAG, immutable paths, Data Flow application arguments, and reservation contract.
+The engorda config must include an Object Storage `query_num_if_sql` URI. Upload
+`datagen/queries_produtos.sql` there; both plan and materialize receive that exact
+URI and freeze it into plan lineage, so no Data Flow local companion file is needed.
 Live execution prints every submission and every observed Data Flow state. Change
 `--poll-seconds 30` to control the status interval. Every OCI CLI call announces
 itself and fails after `--oci-timeout-seconds 60` instead of waiting indefinitely.

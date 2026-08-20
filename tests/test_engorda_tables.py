@@ -139,6 +139,7 @@ class TestEngordaArtifacts:
             "output_uri": "oci://out@ns/run/synthetic/cdb",
             "specs_uri": "oci://cfg@ns/spec.json",
             "faltantes_uri": "oci://cfg@ns/faltantes",
+            "query_num_if_uri": "oci://cfg@ns/queries_produtos.sql",
             "tables": {
                 "INSTRUMENTO_FINANCEIRO": {
                     "source_count": 1,
@@ -210,10 +211,12 @@ class TestEngordaArtifacts:
             },
             lotes={"INSTRUMENTO_FINANCEIRO": CountFrame(2)},
             faltantes_uri="oci://cfg@ns/faltantes",
+            query_num_if_uri="oci://cfg@ns/queries_produtos.sql",
         )
 
         assert plan["selected_num_ifs"] == [10, 20]
         assert plan["engorda_timestamp"] == "2026-08-18T10:11:12.123456"
+        assert plan["query_num_if_uri"] == "oci://cfg@ns/queries_produtos.sql"
         assert plan["tables"]["INSTRUMENTO_FINANCEIRO"] == {
             "source_count": 2,
             "synthetic_count": 6,
