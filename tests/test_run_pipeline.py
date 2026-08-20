@@ -367,6 +367,29 @@ def test_manifest_upload_is_create_once_not_force_overwrite(tmp_path):
     assert "--force" not in commands[0]
 
 
+def test_object_json_download_does_not_use_unsupported_force_flag():
+    commands = []
+
+    class SharedModule:
+        @staticmethod
+        def oci_auth_flags(_auth):
+            return []
+
+        @staticmethod
+        def run_json(command):
+            commands.append(command)
+            Path(command[command.index("--file") + 1]).write_text('{"ok": true}')
+            return {}
+
+    adapter = P.ModuleAdapter.__new__(P.ModuleAdapter)
+    adapter.module = SharedModule()
+
+    assert adapter.read_json(
+        "oci://bucket@namespace/path/report.json", auth={}
+    ) == {"ok": True}
+    assert "--force" not in commands[0]
+
+
 def test_single_copied_script_adopts_inputs_without_sibling_modules(tmp_path):
     standalone = tmp_path / "run_pipeline.py"
     shutil.copy(Path(P.__file__), standalone)

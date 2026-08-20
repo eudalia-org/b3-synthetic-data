@@ -285,5 +285,6 @@ def test_live_storage_uses_oci_argv_temp_files_and_conditional_flags(monkeypatch
     assert [command[3] for command in calls] == ["head", "get", "put", "put", "delete"]
     assert all("--profile" in command and "QAB" in command for command in calls)
     assert "--no-overwrite" in calls[2]
+    assert "--force" not in calls[1]
     assert calls[3][-2:] == ["--if-match", "old-etag"]
     assert calls[4][-2:] == ["--if-match", "new-etag"]

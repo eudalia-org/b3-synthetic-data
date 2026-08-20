@@ -786,9 +786,10 @@ class ModuleAdapter:
     def read_json(self, uri: str, *, auth: dict[str, str]) -> dict[str, Any]:
         fd, temporary = tempfile.mkstemp(prefix="pipeline-object-", suffix=".json")
         os.close(fd)
+        os.unlink(temporary)
         try:
             command = self._object_command("get", uri, auth)
-            command += ["--file", temporary, "--force"]
+            command += ["--file", temporary]
             self._transport()(command)
             with Path(temporary).open(encoding="utf-8") as handle:
                 return json.load(handle)
@@ -974,8 +975,9 @@ class OciCliStorage:
             prefix="pipeline-reservation-", suffix=".json"
         )
         os.close(descriptor)
+        os.unlink(temporary)
         try:
-            response = self._run(self._command("get", uri) + ["--file", temporary, "--force"])
+            response = self._run(self._command("get", uri) + ["--file", temporary])
             etag = _response_etag(response)
             if etag is None:
                 metadata = self.head(uri)
