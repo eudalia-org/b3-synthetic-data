@@ -1017,6 +1017,14 @@ def _validate_plan(plan: dict[str, Any], product: str) -> None:
         raise ReservationError("reservation request is not an engorda plan schema_version=1")
     if not isinstance(plan.get("plan_id"), str) or not plan["plan_id"]:
         raise ReservationError("engorda plan must contain plan_id")
+    body = {key: value for key, value in plan.items() if key != "plan_id"}
+    expected_plan_id = hashlib.sha256(
+        json.dumps(
+            body, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        ).encode("ascii")
+    ).hexdigest()
+    if plan["plan_id"] != expected_plan_id:
+        raise ReservationError("engorda plan_id does not match plan content")
     if plan.get("product") != product:
         raise ReservationError("engorda plan product does not match requested product")
     if not isinstance(plan.get("tables"), dict):
@@ -1119,7 +1127,19 @@ def _allocate_artifact(
         if meu_count > MAX_MEU_NUMERO_ORDINAL:
             raise ReservationError("meu_numero demand exceeds one prefix's ordinal capacity")
         prefixes = ledger["meu_numero"]["prefixes"]
-        for prefix in range(MIN_MEU_NUMERO_PREFIX, MAX_MEU_NUMERO_PREFIX + 1):
+        requested_prefix = plan["meu_numero"].get("requested_prefix")
+        if requested_prefix is not None:
+            if (not isinstance(requested_prefix, str)
+                    or not requested_prefix.isdigit()
+                    or len(requested_prefix) != 3
+                    or requested_prefix[0] == "0"):
+                raise ReservationError("plan.meu_numero.requested_prefix is invalid")
+            prefix_candidates = (int(requested_prefix),)
+        else:
+            prefix_candidates = range(
+                MIN_MEU_NUMERO_PREFIX, MAX_MEU_NUMERO_PREFIX + 1
+            )
+        for prefix in prefix_candidates:
             key = str(prefix)
             start = prefixes.get(key, 1)
             if isinstance(start, bool) or not isinstance(start, int) or start < 1:
@@ -1135,7 +1155,8 @@ def _allocate_artifact(
                 }
                 break
         else:
-            raise ReservationError("meu_numero prefixes 100..999 are exhausted")
+            scope = requested_prefix or "100..999"
+            raise ReservationError(f"meu_numero prefix {scope} is exhausted")
 
     artifact = {
         "artifact_type": "engorda_reservation",

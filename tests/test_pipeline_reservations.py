@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sys
 import threading
@@ -19,11 +20,20 @@ LEASE = "oci://bucket@namespace/control/qab/lease.json"
 LEDGER = "oci://bucket@namespace/control/qab/ledger.json"
 
 
-def plan(plan_id, *, table_count=3, step=2, minimum=100, cod_count=7, meu_count=4):
-    return {
+def plan(
+    plan_id,
+    *,
+    table_count=3,
+    step=2,
+    minimum=100,
+    cod_count=7,
+    meu_count=4,
+    requested_prefix=None,
+):
+    body = {
         "artifact_type": "engorda_plan",
         "schema_version": 1,
-        "plan_id": plan_id,
+        "test_label": plan_id,
         "product": "cdb_simplificado",
         "tables": {
             "OPERACAO": {
@@ -44,8 +54,18 @@ def plan(plan_id, *, table_count=3, step=2, minimum=100, cod_count=7, meu_count=
             },
         },
         "cod_operacao": {"count": cod_count},
-        "meu_numero": {"ordinal_count_demand": meu_count},
+        "meu_numero": {
+            "ordinal_count_demand": meu_count,
+            **({"requested_prefix": requested_prefix}
+               if requested_prefix is not None else {}),
+        },
     }
+    digest = hashlib.sha256(
+        json.dumps(
+            body, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        ).encode("ascii")
+    ).hexdigest()
+    return {**body, "plan_id": digest}
 
 
 class FakeStorage:
@@ -135,7 +155,7 @@ def test_allocates_schema_compatible_ranges_and_keeps_oracle_as_cod_authority():
     assert artifact == {
         "artifact_type": "engorda_reservation",
         "schema_version": 1,
-        "plan_id": "plan-a",
+        "plan_id": plan("plan-a")["plan_id"],
         "product": "cdb_simplificado",
         "table_pks": {
             "OPERACAO": {"count": 3, "start": 100, "end": 104, "step": 2}
@@ -167,6 +187,15 @@ def test_parallel_products_and_later_runs_never_reuse_ranges():
     assert sorted(item["meu_numero"]["start"] for item in artifacts) == [1, 5]
     assert store.json(LEDGER)["table_pks"]["OPERACAO"]["next_start"] == 112
     assert store.json(LEDGER)["meu_numero"]["prefixes"]["100"] == 9
+
+
+def test_requested_meu_numero_prefix_is_honored():
+    store = FakeStorage()
+    store.seed(REQUEST_A, plan("plan-prefix", requested_prefix="321"))
+
+    reserve(store, REQUEST_A, RESERVATION_A, "run-prefix")
+
+    assert store.json(RESERVATION_A)["meu_numero"]["prefix"] == "321"
 
 
 def test_failed_publication_burns_ranges_and_ledger_cas_retries_are_bounded():
