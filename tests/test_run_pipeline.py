@@ -414,6 +414,33 @@ def test_oci_subprocess_timeout_is_reported(monkeypatch):
         P._run(["oci", "os", "object", "list"], timeout_seconds=0.1)
 
 
+def test_security_token_subprocess_declines_hidden_cli_prompt(monkeypatch):
+    options = {}
+
+    def run(command, **kwargs):
+        options.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(P.subprocess, "run", run)
+    P._run([
+        "oci", "data-flow", "application", "get",
+        "--auth", "security_token",
+    ])
+
+    assert options["input"] == "n\n"
+    assert options["capture_output"] is True
+
+
+def test_cli_session_expired_message_is_an_authentication_error():
+    error = subprocess.CalledProcessError(
+        1,
+        ["oci"],
+        stderr="ERROR: This CLI session has expired, so it cannot currently be used",
+    )
+
+    assert P._is_authentication_error(error)
+
+
 def test_preflight_oci_failure_is_operational_not_usage_error(tmp_path):
     config = write_config(tmp_path)
     upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
@@ -567,10 +594,12 @@ def test_failed_refresh_prompts_browser_authentication(monkeypatch, tmp_path):
     calls = []
     prompts = []
     validations = 0
+    interactive_calls = []
 
-    def run(command, *, timeout_seconds=None):
+    def run(command, *, timeout_seconds=None, interactive=False):
         nonlocal validations
         calls.append(list(command))
+        interactive_calls.append((list(command), interactive))
         operation = command[1:3]
         if command[1:4] == ["data-flow", "application", "get"]:
             validations += 1
@@ -604,13 +633,17 @@ def test_failed_refresh_prompts_browser_authentication(monkeypatch, tmp_path):
     ]
     assert authenticate[authenticate.index("--region") + 1] == "sa-saopaulo-1"
     assert authenticate[authenticate.index("--profile-name") + 1] == "QAB"
+    assert next(
+        interactive for command, interactive in interactive_calls
+        if command[1:3] == ["session", "authenticate"]
+    ) is True
 
 
 def test_refresh_that_leaves_session_invalid_falls_back_to_browser(monkeypatch):
     validations = 0
     calls = []
 
-    def run(command, *, timeout_seconds=None):
+    def run(command, *, timeout_seconds=None, interactive=False):
         nonlocal validations
         calls.append(list(command))
         if command[1:4] == ["data-flow", "application", "get"]:

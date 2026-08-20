@@ -68,6 +68,8 @@ Data Flow Application before Object Storage preflight; it does not call the unre
 offers browser authentication. `adopt-inputs` probes Object Storage instead. Use
 `--no-auth-prompt` for non-interactive automation; `--region` overrides the region
 read from the OCI profile when browser auth is needed.
+Normal OCI subprocesses automatically decline the CLI's own hidden re-auth prompt;
+only the runner prompts. Browser authentication inherits the terminal visibly.
 
 The first tracer supports `cdb_simplificado`, `cdb_resgate`, `cdb_escalonamento`,
 `rdb_inclusao`, `rdb_resgate`, `lci`, and `lca`. Validation accepts `PASS` or

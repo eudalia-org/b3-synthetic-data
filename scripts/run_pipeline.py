@@ -66,6 +66,8 @@ _AUTH_FAILURE_MARKERS = (
     'status": 401',
     "token expired",
     "token has expired",
+    "cli session has expired",
+    "session has expired",
     "unauthorized",
 )
 
@@ -225,13 +227,18 @@ def _command_label(command: Sequence[str]) -> str:
 
 
 def _run(
-    command: Sequence[str], *, timeout_seconds: float | None = None
+    command: Sequence[str],
+    *,
+    timeout_seconds: float | None = None,
+    interactive: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    options: dict[str, Any] = {
-        "capture_output": True,
-        "text": True,
-        "check": True,
-    }
+    options: dict[str, Any] = {"text": True, "check": True}
+    if not interactive:
+        options["capture_output"] = True
+        if _uses_security_token(command):
+            # OCI CLI otherwise opens its own hidden re-auth prompt while the
+            # parent captures stdout/stderr. Decline it so Click can prompt.
+            options["input"] = "n\n"
     if timeout_seconds is not None:
         options["timeout"] = timeout_seconds
     try:
@@ -487,6 +494,7 @@ class ModuleAdapter:
         *,
         timeout_seconds: float | None = None,
         wrap_errors: bool = True,
+        interactive: bool = False,
     ) -> None:
         if self.progress is not None:
             self.progress.emit(
@@ -494,10 +502,12 @@ class ModuleAdapter:
                 f"{(timeout_seconds or self.timeout_seconds):g}s"
             )
         try:
-            _run(
-                command,
-                timeout_seconds=timeout_seconds or self.timeout_seconds,
-            )
+            run_options: dict[str, Any] = {
+                "timeout_seconds": timeout_seconds or self.timeout_seconds,
+            }
+            if interactive:
+                run_options["interactive"] = True
+            _run(command, **run_options)
         except subprocess.CalledProcessError as error:
             if not wrap_errors:
                 raise
@@ -585,6 +595,7 @@ class ModuleAdapter:
                     )
                 self._auth_run(
                     authenticate,
+                    interactive=True,
                 )
                 if not probe_auth():
                     raise OciExecutionError(
