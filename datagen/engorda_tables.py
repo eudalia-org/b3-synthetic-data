@@ -2845,21 +2845,53 @@ def _target_fk_rejections(
     """Resolve every emitted FK against same-root synthetic parents or Oracle."""
     rejected: Set[int] = set()
     reasons: Dict[int, Set[str]] = {}
-    selective_missing: Optional[DataFrame] = None
+    selective_rows: List[Tuple[Any, str, str, str]] = []
+    selective_root_field: Optional[T.StructField] = None
+    selective_value_nullable = False
     order_index = {table: index for index, table in enumerate(materialization_order)}
+    edges_by_child: Dict[str, List[dict[str, Any]]] = {}
+    parent_requirements: Dict[
+        str, Dict[Tuple[str, ...], Tuple[T.DataType, ...]]
+    ] = {}
+    parent_requirement_uses: Dict[Tuple[str, Tuple[str, ...]], int] = {}
 
+    # Validate the complete edge plan before starting any Spark iterator or
+    # Oracle probe. This keeps malformed later edges from producing partial work.
     for table in sorted(planos):
         child = lotes[table]
-        provenance = proveniencias[table]
-        child_pk = list(planos[table].pk_cols)
-        attributed = child.join(provenance, child_pk, "inner")
-        table_fks = _fk_list(spec[table])
-        attributed_cached = len(table_fks) > 1
-        parent_use_counts: Dict[str, int] = {}
-        for fk in table_fks:
+        for fk in _fk_list(spec[table]):
             child_cols = tuple(fk.get("columns") or ())
             parent_table = fk.get("parent_table")
             parent_cols = tuple(fk.get("parent_columns") or ())
+            if (not parent_table or not child_cols or not parent_cols
+                    or len(child_cols) != len(parent_cols)):
+                raise ValueError(
+                    f"FK inválida no spec: {table}.{list(child_cols)} -> "
+                    f"{parent_table}.{list(parent_cols)}"
+                )
+            missing_child_cols = sorted(set(child_cols) - set(child.columns))
+            if missing_child_cols:
+                raise ValueError(
+                    f"FK do spec usa coluna(s) ausente(s) em {table}: "
+                    f"{missing_child_cols}"
+                )
+            nullable_nullifications = (
+                set(child_cols)
+                & set(nullify_columns.get(table, ()))
+                - _not_null_cols(spec[table])
+            )
+            if nullable_nullifications:
+                logger.info(
+                    "Admissão FK: %s.%s será anulada integralmente; probe pulado.",
+                    table,
+                    list(child_cols),
+                )
+                continue
+
+            child_types = tuple(child.schema[column].dataType for column in child_cols)
+            numeric_flags = tuple(
+                isinstance(data_type, T.NumericType) for data_type in child_types
+            )
             remappable = any(
                 edge.columns == child_cols
                 and edge.parent_table == parent_table
@@ -2870,167 +2902,177 @@ def _target_fk_rejections(
                 parent_table == table
                 or order_index.get(parent_table, len(order_index)) < order_index[table]
             )
+            internal_requirement = None
             if (remappable and parent_map_available
                     and parent_table in lotes and parent_table in proveniencias):
-                parent_use_counts[parent_table] = parent_use_counts.get(parent_table, 0) + 1
-
-        edge_states: List[dict[str, Any]] = []
-        tagged_key_frames: List[DataFrame] = []
-        attributed_parents: Dict[str, DataFrame] = {}
-        cached_parent_tables: Set[str] = set()
-        try:
-            if attributed_cached:
-                attributed = attributed.persist()
-            for fk in table_fks:
-                child_cols = tuple(fk.get("columns") or ())
-                parent_table = fk.get("parent_table")
-                parent_cols = tuple(fk.get("parent_columns") or ())
-                if (not parent_table or not child_cols or not parent_cols
-                        or len(child_cols) != len(parent_cols)):
+                parent = lotes[parent_table]
+                missing_parent_cols = sorted(set(parent_cols) - set(parent.columns))
+                if missing_parent_cols:
                     raise ValueError(
-                        f"FK inválida no spec: {table}.{list(child_cols)} -> "
-                        f"{parent_table}.{list(parent_cols)}"
+                        f"FK do spec usa coluna(s) pai ausente(s) em {parent_table}: "
+                        f"{missing_parent_cols}"
                     )
-                missing_child_cols = sorted(set(child_cols) - set(child.columns))
-                if missing_child_cols:
-                    raise ValueError(
-                        f"FK do spec usa coluna(s) ausente(s) em {table}: "
-                        f"{missing_child_cols}"
-                    )
-                nullable_nullifications = (
-                    set(child_cols)
-                    & set(nullify_columns.get(table, ()))
-                    - _not_null_cols(spec[table])
+                parent_types = tuple(
+                    parent.schema[column].dataType for column in parent_cols
                 )
-                if nullable_nullifications:
-                    logger.info(
-                        "Admissão FK: %s.%s será anulada integralmente; probe pulado.",
-                        table,
-                        list(child_cols),
-                    )
+                parent_requirements.setdefault(parent_table, {})[
+                    parent_cols
+                ] = parent_types
+                internal_requirement = (parent_table, parent_cols)
+                parent_requirement_uses[internal_requirement] = (
+                    parent_requirement_uses.get(internal_requirement, 0) + 1
+                )
+
+            selective_indexes = [
+                index for index, column in enumerate(child_cols)
+                if (table, column) in selective_keys
+            ]
+            label = (
+                f"FK {table}.{list(child_cols)} -> "
+                f"{parent_table}.{list(parent_cols)}"
+            )
+            edges_by_child.setdefault(table, []).append({
+                "child_cols": child_cols,
+                "child_types": child_types,
+                "parent_table": parent_table,
+                "parent_cols": parent_cols,
+                "numeric_flags": numeric_flags,
+                "selective_indexes": selective_indexes,
+                "label": label,
+                "internal_requirement": internal_requirement,
+                "residual_roots": {},
+            })
+
+    # Load each parent lazily on first use and release it after its last child.
+    # This keeps one iterator per parent table without retaining the complete
+    # multiproduct parent graph for the duration of admission.
+    internal_sets: Dict[
+        str, Dict[Tuple[str, ...], Set[Tuple[Any, Tuple[str, ...]]]]
+    ] = {}
+
+    def ensure_parent_sets(parent_table: str) -> None:
+        if parent_table in internal_sets:
+            return
+        requirements = parent_requirements[parent_table]
+        parent = lotes[parent_table]
+        parent_pk = list(planos[parent_table].pk_cols)
+        wide_columns = list(dict.fromkeys(
+            column for columns in requirements for column in columns
+        ))
+        projected = (
+            parent.join(proveniencias[parent_table], parent_pk, "inner")
+            .select(
+                ROOT_PROVENANCE_COL,
+                *[
+                    F.col(column).cast("string").alias(column)
+                    for column in wide_columns
+                ],
+            )
+        )
+        table_sets = {
+            columns: set() for columns in requirements
+        }
+        internal_sets[parent_table] = table_sets
+        row_count = 0
+        started = time.perf_counter()
+        for row in projected.toLocalIterator(prefetchPartitions=False):
+            row_count += 1
+            root = row[ROOT_PROVENANCE_COL]
+            for columns, data_types in requirements.items():
+                values = tuple(row[column] for column in columns)
+                # Spark equality never matches a tuple with a null component.
+                if any(value is None for value in values):
                     continue
-
-                key_cols = [f"__fk_k{i}" for i in range(len(child_cols))]
-                child_types = tuple(child.schema[column].dataType for column in child_cols)
-                numeric_flags = tuple(
-                    isinstance(data_type, T.NumericType) for data_type in child_types
-                )
-                present = []
-                for column, data_type in zip(child_cols, child_types):
-                    predicate = F.col(column).isNotNull()
-                    if isinstance(data_type, T.StringType):
-                        predicate = predicate & (F.col(column) != F.lit(""))
-                    present.append(predicate)
-                refs = (
-                    attributed.where(
-                        present[0]
-                        if len(present) == 1
-                        else reduce(lambda a, b: a & b, present)
+                key = tuple(
+                    _canon_oracle_key(
+                        value, isinstance(data_type, T.NumericType)
                     )
-                    .select(
-                        F.col(ROOT_PROVENANCE_COL),
-                        *[
-                            _fk_key_col(F.col(column), data_type).alias(key_col)
-                            for column, data_type, key_col in zip(
-                                child_cols, child_types, key_cols
-                            )
-                        ],
-                    )
-                    .dropDuplicates()
+                    for value, data_type in zip(values, data_types)
                 )
+                table_sets[columns].add((root, key))
+        logger.info(
+            "PERF FK parent=%s rows=%d internal_distinct_keys=%d "
+            "requirements=%d extraction_seconds=%.3f",
+            parent_table,
+            row_count,
+            sum(len(keys) for keys in table_sets.values()),
+            len(requirements),
+            time.perf_counter() - started,
+        )
 
-                internal = None
-                remappable = any(
-                    edge.columns == child_cols
-                    and edge.parent_table == parent_table
-                    and edge.parent_columns == parent_cols
-                    for edge in planos[table].fks_remap
+    # Spark performs the cast once in the wide projection. Driver-side numeric
+    # normalization then mirrors _fk_key_col without Python-specific formatting.
+    for table in sorted(planos):
+        edge_states = edges_by_child.get(table, [])
+        if not edge_states:
+            continue
+        for state in edge_states:
+            requirement = state["internal_requirement"]
+            if requirement is not None:
+                ensure_parent_sets(requirement[0])
+        child = lotes[table]
+        provenance = proveniencias[table]
+        child_pk = list(planos[table].pk_cols)
+        wide_columns = list(dict.fromkeys(
+            column
+            for state in edge_states
+            for column in state["child_cols"]
+        ))
+        projected = (
+            child.join(provenance, child_pk, "inner")
+            .select(
+                ROOT_PROVENANCE_COL,
+                *[
+                    F.col(column).cast("string").alias(column)
+                    for column in wide_columns
+                ],
+            )
+        )
+        row_count = 0
+        started = time.perf_counter()
+        for row in projected.toLocalIterator(prefetchPartitions=False):
+            row_count += 1
+            root = row[ROOT_PROVENANCE_COL]
+            for state in edge_states:
+                values = tuple(row[column] for column in state["child_cols"])
+                if any(
+                    value is None
+                    or (isinstance(data_type, T.StringType) and value == "")
+                    for value, data_type in zip(values, state["child_types"])
+                ):
+                    continue
+                key = tuple(
+                    _canon_oracle_key(value, numeric)
+                    for value, numeric in zip(values, state["numeric_flags"])
                 )
-                parent_map_available = (
-                    parent_table == table
-                    or order_index.get(parent_table, len(order_index)) < order_index[table]
-                )
-                if (remappable and parent_map_available
-                        and parent_table in lotes and parent_table in proveniencias):
-                    parent = lotes[parent_table]
-                    missing_parent_cols = sorted(set(parent_cols) - set(parent.columns))
-                    if missing_parent_cols:
-                        raise ValueError(
-                            f"FK do spec usa coluna(s) pai ausente(s) em {parent_table}: "
-                            f"{missing_parent_cols}"
-                        )
-                    if parent_table == table:
-                        attributed_parent = attributed
-                    else:
-                        attributed_parent = attributed_parents.get(parent_table)
-                        if attributed_parent is None:
-                            parent_pk = list(planos[parent_table].pk_cols)
-                            attributed_parent = parent.join(
-                                proveniencias[parent_table], parent_pk, "inner"
-                            )
-                            if parent_use_counts.get(parent_table, 0) > 1:
-                                attributed_parent = attributed_parent.persist()
-                                cached_parent_tables.add(parent_table)
-                            attributed_parents[parent_table] = attributed_parent
-                    internal = attributed_parent.select(
-                        F.col(ROOT_PROVENANCE_COL),
-                        *[
-                            _fk_key_col(
-                                F.col(column), parent.schema[column].dataType
-                            ).alias(key_col)
-                            for column, key_col in zip(parent_cols, key_cols)
-                        ],
-                    ).dropDuplicates()
+                requirement = state["internal_requirement"]
+                if requirement is not None:
+                    parent_table, parent_cols = requirement
+                    if (root, key) in internal_sets[parent_table][parent_cols]:
+                        continue
+                roots = state["residual_roots"].setdefault(key, set())
+                roots.add(root)
+        extraction_seconds = time.perf_counter() - started
+        logger.info(
+            "PERF FK table=%s rows=%d residual_distinct_keys=%d edges=%d "
+            "extraction_seconds=%.3f",
+            table,
+            row_count,
+            sum(len(state["residual_roots"]) for state in edge_states),
+            len(edge_states),
+            extraction_seconds,
+        )
 
-                residual = (
-                    refs if internal is None else refs.join(
-                        internal, [ROOT_PROVENANCE_COL, *key_cols], "left_anti"
-                    )
-                ).persist()
-                edge_id = len(edge_states)
-                distinct_keys = residual.select(*key_cols).dropDuplicates()
-                tagged_key_frames.append(
-                    distinct_keys.select(
-                        F.lit(edge_id).cast("int").alias("__fk_edge"),
-                        F.array(*[F.col(key) for key in key_cols]).alias("__fk_key"),
-                    )
-                )
-                selective_indexes = [
-                    index for index, column in enumerate(child_cols)
-                    if (table, column) in selective_keys
-                ]
-                label = (
-                    f"FK {table}.{list(child_cols)} -> "
-                    f"{parent_table}.{list(parent_cols)}"
-                )
-                edge_states.append({
-                    "id": edge_id,
-                    "child_cols": child_cols,
-                    "parent_table": parent_table,
-                    "parent_cols": parent_cols,
-                    "key_cols": key_cols,
-                    "numeric_flags": numeric_flags,
-                    "selective_indexes": selective_indexes,
-                    "label": label,
-                    "residual": residual,
-                    "missing_schema": T.StructType([
-                        T.StructField(key_col, T.StringType(), False)
-                        for key_col in key_cols
-                    ]),
-                    "pending": [],
-                    "missing_df_accum": None,
-                    "batches_since_checkpoint": 0,
-                    "oracle_seconds": 0.0,
-                    "batch_processing_seconds": 0.0,
-                    "lookup_batches": 0,
-                    "lookup_keys": 0,
-                })
-
-            def process_batch(state: dict[str, Any], batch: List[Tuple[str, ...]]) -> None:
-                batch_started = time.perf_counter()
+        for state in edge_states:
+            residual_roots = state["residual_roots"]
+            keys = sorted(residual_roots)
+            missing_keys: Set[Tuple[str, ...]] = set()
+            oracle_seconds = 0.0
+            lookup_batches = 0
+            for offset in range(0, len(keys), 900):
+                batch = keys[offset:offset + 900]
                 lookup_started = time.perf_counter()
-                state["lookup_batches"] += 1
-                state["lookup_keys"] += len(batch)
+                lookup_batches += 1
                 try:
                     existing = existing_key_lookup(
                         state["parent_table"],
@@ -3039,147 +3081,102 @@ def _target_fk_rejections(
                         state["numeric_flags"],
                     )
                 finally:
-                    state["oracle_seconds"] += time.perf_counter() - lookup_started
-                missing = sorted(set(batch) - existing)
-                if not missing:
-                    state["batch_processing_seconds"] += (
-                        time.perf_counter() - batch_started
-                    )
-                    return
-                missing_batch = spark.createDataFrame(missing, state["missing_schema"])
-                accumulated = state["missing_df_accum"]
-                state["missing_df_accum"] = (
-                    missing_batch if accumulated is None
-                    else accumulated.unionByName(missing_batch)
-                )
-                state["batches_since_checkpoint"] += 1
-                if state["batches_since_checkpoint"] == 32:
-                    previous = state["missing_df_accum"]
-                    state["missing_df_accum"] = (
-                        previous.dropDuplicates().localCheckpoint(eager=True)
-                    )
-                    if previous is not state["missing_df_accum"]:
-                        previous.unpersist(blocking=False)
-                    state["batches_since_checkpoint"] = 0
-                state["batch_processing_seconds"] += (
-                    time.perf_counter() - batch_started
-                )
+                    oracle_seconds += time.perf_counter() - lookup_started
+                missing_keys.update(set(batch) - existing)
 
-            extraction_elapsed = 0.0
-            table_key_count = 0
-            if tagged_key_frames:
-                tagged_keys = reduce(
-                    lambda left, right: left.unionByName(right), tagged_key_frames
-                )
-                extraction_started = time.perf_counter()
-                for row in tagged_keys.toLocalIterator(prefetchPartitions=False):
-                    state = edge_states[int(row["__fk_edge"])]
-                    pending = state["pending"]
-                    pending.append(tuple(str(value) for value in row["__fk_key"]))
-                    table_key_count += 1
-                    if len(pending) == 900:
-                        process_batch(state, pending)
-                        state["pending"] = []
-                extraction_elapsed = time.perf_counter() - extraction_started
-            batches_during_extraction = sum(
-                float(state["batch_processing_seconds"]) for state in edge_states
-            )
-            logger.info(
-                "PERF FK table=%s key_extraction_seconds=%.3f "
-                "batch_processing_seconds=%.3f edges=%d keys=%d",
-                table,
-                max(0.0, extraction_elapsed - batches_during_extraction),
-                batches_during_extraction,
-                len(edge_states),
-                table_key_count,
-            )
-
-            for state in edge_states:
-                pending = state["pending"]
-                if pending:
-                    process_batch(state, pending)
-                    state["pending"] = []
-
-            for state in edge_states:
-                finalization_started = time.perf_counter()
-                child_cols = state["child_cols"]
-                key_cols = state["key_cols"]
-                selective_indexes = state["selective_indexes"]
-                label = state["label"]
-                residual = state["residual"]
-                missing_df_accum = state["missing_df_accum"]
-                missing_count = 0
-                edge_bad_roots: Set[int] = set()
-                if missing_df_accum is not None:
-                    previous = missing_df_accum
-                    missing_df = previous.dropDuplicates().localCheckpoint(eager=True)
-                    if previous is not missing_df:
-                        previous.unpersist(blocking=False)
-                    missing_count = missing_df.count()
-                    missing_refs = residual.join(
-                        missing_df, key_cols, "left_semi"
-                    ).select(ROOT_PROVENANCE_COL, *key_cols).dropDuplicates()
-                    if selective_indexes:
-                        # FKs compostas são rejeitadas pelo contrato da allowlist;
-                        # portanto há exatamente uma coluna/valor a materializar.
-                        index = selective_indexes[0]
-                        edge_missing = missing_refs.select(
-                            F.col(ROOT_PROVENANCE_COL),
-                            F.lit(table).alias("TABELA"),
-                            F.lit(child_cols[index]).alias("COLUNA"),
-                            F.col(key_cols[index]).alias("VALOR"),
-                        ).localCheckpoint(eager=True)
-                        selective_missing = (
-                            edge_missing if selective_missing is None
-                            else selective_missing.unionByName(edge_missing)
+            missing_count = len(missing_keys)
+            edge_bad_roots: Set[int] = set()
+            if state["selective_indexes"]:
+                # Composite selective edges are rejected by contract validation.
+                index = state["selective_indexes"][0]
+                if missing_count:
+                    root_field = provenance.schema[ROOT_PROVENANCE_COL]
+                    if selective_root_field is None:
+                        selective_root_field = root_field
+                    elif root_field.nullable and not selective_root_field.nullable:
+                        selective_root_field = T.StructField(
+                            ROOT_PROVENANCE_COL,
+                            selective_root_field.dataType,
+                            True,
+                            selective_root_field.metadata,
                         )
-                    else:
-                        edge_bad_roots.update(
-                            int(row[ROOT_PROVENANCE_COL])
-                            for row in missing_refs.select(ROOT_PROVENANCE_COL)
-                            .dropDuplicates().collect()
-                        )
-                    missing_df.unpersist(blocking=False)
-
-                logger.info(
-                    "PERF FK edge=%s oracle_lookup_seconds=%.3f batches=%d keys=%d",
-                    label,
-                    state["oracle_seconds"],
-                    state["lookup_batches"],
-                    state["lookup_keys"],
-                )
-                if selective_indexes and missing_count:
+                    selective_value_nullable = (
+                        selective_value_nullable
+                        or child.schema[state["child_cols"][index]].nullable
+                    )
+                for key in sorted(missing_keys):
+                    for root in sorted(residual_roots[key]):
+                        selective_rows.append((
+                            root,
+                            table,
+                            state["child_cols"][index],
+                            key[index],
+                        ))
+                if missing_count:
                     logger.info(
                         "Admissão FK seletiva: %s, %d chave(s) ausente(s); "
                         "a coluna nullable será anulada.",
-                        label,
+                        state["label"],
                         missing_count,
                     )
-                else:
-                    rejected.update(edge_bad_roots)
-                    for root in edge_bad_roots:
-                        reasons.setdefault(root, set()).add(label)
-                    if missing_count:
-                        logger.info(
-                            "Admissão FK: %s, %d chave(s) ausente(s), "
-                            "%d NUM_IF rejeitado(s).",
-                            label,
-                            missing_count,
-                            len(edge_bad_roots),
-                        )
-                logger.info(
-                    "PERF FK edge=%s finalization_seconds=%.3f",
-                    label,
-                    time.perf_counter() - finalization_started,
-                )
-        finally:
-            for state in edge_states:
-                state["residual"].unpersist(blocking=False)
-            for parent_table in cached_parent_tables:
-                attributed_parents[parent_table].unpersist(blocking=False)
-            if attributed_cached:
-                attributed.unpersist(blocking=False)
+            else:
+                for key in missing_keys:
+                    edge_bad_roots.update(
+                        int(root) for root in residual_roots[key]
+                    )
+                rejected.update(edge_bad_roots)
+                for root in edge_bad_roots:
+                    reasons.setdefault(root, set()).add(state["label"])
+                if missing_count:
+                    logger.info(
+                        "Admissão FK: %s, %d chave(s) ausente(s), "
+                        "%d NUM_IF rejeitado(s).",
+                        state["label"],
+                        missing_count,
+                        len(edge_bad_roots),
+                    )
+            logger.info(
+                "PERF FK edge=%s residual_distinct_keys=%d "
+                "oracle_lookup_seconds=%.3f oracle_batches=%d oracle_keys=%d",
+                state["label"],
+                len(keys),
+                oracle_seconds,
+                lookup_batches,
+                len(keys),
+            )
+            residual_roots.clear()
 
+        for state in edge_states:
+            requirement = state["internal_requirement"]
+            if requirement is None:
+                continue
+            remaining = parent_requirement_uses[requirement] - 1
+            parent_requirement_uses[requirement] = remaining
+            if remaining == 0:
+                parent_table, parent_cols = requirement
+                table_sets = internal_sets.get(parent_table)
+                if table_sets is not None:
+                    table_sets.pop(parent_cols, None)
+                    if not table_sets:
+                        internal_sets.pop(parent_table, None)
+
+    selective_missing = None
+    if selective_rows:
+        assert selective_root_field is not None
+        selective_missing = spark.createDataFrame(
+            selective_rows,
+            T.StructType([
+                T.StructField(
+                    ROOT_PROVENANCE_COL,
+                    selective_root_field.dataType,
+                    selective_root_field.nullable,
+                    selective_root_field.metadata,
+                ),
+                T.StructField("TABELA", T.StringType(), False),
+                T.StructField("COLUNA", T.StringType(), False),
+                T.StructField("VALOR", T.StringType(), selective_value_nullable),
+            ]),
+        )
     return rejected, reasons, selective_missing
 
 

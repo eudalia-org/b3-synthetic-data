@@ -250,7 +250,7 @@ def _fixture(spark):
     return sources, spec, plans, profile
 
 
-def test_target_fk_admission_streams_all_child_edges_in_one_action(
+def test_target_fk_admission_streams_all_child_edges_once(
     spark, monkeypatch
 ):
     child = spark.createDataFrame(
@@ -327,6 +327,83 @@ def test_target_fk_admission_streams_all_child_edges_in_one_action(
     assert missing is None
 
 
+def test_target_fk_admission_streams_multiple_parent_column_sets_once(
+    spark, monkeypatch
+):
+    parent = spark.createDataFrame(
+        [(1, 10, "A"), (2, 20, "B")],
+        "ID long, PARENT_ID long, PARENT_CODE string",
+    )
+    parent_provenance = spark.createDataFrame(
+        [(1, 101), (2, 202)], f"ID long, {eng.ROOT_PROVENANCE_COL} long"
+    )
+    child = spark.createDataFrame(
+        [(11, 10, "A"), (12, 20, "B")],
+        "ID long, FK_ID long, FK_CODE string",
+    )
+    child_provenance = spark.createDataFrame(
+        [(11, 101), (12, 202)], f"ID long, {eng.ROOT_PROVENANCE_COL} long"
+    )
+    projections = []
+    frame_class = type(child)
+    original_iterator = frame_class.toLocalIterator
+
+    def tracked_iterator(frame, *args, **kwargs):
+        projections.append(tuple(frame.columns))
+        return original_iterator(frame, *args, **kwargs)
+
+    monkeypatch.setattr(frame_class, "toLocalIterator", tracked_iterator)
+    spec = {
+        "PARENT": {"pk_cols": ["ID"], "foreign_keys": []},
+        "CHILD": {
+            "pk_cols": ["ID"],
+            "foreign_keys": [
+                {
+                    "columns": ["FK_ID"],
+                    "parent_table": "PARENT",
+                    "parent_columns": ["PARENT_ID"],
+                },
+                {
+                    "columns": ["FK_CODE"],
+                    "parent_table": "PARENT",
+                    "parent_columns": ["PARENT_CODE"],
+                },
+            ],
+        },
+    }
+    plans = {
+        "PARENT": eng.PlanoTabela("PARENT", ("ID",)),
+        "CHILD": eng.PlanoTabela(
+            "CHILD",
+            ("ID",),
+            [
+                eng.FkRemap(("FK_ID",), "PARENT", ("PARENT_ID",), False),
+                eng.FkRemap(("FK_CODE",), "PARENT", ("PARENT_CODE",), False),
+            ],
+        ),
+    }
+
+    rejected, reasons, missing = eng._target_fk_rejections(
+        spark,
+        spec,
+        plans,
+        {"PARENT": parent, "CHILD": child},
+        {"PARENT": parent_provenance, "CHILD": child_provenance},
+        ["PARENT", "CHILD"],
+        frozenset(),
+        {},
+        lambda *_args: pytest.fail("internally satisfied keys reached Oracle"),
+    )
+
+    assert projections.count((
+        eng.ROOT_PROVENANCE_COL, "PARENT_ID", "PARENT_CODE"
+    )) == 1
+    assert projections.count((eng.ROOT_PROVENANCE_COL, "FK_ID", "FK_CODE")) == 1
+    assert rejected == set()
+    assert reasons == {}
+    assert missing is None
+
+
 def test_target_fk_admission_keeps_selective_and_hard_edges_isolated(spark):
     child = spark.createDataFrame(
         [(1, "S1", "H1"), (2, "S2", "H2")],
@@ -380,12 +457,140 @@ def test_target_fk_admission_keeps_selective_and_hard_edges_isolated(spark):
     ]
 
 
-def test_target_fk_admission_keeps_oracle_batches_at_most_900(spark):
-    child = spark.range(901).selectExpr("id AS ID", "id AS FK")
+def test_target_fk_admission_mixed_edges_have_exact_outputs(spark):
+    parent = spark.createDataFrame(
+        [
+            (1, Decimal("1.5000"), "I"),
+            (2, Decimal("2.0000"), "I"),
+        ],
+        "ID long, PARENT_NUMBER decimal(10,4), PARENT_KIND string",
+    )
+    parent_provenance = spark.createDataFrame(
+        [(1, 101), (2, 202)], f"ID long, {eng.ROOT_PROVENANCE_COL} long"
+    )
+    child = spark.createDataFrame(
+        [
+            (11, Decimal("1.5000"), "I", Decimal("10.5000"), "X", "S1", "H1"),
+            (12, Decimal("3.0000"), "I", Decimal("20.0000"), "Y", "S2", "H2"),
+        ],
+        "ID long, FK_INTERNAL_NUMBER decimal(10,4), FK_INTERNAL_KIND string, "
+        "FK_EXTERNAL_NUMBER decimal(10,4), FK_EXTERNAL_KIND string, "
+        "FK_SELECTIVE string, FK_HARD string",
+    )
+    child_provenance = spark.createDataFrame(
+        [(11, 101), (12, 202)], f"ID long, {eng.ROOT_PROVENANCE_COL} long"
+    )
+    spec = {
+        "INTERNAL_PARENT": {"pk_cols": ["ID"], "foreign_keys": []},
+        "CHILD": {
+            "pk_cols": ["ID"],
+            "foreign_keys": [
+                {
+                    "columns": ["FK_INTERNAL_NUMBER", "FK_INTERNAL_KIND"],
+                    "parent_table": "INTERNAL_PARENT",
+                    "parent_columns": ["PARENT_NUMBER", "PARENT_KIND"],
+                },
+                {
+                    "columns": ["FK_EXTERNAL_NUMBER", "FK_EXTERNAL_KIND"],
+                    "parent_table": "EXTERNAL_PARENT",
+                    "parent_columns": ["PARENT_NUMBER", "PARENT_KIND"],
+                },
+                {
+                    "columns": ["FK_SELECTIVE"],
+                    "parent_table": "SELECTIVE_PARENT",
+                    "parent_columns": ["CODE"],
+                },
+                {
+                    "columns": ["FK_HARD"],
+                    "parent_table": "HARD_PARENT",
+                    "parent_columns": ["CODE"],
+                },
+            ],
+        },
+    }
+    plans = {
+        "INTERNAL_PARENT": eng.PlanoTabela("INTERNAL_PARENT", ("ID",)),
+        "CHILD": eng.PlanoTabela(
+            "CHILD",
+            ("ID",),
+            [eng.FkRemap(
+                ("FK_INTERNAL_NUMBER", "FK_INTERNAL_KIND"),
+                "INTERNAL_PARENT",
+                ("PARENT_NUMBER", "PARENT_KIND"),
+                False,
+            )],
+        ),
+    }
+    probes = []
+
+    def existing_keys(table, columns, keys, numeric_flags):
+        probes.append((table, columns, list(keys), numeric_flags))
+        missing_by_table = {
+            "SELECTIVE_PARENT": {("S1",)},
+            "HARD_PARENT": {("H2",)},
+        }
+        return set(keys) - missing_by_table.get(table, set())
+
+    rejected, reasons, missing = eng._target_fk_rejections(
+        spark,
+        spec,
+        plans,
+        {"INTERNAL_PARENT": parent, "CHILD": child},
+        {"INTERNAL_PARENT": parent_provenance, "CHILD": child_provenance},
+        ["INTERNAL_PARENT", "CHILD"],
+        frozenset({("CHILD", "FK_SELECTIVE")}),
+        {},
+        existing_keys,
+    )
+
+    assert probes == [
+        (
+            "INTERNAL_PARENT",
+            ("PARENT_NUMBER", "PARENT_KIND"),
+            [("3", "I")],
+            (True, False),
+        ),
+        (
+            "EXTERNAL_PARENT",
+            ("PARENT_NUMBER", "PARENT_KIND"),
+            [("10.5", "X"), ("20", "Y")],
+            (True, False),
+        ),
+        ("SELECTIVE_PARENT", ("CODE",), [("S1",), ("S2",)], (False,)),
+        ("HARD_PARENT", ("CODE",), [("H1",), ("H2",)], (False,)),
+    ]
+    assert rejected == {202}
+    assert reasons == {
+        202: {"FK CHILD.['FK_HARD'] -> HARD_PARENT.['CODE']"}
+    }
+    assert [tuple(row) for row in missing.collect()] == [
+        (101, "CHILD", "FK_SELECTIVE", "S1")
+    ]
+    assert [
+        (field.name, field.dataType.simpleString(), field.nullable)
+        for field in missing.schema.fields
+    ] == [
+        (eng.ROOT_PROVENANCE_COL, "bigint", True),
+        ("TABELA", "string", False),
+        ("COLUNA", "string", False),
+        ("VALOR", "string", True),
+    ]
+
+
+def test_target_fk_admission_keeps_100k_keys_in_900_batches_without_collect(
+    spark, monkeypatch
+):
+    child = spark.range(100_000).selectExpr("id AS ID", "id AS FK")
     provenance = child.selectExpr(
         "ID", f"ID AS {eng.ROOT_PROVENANCE_COL}"
     )
     batch_sizes = []
+    frame_class = type(child)
+
+    def forbidden_collect(*_args, **_kwargs):
+        pytest.fail("FK admission must stream instead of collect")
+
+    monkeypatch.setattr(frame_class, "collect", forbidden_collect)
 
     def existing_keys(_table, _columns, keys, _numeric_flags):
         batch_sizes.append(len(keys))
@@ -412,7 +617,41 @@ def test_target_fk_admission_keeps_oracle_batches_at_most_900(spark):
         existing_keys,
     )
 
-    assert sorted(batch_sizes) == [1, 900]
+    assert sum(batch_sizes) == 100_000
+    assert max(batch_sizes) == 900
+    assert len(batch_sizes) == 112
+    assert rejected == set()
+    assert reasons == {}
+    assert missing is None
+
+
+def test_target_fk_admission_empty_child_has_no_oracle_work(spark):
+    child = spark.createDataFrame([], "ID long, FK string")
+    provenance = spark.createDataFrame(
+        [], f"ID long, {eng.ROOT_PROVENANCE_COL} long"
+    )
+
+    rejected, reasons, missing = eng._target_fk_rejections(
+        spark,
+        {
+            "CHILD": {
+                "pk_cols": ["ID"],
+                "foreign_keys": [{
+                    "columns": ["FK"],
+                    "parent_table": "PARENT",
+                    "parent_columns": ["CODE"],
+                }],
+            }
+        },
+        {"CHILD": eng.PlanoTabela("CHILD", ("ID",))},
+        {"CHILD": child},
+        {"CHILD": provenance},
+        ["CHILD"],
+        frozenset(),
+        {},
+        lambda *_args: pytest.fail("empty child reached Oracle"),
+    )
+
     assert rejected == set()
     assert reasons == {}
     assert missing is None
