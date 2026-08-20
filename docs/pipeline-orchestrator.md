@@ -51,6 +51,7 @@ uv run --allow-insecure-host pypi.org `
   --max-concurrency 4 `
   --poll-seconds 30 `
   --oci-timeout-seconds 60 `
+  --auth-refresh-seconds 1800 `
   --profile p-lmirabella `
   --auth security_token `
   --config-file C:\Users\p-lmirabella\.oci\config `
@@ -73,6 +74,9 @@ offers browser authentication. `adopt-inputs` probes Object Storage instead. Use
 read from the OCI profile when browser auth is needed.
 Normal OCI subprocesses automatically decline the CLI's own hidden re-auth prompt;
 only the runner prompts. Browser authentication inherits the terminal visibly.
+For long engorda runs, the runner refreshes once before submission and every
+`--auth-refresh-seconds 1800` during polling. Set `0` to disable proactive refresh;
+a reactive 401 still uses the interactive refresh/browser flow.
 
 The first tracer supports `cdb_simplificado`, `cdb_resgate`, `cdb_escalonamento`,
 `rdb_inclusao`, `rdb_resgate`, `lci`, and `lca`. Validation accepts `PASS` or

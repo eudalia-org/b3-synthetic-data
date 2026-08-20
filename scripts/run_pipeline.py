@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from configparser import ConfigParser
@@ -271,6 +272,8 @@ def run_json(
     timeout_seconds: float | None = None,
     progress: Any | None = None,
     wrap_errors: bool = True,
+    reauthenticate: Callable[[], None] | None = None,
+    auto_refresh: bool = True,
 ) -> dict[str, Any]:
     """Run OCI JSON transport, refreshing one expired security-token session once."""
     command = list(command)
@@ -284,6 +287,24 @@ def run_json(
         completed = _run(command, timeout_seconds=timeout_seconds)
     except subprocess.CalledProcessError as error:
         if not (_uses_security_token(command) and _is_authentication_error(error)):
+            if not wrap_errors:
+                raise
+            raise _oci_failure(error, command) from error
+        if reauthenticate is not None:
+            if progress is not None:
+                progress.emit(
+                    "[auth] OCI command reported expired session; reauthenticating"
+                )
+            reauthenticate()
+            try:
+                completed = _run(command, timeout_seconds=timeout_seconds)
+            except subprocess.CalledProcessError as retry_error:
+                if not wrap_errors:
+                    raise
+                raise _oci_failure(retry_error, command) from retry_error
+            stdout = completed.stdout.strip()
+            return json.loads(stdout) if stdout else {}
+        if not auto_refresh:
             if not wrap_errors:
                 raise
             raise _oci_failure(error, command) from error
@@ -484,10 +505,17 @@ class ModuleAdapter:
         self,
         *,
         timeout_seconds: float = 60,
+        auth_refresh_seconds: float = 1800,
         progress: ProgressReporter | None = None,
     ):
         self.timeout_seconds = timeout_seconds
+        self.auth_refresh_seconds = auth_refresh_seconds
         self.progress = progress
+        self._auth_context: tuple[
+            dict[str, Any], bool, Callable[[str], bool], str | None
+        ] | None = None
+        self._auth_lock = threading.RLock()
+        self._last_auth_refresh = 0.0
 
     def _auth_run(
         self,
@@ -521,6 +549,7 @@ class ModuleAdapter:
         allow_prompt: bool,
         prompt: Callable[[str], bool],
         application_id: str | None = None,
+        force_refresh: bool = False,
     ) -> None:
         if auth.get("auth") != "security_token":
             if self.progress is not None:
@@ -529,6 +558,10 @@ class ModuleAdapter:
                     "first OCI request will validate credentials"
                 )
             return
+
+        self._auth_context = (
+            dict(auth), allow_prompt, prompt, application_id
+        )
 
         if application_id:
             probe = [
@@ -554,7 +587,14 @@ class ModuleAdapter:
             self.progress.emit(
                 f"[auth] validating security token against {probe_name}"
             )
-        if not probe_auth():
+        probe_valid = probe_auth()
+        if probe_valid and not force_refresh:
+            self._last_auth_refresh = time.monotonic()
+            if self.progress is not None:
+                self.progress.emit("[auth] OCI security-token session is valid")
+            return
+
+        if not probe_valid:
             if not allow_prompt:
                 raise OciExecutionError(
                     "OCI security-token session is invalid and prompting is disabled "
@@ -563,50 +603,83 @@ class ModuleAdapter:
             if not prompt("OCI security-token session is invalid. Refresh it now?"):
                 raise OciExecutionError("OCI authentication was declined by the operator")
 
-            refresh = _session_command("refresh", auth)
-            if self.progress is not None:
-                self.progress.emit("[auth] refreshing OCI security-token session")
-            refresh_succeeded = True
-            try:
-                self._auth_run(refresh, wrap_errors=False)
-            except (subprocess.CalledProcessError, OciExecutionError):
-                refresh_succeeded = False
-            else:
-                refresh_succeeded = probe_auth()
-            if not refresh_succeeded:
-                refresh_error = OciExecutionError(
-                    "OCI session refresh did not produce a valid token"
-                )
-                region = _profile_region(auth)
-                if not region:
-                    raise OciExecutionError(
-                        "OCI session refresh failed and browser authentication needs "
-                        "--region or a region in the OCI profile"
-                    ) from refresh_error
-                if not prompt(
-                    "OCI session refresh failed. Start browser authentication now?"
-                ):
-                    raise OciExecutionError(
-                        "OCI browser authentication was declined by the operator"
-                    ) from refresh_error
-                authenticate = _session_authenticate_command(auth, region)
-                if self.progress is not None:
-                    self.progress.emit(
-                        f"[auth] starting OCI browser authentication region={region}"
-                    )
-                self._auth_run(
-                    authenticate,
-                    interactive=True,
-                )
-                if not probe_auth():
-                    raise OciExecutionError(
-                        "OCI browser authentication completed but the configured "
-                        f"profile still cannot access {probe_name}"
-                    )
-            if refresh_succeeded and self.progress is not None:
-                self.progress.emit("[auth] OCI session refreshed and revalidated")
+        refresh = _session_command("refresh", auth)
         if self.progress is not None:
-            self.progress.emit("[auth] OCI security-token session is valid")
+            self.progress.emit("[auth] proactively refreshing OCI security-token session")
+        try:
+            self._auth_run(refresh, wrap_errors=False)
+            refresh_succeeded = probe_auth()
+        except (subprocess.CalledProcessError, OciExecutionError):
+            refresh_succeeded = False
+        if not refresh_succeeded:
+            refresh_error = OciExecutionError(
+                "OCI session refresh did not produce a valid token"
+            )
+            if not allow_prompt:
+                raise OciExecutionError(
+                    "OCI security-token refresh failed and prompting is disabled "
+                    "by --no-auth-prompt"
+                ) from refresh_error
+            region = _profile_region(auth)
+            if not region:
+                raise OciExecutionError(
+                    "OCI session refresh failed and browser authentication needs "
+                    "--region or a region in the OCI profile"
+                ) from refresh_error
+            if not prompt(
+                "OCI session refresh failed. Start browser authentication now?"
+            ):
+                raise OciExecutionError(
+                    "OCI browser authentication was declined by the operator"
+                ) from refresh_error
+            authenticate = _session_authenticate_command(auth, region)
+            if self.progress is not None:
+                self.progress.emit(
+                    f"[auth] starting OCI browser authentication region={region}"
+                )
+            self._auth_run(authenticate, interactive=True)
+            if not probe_auth():
+                raise OciExecutionError(
+                    "OCI browser authentication completed but the configured "
+                    f"profile still cannot access {probe_name}"
+                )
+        self._last_auth_refresh = time.monotonic()
+        if self.progress is not None:
+            self.progress.emit("[auth] OCI session refreshed and revalidated")
+
+    def _reauthenticate(self, observed_refresh: float | None = None) -> None:
+        if self._auth_context is None:
+            raise OciExecutionError("OCI authentication context is unavailable")
+        with self._auth_lock:
+            if (
+                observed_refresh is not None
+                and self._last_auth_refresh > observed_refresh
+            ):
+                return
+            auth, allow_prompt, prompt, application_id = self._auth_context
+            self.ensure_auth(
+                auth,
+                allow_prompt=allow_prompt,
+                prompt=prompt,
+                application_id=application_id,
+                force_refresh=True,
+            )
+
+    def _refresh_auth_if_due(self) -> None:
+        if (
+            self._auth_context is None
+            or self.auth_refresh_seconds <= 0
+            or time.monotonic() - self._last_auth_refresh < self.auth_refresh_seconds
+        ):
+            return
+        with self._auth_lock:
+            if time.monotonic() - self._last_auth_refresh < self.auth_refresh_seconds:
+                return
+            if self.progress is not None:
+                self.progress.emit(
+                    "[auth] proactive refresh interval reached during polling"
+                )
+            self._reauthenticate()
 
     def _compat_operation(self, name: str, default: Callable[..., Any]) -> Callable[..., Any]:
         module = getattr(self, "module", None)
@@ -630,19 +703,34 @@ class ModuleAdapter:
         operation = self._compat_operation("cancel_run", None)
         if operation is not None:
             return operation(run_id, opts)
-        return _cancel_run(run_id, opts, self._transport())
+        return _cancel_run(run_id, opts, self._transport(manage_auth=False))
 
-    def _transport(self) -> Callable[[Sequence[str]], dict[str, Any]]:
+    def _transport(
+        self, *, manage_auth: bool = True
+    ) -> Callable[[Sequence[str]], dict[str, Any]]:
         operation = self._compat_operation("run_json", None)
         if operation is not None:
             return operation
         timeout_seconds = getattr(self, "timeout_seconds", 60)
         progress = getattr(self, "progress", None)
-        return lambda command: run_json(
-            command,
-            timeout_seconds=timeout_seconds,
-            progress=progress,
-        )
+
+        def transport(command: Sequence[str]) -> dict[str, Any]:
+            if manage_auth:
+                self._refresh_auth_if_due()
+            observed_refresh = self._last_auth_refresh
+            return run_json(
+                command,
+                timeout_seconds=timeout_seconds,
+                progress=progress,
+                reauthenticate=(
+                    (lambda: self._reauthenticate(observed_refresh))
+                    if manage_auth and self._auth_context is not None
+                    else None
+                ),
+                auto_refresh=manage_auth,
+            )
+
+        return transport
 
     def _auth_flags(self, auth: dict[str, str]) -> list[str]:
         return self._compat_operation("oci_auth_flags", oci_auth_flags)(auth)
@@ -2159,6 +2247,7 @@ def _ensure_adapter_auth(
     *,
     allow_prompt: bool,
     application_id: str | None = None,
+    force_refresh: bool = False,
 ) -> None:
     ensure = getattr(adapter, "ensure_auth", None)
     if ensure is None:
@@ -2168,6 +2257,7 @@ def _ensure_adapter_auth(
         allow_prompt=allow_prompt,
         prompt=lambda message: click.confirm(message, default=True, err=True),
         application_id=application_id,
+        force_refresh=force_refresh,
     )
 
 
@@ -2198,6 +2288,7 @@ def run_command(
 
     adapter = adapter or ModuleAdapter(
         timeout_seconds=args.oci_timeout_seconds,
+        auth_refresh_seconds=args.auth_refresh_seconds,
         progress=progress,
     )
     auth = _auth_from_args(args)
@@ -2206,6 +2297,7 @@ def run_command(
         auth,
         allow_prompt=args.auth_prompt,
         application_id=config["applications"]["engorda_plan"],
+        force_refresh=args.auth_refresh_seconds > 0,
     )
     for label, uri in (("run path", plan["run_root"]), ("manifest", plan["manifest_uri"])):
         progress.emit(f"[preflight] checking OCI {label}: {uri}")
@@ -2281,6 +2373,7 @@ def adopt_inputs_command(
         return 0
     adapter = adapter or ModuleAdapter(
         timeout_seconds=args.oci_timeout_seconds,
+        auth_refresh_seconds=args.auth_refresh_seconds,
         progress=progress,
     )
     auth = _auth_from_args(args)
@@ -2314,6 +2407,13 @@ def _auth_options(command: Callable[..., Any]) -> Callable[..., Any]:
         default=60.0,
         show_default=True,
         help="Timeout for each OCI CLI command.",
+    )(command)
+    command = click.option(
+        "--auth-refresh-seconds",
+        type=click.FloatRange(min=0),
+        default=1800.0,
+        show_default=True,
+        help="Proactively refresh security-token auth during long-running polls; 0 disables.",
     )(command)
     return click.option(
         "--auth-prompt/--no-auth-prompt",

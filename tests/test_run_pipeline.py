@@ -275,6 +275,8 @@ def test_click_help_exposes_commands_and_polling_default():
     assert "60" in run.output
     assert "--auth-prompt / --no-auth-prompt" in run.output
     assert "--region" in run.output
+    assert "--auth-refresh-seconds" in run.output
+    assert "1800" in run.output
 
 
 def test_click_dry_run_finishes_without_submitting_jobs(tmp_path):
@@ -498,6 +500,32 @@ def test_security_token_refresh_has_visible_feedback(monkeypatch):
     ]
 
 
+def test_mid_poll_401_uses_runner_reauthentication_callback(monkeypatch):
+    calls = []
+    reauthentications = []
+
+    def run(command, *, timeout_seconds=None, interactive=False):
+        calls.append(list(command))
+        if len(calls) == 1:
+            raise subprocess.CalledProcessError(
+                1, command, stderr="status: 401 NotAuthenticated"
+            )
+        return subprocess.CompletedProcess(
+            command, 0, stdout='{"data": {"lifecycle-state": "IN_PROGRESS"}}', stderr=""
+        )
+
+    monkeypatch.setattr(P, "_run", run)
+    result = P.run_json(
+        ["oci", "data-flow", "run", "get", "--auth", "security_token"],
+        timeout_seconds=5,
+        reauthenticate=lambda: reauthentications.append("browser-capable-flow"),
+    )
+
+    assert result["data"]["lifecycle-state"] == "IN_PROGRESS"
+    assert reauthentications == ["browser-capable-flow"]
+    assert not any(command[1:3] == ["session", "refresh"] for command in calls)
+
+
 def test_invalid_data_flow_auth_probe_prompts_refresh(monkeypatch):
     calls = []
     prompts = []
@@ -538,7 +566,47 @@ def test_invalid_data_flow_auth_probe_prompts_refresh(monkeypatch):
         ["data-flow", "application", "get"],
     ]
     assert prompts == ["OCI security-token session is invalid. Refresh it now?"]
-    assert progress.messages[-1] == "[auth] OCI security-token session is valid"
+    assert progress.messages[-1] == "[auth] OCI session refreshed and revalidated"
+
+
+def test_valid_session_is_refreshed_before_submitting_long_run(monkeypatch):
+    calls = []
+
+    def run(command, *, timeout_seconds=None, interactive=False):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(P, "_run", run)
+    adapter = P.ModuleAdapter(timeout_seconds=5, auth_refresh_seconds=1800)
+    adapter.ensure_auth(
+        {"profile": "QAB", "auth": "security_token"},
+        allow_prompt=True,
+        prompt=lambda _message: True,
+        application_id="ocid1.dataflowapplication.test",
+        force_refresh=True,
+    )
+
+    assert [command[1:3] for command in calls] == [
+        ["data-flow", "application"],
+        ["session", "refresh"],
+        ["data-flow", "application"],
+    ]
+    assert adapter._last_auth_refresh > 0
+
+
+def test_auth_refresh_interval_triggers_during_polling(monkeypatch):
+    adapter = P.ModuleAdapter(auth_refresh_seconds=1800)
+    adapter._auth_context = (
+        {"auth": "security_token"}, True, lambda _message: True, "app"
+    )
+    adapter._last_auth_refresh = 100
+    refreshed = []
+    monkeypatch.setattr(P.time, "monotonic", lambda: 2000)
+    monkeypatch.setattr(adapter, "_reauthenticate", lambda: refreshed.append(True))
+
+    adapter._refresh_auth_if_due()
+
+    assert refreshed == [True]
 
 
 def test_adopt_inputs_auth_probe_uses_object_storage_namespace(monkeypatch):
