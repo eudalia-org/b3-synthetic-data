@@ -466,14 +466,16 @@ def test_security_token_refresh_has_visible_feedback(monkeypatch):
     ]
 
 
-def test_invalid_security_token_prompts_refresh_before_preflight(monkeypatch):
+def test_invalid_data_flow_auth_probe_prompts_refresh(monkeypatch):
     calls = []
     prompts = []
 
     def run(command, *, timeout_seconds=None):
         calls.append(list(command))
-        if command[1:3] == ["session", "validate"] and len(calls) == 1:
-            raise subprocess.CalledProcessError(1, command, stderr="session expired")
+        if command[1:4] == ["data-flow", "application", "get"] and len(calls) == 1:
+            raise subprocess.CalledProcessError(
+                1, command, stderr="status: 401 NotAuthenticated"
+            )
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     class Progress:
@@ -495,20 +497,57 @@ def test_invalid_security_token_prompts_refresh_before_preflight(monkeypatch):
         },
         allow_prompt=True,
         prompt=lambda message: prompts.append(message) or True,
+        application_id="ocid1.dataflowapplication.test",
     )
 
-    assert [command[1:3] for command in calls] == [
-        ["session", "validate"],
-        ["session", "refresh"],
-        ["session", "validate"],
+    assert [command[1:4] for command in calls] == [
+        ["data-flow", "application", "get"],
+        ["session", "refresh", "--profile"],
+        ["data-flow", "application", "get"],
     ]
     assert prompts == ["OCI security-token session is invalid. Refresh it now?"]
     assert progress.messages[-1] == "[auth] OCI security-token session is valid"
 
 
+def test_adopt_inputs_auth_probe_uses_object_storage_namespace(monkeypatch):
+    calls = []
+
+    def run(command, *, timeout_seconds=None):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(P, "_run", run)
+    P.ModuleAdapter(timeout_seconds=5).ensure_auth(
+        {"profile": "QAB", "auth": "security_token"},
+        allow_prompt=True,
+        prompt=lambda _message: True,
+        application_id=None,
+    )
+
+    assert calls[0][1:4] == ["os", "ns", "get"]
+
+
+def test_non_auth_data_flow_probe_error_does_not_prompt(monkeypatch):
+    def forbidden(command, *, timeout_seconds=None):
+        raise subprocess.CalledProcessError(1, command, stderr="status: 403 Forbidden")
+
+    monkeypatch.setattr(P, "_run", forbidden)
+    prompts = []
+    with pytest.raises(P.OciExecutionError, match="data-flow application get"):
+        P.ModuleAdapter(timeout_seconds=5).ensure_auth(
+            {"profile": "QAB", "auth": "security_token"},
+            allow_prompt=True,
+            prompt=lambda message: prompts.append(message) or True,
+            application_id="ocid1.dataflowapplication.test",
+        )
+    assert prompts == []
+
+
 def test_auth_prompt_can_be_disabled(monkeypatch):
     def invalid(command, *, timeout_seconds=None):
-        raise subprocess.CalledProcessError(1, command, stderr="session expired")
+        raise subprocess.CalledProcessError(
+            1, command, stderr="status: 401 NotAuthenticated"
+        )
 
     monkeypatch.setattr(P, "_run", invalid)
     adapter = P.ModuleAdapter(timeout_seconds=5)
@@ -518,6 +557,7 @@ def test_auth_prompt_can_be_disabled(monkeypatch):
             {"profile": "QAB", "auth": "security_token"},
             allow_prompt=False,
             prompt=lambda _message: pytest.fail("must not prompt"),
+            application_id="ocid1.dataflowapplication.test",
         )
 
 
@@ -532,10 +572,12 @@ def test_failed_refresh_prompts_browser_authentication(monkeypatch, tmp_path):
         nonlocal validations
         calls.append(list(command))
         operation = command[1:3]
-        if operation == ["session", "validate"]:
+        if command[1:4] == ["data-flow", "application", "get"]:
             validations += 1
             if validations == 1:
-                raise subprocess.CalledProcessError(1, command, stderr="expired")
+                raise subprocess.CalledProcessError(
+                    1, command, stderr="status: 401 NotAuthenticated"
+                )
         elif operation == ["session", "refresh"]:
             raise subprocess.CalledProcessError(1, command, stderr="refresh expired")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
@@ -550,6 +592,7 @@ def test_failed_refresh_prompts_browser_authentication(monkeypatch, tmp_path):
         },
         allow_prompt=True,
         prompt=lambda message: prompts.append(message) or True,
+        application_id="ocid1.dataflowapplication.test",
     )
 
     authenticate = next(
@@ -570,10 +613,12 @@ def test_refresh_that_leaves_session_invalid_falls_back_to_browser(monkeypatch):
     def run(command, *, timeout_seconds=None):
         nonlocal validations
         calls.append(list(command))
-        if command[1:3] == ["session", "validate"]:
+        if command[1:4] == ["data-flow", "application", "get"]:
             validations += 1
             if validations <= 2:
-                raise subprocess.CalledProcessError(1, command, stderr="still expired")
+                raise subprocess.CalledProcessError(
+                    1, command, stderr="status: 401 NotAuthenticated"
+                )
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     monkeypatch.setattr(P, "_run", run)
@@ -586,6 +631,7 @@ def test_refresh_that_leaves_session_invalid_falls_back_to_browser(monkeypatch):
         },
         allow_prompt=True,
         prompt=lambda _message: True,
+        application_id="ocid1.dataflowapplication.test",
     )
 
     assert any(

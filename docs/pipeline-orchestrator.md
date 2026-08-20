@@ -62,10 +62,12 @@ DAG, immutable paths, Data Flow application arguments, and reservation contract.
 Live execution prints every submission and every observed Data Flow state. Change
 `--poll-seconds 30` to control the status interval. Every OCI CLI call announces
 itself and fails after `--oci-timeout-seconds 60` instead of waiting indefinitely.
-With `--auth security_token`, the runner validates the OCI session before Object
-Storage preflight. An invalid session prompts for refresh and, if refresh fails,
-offers browser authentication. Use `--no-auth-prompt` for non-interactive automation;
-`--region` overrides the region read from the OCI profile when browser auth is needed.
+With `--auth security_token`, the runner validates credentials through the configured
+Data Flow Application before Object Storage preflight; it does not call the unreliable
+`oci session validate` path. A real 401 prompts for refresh and, if refresh fails,
+offers browser authentication. `adopt-inputs` probes Object Storage instead. Use
+`--no-auth-prompt` for non-interactive automation; `--region` overrides the region
+read from the OCI profile when browser auth is needed.
 
 The first tracer supports `cdb_simplificado`, `cdb_resgate`, `cdb_escalonamento`,
 `rdb_inclusao`, `rdb_resgate`, `lci`, and `lca`. Validation accepts `PASS` or

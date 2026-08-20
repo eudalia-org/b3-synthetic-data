@@ -509,6 +509,7 @@ class ModuleAdapter:
         *,
         allow_prompt: bool,
         prompt: Callable[[str], bool],
+        application_id: str | None = None,
     ) -> None:
         if auth.get("auth") != "security_token":
             if self.progress is not None:
@@ -518,12 +519,31 @@ class ModuleAdapter:
                 )
             return
 
-        validate = _session_command("validate", auth)
+        if application_id:
+            probe = [
+                "oci", "data-flow", "application", "get",
+                "--application-id", application_id,
+                *self._auth_flags(dict(auth)),
+            ]
+            probe_name = "Data Flow application"
+        else:
+            probe = ["oci", "os", "ns", "get", *self._auth_flags(dict(auth))]
+            probe_name = "Object Storage namespace"
+
+        def probe_auth() -> bool:
+            try:
+                self._auth_run(probe, wrap_errors=False)
+                return True
+            except subprocess.CalledProcessError as error:
+                if _is_authentication_error(error):
+                    return False
+                raise _oci_failure(error, probe) from error
+
         if self.progress is not None:
-            self.progress.emit("[auth] validating OCI security-token session")
-        try:
-            self._auth_run(validate, wrap_errors=False)
-        except subprocess.CalledProcessError:
+            self.progress.emit(
+                f"[auth] validating security token against {probe_name}"
+            )
+        if not probe_auth():
             if not allow_prompt:
                 raise OciExecutionError(
                     "OCI security-token session is invalid and prompting is disabled "
@@ -538,9 +558,14 @@ class ModuleAdapter:
             refresh_succeeded = True
             try:
                 self._auth_run(refresh, wrap_errors=False)
-                self._auth_run(validate, wrap_errors=False)
-            except (subprocess.CalledProcessError, OciExecutionError) as refresh_error:
+            except (subprocess.CalledProcessError, OciExecutionError):
                 refresh_succeeded = False
+            else:
+                refresh_succeeded = probe_auth()
+            if not refresh_succeeded:
+                refresh_error = OciExecutionError(
+                    "OCI session refresh did not produce a valid token"
+                )
                 region = _profile_region(auth)
                 if not region:
                     raise OciExecutionError(
@@ -561,7 +586,11 @@ class ModuleAdapter:
                 self._auth_run(
                     authenticate,
                 )
-                self._auth_run(validate)
+                if not probe_auth():
+                    raise OciExecutionError(
+                        "OCI browser authentication completed but the configured "
+                        f"profile still cannot access {probe_name}"
+                    )
             if refresh_succeeded and self.progress is not None:
                 self.progress.emit("[auth] OCI session refreshed and revalidated")
         if self.progress is not None:
@@ -2103,6 +2132,7 @@ def _ensure_adapter_auth(
     auth: dict[str, str],
     *,
     allow_prompt: bool,
+    application_id: str | None = None,
 ) -> None:
     ensure = getattr(adapter, "ensure_auth", None)
     if ensure is None:
@@ -2111,6 +2141,7 @@ def _ensure_adapter_auth(
         auth,
         allow_prompt=allow_prompt,
         prompt=lambda message: click.confirm(message, default=True, err=True),
+        application_id=application_id,
     )
 
 
@@ -2144,7 +2175,12 @@ def run_command(
         progress=progress,
     )
     auth = _auth_from_args(args)
-    _ensure_adapter_auth(adapter, auth, allow_prompt=args.auth_prompt)
+    _ensure_adapter_auth(
+        adapter,
+        auth,
+        allow_prompt=args.auth_prompt,
+        application_id=config["applications"]["engorda_plan"],
+    )
     for label, uri in (("run path", plan["run_root"]), ("manifest", plan["manifest_uri"])):
         progress.emit(f"[preflight] checking OCI {label}: {uri}")
         if adapter.uri_exists(uri, auth=auth):
