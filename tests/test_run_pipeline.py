@@ -810,6 +810,46 @@ def test_dry_run_is_offline_and_prints_resolved_argv(tmp_path, capsys):
     assert not (tmp_path / "local-runs").exists()
 
 
+def test_synthetic_output_uri_is_exact_across_plan_materialize_validator_and_artifact(
+    tmp_path, capsys
+):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado", "lci"))
+    args = run_args(
+        tmp_path,
+        config,
+        upstream,
+        "--product",
+        "lci",
+        "--dry-run",
+    )
+
+    assert P.main(args, adapter=NoCallsAdapter()) == 0
+
+    plan = json.loads(capsys.readouterr().out)
+    output_uris = []
+    for product in ("cdb_simplificado", "lci"):
+        artifact_uri = plan["artifacts"]["products"][product]["synthetic"]["uri"]
+        plan_node = plan["nodes"][f"{product}.engorda.plan"]
+        materialize_node = plan["nodes"][f"{product}.engorda.materialize"]
+        validator_node = plan["nodes"][f"{product}.validate"]
+        output_uris.append(artifact_uri)
+
+        assert plan_node["arguments"][
+            plan_node["arguments"].index("--output-uri") + 1
+        ] == artifact_uri
+        assert materialize_node["arguments"][
+            materialize_node["arguments"].index("--output-uri") + 1
+        ] == artifact_uri
+        assert materialize_node["output_uri"] == artifact_uri
+        assert validator_node["input_uri"] == artifact_uri
+        assert validator_node["arguments"][
+            validator_node["arguments"].index("--input-base") + 1
+        ] == artifact_uri
+
+    assert len(set(output_uris)) == 2
+
+
 @pytest.mark.parametrize(
     "product,validator",
     [
@@ -1087,6 +1127,41 @@ def test_existing_local_or_remote_run_path_is_rejected(tmp_path, capsys):
         run_args(tmp_path, config, upstream), adapter=FakeAdapter(existing=(remote,))
     ) == 2
     assert "immutable OCI run path already exists" in capsys.readouterr().err
+
+
+def test_existing_materialize_output_fails_before_manifest_submit_or_reserve(
+    tmp_path, capsys
+):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+    synthetic = (
+        "oci://bucket@namespace/runs/qab/run-001/products/"
+        "cdb_simplificado/synthetic"
+    )
+    adapter = FakeAdapter(existing=(synthetic,))
+
+    assert P.main(run_args(tmp_path, config, upstream), adapter=adapter) == 2
+
+    assert "immutable OCI materialize output" in capsys.readouterr().err
+    assert adapter.created == {}
+    assert adapter.reservations == []
+    assert not (tmp_path / "local-runs" / "qab" / "run-001" / "manifest.json").exists()
+
+
+def test_validate_only_skips_materialize_output_preflight(tmp_path):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+    args = run_args(tmp_path, config, upstream)
+    args[args.index("engorda")] = "validate"
+    adapter = FakeAdapter()
+
+    assert P.main(args, adapter=adapter) == 0
+
+    checked_uris = [call[1] for call in adapter.calls if call[0] == "uri_exists"]
+    assert checked_uris == [
+        "oci://bucket@namespace/runs/qab/run-001",
+        "oci://bucket@namespace/manifests/qab/run-001/manifest.json",
+    ]
 
 
 def test_keyboard_interrupt_cancels_active_runs_and_records_manifest(tmp_path, monkeypatch):

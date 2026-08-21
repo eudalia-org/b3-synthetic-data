@@ -60,6 +60,16 @@ uv run --allow-insecure-host pypi.org `
 
 Use `--dry-run` first. It performs no OCI or Oracle calls and prints the resolved
 DAG, immutable paths, Data Flow application arguments, and reservation contract.
+The plan job writes an `engorda_plan` schema v2 artifact. It snapshots the selected
+lote to a location derived by engorda and commits that location as the plan's
+`selected_lote` descriptor; there is intentionally no runner snapshot-path option.
+Materialization consumes that committed snapshot instead of rebuilding the lote.
+Schema v1 plans are incompatible with reservation and must be regenerated with the
+current plan job; reservation artifacts remain schema v1.
+Before burning ranges, the runner verifies the plan-v2 snapshot descriptor's UUID,
+table paths, schema-object presence, source row counts, and optional selective-missing
+dataset contract against the hashed plan. Spark performs the deeper
+Parquet/StructType checks during materialization.
 The engorda config must include an Object Storage `query_num_if_sql` URI. Upload
 `datagen/queries_produtos.sql` there; both plan and materialize receive that exact
 URI and freeze it into plan lineage, so no Data Flow local companion file is needed.
@@ -77,6 +87,11 @@ only the runner prompts. Browser authentication inherits the terminal visibly.
 For long engorda runs, the runner refreshes once before submission and every
 `--auth-refresh-seconds 1800` during polling. Set `0` to disable proactive refresh;
 a reactive 401 still uses the interactive refresh/browser flow.
+
+Before creating the local manifest or submitting any job, a live run verifies that
+the run root, remote manifest, and every product's exact synthetic output URI are
+absent. An existing synthetic output fails closed. Validate-only runs skip the
+materialize-output checks because they do not create synthetic output.
 
 The first tracer supports `cdb_simplificado`, `cdb_resgate`, `cdb_escalonamento`,
 `rdb_inclusao`, `rdb_resgate`, `lci`, and `lca`. Validation accepts `PASS` or

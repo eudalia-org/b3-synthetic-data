@@ -18,9 +18,21 @@ RESERVATION_A = "oci://bucket@namespace/run/a/reservation.json"
 RESERVATION_B = "oci://bucket@namespace/run/b/reservation.json"
 LEASE = "oci://bucket@namespace/control/qab/lease.json"
 LEDGER = "oci://bucket@namespace/control/qab/ledger.json"
+SNAPSHOT_ID = "00000000-0000-4000-8000-000000000001"
+
+
+def with_plan_id(body):
+    body = {key: value for key, value in body.items() if key != "plan_id"}
+    digest = hashlib.sha256(
+        json.dumps(
+            body, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        ).encode("ascii")
+    ).hexdigest()
+    return {**body, "plan_id": digest}
 
 
 def plan(
+    request_uri,
     plan_id,
     *,
     table_count=3,
@@ -29,14 +41,59 @@ def plan(
     cod_count=7,
     meu_count=4,
     requested_prefix=None,
+    selective_missing=False,
 ):
+    snapshot_uri = f"{request_uri.rstrip('/')}.selected-lote/{SNAPSHOT_ID}"
+    table_source_counts = {"OPERACAO": table_count, "SEM_PK_PROPRIA": 0}
     body = {
         "artifact_type": "engorda_plan",
-        "schema_version": 1,
+        "schema_version": 2,
         "test_label": plan_id,
         "product": "cdb_simplificado",
+        "selected_lote": {
+            "artifact_type": "engorda_selected_lote",
+            "schema_version": 1,
+            "snapshot_id": SNAPSHOT_ID,
+            "snapshot_uri": snapshot_uri,
+            "table_set": sorted(table_source_counts),
+            "tables": {
+                table: {
+                    "path": f"{snapshot_uri}/tables/{table}",
+                    "row_count": count,
+                    "schema": {
+                        "type": "struct",
+                        "fields": [{
+                            "name": "ID",
+                            "type": "long",
+                            "nullable": True,
+                            "metadata": {},
+                        }],
+                    },
+                }
+                for table, count in sorted(table_source_counts.items())
+            },
+            "selective_missing": (
+                {
+                    "present": True,
+                    "path": f"{snapshot_uri}/selective_missing",
+                    "row_count": 1,
+                    "schema": {
+                        "type": "struct",
+                        "fields": [{
+                            "name": "TABELA",
+                            "type": "string",
+                            "nullable": False,
+                            "metadata": {},
+                        }],
+                    },
+                }
+                if selective_missing
+                else {"present": False, "path": None, "row_count": 0, "schema": None}
+            ),
+        },
         "tables": {
             "OPERACAO": {
+                "source_count": table_count,
                 "pk": {
                     "rule": "OFFSET_PROPRIO",
                     "count_demand": table_count,
@@ -45,6 +102,7 @@ def plan(
                 }
             },
             "SEM_PK_PROPRIA": {
+                "source_count": 0,
                 "pk": {
                     "rule": "VIA_PAI",
                     "count_demand": 0,
@@ -60,12 +118,7 @@ def plan(
                if requested_prefix is not None else {}),
         },
     }
-    digest = hashlib.sha256(
-        json.dumps(
-            body, ensure_ascii=True, sort_keys=True, separators=(",", ":")
-        ).encode("ascii")
-    ).hexdigest()
-    return {**body, "plan_id": digest}
+    return with_plan_id(body)
 
 
 class FakeStorage:
@@ -143,7 +196,7 @@ def reserve(store, request_uri, reservation_uri, run_id):
 
 def test_allocates_schema_compatible_ranges_and_keeps_oracle_as_cod_authority():
     store = FakeStorage()
-    store.seed(REQUEST_A, plan("plan-a"))
+    store.seed(REQUEST_A, plan(REQUEST_A, "plan-a"))
 
     result = reserve(store, REQUEST_A, RESERVATION_A, "run-a")
 
@@ -155,7 +208,7 @@ def test_allocates_schema_compatible_ranges_and_keeps_oracle_as_cod_authority():
     assert artifact == {
         "artifact_type": "engorda_reservation",
         "schema_version": 1,
-        "plan_id": plan("plan-a")["plan_id"],
+        "plan_id": plan(REQUEST_A, "plan-a")["plan_id"],
         "product": "cdb_simplificado",
         "table_pks": {
             "OPERACAO": {"count": 3, "start": 100, "end": 104, "step": 2}
@@ -169,10 +222,125 @@ def test_allocates_schema_compatible_ranges_and_keeps_oracle_as_cod_authority():
     assert store.calls.index(ledger_put) < store.calls.index(reservation_put)
 
 
+def test_plan_v1_requires_migration_and_plan_v2_is_accepted():
+    store = FakeStorage()
+    legacy = plan(REQUEST_A, "legacy")
+    legacy["schema_version"] = 1
+    legacy = with_plan_id(legacy)
+    store.seed(REQUEST_A, legacy)
+
+    with pytest.raises(R.ReservationError, match="regenerate it with plan-v2"):
+        reserve(store, REQUEST_A, RESERVATION_A, "run-v1")
+
+    store.seed(REQUEST_A, plan(REQUEST_A, "current"))
+    reserve(store, REQUEST_A, RESERVATION_A, "run-v2")
+
+    assert store.json(RESERVATION_A)["schema_version"] == 1
+
+
+def test_plan_v2_requires_selected_lote_descriptor():
+    store = FakeStorage()
+    request = plan(REQUEST_A, "missing-snapshot")
+    request.pop("selected_lote")
+    store.seed(REQUEST_A, with_plan_id(request))
+
+    with pytest.raises(R.ReservationError, match="selected_lote"):
+        reserve(store, REQUEST_A, RESERVATION_A, "run-missing-snapshot")
+
+    assert LEDGER not in store.objects
+    assert RESERVATION_A not in store.objects
+
+
+def test_plan_v2_accepts_present_selective_missing_descriptor():
+    store = FakeStorage()
+    store.seed(REQUEST_A, plan(REQUEST_A, "selective", selective_missing=True))
+
+    reserve(store, REQUEST_A, RESERVATION_A, "run-selective")
+
+    assert store.json(RESERVATION_A)["schema_version"] == 1
+
+
+def test_external_selected_lote_uri_is_rejected_before_lease_or_ledger():
+    store = FakeStorage()
+    external_request = "oci://external@namespace/other/plan.json"
+    store.seed(REQUEST_A, plan(external_request, "external-snapshot"))
+
+    with pytest.raises(R.ReservationError, match="selected_lote.snapshot_uri"):
+        reserve(store, REQUEST_A, RESERVATION_A, "run-external-snapshot")
+
+    assert store.calls == [("get", REQUEST_A)]
+    assert LEASE not in store.objects
+    assert LEDGER not in store.objects
+    assert RESERVATION_A not in store.objects
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda descriptor: descriptor.update(artifact_type="wrong"),
+        lambda descriptor: descriptor.update(schema_version=2),
+        lambda descriptor: descriptor.update(
+            snapshot_id="00000000-0000-4000-8000-00000000000A"
+        ),
+        lambda descriptor: descriptor.update(snapshot_uri=""),
+        lambda descriptor: descriptor.update(table_set=list(reversed(descriptor["table_set"]))),
+        lambda descriptor: descriptor["tables"].pop("OPERACAO"),
+        lambda descriptor: descriptor["tables"]["OPERACAO"].update(path="oci://wrong"),
+        lambda descriptor: descriptor["tables"]["OPERACAO"].update(row_count=-1),
+        lambda descriptor: descriptor["tables"]["OPERACAO"].update(row_count=99),
+        lambda descriptor: descriptor["tables"]["OPERACAO"].update(schema=[]),
+        lambda descriptor: descriptor["selective_missing"].update(present="false"),
+        lambda descriptor: descriptor["selective_missing"].update(path="oci://wrong"),
+    ],
+    ids=[
+        "artifact-type",
+        "schema-version",
+        "snapshot-id",
+        "snapshot-uri",
+        "table-set",
+        "tables-set",
+        "table-path",
+        "negative-table-count",
+        "mismatched-table-count",
+        "table-schema",
+        "selective-presence",
+        "absent-selective-shape",
+    ],
+)
+def test_invalid_selected_lote_never_burns_ranges(mutation):
+    store = FakeStorage()
+    request = plan(REQUEST_A, "invalid")
+    mutation(request["selected_lote"])
+    store.seed(REQUEST_A, with_plan_id(request))
+
+    with pytest.raises(R.ReservationError, match="selected_lote"):
+        reserve(store, REQUEST_A, RESERVATION_A, "run-invalid")
+
+    assert LEDGER not in store.objects
+    assert RESERVATION_A not in store.objects
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("path", "oci://wrong"), ("row_count", -1), ("schema", [])],
+)
+def test_invalid_present_selective_missing_never_burns_ranges(field, value):
+    store = FakeStorage()
+    request = plan(REQUEST_A, "invalid-selective", selective_missing=True)
+    request["selected_lote"]["selective_missing"][field] = value
+    store.seed(REQUEST_A, with_plan_id(request))
+
+    with pytest.raises(R.ReservationError, match="selected_lote.selective_missing"):
+        reserve(store, REQUEST_A, RESERVATION_A, "run-invalid-selective")
+
+    assert LEDGER not in store.objects
+    assert RESERVATION_A not in store.objects
+
+
 def test_parallel_products_and_later_runs_never_reuse_ranges():
     store = FakeStorage()
-    store.seed(REQUEST_A, plan("plan-a"))
-    store.seed(REQUEST_B, plan("plan-b"))
+    store.seed(REQUEST_A, plan(REQUEST_A, "plan-a"))
+    store.seed(REQUEST_B, plan(REQUEST_B, "plan-b"))
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [
@@ -191,7 +359,7 @@ def test_parallel_products_and_later_runs_never_reuse_ranges():
 
 def test_requested_meu_numero_prefix_is_honored():
     store = FakeStorage()
-    store.seed(REQUEST_A, plan("plan-prefix", requested_prefix="321"))
+    store.seed(REQUEST_A, plan(REQUEST_A, "plan-prefix", requested_prefix="321"))
 
     reserve(store, REQUEST_A, RESERVATION_A, "run-prefix")
 
@@ -200,8 +368,8 @@ def test_requested_meu_numero_prefix_is_honored():
 
 def test_failed_publication_burns_ranges_and_ledger_cas_retries_are_bounded():
     store = FakeStorage()
-    store.seed(REQUEST_A, plan("plan-a"))
-    store.seed(REQUEST_B, plan("plan-b"))
+    store.seed(REQUEST_A, plan(REQUEST_A, "plan-a"))
+    store.seed(REQUEST_B, plan(REQUEST_B, "plan-b"))
     store.fail_puts[LEDGER] = 1
     store.fail_puts[RESERVATION_A] = 1
 
@@ -217,7 +385,7 @@ def test_failed_publication_burns_ranges_and_ledger_cas_retries_are_bounded():
 
 def test_ledger_cas_stops_after_bounded_attempts():
     store = FakeStorage()
-    store.seed(REQUEST_A, plan("plan-a"))
+    store.seed(REQUEST_A, plan(REQUEST_A, "plan-a"))
     store.fail_puts[LEDGER] = R.MAX_CAS_ATTEMPTS
 
     with pytest.raises(R.ReservationError, match="ledger CAS retries exhausted"):
@@ -230,7 +398,7 @@ def test_ledger_cas_stops_after_bounded_attempts():
 
 def test_expired_lease_is_taken_over_but_live_lease_is_not():
     store = FakeStorage()
-    store.seed(REQUEST_A, plan("plan-a"))
+    store.seed(REQUEST_A, plan(REQUEST_A, "plan-a"))
     lease = {
         "artifact_type": "pipeline_environment_lease",
         "schema_version": 1,
@@ -242,7 +410,7 @@ def test_expired_lease_is_taken_over_but_live_lease_is_not():
     reserve(store, REQUEST_A, RESERVATION_A, "run-a")
     assert any(call[:2] == ("put", LEASE) and call[3] for call in store.calls)
 
-    store.seed(REQUEST_B, plan("plan-b"))
+    store.seed(REQUEST_B, plan(REQUEST_B, "plan-b"))
     lease["expires_at"] = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
     store.seed(LEASE, lease)
     with pytest.raises(R.LeaseUnavailable, match="abandoned"):
@@ -251,7 +419,7 @@ def test_expired_lease_is_taken_over_but_live_lease_is_not():
 
 def test_existing_create_once_reservation_is_idempotent():
     store = FakeStorage()
-    store.seed(REQUEST_A, plan("plan-a"))
+    store.seed(REQUEST_A, plan(REQUEST_A, "plan-a"))
     first = reserve(store, REQUEST_A, RESERVATION_A, "run-a")
     ledger_before = store.objects[LEDGER]
 

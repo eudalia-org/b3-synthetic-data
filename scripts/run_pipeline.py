@@ -25,6 +25,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Protocol, Sequence
+from uuid import UUID
 
 import click
 
@@ -1143,9 +1144,105 @@ def _positive_or_zero(value: Any, location: str) -> int:
     return value
 
 
-def _validate_plan(plan: dict[str, Any], product: str) -> None:
-    if plan.get("artifact_type") != "engorda_plan" or plan.get("schema_version") != 1:
-        raise ReservationError("reservation request is not an engorda plan schema_version=1")
+def _validate_selected_lote(
+    descriptor: Any, plan_tables: Mapping[str, Any], request_uri: str
+) -> None:
+    expected_keys = {
+        "artifact_type",
+        "schema_version",
+        "snapshot_id",
+        "snapshot_uri",
+        "table_set",
+        "tables",
+        "selective_missing",
+    }
+    if not isinstance(descriptor, Mapping) or set(descriptor) != expected_keys:
+        raise ReservationError("plan.selected_lote must have the exact plan-v2 structure")
+    if descriptor.get("artifact_type") != "engorda_selected_lote":
+        raise ReservationError("plan.selected_lote.artifact_type is invalid")
+    if descriptor.get("schema_version") != 1:
+        raise ReservationError("plan.selected_lote.schema_version must be 1")
+
+    snapshot_id = descriptor.get("snapshot_id")
+    try:
+        canonical_snapshot_id = str(UUID(snapshot_id))
+    except (AttributeError, TypeError, ValueError) as error:
+        raise ReservationError("plan.selected_lote.snapshot_id must be a canonical UUID") from error
+    if canonical_snapshot_id != snapshot_id:
+        raise ReservationError("plan.selected_lote.snapshot_id must be a canonical UUID")
+    snapshot_uri = descriptor.get("snapshot_uri")
+    if not isinstance(snapshot_uri, str) or not snapshot_uri.strip():
+        raise ReservationError("plan.selected_lote.snapshot_uri must be a non-empty string")
+    expected_snapshot_uri = (
+        f"{request_uri.rstrip('/')}.selected-lote/{canonical_snapshot_id}"
+    )
+    if snapshot_uri != expected_snapshot_uri:
+        raise ReservationError(
+            "plan.selected_lote.snapshot_uri must derive from request_uri and snapshot_id"
+        )
+
+    expected_tables = sorted(plan_tables)
+    table_set = descriptor.get("table_set")
+    if table_set != expected_tables:
+        raise ReservationError(
+            "plan.selected_lote.table_set must exactly match sorted plan.tables"
+        )
+    snapshot_tables = descriptor.get("tables")
+    if not isinstance(snapshot_tables, Mapping) or set(snapshot_tables) != set(expected_tables):
+        raise ReservationError("plan.selected_lote.tables must exactly match plan.tables")
+    for table in expected_tables:
+        entry = snapshot_tables[table]
+        location = f"plan.selected_lote.tables.{table}"
+        if not isinstance(entry, Mapping) or set(entry) != {"path", "row_count", "schema"}:
+            raise ReservationError(f"{location} must have path, row_count, and schema")
+        if entry.get("path") != f"{snapshot_uri}/tables/{table}":
+            raise ReservationError(f"{location}.path is invalid")
+        row_count = _positive_or_zero(entry.get("row_count"), f"{location}.row_count")
+        if row_count != plan_tables[table]["source_count"]:
+            raise ReservationError(f"{location}.row_count must match plan.tables source_count")
+        if not isinstance(entry.get("schema"), dict):
+            raise ReservationError(f"{location}.schema must be an object")
+
+    selective = descriptor.get("selective_missing")
+    selective_keys = {"present", "path", "row_count", "schema"}
+    if (
+        not isinstance(selective, Mapping)
+        or set(selective) != selective_keys
+        or type(selective.get("present")) is not bool
+    ):
+        raise ReservationError(
+            "plan.selected_lote.selective_missing must have the exact presence contract"
+        )
+    if selective["present"]:
+        if selective.get("path") != f"{snapshot_uri}/selective_missing":
+            raise ReservationError("plan.selected_lote.selective_missing.path is invalid")
+        _positive_or_zero(
+            selective.get("row_count"),
+            "plan.selected_lote.selective_missing.row_count",
+        )
+        if not isinstance(selective.get("schema"), dict):
+            raise ReservationError(
+                "plan.selected_lote.selective_missing.schema must be an object"
+            )
+    elif dict(selective) != {
+        "present": False,
+        "path": None,
+        "row_count": 0,
+        "schema": None,
+    }:
+        raise ReservationError(
+            "plan.selected_lote.selective_missing absent contract is invalid"
+        )
+
+
+def _validate_plan(plan: dict[str, Any], product: str, request_uri: str) -> None:
+    if plan.get("artifact_type") != "engorda_plan":
+        raise ReservationError("reservation request is not an engorda plan")
+    if plan.get("schema_version") != 2:
+        raise ReservationError(
+            "engorda plan schema_version is incompatible; regenerate it with plan-v2 "
+            "before reserving ranges"
+        )
     if not isinstance(plan.get("plan_id"), str) or not plan["plan_id"]:
         raise ReservationError("engorda plan must contain plan_id")
     body = {key: value for key, value in plan.items() if key != "plan_id"}
@@ -1158,11 +1255,14 @@ def _validate_plan(plan: dict[str, Any], product: str) -> None:
         raise ReservationError("engorda plan_id does not match plan content")
     if plan.get("product") != product:
         raise ReservationError("engorda plan product does not match requested product")
-    if not isinstance(plan.get("tables"), dict):
+    if not isinstance(plan.get("tables"), dict) or not plan["tables"]:
         raise ReservationError("engorda plan tables must be an object")
     for table, table_plan in plan["tables"].items():
-        if not isinstance(table, str) or not isinstance(table_plan, Mapping):
+        if not isinstance(table, str) or not table or not isinstance(table_plan, Mapping):
             raise ReservationError("engorda plan contains an invalid table entry")
+        _positive_or_zero(
+            table_plan.get("source_count"), f"plan.tables.{table}.source_count"
+        )
         pk = table_plan.get("pk")
         if not isinstance(pk, Mapping):
             raise ReservationError(f"plan.tables.{table}.pk must be an object")
@@ -1183,6 +1283,7 @@ def _validate_plan(plan: dict[str, Any], product: str) -> None:
                 )
         elif count != 0 or minimum is not None:
             raise ReservationError(f"plan.tables.{table}.pk VIA_PAI must not request a range")
+    _validate_selected_lote(plan.get("selected_lote"), plan["tables"], request_uri)
     for section, field in (
         ("cod_operacao", "count"),
         ("meu_numero", "ordinal_count_demand"),
@@ -1383,7 +1484,7 @@ def reserve_ranges(
         raise ReservationError("lease_ttl_seconds must be a positive integer")
     storage = storage or OciCliStorage(auth)
     plan, _ = _read_json(storage, request_uri)
-    _validate_plan(plan, product)
+    _validate_plan(plan, product, request_uri)
 
     existing = _existing_reservation(storage, reservation_uri, plan, product)
     if existing is not None:
@@ -2302,7 +2403,16 @@ def run_command(
         application_id=config["applications"]["engorda_plan"],
         force_refresh=args.auth_refresh_seconds > 0,
     )
-    for label, uri in (("run path", plan["run_root"]), ("manifest", plan["manifest_uri"])):
+    immutable_outputs = [
+        (f"materialize output for {node['product']}", node["output_uri"])
+        for node in plan["nodes"].values()
+        if node["operation"] == "materialize"
+    ]
+    for label, uri in (
+        ("run path", plan["run_root"]),
+        ("manifest", plan["manifest_uri"]),
+        *immutable_outputs,
+    ):
         progress.emit(f"[preflight] checking OCI {label}: {uri}")
         if adapter.uri_exists(uri, auth=auth):
             raise PipelineError(f"immutable OCI {label} already exists: {uri}")
