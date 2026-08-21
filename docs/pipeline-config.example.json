@@ -20,7 +20,15 @@
     "rdb_inclusao": {"capabilities": ["engorda", "validate"]},
     "rdb_resgate": {"capabilities": ["engorda", "validate"]},
     "lci": {"capabilities": ["engorda", "validate"]},
-    "lca": {"capabilities": ["engorda", "validate"]}
+    "lca": {"capabilities": ["engorda", "validate"]},
+    "ccb_pppre": {"capabilities": ["engorda", "validate"]},
+    "ccb_pfpre": {"capabilities": ["engorda", "validate"]},
+    "ccb_pgrpre": {"capabilities": ["engorda", "validate"]},
+    "ccb_favcp": {"capabilities": ["engorda", "validate"]},
+    "ccb_fapre": {"capabilities": ["engorda", "validate"]},
+    "gravame": {"capabilities": ["validate"]},
+    "lastro": {"capabilities": ["validate"]},
+    "direito_creditorio": {"capabilities": ["validate"]}
   },
   "stage_defaults": {
     "engorda": {

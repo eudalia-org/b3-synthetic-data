@@ -2,7 +2,8 @@
 
 The first tracer runs immutable `engorda -> validate` branches through OCI Data Flow.
 Copy `docs/pipeline-config.example.json`, replace its OCI values, and keep one config
-file per environment.
+file per environment. `products` may enable any nonempty subset of the registry; both
+`run` and `adopt-inputs` reject products not enabled in that environment's config.
 
 `scripts/run_pipeline.py` is self-contained for operator distribution and includes
 PEP 723 metadata for Python 3.11 and Click. Copy that one Python file to the Windows
@@ -32,6 +33,12 @@ uv run --allow-insecure-host pypi.org `
 ```
 
 Add `--dry-run` to validate and print the adoption plan without OCI calls.
+For validate-only products, adopt the existing synthetic output too:
+
+```powershell
+--product gravame `
+--synthetic-uri gravame=oci://bucket@namespace/existing-gravame-output
+```
 
 ## Run engorda through validation
 
@@ -94,6 +101,10 @@ absent. An existing synthetic output fails closed. Validate-only runs skip the
 materialize-output checks because they do not create synthetic output.
 
 The first tracer supports `cdb_simplificado`, `cdb_resgate`, `cdb_escalonamento`,
-`rdb_inclusao`, `rdb_resgate`, `lci`, and `lca`. Validation accepts `PASS` or
-`PARTIAL` only when the report contains zero ERROR findings and its product/input
-lineage matches the branch exactly.
+`rdb_inclusao`, `rdb_resgate`, `lci`, `lca`, `ccb_pppre`, `ccb_pfpre`, `ccb_pgrpre`,
+`ccb_favcp`, `ccb_fapre`, `gravame`, `lastro`, and `direito_creditorio`. Validation
+accepts `PASS` or `PARTIAL` only when the report contains zero ERROR findings and its
+product/input lineage matches the branch exactly.
+The five CCB variants support `engorda -> validate`. `gravame`, `lastro`, and
+`direito_creditorio` are exposed as validate-only because the current generic engorda
+does not provide their required root/domain contract yet.

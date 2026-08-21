@@ -47,6 +47,9 @@ TERMINAL_SUCCESS = {"SUCCEEDED"}
 TERMINAL_FAILURE = {"FAILED", "CANCELED", "CANCELLED", "STOPPED"}
 RUNNING_STATES = {"ACCEPTED", "IN_PROGRESS", "CANCELING", "STOPPING"}
 NODE_TERMINAL = {"SUCCEEDED", "FAILED", "BLOCKED", "CANCELLED"}
+MANIFEST_REPLACE_ATTEMPTS = 8
+MANIFEST_REPLACE_DELAY_SECONDS = 0.05
+MANIFEST_REPLACE_MAX_DELAY_SECONDS = 0.5
 
 RUN_ARGS_FLAG = "--arguments"
 PENDING_STATES = {"ACCEPTED", "IN_PROGRESS", "CANCELING", "STOPPING"}
@@ -370,14 +373,27 @@ def cancel_run(run_id: str, opts: Mapping[str, Any] | None = None) -> str:
 
 # Generator product -> validator profile. This registry stays lightweight so the
 # local CLI never imports the Spark-heavy generator or validator modules.
+_ENGORDA_VALIDATE = frozenset({"engorda", "validate"})
+_VALIDATE_ONLY = frozenset({"validate"})
 PRODUCTS: dict[str, dict[str, Any]] = {
-    "cdb_simplificado": {"validator_product": "cdb_simplificado"},
-    "cdb_resgate": {"validator_product": "cdb"},
-    "cdb_escalonamento": {"validator_product": "cdb"},
-    "rdb_inclusao": {"validator_product": "rdb"},
-    "rdb_resgate": {"validator_product": "rdb"},
-    "lci": {"validator_product": "lci"},
-    "lca": {"validator_product": "lca"},
+    "cdb_simplificado": {
+        "validator_product": "cdb_simplificado",
+        "capabilities": _ENGORDA_VALIDATE,
+    },
+    "cdb_resgate": {"validator_product": "cdb", "capabilities": _ENGORDA_VALIDATE},
+    "cdb_escalonamento": {"validator_product": "cdb", "capabilities": _ENGORDA_VALIDATE},
+    "rdb_inclusao": {"validator_product": "rdb", "capabilities": _ENGORDA_VALIDATE},
+    "rdb_resgate": {"validator_product": "rdb", "capabilities": _ENGORDA_VALIDATE},
+    "lci": {"validator_product": "lci", "capabilities": _ENGORDA_VALIDATE},
+    "lca": {"validator_product": "lca", "capabilities": _ENGORDA_VALIDATE},
+    "ccb_pppre": {"validator_product": "ccb", "capabilities": _ENGORDA_VALIDATE},
+    "ccb_pfpre": {"validator_product": "ccb", "capabilities": _ENGORDA_VALIDATE},
+    "ccb_pgrpre": {"validator_product": "ccb", "capabilities": _ENGORDA_VALIDATE},
+    "ccb_favcp": {"validator_product": "ccb", "capabilities": _ENGORDA_VALIDATE},
+    "ccb_fapre": {"validator_product": "ccb", "capabilities": _ENGORDA_VALIDATE},
+    "gravame": {"validator_product": "gravame", "capabilities": _VALIDATE_ONLY},
+    "lastro": {"validator_product": "credito_scr", "capabilities": _VALIDATE_ONLY},
+    "direito_creditorio": {"validator_product": "dicre", "capabilities": _VALIDATE_ONLY},
 }
 
 
@@ -484,7 +500,19 @@ class AtomicManifest:
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, self.path)
+            for attempt in range(MANIFEST_REPLACE_ATTEMPTS):
+                try:
+                    os.replace(temporary, self.path)
+                    break
+                except PermissionError:
+                    if attempt == MANIFEST_REPLACE_ATTEMPTS - 1:
+                        raise
+                    time.sleep(
+                        min(
+                            MANIFEST_REPLACE_DELAY_SECONDS * 2**attempt,
+                            MANIFEST_REPLACE_MAX_DELAY_SECONDS,
+                        )
+                    )
         except BaseException:
             try:
                 os.unlink(temporary)
@@ -1586,14 +1614,13 @@ def load_config(path: str | Path) -> dict[str, Any]:
             raise PipelineError(f"config.reservations.{name} must be an oci:// URI")
 
     configured_products = config.get("products")
-    if not isinstance(configured_products, dict):
-        raise PipelineError("config.products must declare the environment product capabilities")
+    if not isinstance(configured_products, dict) or not configured_products:
+        raise PipelineError(
+            "config.products must declare at least one environment product capability"
+        )
     unsupported = sorted(set(configured_products) - set(PRODUCTS))
     if unsupported:
         raise PipelineError(f"unsupported generator products in config: {', '.join(unsupported)}")
-    missing = sorted(set(PRODUCTS) - set(configured_products))
-    if missing:
-        raise PipelineError(f"config.products is missing registry products: {', '.join(missing)}")
     for product, settings in configured_products.items():
         if not isinstance(settings, dict) or not isinstance(settings.get("capabilities"), list):
             raise PipelineError(f"config.products.{product}.capabilities must be a list")
@@ -1602,6 +1629,14 @@ def load_config(path: str | Path) -> dict[str, Any]:
             raise PipelineError(f"config.products.{product} has an unsupported capability")
         if len(capabilities) != len(set(capabilities)):
             raise PipelineError(f"config.products.{product}.capabilities contains duplicates")
+        unsupported_capabilities = sorted(
+            set(capabilities) - set(PRODUCTS[product]["capabilities"])
+        )
+        if unsupported_capabilities:
+            raise PipelineError(
+                f"config.products.{product} enables unsupported registry capabilities: "
+                f"{', '.join(unsupported_capabilities)}"
+            )
 
     defaults = config.get("stage_defaults", {})
     if not isinstance(defaults, dict) or any(
@@ -1625,6 +1660,14 @@ def parse_products(values: Sequence[str]) -> list[str]:
             f"{', '.join(PRODUCTS)}"
         )
     return products
+
+
+def require_configured_products(config: Mapping[str, Any], products: Sequence[str]) -> None:
+    missing = sorted(set(products) - set(config["products"]))
+    if missing:
+        raise PipelineError(
+            "selected product(s) are not enabled in config.products: " + ", ".join(missing)
+        )
 
 
 def selected_stages(first: str, last: str) -> tuple[str, ...]:
@@ -1812,6 +1855,7 @@ def build_pipeline_plan(
     config: dict[str, Any], args: SimpleNamespace, upstream: dict[str, Any]
 ) -> dict[str, Any]:
     products = parse_products(args.product)
+    require_configured_products(config, products)
     upstream_products = upstream.get("products")
     if not isinstance(upstream_products, list):
         raise PipelineError("upstream manifest must declare its adopted products")
@@ -2461,6 +2505,33 @@ def adopt_inputs_command(
     progress = progress or ProgressReporter(enabled=False)
     config = load_config(args.config)
     products = parse_products(args.product)
+    require_configured_products(config, products)
+    synthetic_uris: dict[str, str] = {}
+    for raw in args.synthetic_uri:
+        product, separator, uri = raw.partition("=")
+        if not separator or not product or not uri:
+            raise PipelineError(
+                "--synthetic-uri must use product=oci://bucket@namespace/path"
+            )
+        if product not in products:
+            raise PipelineError(
+                f"--synthetic-uri product {product!r} is not selected by --product"
+            )
+        if product in synthetic_uris:
+            raise PipelineError(f"duplicate --synthetic-uri for product {product}")
+        if not uri.startswith("oci://"):
+            raise PipelineError(f"--synthetic-uri for {product} must start with oci://")
+        synthetic_uris[product] = uri
+    missing_validate_only = sorted(
+        product for product in products
+        if "engorda" not in PRODUCTS[product]["capabilities"]
+        and product not in synthetic_uris
+    )
+    if missing_validate_only:
+        raise PipelineError(
+            "validate-only product(s) require --synthetic-uri: "
+            + ", ".join(missing_validate_only)
+        )
     for label, uri in (("raw", args.raw_uri), ("faltantes", args.faltantes_uri)):
         if not uri.startswith("oci://"):
             raise PipelineError(f"--{label.replace('_', '-')} URI must start with oci://")
@@ -2477,6 +2548,12 @@ def adopt_inputs_command(
         "artifacts": {
             "raw": {"uri": args.raw_uri, "producer": "external"},
             "faltantes": {"uri": args.faltantes_uri, "producer": "external"},
+            "products": {
+                product: {
+                    "synthetic": {"uri": uri, "producer": "external"}
+                }
+                for product, uri in sorted(synthetic_uris.items())
+            },
         },
     }
     if args.dry_run:
@@ -2498,6 +2575,14 @@ def adopt_inputs_command(
             payload["artifacts"][name].update(describe(uri, auth=auth))
         elif not adapter.uri_exists(uri, auth=auth):
             raise PipelineError(f"OCI input URI does not exist: {uri}")
+    for product, uri in sorted(synthetic_uris.items()):
+        progress.emit(f"[preflight] inspecting {product} synthetic: {uri}")
+        artifact = payload["artifacts"]["products"][product]["synthetic"]
+        describe = getattr(adapter, "describe_uri", None)
+        if describe is not None:
+            artifact.update(describe(uri, auth=auth))
+        elif not adapter.uri_exists(uri, auth=auth):
+            raise PipelineError(f"OCI synthetic URI does not exist: {uri}")
     progress.emit("[preflight] adopted input paths are readable")
     atomic_write_json(output, payload)
     print(str(output))
@@ -2601,6 +2686,11 @@ def run_cli(context: click.Context, **options: Any) -> None:
 @click.option("--product", multiple=True, required=True, help="Repeat or use commas.")
 @click.option("--raw-uri", required=True)
 @click.option("--faltantes-uri", required=True)
+@click.option(
+    "--synthetic-uri",
+    multiple=True,
+    help="Existing product output as product=oci://...; required for validate-only products.",
+)
 @click.option(
     "--output-manifest", required=True, type=click.Path(dir_okay=False, path_type=str)
 )

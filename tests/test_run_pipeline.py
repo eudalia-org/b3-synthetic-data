@@ -15,11 +15,20 @@ import run_pipeline as P  # noqa: E402, I001
 
 
 ALL_PRODUCTS = tuple(P.PRODUCTS)
+LEGACY_PRODUCTS = (
+    "cdb_simplificado",
+    "cdb_resgate",
+    "cdb_escalonamento",
+    "rdb_inclusao",
+    "rdb_resgate",
+    "lci",
+    "lca",
+)
 
 
 def write_config(tmp_path, *, capabilities=None, extra=None):
     products = {
-        product: {"capabilities": ["engorda", "validate"]}
+        product: {"capabilities": sorted(P.PRODUCTS[product]["capabilities"])}
         for product in ALL_PRODUCTS
     }
     if capabilities:
@@ -365,6 +374,73 @@ def test_manifest_upload_is_create_once_not_force_overwrite(tmp_path):
 
     assert "--no-overwrite" in commands[0]
     assert "--force" not in commands[0]
+
+
+def test_atomic_manifest_retries_windows_access_denied(monkeypatch, tmp_path):
+    manifest = tmp_path / "manifest.json"
+    real_replace = os.replace
+    calls = []
+    sleeps = []
+
+    def flaky_replace(source, destination):
+        calls.append((source, destination))
+        if len(calls) <= 2:
+            error = PermissionError(5, "Access is denied")
+            error.winerror = 5
+            raise error
+        real_replace(source, destination)
+
+    monkeypatch.setattr(P.os, "replace", flaky_replace)
+    monkeypatch.setattr(P.time, "sleep", sleeps.append)
+
+    P.AtomicManifest(manifest, {"status": "RUNNING", "nodes": {}})
+
+    assert len(calls) == 3
+    assert sleeps == [0.05, 0.1]
+    assert json.loads(manifest.read_text()) == {"status": "RUNNING", "nodes": {}}
+
+
+def test_atomic_manifest_persistent_permission_error_cleans_temp(monkeypatch, tmp_path):
+    manifest = tmp_path / "manifest.json"
+    calls = []
+    sleeps = []
+    denied = PermissionError(5, "Access is denied")
+    denied.winerror = 5
+
+    def denied_replace(source, destination):
+        calls.append((source, destination))
+        raise denied
+
+    monkeypatch.setattr(P.os, "replace", denied_replace)
+    monkeypatch.setattr(P.time, "sleep", sleeps.append)
+
+    with pytest.raises(PermissionError) as raised:
+        P.AtomicManifest(manifest, {"status": "RUNNING"})
+
+    assert raised.value is denied
+    assert len(calls) == P.MANIFEST_REPLACE_ATTEMPTS
+    assert sleeps == [0.05, 0.1, 0.2, 0.4, 0.5, 0.5, 0.5]
+    assert not manifest.exists()
+    assert list(tmp_path.glob(".manifest.json.*.tmp")) == []
+
+
+def test_atomic_manifest_serializes_concurrent_updates(tmp_path):
+    manifest = tmp_path / "manifest.json"
+    store = P.AtomicManifest(manifest, {"values": []})
+    workers = [
+        threading.Thread(
+            target=store.update,
+            args=(lambda payload, value=value: payload["values"].append(value),),
+        )
+        for value in range(20)
+    ]
+
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    assert sorted(json.loads(manifest.read_text())["values"]) == list(range(20))
 
 
 def test_object_json_download_does_not_use_unsupported_force_flag():
@@ -853,12 +929,21 @@ def test_synthetic_output_uri_is_exact_across_plan_materialize_validator_and_art
 @pytest.mark.parametrize(
     "product,validator",
     [
+        ("cdb_simplificado", "cdb_simplificado"),
         ("cdb_resgate", "cdb"),
         ("cdb_escalonamento", "cdb"),
         ("rdb_inclusao", "rdb"),
         ("rdb_resgate", "rdb"),
         ("lci", "lci"),
         ("lca", "lca"),
+        ("ccb_pppre", "ccb"),
+        ("ccb_pfpre", "ccb"),
+        ("ccb_pgrpre", "ccb"),
+        ("ccb_favcp", "ccb"),
+        ("ccb_fapre", "ccb"),
+        ("gravame", "gravame"),
+        ("lastro", "credito_scr"),
+        ("direito_creditorio", "dicre"),
     ],
 )
 def test_registry_maps_generator_products_to_validator_profiles(
@@ -868,12 +953,38 @@ def test_registry_maps_generator_products_to_validator_profiles(
     upstream = write_upstream(tmp_path, products=(product,))
     args = run_args(tmp_path, config, upstream, "--dry-run")
     args[args.index("cdb_simplificado")] = product
+    if "engorda" not in P.PRODUCTS[product]["capabilities"]:
+        args[args.index("engorda")] = "validate"
 
     assert P.main(args, adapter=NoCallsAdapter()) == 0
 
     output = json.loads(capsys.readouterr().out)
     argv = output["nodes"][f"{product}.validate"]["arguments"]
     assert argv[argv.index("--product") + 1] == validator
+
+
+def test_validate_only_product_rejects_engorda_interval(tmp_path, capsys):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("gravame",))
+    args = run_args(tmp_path, config, upstream, "--dry-run")
+    args[args.index("cdb_simplificado")] = "gravame"
+
+    assert P.main(args, adapter=NoCallsAdapter()) == 2
+    assert "lacks requested stage capability: engorda" in capsys.readouterr().err
+
+
+def test_registry_exposes_every_engorda_generator_name():
+    assert ALL_PRODUCTS == (
+        *LEGACY_PRODUCTS,
+        "ccb_pppre",
+        "ccb_pfpre",
+        "ccb_pgrpre",
+        "ccb_favcp",
+        "ccb_fapre",
+        "gravame",
+        "lastro",
+        "direito_creditorio",
+    )
 
 
 def test_rejects_unsupported_product_and_non_tracer_interval(tmp_path, capsys):
@@ -942,6 +1053,74 @@ def test_config_is_one_environment_and_rejects_unsupported_registry_entries(tmp_
         P.load_config(config)
 
 
+def test_legacy_product_subset_config_remains_valid(tmp_path):
+    config = write_config(tmp_path)
+    payload = json.loads(config.read_text())
+    payload["products"] = {
+        product: payload["products"][product] for product in LEGACY_PRODUCTS
+    }
+    config.write_text(json.dumps(payload))
+
+    loaded = P.load_config(config)
+
+    assert tuple(loaded["products"]) == LEGACY_PRODUCTS
+
+
+@pytest.mark.parametrize(
+    "products,error",
+    [
+        ({}, "at least one"),
+        ({"cdb_simplificado": {"capabilities": ["unknown"]}}, "unsupported capability"),
+        (
+            {"cdb_simplificado": {"capabilities": ["engorda", "engorda"]}},
+            "contains duplicates",
+        ),
+    ],
+)
+def test_config_rejects_empty_or_invalid_product_capabilities(tmp_path, products, error):
+    config = write_config(tmp_path, extra={"products": products})
+
+    with pytest.raises(P.PipelineError, match=error):
+        P.load_config(config)
+
+
+@pytest.mark.parametrize("command", ["run", "adopt-inputs"])
+def test_selected_registry_product_must_be_enabled_in_config(
+    tmp_path, capsys, command
+):
+    config = write_config(tmp_path)
+    payload = json.loads(config.read_text())
+    payload["products"] = {
+        product: payload["products"][product] for product in LEGACY_PRODUCTS
+    }
+    config.write_text(json.dumps(payload))
+
+    if command == "run":
+        upstream = write_upstream(tmp_path, products=("gravame",))
+        args = run_args(tmp_path, config, upstream, "--dry-run")
+        args[args.index("cdb_simplificado")] = "gravame"
+    else:
+        args = [
+            "adopt-inputs",
+            "--config",
+            str(config),
+            "--product",
+            "gravame",
+            "--raw-uri",
+            "oci://source@namespace/raw",
+            "--faltantes-uri",
+            "oci://source@namespace/faltantes",
+            "--output-manifest",
+            str(tmp_path / "adopted.json"),
+            "--dry-run",
+        ]
+
+    assert P.main(args, adapter=NoCallsAdapter()) == 2
+    error = capsys.readouterr().err
+    assert "gravame" in error
+    assert "not enabled in config.products" in error
+
+
 def test_config_rejects_credentials_and_operator_auth(tmp_path):
     config = write_config(tmp_path, extra={"profile": "QAB"})
     with pytest.raises(P.PipelineError, match="authentication belongs on CLI flags"):
@@ -989,6 +1168,41 @@ def test_adopt_inputs_dry_run_is_offline_and_normal_mode_validates_uris(tmp_path
     assert manifest["artifacts"]["raw"]["object_count"] == 2
     assert manifest["artifacts"]["faltantes"]["total_bytes"] == 42
     assert all(call[2] == {"profile": "QAB"} for call in adapter.calls)
+
+
+def test_adopt_validate_only_product_requires_and_records_synthetic_uri(
+    tmp_path, capsys
+):
+    config = write_config(tmp_path)
+    output = tmp_path / "gravame-inputs.json"
+    argv = [
+        "adopt-inputs",
+        "--config", str(config),
+        "--product", "gravame",
+        "--raw-uri", "oci://source@namespace/raw",
+        "--faltantes-uri", "oci://source@namespace/faltantes",
+        "--output-manifest", str(output),
+    ]
+
+    assert P.main([*argv, "--dry-run"], adapter=NoCallsAdapter()) == 2
+    assert "require --synthetic-uri" in capsys.readouterr().err
+
+    synthetic = "oci://source@namespace/gravame-output"
+    argv += ["--synthetic-uri", f"gravame={synthetic}"]
+    assert P.main([*argv, "--dry-run"], adapter=NoCallsAdapter()) == 0
+    dry = json.loads(capsys.readouterr().out)
+    assert dry["artifacts"]["products"]["gravame"]["synthetic"]["uri"] == synthetic
+
+    adapter = FakeAdapter(existing=(
+        "oci://source@namespace/raw",
+        "oci://source@namespace/faltantes",
+        synthetic,
+    ))
+    assert P.main(argv, adapter=adapter) == 0
+    adopted = json.loads(output.read_text())
+    assert adopted["artifacts"]["products"]["gravame"]["synthetic"][
+        "producer"
+    ] == "external"
 
 
 def test_dependency_execution_is_concurrent_and_isolates_failed_branch(tmp_path):
