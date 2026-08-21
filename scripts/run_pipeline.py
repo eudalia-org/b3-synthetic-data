@@ -782,13 +782,13 @@ class ModuleAdapter:
 
     def uri_exists(self, uri: str, *, auth: dict[str, str]) -> bool:
         command = self._object_command("list", uri, auth)
-        command.append("--all")
+        command += ["--limit", "1"]
         response = self._transport()(command)
         return bool(response.get("data"))
 
     def describe_uri(self, uri: str, *, auth: dict[str, str]) -> dict[str, Any]:
         command = self._object_command("list", uri, auth)
-        command.append("--all")
+        command += ["--limit", "1"]
         response = self._transport()(command)
         raw_items = response.get("data", [])
         if isinstance(raw_items, dict):
@@ -805,11 +805,13 @@ class ModuleAdapter:
         )
         canonical = json.dumps(inventory, sort_keys=True, separators=(",", ":"))
         return {
-            "object_count": len(inventory),
-            "total_bytes": sum(
+            "inventory_mode": "sample",
+            "inventory_complete": False,
+            "object_count_sampled": len(inventory),
+            "sample_total_bytes": sum(
                 item["size"] for item in inventory if isinstance(item["size"], int)
             ),
-            "inventory_sha256": hashlib.sha256(canonical.encode()).hexdigest(),
+            "inventory_sample_sha256": hashlib.sha256(canonical.encode()).hexdigest(),
         }
 
     def read_json(self, uri: str, *, auth: dict[str, str]) -> dict[str, Any]:

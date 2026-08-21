@@ -466,6 +466,37 @@ def test_object_json_download_does_not_use_unsupported_force_flag():
     assert "--force" not in commands[0]
 
 
+def test_object_prefix_preflight_samples_one_object_instead_of_listing_all():
+    commands = []
+
+    class SharedModule:
+        @staticmethod
+        def oci_auth_flags(_auth):
+            return []
+
+        @staticmethod
+        def run_json(command):
+            commands.append(command)
+            return {
+                "data": [
+                    {"name": "part-0", "etag": "etag-0", "size": 42},
+                ]
+            }
+
+    adapter = P.ModuleAdapter.__new__(P.ModuleAdapter)
+    adapter.module = SharedModule()
+    uri = "oci://bucket@namespace/one-terabyte-prefix"
+
+    assert adapter.uri_exists(uri, auth={}) is True
+    metadata = adapter.describe_uri(uri, auth={})
+
+    assert all("--all" not in command for command in commands)
+    assert all(command[command.index("--limit") + 1] == "1" for command in commands)
+    assert metadata["inventory_mode"] == "sample"
+    assert metadata["inventory_complete"] is False
+    assert metadata["object_count_sampled"] == 1
+
+
 def test_single_copied_script_adopts_inputs_without_sibling_modules(tmp_path):
     standalone = tmp_path / "run_pipeline.py"
     shutil.copy(Path(P.__file__), standalone)

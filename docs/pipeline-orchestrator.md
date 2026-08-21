@@ -33,6 +33,9 @@ uv run --allow-insecure-host pypi.org `
 ```
 
 Add `--dry-run` to validate and print the adoption plan without OCI calls.
+Object Storage preflight samples one object with `--limit 1`; it never runs
+`object list --all` over large RAW/synthetic prefixes. Deep integrity remains in
+the plan-v2 snapshot schemas, counts, root IDs, and spec hash.
 For validate-only products, adopt the existing synthetic output too:
 
 ```powershell
