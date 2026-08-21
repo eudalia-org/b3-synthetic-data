@@ -73,6 +73,33 @@ class TestEngordaPhaseCli:
         assert args.num_ifs == [123]
         assert args.raw_uri is None
         assert args.output_uri is None
+        assert args.sem_poda_cronograma_resgate is False
+
+    def test_cli_disables_schedule_pruning_and_main_forwards_it(self, monkeypatch):
+        captured = []
+        monkeypatch.setattr(
+            engorda_tables, "executar_job", lambda job: captured.append(job)
+        )
+
+        engorda_tables.main([
+            "--produto", "cdb_resgate",
+            "--num-ifs", "123",
+            "--meu-numero-prefix", "321",
+            "--sem-poda-cronograma-resgate",
+        ])
+
+        assert captured[0].poda_cronograma_resgate is False
+
+    def test_schedule_pruning_job_option_is_boolean(self):
+        job = engorda_tables.EngordaJob(
+            produto="cdb_simplificado",
+            num_ifs=(1,),
+            meu_numero_prefix="321",
+            poda_cronograma_resgate="yes",
+        )
+
+        with pytest.raises(ValueError, match="poda_cronograma_resgate.*booleano"):
+            engorda_tables._validate_engorda_job(job)
 
     def test_materialize_uses_artifacts_and_rejects_resampling(self):
         args = engorda_tables.parse_arguments([
@@ -1192,6 +1219,154 @@ def spark():
     )
     yield session
     session.stop()
+
+
+def _schedule_guard_sources(spark):
+    conditions = spark.createDataFrame(
+        [
+            (
+                root,
+                100 + root,
+                "21" if root == 14 else "20",
+                "2020-01-01" if root == 12 else None,
+            )
+            for root in range(1, 17)
+        ],
+        "NUM_IF long, NUM_CONDICAO_IF long, COD_TIPO_CONDICAO_IF string, "
+        "DAT_EXCLUSAO string",
+    )
+    redemptions = spark.createDataFrame(
+        [
+            (
+                100 + root,
+                "SEM TABELA" if root == 10 else (
+                    "  com tabela  " if root == 11 else "COM TABELA"
+                ),
+                "2020-01-01" if root == 13 else None,
+            )
+            for root in range(1, 17)
+        ],
+        "NUM_CONDICAO_IF long, COD_COND_RESGATE string, DAT_EXCLUSAO string",
+    )
+    schedules = spark.createDataFrame(
+        [
+            (101, "2026-01-01", "50", None),
+            (102, "2026-01-01", "50", "S"),
+            (103, "not-a-date", "50", None),
+            (104, "2026-01-01", "not-a-number", None),
+            (105, None, "50", None),
+            (106, "2026-01-01", None, None),
+            (107, "2026-01-01", "NaN", None),
+            (108, "2026-01-01", "Infinity", None),
+            (109, "2026-01-01", "150.5", None),
+            (110, "bad", "bad", None),
+            (111, "2026-01-01", "100", None),
+            (115, "2026-01-01", "10", None),
+            (115, "bad", "20", None),
+        ],
+        "NUM_CONDICAO_IF long, DAT_RESGATE string, VAL_PERCENTUAL string, "
+        "IND_EXCLUIDO string",
+    )
+    return {
+        engorda_tables.CONDICAO_IF_TABLE: conditions,
+        engorda_tables.RESGATE_TABELA: redemptions,
+        engorda_tables.CRONOGRAMA_TABELA: schedules,
+    }
+
+
+def test_schedule_guard_rejects_only_active_type20_com_tabela_defects(
+    spark, monkeypatch
+):
+    sources = _schedule_guard_sources(spark)
+    monkeypatch.setattr(
+        engorda_tables,
+        "_read_source",
+        lambda _spark, _config, table: sources[table],
+    )
+    domain = spark.createDataFrame([(root,) for root in range(1, 17)], "NUM_IF long")
+
+    invalid = engorda_tables._num_if_cronograma_resgate_invalido(
+        spark, {}, domain
+    )
+
+    assert {row.NUM_IF for row in invalid.collect()} == {
+        2, 3, 4, 5, 6, 7, 8, 15, 16
+    }
+
+
+def test_schedule_guard_refills_sampling_but_rejects_explicit_invalid_root(
+    spark, monkeypatch
+):
+    sources = _schedule_guard_sources(spark)
+    domain = spark.createDataFrame([(root,) for root in range(1, 17)], "NUM_IF long")
+    monkeypatch.setattr(
+        engorda_tables,
+        "_read_source",
+        lambda _spark, _config, table: sources[table],
+    )
+    monkeypatch.setattr(
+        engorda_tables,
+        "_dominio_num_if_produto",
+        lambda *_args, **_kwargs: domain,
+    )
+    profile = dataclasses.replace(
+        engorda_tables.get_product_profile("cdb_resgate"),
+        integrity=engorda_tables.IntegrityPolicy(),
+    )
+
+    selected = engorda_tables.seleciona_instrumentos(
+        spark, {}, {}, None, 7, 42, profile, poda_subtipo=False
+    )
+    assert selected == [1, 9, 10, 11, 12, 13, 14]
+
+    with pytest.raises(ValueError, match=r"PODADOS.*2"):
+        engorda_tables.seleciona_instrumentos(
+            spark, {}, {}, [2], None, 42, profile, poda_subtipo=False
+        )
+
+
+def test_schedule_guard_fails_closed_when_required_source_is_unavailable(
+    spark, monkeypatch
+):
+    sources = _schedule_guard_sources(spark)
+
+    def read_source(_spark, _config, table):
+        if table == engorda_tables.RESGATE_TABELA:
+            raise OSError("missing")
+        return sources[table]
+
+    monkeypatch.setattr(engorda_tables, "_read_source", read_source)
+    domain = spark.createDataFrame([(1,)], "NUM_IF long")
+
+    with pytest.raises(ValueError, match=r"exige a fonte RESGATE"):
+        engorda_tables._num_if_cronograma_resgate_invalido(spark, {}, domain)
+
+
+def test_schedule_guard_is_scoped_to_resgate_products():
+    assert engorda_tables.PRODUTOS_COM_PODA_CRONOGRAMA_RESGATE == {
+        "cdb_resgate",
+        "rdb_resgate",
+    }
+
+
+def test_post_closure_schedule_pruning_still_removes_sem_tabela_rows(spark):
+    lotes = {
+        engorda_tables.RESGATE_TABELA: spark.createDataFrame(
+            [(1, " sem tabela "), (2, "COM TABELA")],
+            "NUM_CONDICAO_IF long, COD_COND_RESGATE string",
+        ),
+        engorda_tables.CRONOGRAMA_TABELA: spark.createDataFrame(
+            [(10, 1), (20, 2)],
+            "NUM_ID_CONDICAO_RESGATE long, NUM_CONDICAO_IF long",
+        ),
+    }
+
+    removed = engorda_tables._poda_cronograma_sem_tabela(lotes)
+
+    assert removed == 1
+    assert [row.NUM_CONDICAO_IF for row in lotes[
+        engorda_tables.CRONOGRAMA_TABELA
+    ].collect()] == [2]
 
 
 def test_meu_numero_uses_reserved_ordinal_interval(spark):

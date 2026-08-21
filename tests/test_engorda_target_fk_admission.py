@@ -701,6 +701,75 @@ def test_target_fk_admission_refills_direct_and_transitive_orphans(
     assert set(probes) <= {("100",), ("900",), ("901",)}
 
 
+def test_live_admission_applies_schedule_guard_to_refill_and_explicit_roots(
+    spark, monkeypatch
+):
+    sources, spec, plans, _ = _fixture(spark)
+    sources.update({
+        eng.CONDICAO_IF_TABLE: spark.createDataFrame(
+            [(root, 100 + root, "20", None) for root in range(1, 5)],
+            "NUM_IF long, NUM_CONDICAO_IF long, COD_TIPO_CONDICAO_IF string, "
+            "DAT_EXCLUSAO string",
+        ),
+        eng.RESGATE_TABELA: spark.createDataFrame(
+            [(100 + root, "COM TABELA", None) for root in range(1, 5)],
+            "NUM_CONDICAO_IF long, COD_COND_RESGATE string, DAT_EXCLUSAO string",
+        ),
+        eng.CRONOGRAMA_TABELA: spark.createDataFrame(
+            [
+                (101, "2026-01-01", "50", None),
+                (102, "2026-01-01", "50", None),
+                (103, "bad", "50", None),
+                (104, "2026-01-01", "150", None),
+            ],
+            "NUM_CONDICAO_IF long, DAT_RESGATE string, VAL_PERCENTUAL string, "
+            "IND_EXCLUIDO string",
+        ),
+    })
+    domain = sources[eng.TABELA_RAIZ].select(eng.COL_NUM_IF)
+    profile = dataclasses.replace(
+        eng.get_product_profile("cdb_resgate"),
+        integrity=eng.IntegrityPolicy(),
+    )
+    monkeypatch.setattr(eng, "_read_source", lambda _s, _c, table: sources[table])
+    monkeypatch.setattr(eng, "_dominio_num_if_produto", lambda *_a, **_k: domain)
+
+    def existing_keys(_table, _columns, keys, _numeric_flags):
+        return {key for key in keys if key not in {("900",), ("901",)}}
+
+    selection = eng.seleciona_instrumentos_destino(
+        spark,
+        {},
+        spec,
+        num_ifs=None,
+        n_instrumentos=1,
+        seed=42,
+        profile=profile,
+        planos=plans,
+        ordem=list(plans),
+        max_passadas=6,
+        existing_key_lookup=existing_keys,
+        poda_subtipo=False,
+    )
+    assert selection.values == [4]
+
+    with pytest.raises(ValueError, match=r"podados=\[3\]"):
+        eng.seleciona_instrumentos_destino(
+            spark,
+            {},
+            spec,
+            num_ifs=[3],
+            n_instrumentos=None,
+            seed=42,
+            profile=profile,
+            planos=plans,
+            ordem=list(plans),
+            max_passadas=6,
+            existing_key_lookup=existing_keys,
+            poda_subtipo=False,
+        )
+
+
 def test_target_fk_admission_does_not_replace_explicit_instruments(
     spark, monkeypatch
 ):
@@ -1074,6 +1143,7 @@ def test_materialize_job_consumes_frozen_plan_without_resampling(tmp_path, monke
     assert captured["snapshot_lotes"] == frozen_lotes
     assert captured["snapshot_faltantes"] is None
     assert captured["snapshot_lote_counts"] == {eng.TABELA_RAIZ: 2}
+    assert captured["poda_cronograma_resgate"] is True
 
 
 def test_exact_pipeline_output_uri_passes_destination_safety_check():
@@ -1371,6 +1441,86 @@ def test_materialize_rejects_reservation_below_current_oracle_floor():
         eng._validate_reservation_live_pk_floors(planos, reservation)
 
 
+def test_phase_plan_snapshots_only_schedule_admitted_roots(spark, monkeypatch):
+    class SnapshotReached(RuntimeError):
+        pass
+
+    class Connection:
+        def close(self):
+            pass
+
+    admitted_root = spark.createDataFrame(
+        [(20, 49)], "NUM_IF long, NUM_TIPO_IF long"
+    )
+    profile = eng.get_product_profile("cdb_resgate")
+    config = {
+        "DATAGEN_RAW_BASE_URI": "oci://raw@ns/run/RAW",
+        "DATAGEN_RAW_PREFIX": "",
+        "DATAGEN_SYNTHETIC_BASE_URI": "oci://out@ns/run/synthetic/cdb",
+        "DATAGEN_SYNTHETIC_PREFIX": "",
+        "DATAGEN_CLONE_PREFIX": "cdb_resgate",
+        "DATAGEN_SPECS_URI": "spec.json",
+    }
+    spec = {
+        eng.TABELA_RAIZ: {
+            "pk_cols": [eng.COL_NUM_IF],
+            "foreign_keys": [],
+            "static": False,
+        }
+    }
+    monkeypatch.setitem(
+        eng.TABELAS_ENGORDA_POR_PRODUTO,
+        "cdb_resgate",
+        (eng.TABELA_RAIZ,),
+    )
+    monkeypatch.setattr(eng, "_valida_contrato_nulificacao_seletiva", lambda *_: None)
+    monkeypatch.setattr(eng, "_carrega_faltantes", lambda *_: None)
+    monkeypatch.setattr(eng, "_oracle_credentials", lambda *_: ("url", "user", "pw"))
+    monkeypatch.setattr(
+        eng, "_read_controle_operacional_date", lambda *_: date(2026, 8, 20)
+    )
+    monkeypatch.setattr(eng, "_open_oracle_connection", lambda *_: Connection())
+    monkeypatch.setattr(eng, "monta_plano", lambda *_args, **_kwargs: {
+        eng.TABELA_RAIZ: eng.PlanoTabela(
+            eng.TABELA_RAIZ,
+            (eng.COL_NUM_IF,),
+            pk_regra="OFFSET_PROPRIO",
+            pk_start=100,
+        )
+    })
+    monkeypatch.setattr(eng, "ordem_topologica", lambda *_: [eng.TABELA_RAIZ])
+
+    def select_admitted(*_args, **kwargs):
+        assert kwargs["poda_cronograma_resgate"] is True
+        return eng.TargetInstrumentSelection(
+            [20], None, {eng.TABELA_RAIZ: admitted_root}
+        )
+
+    monkeypatch.setattr(eng, "seleciona_instrumentos_destino", select_admitted)
+    monkeypatch.setattr(eng, "_deriva_tipo_oracle", lambda *_: 49)
+    monkeypatch.setattr(eng, "_apply_oracle_pk_floors", lambda *_: None)
+    monkeypatch.setattr(eng, "_count_final_lotes", lambda *_: {eng.TABELA_RAIZ: 1})
+
+    def snapshot(_spark, _uri, lotes, _missing, **kwargs):
+        assert kwargs["selected_num_ifs"] == [20]
+        assert [row.NUM_IF for row in lotes[eng.TABELA_RAIZ].collect()] == [20]
+        raise SnapshotReached()
+
+    monkeypatch.setattr(eng, "_create_selected_lote_snapshot", snapshot)
+
+    with pytest.raises(SnapshotReached):
+        eng.executa_clonagem(
+            spark,
+            config,
+            spec,
+            product_profile=profile,
+            n_instrumentos=1,
+            phase="plan",
+            plan_uri="plan.json",
+            specs_uri="spec.json",
+        )
+
+
 def test_materialize_uses_frozen_lotes_and_rejects_spec_hash_divergence_before_side_effects(
     spark, monkeypatch
 ):
@@ -1469,6 +1619,7 @@ def test_materialize_uses_frozen_lotes_and_rejects_spec_hash_divergence_before_s
         "_carrega_faltantes",
         "_dominio_num_if_produto",
         "_num_if_inconsistentes_subtipo",
+        "_num_if_cronograma_resgate_invalido",
         "seleciona_instrumentos",
         "seleciona_instrumentos_destino",
         "calcula_lotes",
