@@ -1011,7 +1011,7 @@ class OciCliStorage:
             if no_overwrite:
                 command.append("--no-overwrite")
             if if_match is not None:
-                command += ["--if-match", if_match]
+                command += ["--if-match", if_match, "--force"]
             response = self._run(command)
             etag = _response_etag(response)
             if etag is None:
@@ -2116,6 +2116,7 @@ def execute_plan(
                 dependency_states = [states[dependency] for dependency in node["dependencies"]]
                 if any(state in {"FAILED", "BLOCKED", "CANCELLED"} for state in dependency_states):
                     set_node(node_id, state="BLOCKED", finished_at=utc_now())
+                    states[node_id] = "BLOCKED"
                     continue
                 if not all(state == "SUCCEEDED" for state in dependency_states):
                     continue
