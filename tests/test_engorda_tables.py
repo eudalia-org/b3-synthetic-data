@@ -125,10 +125,50 @@ class TestEngordaPhaseCli:
 
 class TestEngordaArtifacts:
     @staticmethod
+    def _selected_lote(table_counts=None):
+        table_counts = table_counts or {"INSTRUMENTO_FINANCEIRO": 1}
+        snapshot = (
+            "oci://cfg@ns/run/plan.json.selected-lote/"
+            "00000000-0000-4000-8000-000000000001"
+        )
+        return {
+            "artifact_type": engorda_tables.ENGORDA_SELECTED_LOTE_ARTIFACT,
+            "schema_version": engorda_tables.ENGORDA_SELECTED_LOTE_SCHEMA_VERSION,
+            "snapshot_id": "00000000-0000-4000-8000-000000000001",
+            "snapshot_uri": snapshot,
+            "table_set": sorted(table_counts),
+            "tables": {
+                table: {
+                    "path": f"{snapshot}/tables/{table}",
+                    "row_count": count,
+                    "schema": {
+                        "type": "struct",
+                        "fields": [
+                            {"name": "NUM_IF" if table == "INSTRUMENTO_FINANCEIRO"
+                             else "NUM_ID_OPERACAO",
+                             "type": "long", "nullable": True,
+                             "metadata": {}},
+                        ] + ([
+                            {"name": "NUM_TIPO_IF", "type": "long", "nullable": True,
+                             "metadata": {}},
+                        ] if table == "INSTRUMENTO_FINANCEIRO" else []),
+                    },
+                }
+                for table, count in sorted(table_counts.items())
+            },
+            "selective_missing": {
+                "present": False,
+                "path": None,
+                "row_count": 0,
+                "schema": None,
+            },
+        }
+
+    @staticmethod
     def _plan():
         body = {
             "artifact_type": engorda_tables.ENGORDA_PLAN_ARTIFACT,
-            "schema_version": engorda_tables.ENGORDA_ARTIFACT_SCHEMA_VERSION,
+            "schema_version": engorda_tables.ENGORDA_PLAN_SCHEMA_VERSION,
             "product": "cdb_simplificado",
             "selected_num_ifs": [10],
             "fator_k": 2,
@@ -138,8 +178,10 @@ class TestEngordaArtifacts:
             "raw_uri": "oci://raw@ns/run/RAW",
             "output_uri": "oci://out@ns/run/synthetic/cdb",
             "specs_uri": "oci://cfg@ns/spec.json",
+            "spec_sha256": "a" * 64,
             "faltantes_uri": "oci://cfg@ns/faltantes",
             "query_num_if_uri": "oci://cfg@ns/queries_produtos.sql",
+            "selected_lote": TestEngordaArtifacts._selected_lote(),
             "tables": {
                 "INSTRUMENTO_FINANCEIRO": {
                     "source_count": 1,
@@ -169,6 +211,30 @@ class TestEngordaArtifacts:
         tampered = dict(plan, fator_k=3)
         with pytest.raises(ValueError, match="plan_id"):
             engorda_tables._validate_plan_artifact(tampered)
+        tampered_snapshot = json.loads(json.dumps(plan))
+        tampered_snapshot["selected_lote"]["tables"][
+            "INSTRUMENTO_FINANCEIRO"
+        ]["row_count"] = 2
+        with pytest.raises(ValueError, match="plan_id"):
+            engorda_tables._validate_plan_artifact(tampered_snapshot)
+
+    def test_plan_v1_requires_regeneration(self):
+        old_plan = self._plan()
+        old_body = {key: value for key, value in old_plan.items() if key != "plan_id"}
+        old_body["schema_version"] = 1
+        old_body.pop("selected_lote")
+        old_plan = {**old_body, "plan_id": engorda_tables._plan_id(old_body)}
+
+        with pytest.raises(ValueError, match="schema_version=1.*gere novamente"):
+            engorda_tables._validate_plan_artifact(old_plan)
+
+    def test_plan_v2_requires_spec_sha256(self):
+        body = {key: value for key, value in self._plan().items() if key != "plan_id"}
+        body.pop("spec_sha256")
+        plan = {**body, "plan_id": engorda_tables._plan_id(body)}
+
+        with pytest.raises(ValueError, match="spec_sha256"):
+            engorda_tables._validate_plan_artifact(plan)
 
     def test_plan_builder_freezes_exact_public_demands(self):
         class CountFrame:
@@ -193,6 +259,7 @@ class TestEngordaArtifacts:
                 "DATAGEN_CLONE_PREFIX": "run/synthetic/cdb",
             },
             specs_uri="oci://cfg@ns/spec.json",
+            spec_sha256="a" * 64,
             product_profile=profile,
             valores=[20, 10],
             fator_k=3,
@@ -212,6 +279,7 @@ class TestEngordaArtifacts:
             lotes={"INSTRUMENTO_FINANCEIRO": CountFrame(2)},
             faltantes_uri="oci://cfg@ns/faltantes",
             query_num_if_uri="oci://cfg@ns/queries_produtos.sql",
+            selected_lote=self._selected_lote({"INSTRUMENTO_FINANCEIRO": 2}),
         )
 
         assert plan["selected_num_ifs"] == [10, 20]
@@ -264,6 +332,7 @@ class TestEngordaArtifacts:
                 "DATAGEN_CLONE_PREFIX": "run/synthetic/cdb",
             },
             specs_uri="oci://cfg@ns/spec.json",
+            spec_sha256="a" * 64,
             product_profile=profile,
             valores=[10, 20],
             fator_k=2,
@@ -279,6 +348,10 @@ class TestEngordaArtifacts:
             lote_counts={"INSTRUMENTO_FINANCEIRO": 2, "OPERACAO": 3},
             faltantes_uri=None,
             query_num_if_uri="oci://cfg@ns/queries_produtos.sql",
+            selected_lote=self._selected_lote({
+                "INSTRUMENTO_FINANCEIRO": 2,
+                "OPERACAO": 3,
+            }),
         )
 
         assert plan["tables"]["OPERACAO"]["source_count"] == 3
@@ -381,7 +454,7 @@ class TestEngordaArtifacts:
         plan = self._plan()
         reservation = {
             "artifact_type": engorda_tables.ENGORDA_RESERVATION_ARTIFACT,
-            "schema_version": engorda_tables.ENGORDA_ARTIFACT_SCHEMA_VERSION,
+            "schema_version": engorda_tables.ENGORDA_RESERVATION_SCHEMA_VERSION,
             "plan_id": plan["plan_id"],
             "product": "cdb_simplificado",
             "table_pks": {
@@ -423,7 +496,7 @@ class TestEngordaArtifacts:
         plan = self._plan()
         reservation = {
             "artifact_type": engorda_tables.ENGORDA_RESERVATION_ARTIFACT,
-            "schema_version": engorda_tables.ENGORDA_ARTIFACT_SCHEMA_VERSION,
+            "schema_version": engorda_tables.ENGORDA_RESERVATION_SCHEMA_VERSION,
             "plan_id": "other",
             "product": "cdb_simplificado",
             "table_pks": {},

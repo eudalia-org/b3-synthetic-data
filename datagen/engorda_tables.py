@@ -462,8 +462,11 @@ SQL_PLACEHOLDER_RE = re.compile(r"\{\{[^{}]+\}\}")
 DEFAULT_COD_IF_PATTERN = r"^[0-9A-Z]{6,20}$"
 DEFAULT_COD_IF_DRY_PREFIX = "SYN100"
 DEFAULT_COD_OPERACAO_PATTERN = r"^[0-9]{16}$"
-ENGORDA_ARTIFACT_SCHEMA_VERSION = 1
+ENGORDA_PLAN_SCHEMA_VERSION = 2
+ENGORDA_SELECTED_LOTE_SCHEMA_VERSION = 1
+ENGORDA_RESERVATION_SCHEMA_VERSION = 1
 ENGORDA_PLAN_ARTIFACT = "engorda_plan"
+ENGORDA_SELECTED_LOTE_ARTIFACT = "engorda_selected_lote"
 ENGORDA_RESERVATION_ARTIFACT = "engorda_reservation"
 ENGORDA_PHASES = ("all", "plan", "materialize")
 
@@ -1674,6 +1677,282 @@ def _plan_id(plan_without_id: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical_json(plan_without_id).encode("ascii")).hexdigest()
 
 
+def _selected_lote_snapshot_uri(plan_uri: str, snapshot_id: str) -> str:
+    return f"{plan_uri.rstrip('/')}.selected-lote/{snapshot_id}"
+
+
+def _nonnegative_int(value: Any, context: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{context} precisa ser inteiro >= 0")
+    return value
+
+
+def _validate_selected_lote_descriptor(
+    descriptor: Mapping[str, Any],
+    *,
+    expected_tables: Set[str],
+    plan_uri: Optional[str] = None,
+) -> dict[str, Any]:
+    if not isinstance(descriptor, Mapping):
+        raise ValueError("selected_lote precisa ser um descriptor")
+    expected_keys = {
+        "artifact_type", "schema_version", "snapshot_id", "snapshot_uri",
+        "table_set", "tables", "selective_missing",
+    }
+    if set(descriptor) != expected_keys:
+        raise ValueError(
+            "selected_lote possui campos inválidos: "
+            f"esperado={sorted(expected_keys)}, recebido={sorted(descriptor)}"
+        )
+    if descriptor.get("artifact_type") != ENGORDA_SELECTED_LOTE_ARTIFACT:
+        raise ValueError("selected_lote possui artifact_type inválido")
+    if descriptor.get("schema_version") != ENGORDA_SELECTED_LOTE_SCHEMA_VERSION:
+        raise ValueError("selected_lote possui schema_version incompatível")
+    snapshot_id = descriptor.get("snapshot_id")
+    try:
+        parsed_snapshot_id = uuid.UUID(str(snapshot_id))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError("selected_lote possui snapshot_id UUID inválido") from exc
+    if str(parsed_snapshot_id) != snapshot_id:
+        raise ValueError("selected_lote snapshot_id precisa ser UUID canônico")
+    snapshot_uri = descriptor.get("snapshot_uri")
+    if not isinstance(snapshot_uri, str) or not snapshot_uri:
+        raise ValueError("selected_lote possui snapshot_uri inválido")
+    if plan_uri is not None:
+        expected_uri = _selected_lote_snapshot_uri(plan_uri, snapshot_id)
+        if snapshot_uri != expected_uri:
+            raise ValueError(
+                "selected_lote snapshot_uri não deriva do plan_uri e snapshot_id"
+            )
+
+    table_set = descriptor.get("table_set")
+    if (not isinstance(table_set, list)
+            or any(not isinstance(table, str) or not table for table in table_set)
+            or table_set != sorted(set(table_set))):
+        raise ValueError("selected_lote table_set precisa ser lista exata e ordenada")
+    if set(table_set) != expected_tables:
+        raise ValueError(
+            "selected_lote table_set diverge: "
+            f"esperado={sorted(expected_tables)}, recebido={table_set}"
+        )
+    if TABELA_RAIZ not in expected_tables:
+        raise ValueError(f"selected_lote table_set não contém {TABELA_RAIZ}")
+    tables = descriptor.get("tables")
+    if not isinstance(tables, Mapping) or set(tables) != expected_tables:
+        raise ValueError("selected_lote tables diverge do table_set")
+    for table in table_set:
+        entry = tables[table]
+        if not isinstance(entry, Mapping) or set(entry) != {"path", "row_count", "schema"}:
+            raise ValueError(f"selected_lote tables.{table} inválido")
+        if entry.get("path") != f"{snapshot_uri}/tables/{table}":
+            raise ValueError(f"selected_lote tables.{table}.path inválido")
+        _nonnegative_int(entry.get("row_count"), f"selected_lote tables.{table}.row_count")
+        schema = entry.get("schema")
+        if not isinstance(schema, dict):
+            raise ValueError(f"selected_lote tables.{table}.schema inválido")
+        try:
+            parsed_schema = T.StructType.fromJson(schema)
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ValueError(f"selected_lote tables.{table}.schema inválido") from exc
+        if parsed_schema.jsonValue() != schema:
+            raise ValueError(f"selected_lote tables.{table}.schema não é canônico")
+
+    selective = descriptor.get("selective_missing")
+    if (not isinstance(selective, Mapping)
+            or set(selective) != {"present", "path", "row_count", "schema"}
+            or type(selective.get("present")) is not bool):
+        raise ValueError("selected_lote selective_missing inválido")
+    if selective["present"]:
+        if selective.get("path") != f"{snapshot_uri}/selective_missing":
+            raise ValueError("selected_lote selective_missing.path inválido")
+        _nonnegative_int(
+            selective.get("row_count"),
+            "selected_lote selective_missing.row_count",
+        )
+        schema = selective.get("schema")
+        if not isinstance(schema, dict):
+            raise ValueError("selected_lote selective_missing.schema inválido")
+        try:
+            parsed_schema = T.StructType.fromJson(schema)
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ValueError("selected_lote selective_missing.schema inválido") from exc
+        if parsed_schema.jsonValue() != schema:
+            raise ValueError("selected_lote selective_missing.schema não é canônico")
+    elif dict(selective) != {
+        "present": False, "path": None, "row_count": 0, "schema": None,
+    }:
+        raise ValueError("selected_lote selective_missing ausente possui contrato inválido")
+    return dict(descriptor)
+
+
+def _write_selected_lote_datasets(
+    descriptor: Mapping[str, Any],
+    lotes: Mapping[str, DataFrame],
+    selective_missing: Optional[DataFrame],
+) -> None:
+    table_set = descriptor["table_set"]
+    if set(lotes) != set(table_set):
+        raise ValueError("lotes para snapshot divergem do table_set")
+    for table in table_set:
+        lotes[table].write.mode("errorifexists").parquet(
+            descriptor["tables"][table]["path"]
+        )
+    selective = descriptor["selective_missing"]
+    if selective["present"]:
+        if selective_missing is None:
+            raise ValueError("snapshot exige DataFrame selective_missing")
+        selective_missing.write.mode("errorifexists").parquet(selective["path"])
+    elif selective_missing is not None:
+        raise ValueError("snapshot não descreve o DataFrame selective_missing")
+
+
+def _load_selected_lote_snapshot(
+    spark: SparkSession,
+    plan_uri: str,
+    descriptor: Mapping[str, Any],
+    *,
+    expected_tables: Set[str],
+    selected_num_ifs: Sequence[int],
+    selective_keys: frozenset[Tuple[str, str]],
+) -> Tuple[Dict[str, DataFrame], Optional[DataFrame], Dict[str, int]]:
+    validated = _validate_selected_lote_descriptor(
+        descriptor, expected_tables=expected_tables, plan_uri=plan_uri
+    )
+    lotes: Dict[str, DataFrame] = {}
+    for table in validated["table_set"]:
+        entry = validated["tables"][table]
+        frame = spark.read.parquet(entry["path"])
+        if frame.schema.jsonValue() != entry["schema"]:
+            raise ValueError(f"selected_lote tables.{table}.schema diverge do Parquet")
+        lotes[table] = frame
+    counts = _count_final_lotes(lotes)
+    for table in validated["table_set"]:
+        expected_count = validated["tables"][table]["row_count"]
+        if counts[table] != expected_count:
+            raise ValueError(
+                f"selected_lote tables.{table}.row_count={counts[table]}, "
+                f"esperado {expected_count}"
+            )
+
+    root = lotes[TABELA_RAIZ]
+    if COL_NUM_IF not in root.columns:
+        raise ValueError(f"selected_lote root não expõe {COL_NUM_IF}")
+    root_ids = sorted(int(row[COL_NUM_IF]) for row in root.select(COL_NUM_IF).collect())
+    expected_root_ids = sorted(int(value) for value in selected_num_ifs)
+    if root_ids != expected_root_ids:
+        raise ValueError(
+            f"selected_lote root NUM_IF diverge: {root_ids} != {expected_root_ids}"
+        )
+
+    selective = validated["selective_missing"]
+    missing: Optional[DataFrame] = None
+    if selective["present"]:
+        missing = spark.read.parquet(selective["path"])
+        if missing.schema.jsonValue() != selective["schema"]:
+            raise ValueError("selected_lote selective_missing.schema diverge do Parquet")
+        required_columns = ["TABELA", "COLUNA", "VALOR"]
+        if missing.columns != required_columns:
+            raise ValueError(
+                "selected_lote selective_missing possui colunas inválidas; "
+                f"esperado={required_columns}, recebido={missing.columns}"
+            )
+        rows = [tuple(row) for row in missing.select(*required_columns).collect()]
+        if len(rows) != selective["row_count"]:
+            raise ValueError(
+                "selected_lote selective_missing.row_count="
+                f"{len(rows)}, esperado {selective['row_count']}"
+            )
+        if any(value is None for _, _, value in rows):
+            raise ValueError(
+                "selected_lote selective_missing possui VALOR nulo"
+            )
+        if len(set(rows)) != len(rows):
+            raise ValueError("selected_lote selective_missing possui duplicatas")
+        invalid_pairs = sorted({(table, column) for table, column, _ in rows}
+                               - set(selective_keys))
+        if invalid_pairs:
+            raise ValueError(
+                "selected_lote selective_missing diverge da allowlist: "
+                f"{invalid_pairs}"
+            )
+    return lotes, missing, counts
+
+
+def _create_selected_lote_snapshot(
+    spark: SparkSession,
+    plan_uri: str,
+    lotes: Mapping[str, DataFrame],
+    selective_missing: Optional[DataFrame],
+    *,
+    selected_num_ifs: Sequence[int],
+    selective_keys: frozenset[Tuple[str, str]],
+    lote_counts: Optional[Mapping[str, int]] = None,
+) -> dict[str, Any]:
+    snapshot_id = str(uuid.uuid4())
+    snapshot_uri = _selected_lote_snapshot_uri(plan_uri, snapshot_id)
+    counts = (
+        {table: int(count) for table, count in lote_counts.items()}
+        if lote_counts is not None else _count_final_lotes(lotes)
+    )
+    descriptor: dict[str, Any] = {
+        "artifact_type": ENGORDA_SELECTED_LOTE_ARTIFACT,
+        "schema_version": ENGORDA_SELECTED_LOTE_SCHEMA_VERSION,
+        "snapshot_id": snapshot_id,
+        "snapshot_uri": snapshot_uri,
+        "table_set": sorted(lotes),
+        "tables": {
+            table: {
+                "path": f"{snapshot_uri}/tables/{table}",
+                "row_count": counts[table],
+                "schema": lotes[table].schema.jsonValue(),
+            }
+            for table in sorted(lotes)
+        },
+        "selective_missing": (
+            {
+                "present": True,
+                "path": f"{snapshot_uri}/selective_missing",
+                "row_count": selective_missing.count(),
+                "schema": selective_missing.schema.jsonValue(),
+            }
+            if selective_missing is not None else {
+                "present": False, "path": None, "row_count": 0, "schema": None,
+            }
+        ),
+    }
+    _validate_selected_lote_descriptor(
+        descriptor, expected_tables=set(lotes), plan_uri=plan_uri
+    )
+    _write_selected_lote_datasets(descriptor, lotes, selective_missing)
+    for table in descriptor["table_set"]:
+        persisted_schema = spark.read.parquet(
+            descriptor["tables"][table]["path"]
+        ).schema
+        if persisted_schema.simpleString() != lotes[table].schema.simpleString():
+            raise ValueError(
+                f"selected_lote tables.{table}.schema mudou na persistência"
+            )
+        descriptor["tables"][table]["schema"] = persisted_schema.jsonValue()
+    if selective_missing is not None:
+        persisted_schema = spark.read.parquet(
+            descriptor["selective_missing"]["path"]
+        ).schema
+        if persisted_schema.simpleString() != selective_missing.schema.simpleString():
+            raise ValueError(
+                "selected_lote selective_missing.schema mudou na persistência"
+            )
+        descriptor["selective_missing"]["schema"] = persisted_schema.jsonValue()
+    _load_selected_lote_snapshot(
+        spark,
+        plan_uri,
+        descriptor,
+        expected_tables=set(lotes),
+        selected_num_ifs=selected_num_ifs,
+        selective_keys=selective_keys,
+    )
+    return descriptor
+
+
 def _not_null_cols(cfg: dict) -> set[str]:
     raw = cfg.get("not_null_cols") or []
     return {str(c).strip().upper() for c in raw if isinstance(c, str)}
@@ -2170,7 +2449,10 @@ def _fks_para_pais_clonados(spec: dict, tabela: str,
 def monta_plano(spark, config, spec: dict, estaticas_extra: Set[str],
                 pk_floor: int, pk_band: int, offset_num_if: Optional[int],
                 n_clones_estimado: int,
-                pk_passo: int = 1) -> Dict[str, PlanoTabela]:
+                pk_passo: int = 1,
+                source_frames: Optional[Mapping[str, DataFrame]] = None,
+                frozen_table_plans: Optional[Mapping[str, Any]] = None,
+                ) -> Dict[str, PlanoTabela]:
     """Classifica cada tabela sintetizável e define a regra de PK. Aborta (com
     lista completa) se alguma tabela ficar sem regra — nada de chute.
 
@@ -2190,6 +2472,27 @@ def monta_plano(spark, config, spec: dict, estaticas_extra: Set[str],
     clonaveis = {t for t in spec if t not in estaticas}
     if TABELA_RAIZ not in clonaveis:
         raise ValueError(f"{TABELA_RAIZ} precisa ser sintetizável (não-static) no spec.")
+    frozen = source_frames is not None or frozen_table_plans is not None
+    if frozen and (source_frames is None or frozen_table_plans is None):
+        raise ValueError(
+            "reconstrução congelada exige source_frames e frozen_table_plans"
+        )
+    if frozen and (set(source_frames) != clonaveis
+                   or set(frozen_table_plans) != clonaveis):
+        raise ValueError(
+            "snapshot/frozen table_set diverge do conjunto sintetizável"
+        )
+
+    source_schemas: Dict[str, T.StructType] = {}
+
+    def source_schema(table: str) -> T.StructType:
+        if table not in source_schemas:
+            source_schemas[table] = (
+                source_frames[table].schema
+                if source_frames is not None
+                else read_parquet(spark, raw_path(config, table)).schema
+            )
+        return source_schemas[table]
 
     planos: Dict[str, PlanoTabela] = {}
     problemas: List[str] = []
@@ -2211,7 +2514,7 @@ def monta_plano(spark, config, spec: dict, estaticas_extra: Set[str],
             plano.pk_regra = "VIA_PAI"
         elif len(pk) == 1 and pk[0] not in cols_fk_qualquer:
             try:
-                dt = read_parquet(spark, raw_path(config, t)).schema[pk[0]].dataType
+                dt = source_schema(t)[pk[0]].dataType
             except Exception as exc:
                 problemas.append(f"{t}: não li o schema Parquet ({exc})")
                 continue
@@ -2244,42 +2547,75 @@ def monta_plano(spark, config, spec: dict, estaticas_extra: Set[str],
             "(--tratar-como-static as exclui da sintetização):\n  - "
             + "\n  - ".join(problemas))
 
+    if frozen_table_plans is not None:
+        for table, plano in sorted(planos.items()):
+            frozen_table = frozen_table_plans[table]
+            frozen_pk = frozen_table.get("pk") if isinstance(frozen_table, Mapping) else None
+            if not isinstance(frozen_pk, Mapping):
+                raise ValueError(f"plano congelado {table}.pk inválido")
+            if frozen_pk.get("rule") != plano.pk_regra:
+                raise ValueError(
+                    f"plano congelado {table}.pk.rule diverge da classificação atual"
+                )
+            step = frozen_pk.get("step")
+            if isinstance(step, bool) or not isinstance(step, int) or step < 1:
+                raise ValueError(f"plano congelado {table}.pk.step inválido")
+            minimum_start = frozen_pk.get("minimum_start")
+            if plano.pk_regra == "OFFSET_PROPRIO":
+                if isinstance(minimum_start, bool) or not isinstance(minimum_start, int):
+                    raise ValueError(
+                        f"plano congelado {table}.pk.minimum_start inválido"
+                    )
+                plano.pk_start = minimum_start
+            elif minimum_start is not None:
+                raise ValueError(
+                    f"plano congelado {table}.pk.minimum_start precisa ser nulo"
+                )
+            plano.pk_passo = step
+
     # Início da PK nova para as tabelas OFFSET_PROPRIO (max real do Parquet
     # COMPLETO + band, com clamp de capacidade — padrão compute_pk_maxes).
     for t, plano in sorted(planos.items()):
         if plano.pk_regra != "OFFSET_PROPRIO":
             continue
-        plano.pk_passo = pk_passo
         pk_col = plano.pk_cols[0]
-        raw_max = _read_pk_max(spark, raw_path(config, t), pk_col)
-        if raw_max is None:
-            raise ValueError(f"{t}: não li max({pk_col}) do Parquet completo.")
-        true_max = int(raw_max)
-        if t == TABELA_RAIZ and offset_num_if is not None:
-            if offset_num_if <= true_max:
-                raise ValueError(
-                    f"--offset-num-if {offset_num_if} <= max real de "
-                    f"{COL_NUM_IF} ({true_max}); colidiria com produção.")
-            # Início EXPLÍCITO é inclusivo: o primeiro NUM_IF novo É o valor
-            # informado (semântica documentada no --help).
-            plano.pk_start = offset_num_if
-        else:
-            # Primeira PK nova = max real + band + 1.
-            plano.pk_start = max(true_max + pk_band, pk_floor) + 1
-        dt = read_parquet(spark, raw_path(config, t)).schema[pk_col].dataType
+        if frozen_table_plans is None:
+            plano.pk_passo = pk_passo
+            raw_max = _read_pk_max(spark, raw_path(config, t), pk_col)
+            if raw_max is None:
+                raise ValueError(f"{t}: não li max({pk_col}) do Parquet completo.")
+            true_max = int(raw_max)
+            if t == TABELA_RAIZ and offset_num_if is not None:
+                if offset_num_if <= true_max:
+                    raise ValueError(
+                        f"--offset-num-if {offset_num_if} <= max real de "
+                        f"{COL_NUM_IF} ({true_max}); colidiria com produção.")
+                # Início EXPLÍCITO é inclusivo: o primeiro NUM_IF novo É o valor
+                # informado (semântica documentada no --help).
+                plano.pk_start = offset_num_if
+            else:
+                # Primeira PK nova = max real + band + 1.
+                plano.pk_start = max(true_max + pk_band, pk_floor) + 1
+        dt = source_schema(t)[pk_col].dataType
         cap = _pk_capacity_of(dt)
         # O passo multiplica o alcance: a última PK nova é
         # pk_start + (n_clones - 1) * pk_passo.
-        alcance = n_clones_estimado * pk_passo
+        alcance = n_clones_estimado * plano.pk_passo
         if cap is not None and plano.pk_start + alcance > cap:
             logger.warning(
                 "%s: início %d + ~%d sintético(s) × passo %d pode estourar o "
                 "domínio da PK (cap %d). Reduza o lote/K/passo ou trate a "
                 "tabela como static.",
                 t, plano.pk_start, n_clones_estimado, pk_passo, cap)
-        logger.info("Plano %s: PK %s OFFSET_PROPRIO a partir de %d "
-                    "(max real %d, band %d, passo %d)", t, pk_col,
-                    plano.pk_start, true_max, pk_band, pk_passo)
+        if frozen_table_plans is None:
+            logger.info("Plano %s: PK %s OFFSET_PROPRIO a partir de %d "
+                        "(max real %d, band %d, passo %d)", t, pk_col,
+                        plano.pk_start, true_max, pk_band, pk_passo)
+        else:
+            logger.info(
+                "Plano %s: PK %s OFFSET_PROPRIO congelado a partir de %d "
+                "(passo %d)", t, pk_col, plano.pk_start, plano.pk_passo,
+            )
     for t, plano in sorted(planos.items()):
         if plano.pk_regra == "VIA_PAI":
             logger.info("Plano %s: PK %s VIA_PAI (segue o mapeamento do pai)",
@@ -3397,7 +3733,7 @@ def seleciona_instrumentos_destino(
 
 
 def _deriva_tipo_oracle(spark, config, num_if_valores: List,
-                        tipo_oracle_cli: Optional[int] = None) -> int:
+                         tipo_oracle_cli: Optional[int] = None) -> int:
     """Deriva o TIPO do instrumento (NUM_TIPO_IF) das próprias linhas do lote.
 
     Por que derivar em vez de configurar: o valor alimenta
@@ -3427,10 +3763,23 @@ def _deriva_tipo_oracle(spark, config, num_if_valores: List,
 
     sel = spark.createDataFrame([(v,) for v in num_if_valores], [COL_NUM_IF])
     sel = sel.select(F.col(COL_NUM_IF).cast(src.schema[COL_NUM_IF].dataType))
+    lote = src.join(F.broadcast(sel), on=COL_NUM_IF, how="left_semi")
+    return _deriva_tipo_oracle_do_lote(lote, tipo_oracle_cli)
+
+
+def _deriva_tipo_oracle_do_lote(
+    lote_raiz: DataFrame,
+    tipo_oracle_esperado: Optional[int] = None,
+) -> int:
+    """Deriva NUM_TIPO_IF do lote já admitido, sem consultar RAW."""
+    if COL_NUM_TIPO_IF not in lote_raiz.columns:
+        raise ValueError(
+            f"snapshot de {TABELA_RAIZ} não expõe {COL_NUM_TIPO_IF}; "
+            "gere novamente o plano"
+        )
     brutos = [
         row["__tipo"] for row in
-        (src.join(F.broadcast(sel), on=COL_NUM_IF, how="left_semi")
-         .select(F.col(COL_NUM_TIPO_IF).alias("__tipo"))
+        (lote_raiz.select(F.col(COL_NUM_TIPO_IF).alias("__tipo"))
          .dropDuplicates()
          .orderBy("__tipo")
          .limit(MAX_TIPOS_DIAGNOSTICO + 1)
@@ -3461,7 +3810,7 @@ def _deriva_tipo_oracle(spark, config, num_if_valores: List,
     if len(tipos) > 1:
         listados = (tipos if len(tipos) <= MAX_TIPOS_DIAGNOSTICO
                     else f"{tipos[:MAX_TIPOS_DIAGNOSTICO]}... (+)")
-        if tipo_oracle_cli is None:
+        if tipo_oracle_esperado is None:
             raise ValueError(
                 f"Lote heterogêneo: {COL_NUM_TIPO_IF} distinto(s) {listados} nas "
                 f"linhas selecionadas de {TABELA_RAIZ}. O tipo define qual COD_IF "
@@ -3469,21 +3818,22 @@ def _deriva_tipo_oracle(spark, config, num_if_valores: List,
                 "domínio a UM tipo. Se o lote for legitimamente multi-tipo, "
                 "informe --tipo-oracle para escolher o tipo da alocação.")
         logger.warning(
-            "Lote heterogêneo (%s=%s); alocando COD_IF com --tipo-oracle=%d por "
-            "decisão explícita do operador.",
-            COL_NUM_TIPO_IF, listados, int(tipo_oracle_cli))
-        return int(tipo_oracle_cli)
+            "Lote heterogêneo (%s=%s); alocando COD_IF com tipo congelado=%d por "
+            "decisão explícita do plano.",
+            COL_NUM_TIPO_IF, listados, int(tipo_oracle_esperado))
+        return int(tipo_oracle_esperado)
 
     derivado = tipos[0]
-    if tipo_oracle_cli is not None and int(tipo_oracle_cli) != derivado:
+    if tipo_oracle_esperado is not None and int(tipo_oracle_esperado) != derivado:
         raise ValueError(
-            f"--tipo-oracle={int(tipo_oracle_cli)} diverge do {COL_NUM_TIPO_IF} "
+            f"tipo Oracle esperado={int(tipo_oracle_esperado)} diverge do "
+            f"{COL_NUM_TIPO_IF} "
             f"do lote ({derivado}). Isso indica query/produto trocados; corrija "
             "antes de alocar COD_IF no Oracle.")
     logger.info(
         "Tipo do instrumento DERIVADO do lote: %s=%d (%s).",
         COL_NUM_TIPO_IF, derivado,
-        "confirmado por --tipo-oracle" if tipo_oracle_cli is not None
+        "confirmado pelo valor esperado" if tipo_oracle_esperado is not None
         else "sem override na CLI")
     return derivado
 
@@ -4754,7 +5104,9 @@ def _delete_path(spark: SparkSession, path: str) -> None:
         raise ValueError(f"não foi possível apagar caminho de trabalho: {path}")
 
 
-def _promote_staging_paths(fs, staging, final, backup) -> None:
+def _promote_staging_paths(
+    fs, staging, final, backup, *, require_absent: bool = False
+) -> None:
     """Promove staging com rollback explícito, sem alegar atomicidade.
 
     Object stores podem implementar rename como copy+delete. Existe uma janela
@@ -4765,6 +5117,11 @@ def _promote_staging_paths(fs, staging, final, backup) -> None:
     if not fs.exists(staging):
         raise ValueError(f"staging ausente antes da publicação: {staging_text}")
     had_previous = fs.exists(final)
+    if had_previous and require_absent:
+        raise ValueError(
+            f"artefato sintético imutável já existe em {final_text!r}; "
+            "não será substituído após race de publicação"
+        )
     if had_previous:
         logger.warning(
             "Publicação object-store não atômica: se o processo cair entre renames, "
@@ -4826,23 +5183,39 @@ def _promote_staging_paths(fs, staging, final, backup) -> None:
                 "remova manualmente %s. O destino final não foi alterado.", backup_text)
 
 
-def _publish_staging(spark: SparkSession, staging_path: str, final_path: str) -> None:
+def _publish_staging(
+    spark: SparkSession,
+    staging_path: str,
+    final_path: str,
+    *,
+    require_absent: bool = False,
+) -> None:
     jvm = spark.sparkContext._jvm
     jsc = spark.sparkContext._jsc
     staging = jvm.org.apache.hadoop.fs.Path(staging_path)
     final = jvm.org.apache.hadoop.fs.Path(final_path)
     backup = jvm.org.apache.hadoop.fs.Path(f"{final_path}.__previous_{uuid.uuid4().hex}")
     fs = final.getFileSystem(jsc.hadoopConfiguration())
-    _promote_staging_paths(fs, staging, final, backup)
+    _promote_staging_paths(
+        fs, staging, final, backup, require_absent=require_absent
+    )
 
 
 def _stage_and_publish(spark: SparkSession, final_path: str,
-                       prepare: Callable[[str], None]) -> None:
+                       prepare: Callable[[str], None], *,
+                       require_absent: bool = False) -> None:
     staging_path = f"{final_path}.__staging_{uuid.uuid4().hex}"
     _delete_path(spark, staging_path)
     try:
         prepare(staging_path)
-        _publish_staging(spark, staging_path, final_path)
+        if require_absent:
+            _assert_exact_output_absent(spark, final_path)
+        _publish_staging(
+            spark,
+            staging_path,
+            final_path,
+            require_absent=require_absent,
+        )
     except Exception:
         logger.error(
             "Publicação abortada; verifique o erro e qualquer backup .__previous_* "
@@ -5171,6 +5544,7 @@ def _build_engorda_plan(
     *,
     config: Mapping[str, str],
     specs_uri: str,
+    spec_sha256: str,
     product_profile: ProductProfile,
     valores: Sequence[int],
     fator_k: int,
@@ -5182,7 +5556,9 @@ def _build_engorda_plan(
     lotes: Mapping[str, DataFrame],
     faltantes_uri: Optional[str],
     query_num_if_uri: str,
+    selected_lote: Mapping[str, Any],
     lote_counts: Optional[Mapping[str, int]] = None,
+    frozen_table_plans: Optional[Mapping[str, Any]] = None,
     prazo_vencimento_dias: Optional[int] = None,
     anular_cols: Optional[Mapping[str, Sequence[str]]] = None,
     meu_numero_prefix: Optional[str] = None,
@@ -5197,17 +5573,31 @@ def _build_engorda_plan(
         plano = planos[table]
         source_count = source_counts[table]
         synthetic_count = source_count * fator_k
+        pk_plan = {
+            "rule": plano.pk_regra,
+            "count_demand": (
+                synthetic_count if plano.pk_regra == "OFFSET_PROPRIO" else 0
+            ),
+            "step": plano.pk_passo,
+            "minimum_start": plano.pk_start,
+        }
+        if frozen_table_plans is not None:
+            frozen_table = frozen_table_plans[table]
+            frozen_pk = frozen_table.get("pk") if isinstance(frozen_table, Mapping) else None
+            if not isinstance(frozen_pk, Mapping):
+                raise ValueError(f"plano congelado {table}.pk inválido")
+            if (frozen_table.get("source_count") != source_count
+                    or frozen_table.get("synthetic_count") != synthetic_count
+                    or frozen_pk.get("rule") != pk_plan["rule"]
+                    or frozen_pk.get("count_demand") != pk_plan["count_demand"]):
+                raise ValueError(
+                    f"plano congelado {table} diverge das contagens/classificação"
+                )
+            pk_plan = dict(frozen_pk)
         tables[table] = {
             "source_count": source_count,
             "synthetic_count": synthetic_count,
-            "pk": {
-                "rule": plano.pk_regra,
-                "count_demand": (
-                    synthetic_count if plano.pk_regra == "OFFSET_PROPRIO" else 0
-                ),
-                "step": plano.pk_passo,
-                "minimum_start": plano.pk_start,
-            },
+            "pk": pk_plan,
         }
 
     operation = product_profile.business_keys.operation
@@ -5225,7 +5615,7 @@ def _build_engorda_plan(
 
     body: dict[str, Any] = {
         "artifact_type": ENGORDA_PLAN_ARTIFACT,
-        "schema_version": ENGORDA_ARTIFACT_SCHEMA_VERSION,
+        "schema_version": ENGORDA_PLAN_SCHEMA_VERSION,
         "product": product_profile.name,
         "selected_num_ifs": sorted(int(value) for value in valores),
         "fator_k": fator_k,
@@ -5240,8 +5630,10 @@ def _build_engorda_plan(
         ),
         "output_uri": clone_base_path(dict(config)),
         "specs_uri": specs_uri,
+        "spec_sha256": spec_sha256,
         "faltantes_uri": faltantes_uri,
         "query_num_if_uri": query_num_if_uri,
+        "selected_lote": dict(selected_lote),
         "prazo_vencimento_dias": prazo_vencimento_dias,
         "anular_cols": {
             table: list(columns)
@@ -5265,7 +5657,12 @@ def _build_engorda_plan(
 def _validate_plan_artifact(plan: Mapping[str, Any]) -> dict[str, Any]:
     if plan.get("artifact_type") != ENGORDA_PLAN_ARTIFACT:
         raise ValueError("artefato de plano possui artifact_type inválido")
-    if plan.get("schema_version") != ENGORDA_ARTIFACT_SCHEMA_VERSION:
+    if plan.get("schema_version") == 1:
+        raise ValueError(
+            "plano schema_version=1 não possui snapshot imutável; gere novamente "
+            "com phase plan antes de materializar"
+        )
+    if plan.get("schema_version") != ENGORDA_PLAN_SCHEMA_VERSION:
         raise ValueError("artefato de plano possui schema_version incompatível")
     plan_id = plan.get("plan_id")
     if not isinstance(plan_id, str) or not plan_id:
@@ -5276,14 +5673,26 @@ def _validate_plan_artifact(plan: Mapping[str, Any]) -> dict[str, Any]:
     required = {
         "product", "selected_num_ifs", "fator_k", "seed",
         "engorda_timestamp", "controle_operacional_date", "raw_uri",
-        "output_uri", "specs_uri", "faltantes_uri", "tables", "cod_if",
-        "cod_operacao", "meu_numero", "query_num_if_uri",
+        "output_uri", "specs_uri", "spec_sha256", "faltantes_uri", "tables", "cod_if",
+        "cod_operacao", "meu_numero", "query_num_if_uri", "selected_lote",
     }
     missing = sorted(required - set(plan))
     if missing:
         raise ValueError(f"artefato de plano incompleto: {missing}")
+    if (not isinstance(plan["spec_sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", plan["spec_sha256"])):
+        raise ValueError("artefato de plano possui spec_sha256 inválido")
     if not isinstance(plan["tables"], dict) or not plan["tables"]:
         raise ValueError("artefato de plano precisa conter tables")
+    selected_lote = _validate_selected_lote_descriptor(
+        plan["selected_lote"], expected_tables=set(plan["tables"])
+    )
+    for table, table_plan in plan["tables"].items():
+        snapshot_count = selected_lote["tables"][table]["row_count"]
+        if table_plan.get("source_count") != snapshot_count:
+            raise ValueError(
+                f"plano tables.{table}.source_count diverge do selected_lote"
+            )
     return dict(plan)
 
 
@@ -5311,7 +5720,7 @@ def _validate_reservation_artifact(
 ) -> dict[str, Any]:
     if reservation.get("artifact_type") != ENGORDA_RESERVATION_ARTIFACT:
         raise ValueError("artefato de reserva possui artifact_type inválido")
-    if reservation.get("schema_version") != ENGORDA_ARTIFACT_SCHEMA_VERSION:
+    if reservation.get("schema_version") != ENGORDA_RESERVATION_SCHEMA_VERSION:
         raise ValueError("artefato de reserva possui schema_version incompatível")
     if reservation.get("plan_id") != plan["plan_id"]:
         raise ValueError("reserva não está vinculada ao plan_id consumido")
@@ -5390,6 +5799,19 @@ def _inject_reserved_pk_starts(
         planos[table].pk_start = int(table_reservation["start"])
 
 
+def _validate_reservation_live_pk_floors(
+    planos: Mapping[str, PlanoTabela], reservation: Mapping[str, Any]
+) -> None:
+    for table, table_reservation in reservation["table_pks"].items():
+        live_minimum = planos[table].pk_start
+        reserved_start = int(table_reservation["start"])
+        if live_minimum is None or reserved_start < int(live_minimum):
+            raise ValueError(
+                f"reserva table_pks.{table}: start {reserved_start} abaixo do "
+                f"mínimo live seguro {live_minimum}"
+            )
+
+
 def executa_clonagem(spark, config, spec: dict, *,
                      product_profile: ProductProfile,
                      meu_numero_prefix: Optional[str] = None,
@@ -5417,9 +5839,12 @@ def executa_clonagem(spark, config, spec: dict, *,
                       dry_run: bool = False,
                       phase: str = "all",
                       plan_uri: Optional[str] = None,
-                      planned_artifact: Optional[Mapping[str, Any]] = None,
-                      reservation: Optional[Mapping[str, Any]] = None,
-                      specs_uri: Optional[str] = None) -> Dict[str, dict]:
+                       planned_artifact: Optional[Mapping[str, Any]] = None,
+                       reservation: Optional[Mapping[str, Any]] = None,
+                       snapshot_lotes: Optional[Mapping[str, DataFrame]] = None,
+                       snapshot_faltantes: Optional[DataFrame] = None,
+                       snapshot_lote_counts: Optional[Mapping[str, int]] = None,
+                       specs_uri: Optional[str] = None) -> Dict[str, dict]:
     """Roda a sintetização fim a fim; devolve {tabela: estatísticas} (para uso em
     notebook). Aborta sem gravar NADA se qualquer validação falhar.
 
@@ -5439,9 +5864,15 @@ def executa_clonagem(spark, config, spec: dict, *,
         raise ValueError(f"phase inválida: {phase!r}")
     if phase == "plan" and dry_run:
         raise ValueError("phase plan não aceita dry_run: a admissão Oracle é obrigatória")
-    if (num_ifs is None) == (n_instrumentos is None):
+    if phase != "materialize" and (num_ifs is None) == (n_instrumentos is None):
         raise ValueError(
             "informe exatamente uma seleção: num_ifs ou n_instrumentos"
+        )
+    if phase == "materialize" and (
+        snapshot_lotes is None or snapshot_lote_counts is None
+    ):
+        raise ValueError(
+            "materialize exige lotes e contagens carregados do snapshot validado"
         )
     if fator_k < 1:
         raise ValueError("--fator-k deve ser >= 1.")
@@ -5505,6 +5936,7 @@ def executa_clonagem(spark, config, spec: dict, *,
     else:
         logger.info("Produto %s não altera colunas de data.", product_profile.name)
     spec = normalize_specs(spec)
+    spec_sha256 = hashlib.sha256(_canonical_json(spec).encode("ascii")).hexdigest()
     logger.info("Spec carregado: %d tabela(s); engordáveis (não-static) antes dos "
                 "parâmetros: %d.", len(spec),
                 sum(1 for cfg in spec.values() if not cfg.get("static")))
@@ -5540,20 +5972,29 @@ def executa_clonagem(spark, config, spec: dict, *,
             if table in spec:
                 spec[table]["static"] = True
 
-    faltantes = _carrega_faltantes(spark, config, faltantes_arg, faltantes_parquet)
-    if faltantes is not None:
-        logger.info(
-            "Faltantes offline carregados: %d chave(s). Em run real o arquivo "
-            "não decide a admissão; o Oracle live é autoritativo.",
-            faltantes.count(),
+    if phase == "materialize":
+        faltantes = snapshot_faltantes
+    else:
+        faltantes = _carrega_faltantes(
+            spark, config, faltantes_arg, faltantes_parquet
         )
+        if faltantes is not None:
+            logger.info(
+                "Faltantes offline carregados: %d chave(s). Em run real o arquivo "
+                "não decide a admissão; o Oracle live é autoritativo.",
+                faltantes.count(),
+            )
     if (not poda_subtipo
             and produto in PRODUTOS_COM_PODA_SUBTIPO
             and product_profile.integrity.subtype is not None):
         logger.warning("Poda de subtipo (item 1) DESLIGADA (--sem-poda-subtipo): "
                        "sintéticos podem ter CONDICAO_IF dangling (Cat 1).")
 
-    requested_count = len(num_ifs) if num_ifs is not None else int(n_instrumentos)
+    if phase == "materialize":
+        valores = [int(value) for value in planned_artifact["selected_num_ifs"]]
+        requested_count = len(valores)
+    else:
+        requested_count = len(num_ifs) if num_ifs is not None else int(n_instrumentos)
     # O plano de pertencimento precisa existir durante a admissão FK para ligar
     # filhos transitivos ao NUM_IF dono. O tamanho solicitado basta para o aviso
     # conservador de capacidade; a seleção aceita exatamente esse total.
@@ -5567,12 +6008,23 @@ def executa_clonagem(spark, config, spec: dict, *,
         offset_num_if,
         n_clones_estimado=requested_count * fator_k * 1000,
         pk_passo=pk_passo,
+        source_frames=(snapshot_lotes if phase == "materialize" else None),
+        frozen_table_plans=(
+            planned_artifact["tables"] if phase == "materialize" else None
+        ),
     )
     ordem = ordem_topologica(planos)
     logger.info("Ordem de sintetização (%d tabela(s)): %s", len(ordem), ordem)
 
     selected_lotes: Optional[Dict[str, DataFrame]] = None
-    if credentials is None:
+    if phase == "materialize":
+        selected_lotes = dict(snapshot_lotes)
+        if set(selected_lotes) != set(planos):
+            raise ValueError(
+                "materialize: table_set do snapshot diverge do spec atual: "
+                f"snapshot={sorted(selected_lotes)}, spec={sorted(planos)}"
+            )
+    elif credentials is None:
         logger.warning(
             "Dry-run: admissão live de todas as FKs contra o Oracle não executada; "
             "o resultado é estruturalmente válido, mas parcial quanto a drift."
@@ -5634,7 +6086,13 @@ def executa_clonagem(spark, config, spec: dict, *,
     # Tipo do instrumento DERIVADO do lote — antes de qualquer round-trip Oracle.
     # É isto que substitui o antigo literal por produto e o que impede alocar
     # COD_IF de um produto para instrumento de outro.
-    tipo_derivado = _deriva_tipo_oracle(spark, config, valores, tipo_oracle)
+    if phase == "materialize":
+        tipo_derivado = _deriva_tipo_oracle_do_lote(
+            selected_lotes[TABELA_RAIZ],
+            int(planned_artifact["cod_if"]["oracle_type"]),
+        )
+    else:
+        tipo_derivado = _deriva_tipo_oracle(spark, config, valores, tipo_oracle)
     business_policy = _resolve_business_policy(business_policy, tipo_derivado)
     operation_policy = business_policy.operation
 
@@ -5655,31 +6113,58 @@ def executa_clonagem(spark, config, spec: dict, *,
     if credentials is not None:
         _apply_oracle_pk_floors(spark._sc._jvm, credentials, planos)
 
-    with _perf_timer("final_lote_counts", product=product_profile.name):
-        final_lote_counts = _count_final_lotes(lotes)
+    if phase == "materialize":
+        final_lote_counts = {
+            table: int(count) for table, count in snapshot_lote_counts.items()
+        }
+        if set(final_lote_counts) != set(lotes):
+            raise ValueError("materialize: contagens do snapshot divergem do table_set")
+    else:
+        with _perf_timer("final_lote_counts", product=product_profile.name):
+            final_lote_counts = _count_final_lotes(lotes)
 
-    current_plan = _build_engorda_plan(
-        config=config,
-        specs_uri=specs_uri or config["DATAGEN_SPECS_URI"],
-        product_profile=product_profile,
-        valores=valores,
-        fator_k=fator_k,
-        seed=seed,
-        engorda_ts=engorda_ts,
-        controle_operacional_date=controle_operacional_date,
-        tipo_derivado=tipo_derivado,
-        planos=planos,
-        lotes=lotes,
-        lote_counts=final_lote_counts,
-        faltantes_uri=faltantes_parquet,
-        query_num_if_uri=query_num_if_path or product_profile.query_filename,
-        prazo_vencimento_dias=prazo_vencimento_dias,
-        anular_cols=anular_cols,
-        meu_numero_prefix=requested_meu_numero_prefix,
-    )
+    current_plan: Optional[dict[str, Any]] = None
     if phase == "plan":
         if not plan_uri:
             raise ValueError("phase plan exige plan_uri")
+        selected_lote_descriptor = _create_selected_lote_snapshot(
+            spark,
+            plan_uri,
+            lotes,
+            faltantes,
+            selected_num_ifs=valores,
+            selective_keys=product_profile.integrity.selective_missing_keys,
+            lote_counts=final_lote_counts,
+        )
+    elif phase == "materialize":
+        selected_lote_descriptor = planned_artifact["selected_lote"]
+
+    if phase in {"plan", "materialize"}:
+        current_plan = _build_engorda_plan(
+            config=config,
+            specs_uri=specs_uri or config["DATAGEN_SPECS_URI"],
+            spec_sha256=spec_sha256,
+            product_profile=product_profile,
+            valores=valores,
+            fator_k=fator_k,
+            seed=seed,
+            engorda_ts=engorda_ts,
+            controle_operacional_date=controle_operacional_date,
+            tipo_derivado=tipo_derivado,
+            planos=planos,
+            lotes=lotes,
+            lote_counts=final_lote_counts,
+            faltantes_uri=faltantes_parquet,
+            query_num_if_uri=query_num_if_path or product_profile.query_filename,
+            selected_lote=selected_lote_descriptor,
+            frozen_table_plans=(
+                planned_artifact["tables"] if phase == "materialize" else None
+            ),
+            prazo_vencimento_dias=prazo_vencimento_dias,
+            anular_cols=anular_cols,
+            meu_numero_prefix=requested_meu_numero_prefix,
+        )
+    if phase == "plan":
         with _perf_timer("plan_artifact_write", product=product_profile.name):
             _write_json_artifact(spark, plan_uri, current_plan)
         for frame in lotes.values():
@@ -5696,6 +6181,7 @@ def executa_clonagem(spark, config, spec: dict, *,
         validated_reservation = _validate_reservation_artifact(
             validated_plan, reservation
         )
+        _validate_reservation_live_pk_floors(planos, validated_reservation)
         _inject_reserved_pk_starts(planos, validated_reservation)
 
     mapeamentos: Dict[str, DataFrame] = {}
@@ -5888,11 +6374,14 @@ def executa_clonagem(spark, config, spec: dict, *,
                     save_base)
     else:
         save_base = _valida_destino(config)
-        if config.get("DATAGEN_OUTPUT_URI"):
+        require_absent = bool(config.get("DATAGEN_OUTPUT_URI"))
+        if require_absent:
             _assert_exact_output_absent(spark, save_base)
         _stage_and_publish(
             spark, save_base,
-            lambda staging_base: _prepare_outputs(staging_base, False))
+            lambda staging_base: _prepare_outputs(staging_base, False),
+            require_absent=require_absent,
+        )
         logger.info("Staging validado e publicado em %s.", save_base)
 
     logger.info("=" * 78)
@@ -6104,6 +6593,9 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
         specs_uri = job.specs_uri or config["DATAGEN_SPECS_URI"]
         planned_artifact = None
         reservation = None
+        snapshot_lotes = None
+        snapshot_faltantes = None
+        snapshot_lote_counts = None
         num_ifs = list(job.num_ifs) if job.num_ifs is not None else None
         n_instrumentos = job.n_instrumentos
         fator_k = job.fator_k
@@ -6139,7 +6631,17 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
             }
             if mismatches:
                 raise ValueError(f"lineage do materialize diverge do plano: {mismatches}")
-            num_ifs = [int(value) for value in planned_artifact["selected_num_ifs"]]
+            snapshot_lotes, snapshot_faltantes, snapshot_lote_counts = (
+                _load_selected_lote_snapshot(
+                    spark,
+                    job.plan_uri,
+                    planned_artifact["selected_lote"],
+                    expected_tables=set(planned_artifact["tables"]),
+                    selected_num_ifs=planned_artifact["selected_num_ifs"],
+                    selective_keys=profile.integrity.selective_missing_keys,
+                )
+            )
+            num_ifs = None
             n_instrumentos = None
             fator_k = int(planned_artifact["fator_k"])
             seed = int(planned_artifact["seed"])
@@ -6184,6 +6686,9 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
             plan_uri=job.plan_uri,
             planned_artifact=planned_artifact,
             reservation=reservation,
+            snapshot_lotes=snapshot_lotes,
+            snapshot_faltantes=snapshot_faltantes,
+            snapshot_lote_counts=snapshot_lote_counts,
             specs_uri=specs_uri,
         )
     finally:

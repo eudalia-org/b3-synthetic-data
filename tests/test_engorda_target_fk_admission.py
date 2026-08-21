@@ -1,6 +1,10 @@
+import copy
 import dataclasses
+import hashlib
 import json
+from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -942,7 +946,7 @@ def test_key_canonicalization_is_type_aware():
 def test_materialize_job_consumes_frozen_plan_without_resampling(tmp_path, monkeypatch):
     plan_body = {
         "artifact_type": eng.ENGORDA_PLAN_ARTIFACT,
-        "schema_version": eng.ENGORDA_ARTIFACT_SCHEMA_VERSION,
+        "schema_version": eng.ENGORDA_PLAN_SCHEMA_VERSION,
         "product": "cdb_simplificado",
         "selected_num_ifs": [10, 20],
         "fator_k": 3,
@@ -952,8 +956,37 @@ def test_materialize_job_consumes_frozen_plan_without_resampling(tmp_path, monke
         "raw_uri": "oci://raw@ns/run/RAW",
         "output_uri": "oci://out@ns/run/synthetic/cdb",
         "specs_uri": "oci://cfg@ns/spec.json",
+        "spec_sha256": "a" * 64,
         "faltantes_uri": "oci://cfg@ns/faltantes",
         "query_num_if_uri": "queries_produtos.sql",
+        "selected_lote": {
+            "artifact_type": eng.ENGORDA_SELECTED_LOTE_ARTIFACT,
+            "schema_version": eng.ENGORDA_SELECTED_LOTE_SCHEMA_VERSION,
+            "snapshot_id": "00000000-0000-4000-8000-000000000001",
+            "snapshot_uri": "snapshot",
+            "table_set": [eng.TABELA_RAIZ],
+            "tables": {
+                eng.TABELA_RAIZ: {
+                    "path": "snapshot/tables/INSTRUMENTO_FINANCEIRO",
+                    "row_count": 2,
+                    "schema": {
+                        "type": "struct",
+                        "fields": [
+                            {"name": "NUM_IF", "type": "long", "nullable": True,
+                             "metadata": {}},
+                            {"name": "NUM_TIPO_IF", "type": "long", "nullable": True,
+                             "metadata": {}},
+                        ],
+                    },
+                }
+            },
+            "selective_missing": {
+                "present": False,
+                "path": None,
+                "row_count": 0,
+                "schema": None,
+            },
+        },
         "tables": {
             eng.TABELA_RAIZ: {
                 "source_count": 2,
@@ -973,7 +1006,7 @@ def test_materialize_job_consumes_frozen_plan_without_resampling(tmp_path, monke
     plan = {**plan_body, "plan_id": eng._plan_id(plan_body)}
     reservation = {
         "artifact_type": eng.ENGORDA_RESERVATION_ARTIFACT,
-        "schema_version": eng.ENGORDA_ARTIFACT_SCHEMA_VERSION,
+        "schema_version": eng.ENGORDA_RESERVATION_SCHEMA_VERSION,
         "plan_id": plan["plan_id"],
         "product": "cdb_simplificado",
         "table_pks": {
@@ -994,6 +1027,12 @@ def test_materialize_job_consumes_frozen_plan_without_resampling(tmp_path, monke
     captured = {}
     monkeypatch.setattr(eng, "create_spark_session", lambda *_args: FakeSpark())
     monkeypatch.setattr(eng, "load_specs", lambda *_args: {"SPEC": {}})
+    frozen_lotes = {eng.TABELA_RAIZ: object()}
+    monkeypatch.setattr(
+        eng,
+        "_load_selected_lote_snapshot",
+        lambda *_args, **_kwargs: (frozen_lotes, None, {eng.TABELA_RAIZ: 2}),
+    )
     monkeypatch.setattr(
         eng,
         "get_engorda_env",
@@ -1024,7 +1063,7 @@ def test_materialize_job_consumes_frozen_plan_without_resampling(tmp_path, monke
         faltantes_parquet="oci://cfg@ns/faltantes",
     ))
 
-    assert captured["num_ifs"] == [10, 20]
+    assert captured["num_ifs"] is None
     assert captured["n_instrumentos"] is None
     assert captured["fator_k"] == 3
     assert captured["seed"] == 7
@@ -1032,6 +1071,9 @@ def test_materialize_job_consumes_frozen_plan_without_resampling(tmp_path, monke
     assert captured["phase"] == "materialize"
     assert captured["planned_artifact"] == plan
     assert captured["reservation"] == reservation
+    assert captured["snapshot_lotes"] == frozen_lotes
+    assert captured["snapshot_faltantes"] is None
+    assert captured["snapshot_lote_counts"] == {eng.TABELA_RAIZ: 2}
 
 
 def test_exact_pipeline_output_uri_passes_destination_safety_check():
@@ -1055,6 +1097,559 @@ def test_local_plan_artifact_is_immutable(tmp_path):
         eng._write_json_artifact(object(), str(path), {"version": 2})
 
     assert json.loads(path.read_text(encoding="utf-8")) == {"version": 1}
+
+
+def test_selected_lote_snapshot_roundtrip_preserves_empty_and_selective_missing(
+    spark, tmp_path, monkeypatch
+):
+    root = spark.createDataFrame(
+        [(10, 49, "A"), (20, 49, "B")],
+        "NUM_IF long, NUM_TIPO_IF long, VALUE string",
+    )
+    empty = spark.createDataFrame([], "ID long, NUM_IF long, NOTE string")
+    missing = spark.createDataFrame(
+        [("CHILD", "FK", "900")],
+        "TABELA string, COLUNA string, VALOR string",
+    )
+    plan_uri = str(tmp_path / "plan.json")
+
+    descriptor = eng._create_selected_lote_snapshot(
+        spark,
+        plan_uri,
+        {eng.TABELA_RAIZ: root, "CHILD": empty},
+        missing,
+        selected_num_ifs=[10, 20],
+        selective_keys=frozenset({("CHILD", "FK")}),
+    )
+    count_actions = 0
+    selective_collects = 0
+    original_count_final_lotes = eng._count_final_lotes
+    frame_class = type(root)
+    original_collect = frame_class.collect
+    original_count = frame_class.count
+    original_drop_duplicates = frame_class.dropDuplicates
+
+    def tracked_count_final_lotes(frames):
+        nonlocal count_actions
+        count_actions += 1
+        return original_count_final_lotes(frames)
+
+    def tracked_collect(frame):
+        nonlocal selective_collects
+        if frame.columns == ["TABELA", "COLUNA", "VALOR"]:
+            selective_collects += 1
+        return original_collect(frame)
+
+    def forbidden_selective_count(frame):
+        if frame.columns == ["TABELA", "COLUNA", "VALOR"]:
+            raise AssertionError("selective_missing must be validated by one collect")
+        return original_count(frame)
+
+    def forbidden_selective_dedup(frame, *args, **kwargs):
+        if frame.columns == ["TABELA", "COLUNA", "VALOR"]:
+            raise AssertionError("selective_missing dedup must be driver-side")
+        return original_drop_duplicates(frame, *args, **kwargs)
+
+    monkeypatch.setattr(eng, "_count_final_lotes", tracked_count_final_lotes)
+    monkeypatch.setattr(frame_class, "collect", tracked_collect)
+    monkeypatch.setattr(frame_class, "count", forbidden_selective_count)
+    monkeypatch.setattr(frame_class, "dropDuplicates", forbidden_selective_dedup)
+    lotes, loaded_missing, counts = eng._load_selected_lote_snapshot(
+        spark,
+        plan_uri,
+        descriptor,
+        expected_tables={eng.TABELA_RAIZ, "CHILD"},
+        selected_num_ifs=[10, 20],
+        selective_keys=frozenset({("CHILD", "FK")}),
+    )
+    assert count_actions == 1
+    assert selective_collects == 1
+
+    assert descriptor["artifact_type"] == eng.ENGORDA_SELECTED_LOTE_ARTIFACT
+    assert descriptor["schema_version"] == eng.ENGORDA_SELECTED_LOTE_SCHEMA_VERSION
+    assert descriptor["table_set"] == ["CHILD", eng.TABELA_RAIZ]
+    assert descriptor["tables"]["CHILD"]["row_count"] == 0
+    assert counts == {"CHILD": 0, eng.TABELA_RAIZ: 2}
+    assert lotes[eng.TABELA_RAIZ].orderBy("NUM_IF").collect() == root.orderBy("NUM_IF").collect()
+    assert lotes["CHILD"].count() == 0
+    assert loaded_missing.collect() == missing.collect()
+
+    with pytest.raises(Exception, match="exist"):
+        eng._write_selected_lote_datasets(
+            descriptor,
+            {eng.TABELA_RAIZ: root, "CHILD": empty},
+            missing,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda value: value["table_set"].append("GHOST"), "table_set"),
+        (
+            lambda value: value["tables"]["CHILD"].update(row_count=1),
+            "row_count",
+        ),
+        (
+            lambda value: value["tables"]["CHILD"]["schema"]["fields"][0].update(
+                nullable=False
+            ),
+            "schema",
+        ),
+        (
+            lambda value: value["selective_missing"].update(row_count=2),
+            "selective_missing.*row_count",
+        ),
+    ],
+)
+def test_selected_lote_snapshot_rejects_malformed_descriptor_before_use(
+    spark, tmp_path, mutation, message
+):
+    root = spark.createDataFrame([(10, 49)], "NUM_IF long, NUM_TIPO_IF long")
+    empty = spark.createDataFrame([], "ID long")
+    missing = spark.createDataFrame(
+        [("CHILD", "FK", "900")],
+        "TABELA string, COLUNA string, VALOR string",
+    )
+    plan_uri = str(tmp_path / "plan.json")
+    descriptor = eng._create_selected_lote_snapshot(
+        spark,
+        plan_uri,
+        {eng.TABELA_RAIZ: root, "CHILD": empty},
+        missing,
+        selected_num_ifs=[10],
+        selective_keys=frozenset({("CHILD", "FK")}),
+    )
+    malformed = copy.deepcopy(descriptor)
+    mutation(malformed)
+
+    with pytest.raises(ValueError, match=message):
+        eng._load_selected_lote_snapshot(
+            spark,
+            plan_uri,
+            malformed,
+            expected_tables={eng.TABELA_RAIZ, "CHILD"},
+            selected_num_ifs=[10],
+            selective_keys=frozenset({("CHILD", "FK")}),
+        )
+
+
+def test_selected_lote_snapshot_rejects_root_ids_and_selective_pairs(spark, tmp_path):
+    root = spark.createDataFrame([(10, 49)], "NUM_IF long, NUM_TIPO_IF long")
+    missing = spark.createDataFrame(
+        [("CHILD", "FK", "900")],
+        "TABELA string, COLUNA string, VALOR string",
+    )
+    plan_uri = str(tmp_path / "plan.json")
+    descriptor = eng._create_selected_lote_snapshot(
+        spark,
+        plan_uri,
+        {eng.TABELA_RAIZ: root},
+        missing,
+        selected_num_ifs=[10],
+        selective_keys=frozenset({("CHILD", "FK")}),
+    )
+
+    with pytest.raises(ValueError, match="root NUM_IF"):
+        eng._load_selected_lote_snapshot(
+            spark,
+            plan_uri,
+            descriptor,
+            expected_tables={eng.TABELA_RAIZ},
+            selected_num_ifs=[20],
+            selective_keys=frozenset({("CHILD", "FK")}),
+        )
+    with pytest.raises(ValueError, match="selective_missing.*allowlist"):
+        eng._load_selected_lote_snapshot(
+            spark,
+            plan_uri,
+            descriptor,
+            expected_tables={eng.TABELA_RAIZ},
+            selected_num_ifs=[10],
+            selective_keys=frozenset(),
+        )
+
+
+def test_selected_lote_snapshot_rejects_null_selective_value(spark, tmp_path):
+    root = spark.createDataFrame([(10, 49)], "NUM_IF long, NUM_TIPO_IF long")
+    missing = spark.createDataFrame(
+        [("CHILD", "FK", None)],
+        "TABELA string, COLUNA string, VALOR string",
+    )
+    plan_uri = str(tmp_path / "plan.json")
+
+    with pytest.raises(ValueError, match="selective_missing.*VALOR.*nulo"):
+        eng._create_selected_lote_snapshot(
+            spark,
+            plan_uri,
+            {eng.TABELA_RAIZ: root},
+            missing,
+            selected_num_ifs=[10],
+            selective_keys=frozenset({("CHILD", "FK")}),
+        )
+
+
+def test_selected_lote_snapshot_rejects_duplicate_selective_rows(spark, tmp_path):
+    root = spark.createDataFrame([(10, 49)], "NUM_IF long, NUM_TIPO_IF long")
+    missing = spark.createDataFrame(
+        [("CHILD", "FK", "900"), ("CHILD", "FK", "900")],
+        "TABELA string, COLUNA string, VALOR string",
+    )
+
+    with pytest.raises(ValueError, match="selective_missing.*duplicatas"):
+        eng._create_selected_lote_snapshot(
+            spark,
+            str(tmp_path / "plan.json"),
+            {eng.TABELA_RAIZ: root},
+            missing,
+            selected_num_ifs=[10],
+            selective_keys=frozenset({("CHILD", "FK")}),
+        )
+
+
+def test_monta_plano_reconstructs_frozen_pk_plan_without_raw_reads(spark, monkeypatch):
+    root = spark.createDataFrame([(10, 49)], "NUM_IF long, NUM_TIPO_IF long")
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("materialize read RAW")
+
+    monkeypatch.setattr(eng, "read_parquet", forbidden)
+    monkeypatch.setattr(eng, "_read_pk_max", forbidden)
+    monkeypatch.setattr(eng, "_read_source", forbidden)
+
+    planos = eng.monta_plano(
+        spark,
+        {},
+        {
+            eng.TABELA_RAIZ: {
+                "pk_cols": [eng.COL_NUM_IF],
+                "foreign_keys": [],
+                "static": False,
+            }
+        },
+        set(),
+        0,
+        0,
+        None,
+        10,
+        source_frames={eng.TABELA_RAIZ: root},
+        frozen_table_plans={
+            eng.TABELA_RAIZ: {
+                "source_count": 1,
+                "synthetic_count": 3,
+                "pk": {
+                    "rule": "OFFSET_PROPRIO",
+                    "count_demand": 3,
+                    "step": 7,
+                    "minimum_start": 500,
+                },
+            }
+        },
+    )
+
+    assert planos[eng.TABELA_RAIZ].pk_regra == "OFFSET_PROPRIO"
+    assert planos[eng.TABELA_RAIZ].pk_start == 500
+    assert planos[eng.TABELA_RAIZ].pk_passo == 7
+
+
+def test_materialize_rejects_reservation_below_current_oracle_floor():
+    planos = {
+        eng.TABELA_RAIZ: eng.PlanoTabela(
+            eng.TABELA_RAIZ,
+            (eng.COL_NUM_IF,),
+            pk_regra="OFFSET_PROPRIO",
+            pk_start=151,
+        )
+    }
+    reservation = {
+        "table_pks": {
+            eng.TABELA_RAIZ: {"start": 150},
+        }
+    }
+
+    with pytest.raises(ValueError, match="mínimo live seguro 151"):
+        eng._validate_reservation_live_pk_floors(planos, reservation)
+
+
+def test_materialize_uses_frozen_lotes_and_rejects_spec_hash_divergence_before_side_effects(
+    spark, monkeypatch
+):
+    class AllocatorReached(RuntimeError):
+        pass
+
+    root = spark.createDataFrame(
+        [(10, 49, "OLD")], "NUM_IF long, NUM_TIPO_IF long, COD_IF string"
+    )
+    profile = eng.get_product_profile("cdb_simplificado")
+    profile = dataclasses.replace(
+        profile,
+        business_keys=dataclasses.replace(profile.business_keys, operation=None),
+    )
+    config = {
+        "DATAGEN_RAW_BASE_URI": "oci://raw@ns/run/RAW",
+        "DATAGEN_RAW_PREFIX": "",
+        "DATAGEN_SYNTHETIC_BASE_URI": "oci://out@ns/run/synthetic/cdb",
+        "DATAGEN_SYNTHETIC_PREFIX": "",
+        "DATAGEN_CLONE_PREFIX": "ignored",
+        "DATAGEN_OUTPUT_URI": "oci://out@ns/run/synthetic/cdb",
+        "DATAGEN_SPECS_URI": "oci://cfg@ns/spec.json",
+    }
+    snapshot_id = "00000000-0000-4000-8000-000000000001"
+    snapshot_uri = f"plan.json.selected-lote/{snapshot_id}"
+    descriptor = {
+        "artifact_type": eng.ENGORDA_SELECTED_LOTE_ARTIFACT,
+        "schema_version": eng.ENGORDA_SELECTED_LOTE_SCHEMA_VERSION,
+        "snapshot_id": snapshot_id,
+        "snapshot_uri": snapshot_uri,
+        "table_set": [eng.TABELA_RAIZ],
+        "tables": {
+            eng.TABELA_RAIZ: {
+                "path": f"{snapshot_uri}/tables/{eng.TABELA_RAIZ}",
+                "row_count": 1,
+                "schema": root.schema.jsonValue(),
+            }
+        },
+        "selective_missing": {
+            "present": False,
+            "path": None,
+            "row_count": 0,
+            "schema": None,
+        },
+    }
+    root_plan = eng.PlanoTabela(
+        eng.TABELA_RAIZ,
+        (eng.COL_NUM_IF,),
+        pk_regra="OFFSET_PROPRIO",
+        pk_start=100,
+        pk_passo=1,
+    )
+    engorda_ts = datetime(2026, 8, 20, 10, 11, 12)
+    spec = {
+        eng.TABELA_RAIZ: {
+            "pk_cols": [eng.COL_NUM_IF],
+            "foreign_keys": [],
+            "static": False,
+        }
+    }
+    normalized_spec = eng.normalize_specs(spec)
+    spec_sha256 = hashlib.sha256(
+        eng._canonical_json(normalized_spec).encode("ascii")
+    ).hexdigest()
+    plan = eng._build_engorda_plan(
+        config=config,
+        specs_uri=config["DATAGEN_SPECS_URI"],
+        spec_sha256=spec_sha256,
+        product_profile=profile,
+        valores=[10],
+        fator_k=1,
+        seed=42,
+        engorda_ts=engorda_ts,
+        controle_operacional_date=date(2026, 8, 20),
+        tipo_derivado=49,
+        planos={eng.TABELA_RAIZ: root_plan},
+        lotes={eng.TABELA_RAIZ: root},
+        lote_counts={eng.TABELA_RAIZ: 1},
+        faltantes_uri=None,
+        query_num_if_uri=profile.query_filename,
+        selected_lote=descriptor,
+        anular_cols=profile.integrity.nullify_mapping(),
+    )
+    reservation = {
+        "artifact_type": eng.ENGORDA_RESERVATION_ARTIFACT,
+        "schema_version": eng.ENGORDA_RESERVATION_SCHEMA_VERSION,
+        "plan_id": plan["plan_id"],
+        "product": profile.name,
+        "table_pks": {
+            eng.TABELA_RAIZ: {"count": 1, "start": 200, "end": 200, "step": 1}
+        },
+        "cod_operacao": {"strategy": "oracle_allocator", "count": 0},
+        "meu_numero": {"prefix": None, "count": 0, "start": None, "end": None},
+    }
+    forbidden = (
+        "_carrega_faltantes",
+        "_dominio_num_if_produto",
+        "_num_if_inconsistentes_subtipo",
+        "seleciona_instrumentos",
+        "seleciona_instrumentos_destino",
+        "calcula_lotes",
+        "_deriva_tipo_oracle",
+        "_target_fk_rejections",
+        "read_parquet",
+        "_read_pk_max",
+        "_read_source",
+    )
+    for name in forbidden:
+        monkeypatch.setattr(
+            eng,
+            name,
+            lambda *_args, _name=name, **_kwargs: (_ for _ in ()).throw(
+                AssertionError(f"materialize called {_name}")
+            ),
+        )
+    monkeypatch.setitem(
+        eng.TABELAS_ENGORDA_POR_PRODUTO,
+        "cdb_simplificado",
+        (eng.TABELA_RAIZ,),
+    )
+    monkeypatch.setattr(eng, "_valida_contrato_nulificacao_seletiva", lambda *_: None)
+    monkeypatch.setattr(eng, "_oracle_credentials", lambda *_: ("url", "user", "pw"))
+    events = []
+
+    def apply_live_floor(_jvm, _credentials, planos):
+        events.append("pk_floor")
+        planos[eng.TABELA_RAIZ].pk_start = 150
+
+    original_validate_reservation = eng._validate_reservation_artifact
+
+    def validate_reservation(*args):
+        events.append("current_plan_matched")
+        return original_validate_reservation(*args)
+
+    def assert_absent(*_args):
+        events.append("output_absent")
+
+    def stage_and_publish(_spark, _path, prepare, *, require_absent=False):
+        assert require_absent is True
+        events.append("staging")
+        prepare("staging")
+
+    def allocator(*_args, **_kwargs):
+        events.append("allocator")
+        raise AllocatorReached()
+
+    monkeypatch.setattr(eng, "_apply_oracle_pk_floors", apply_live_floor)
+    monkeypatch.setattr(eng, "_validate_reservation_artifact", validate_reservation)
+    monkeypatch.setattr(eng, "_assert_exact_output_absent", assert_absent)
+    monkeypatch.setattr(eng, "_stage_and_publish", stage_and_publish)
+    monkeypatch.setattr(eng, "_materialize_code_map", allocator)
+    monkeypatch.setattr(eng, "loga_chaves_amostra", lambda *_: None)
+    monkeypatch.setattr(eng, "valida_tabela", lambda *_: [])
+    monkeypatch.setattr(
+        eng,
+        "_count_final_lotes",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("materialize recounted frozen snapshot")
+        ),
+    )
+
+    with pytest.raises(AllocatorReached):
+        eng.executa_clonagem(
+            spark,
+            config,
+            spec,
+            product_profile=profile,
+            fator_k=1,
+            seed=42,
+            engorda_ts=engorda_ts,
+            phase="materialize",
+            planned_artifact=plan,
+            reservation=reservation,
+            snapshot_lotes={eng.TABELA_RAIZ: root},
+            snapshot_faltantes=None,
+            snapshot_lote_counts={eng.TABELA_RAIZ: 1},
+            controle_operacional_date=date(2026, 8, 20),
+            specs_uri=config["DATAGEN_SPECS_URI"],
+        )
+
+    assert events == [
+        "pk_floor",
+        "current_plan_matched",
+        "output_absent",
+        "staging",
+        "allocator",
+    ]
+
+    events.clear()
+    changed_spec = copy.deepcopy(spec)
+    changed_spec[eng.TABELA_RAIZ]["mutable_metadata"] = "changed"
+    with pytest.raises(ValueError, match="materialize divergiu do plano congelado"):
+        eng.executa_clonagem(
+            spark,
+            config,
+            changed_spec,
+            product_profile=profile,
+            fator_k=1,
+            seed=42,
+            engorda_ts=engorda_ts,
+            phase="materialize",
+            planned_artifact=plan,
+            reservation=reservation,
+            snapshot_lotes={eng.TABELA_RAIZ: root},
+            snapshot_faltantes=None,
+            snapshot_lote_counts={eng.TABELA_RAIZ: 1},
+            controle_operacional_date=date(2026, 8, 20),
+            specs_uri=config["DATAGEN_SPECS_URI"],
+        )
+
+    assert events == ["pk_floor"]
+
+
+def test_phase_all_performs_no_snapshot_io(spark, monkeypatch):
+    class InputsResolved(RuntimeError):
+        pass
+
+    root = spark.createDataFrame([(10, 49)], "NUM_IF long, NUM_TIPO_IF long")
+    profile = eng.get_product_profile("cdb_simplificado")
+    monkeypatch.setitem(
+        eng.TABELAS_ENGORDA_POR_PRODUTO,
+        "cdb_simplificado",
+        (eng.TABELA_RAIZ,),
+    )
+    monkeypatch.setattr(eng, "_valida_contrato_nulificacao_seletiva", lambda *_: None)
+    monkeypatch.setattr(eng, "_carrega_faltantes", lambda *_: None)
+    monkeypatch.setattr(eng, "_oracle_credentials", lambda *_: None)
+    monkeypatch.setattr(eng, "monta_plano", lambda *_args, **_kwargs: {
+        eng.TABELA_RAIZ: eng.PlanoTabela(
+            eng.TABELA_RAIZ,
+            (eng.COL_NUM_IF,),
+            pk_regra="OFFSET_PROPRIO",
+            pk_start=100,
+        )
+    })
+    monkeypatch.setattr(eng, "ordem_topologica", lambda *_: [eng.TABELA_RAIZ])
+    monkeypatch.setattr(eng, "seleciona_instrumentos", lambda *_args, **_kwargs: [10])
+    monkeypatch.setattr(eng, "_deriva_tipo_oracle", lambda *_: 49)
+    monkeypatch.setattr(eng, "calcula_lotes", lambda *_args, **_kwargs: {
+        eng.TABELA_RAIZ: root
+    })
+    monkeypatch.setattr(
+        eng,
+        "_create_selected_lote_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("phase all wrote snapshot")
+        ),
+    )
+    monkeypatch.setattr(
+        eng,
+        "_load_selected_lote_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("phase all read snapshot")
+        ),
+    )
+    monkeypatch.setattr(
+        eng,
+        "_count_final_lotes",
+        lambda *_: (_ for _ in ()).throw(InputsResolved()),
+    )
+
+    with pytest.raises(InputsResolved):
+        eng.executa_clonagem(
+            spark,
+            {"DATAGEN_SPECS_URI": "spec.json"},
+            {
+                eng.TABELA_RAIZ: {
+                    "pk_cols": [eng.COL_NUM_IF],
+                    "foreign_keys": [],
+                    "static": False,
+                }
+            },
+            product_profile=profile,
+            meu_numero_prefix="321",
+            num_ifs=[10],
+            dry_run=True,
+            phase="all",
+            controle_operacional_date=date(2026, 8, 20),
+        )
 
 
 def test_exact_pipeline_output_refuses_overwrite():
@@ -1090,6 +1685,58 @@ def test_exact_pipeline_output_refuses_overwrite():
         )
 
 
+def test_require_absent_rechecks_after_staging_and_preserves_raced_output(
+    spark, tmp_path
+):
+    final_path = tmp_path / "final"
+
+    def prepare(staging_path):
+        staging = Path(staging_path)
+        staging.mkdir(parents=True)
+        (staging / "new.marker").write_text("new", encoding="ascii")
+        final_path.mkdir()
+        (final_path / "winner.marker").write_text("winner", encoding="ascii")
+
+    with pytest.raises(ValueError, match="imutável já existe"):
+        eng._stage_and_publish(
+            spark,
+            str(final_path),
+            prepare,
+            require_absent=True,
+        )
+
+    assert (final_path / "winner.marker").read_text(encoding="ascii") == "winner"
+    assert not (final_path / "new.marker").exists()
+
+
+def test_require_absent_never_replaces_output_raced_after_recheck():
+    class RacingFileSystem:
+        def __init__(self):
+            self.entries = {"staging": "new", "final": "winner"}
+            self.renames = []
+
+        def exists(self, path):
+            return str(path) in self.entries
+
+        def rename(self, source, target):
+            self.renames.append((str(source), str(target)))
+            return False
+
+    fs = RacingFileSystem()
+
+    with pytest.raises(ValueError, match="race de publicação"):
+        eng._promote_staging_paths(
+            fs,
+            "staging",
+            "final",
+            "backup",
+            require_absent=True,
+        )
+
+    assert fs.entries["final"] == "winner"
+    assert fs.renames == []
+
+
 def test_reservation_must_honor_requested_meu_numero_prefix():
     plan = {
         "plan_id": "plan",
@@ -1103,7 +1750,7 @@ def test_reservation_must_honor_requested_meu_numero_prefix():
     }
     reservation = {
         "artifact_type": eng.ENGORDA_RESERVATION_ARTIFACT,
-        "schema_version": eng.ENGORDA_ARTIFACT_SCHEMA_VERSION,
+        "schema_version": eng.ENGORDA_RESERVATION_SCHEMA_VERSION,
         "plan_id": "plan",
         "product": "cdb_simplificado",
         "table_pks": {},
