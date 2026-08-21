@@ -558,6 +558,7 @@ class EngordaJob:
     faltantes_parquet: Optional[str] = None
     poda_subtipo: bool = True
     poda_cronograma_resgate: bool = True
+    ajusta_fator_k: bool = True
     somente_ativos: bool = True
     anular_cols: Optional[Mapping[str, Sequence[str]]] = None
     oracle_code_batch_size: int = DEFAULT_ORACLE_CODE_BATCH_SIZE
@@ -2691,6 +2692,20 @@ def _norm_key_col(col):
     return F.regexp_replace(F.trim(col.cast("string")), r"\.0+$", "")
 
 
+def _norm_code_validador(col):
+    """Normalização IDÊNTICA à _norm_code do validate_products.
+
+    Duas diferenças em relação a _norm_key_col, e as duas importam quando a
+    decisão precisa CASAR com a do validador (tipo da condição, modo do resgate):
+      * remove UM único '.0' final, não '.0+' — em '20.00' o validador enxerga
+        '20.00' (que não é '20'), enquanto _norm_key_col enxergaria '20';
+      * NÃO faz upper() — 'com tabela' não é 'COM TABELA' para o validador.
+
+    Divergir em qualquer das duas faz o fecho MANTER cronograma que o validador
+    considera pendurado em pai inválido, reprovando resgate_schedule_parent."""
+    return F.regexp_replace(F.trim(col.cast("string")), r"\.0$", "")
+
+
 def _fk_key_col(col, data_type: T.DataType):
     text = col.cast("string")
     if isinstance(data_type, T.NumericType):
@@ -2842,7 +2857,17 @@ def _num_if_cronograma_resgate_invalido(
     config,
     dominio: DataFrame,
 ) -> DataFrame:
-    """Find active type-20 COM TABELA roots with an unusable RAW schedule."""
+    """Roots whose RAW redemption schedule cannot satisfy the validator.
+
+    Two rejection reasons, both unfixable without inventing business data:
+      coverage - active type-20 COM TABELA redemption with no schedule row;
+      values   - schedule row whose DAT_RESGATE/VAL_PERCENTUAL will not cast.
+
+    The third failure mode, 2b/2c.resgate_schedule_parent, is deliberately NOT
+    handled here: a schedule under an invalid parent is dropped row-wise by
+    _poda_cronograma_sem_tabela during closure, which fixes the check without
+    removing the root from the domain.
+    """
     sources: Dict[str, DataFrame] = {}
     for table in (CONDICAO_IF_TABLE, RESGATE_TABELA, CRONOGRAMA_TABELA):
         try:
@@ -2883,11 +2908,15 @@ def _num_if_cronograma_resgate_invalido(
     target_roots = dominio.select(
         _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")
     ).dropDuplicates()
+    # Exactly the validator's COM TABELA parent set: active type-20 condition
+    # joined to an active COM TABELA redemption. Both the type and the mode go
+    # through _norm_code_validador so this set matches the validator's, char
+    # for char.
     conditions = (
         conditions.select(
             _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if"),
             _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__nci"),
-            _norm_key_col(F.col(CONDICAO_IF_TIPO_COL)).alias("__tipo"),
+            _norm_code_validador(F.col(CONDICAO_IF_TIPO_COL)).alias("__tipo"),
         )
         .join(target_roots, "__num_if", "left_semi")
         .where(F.col("__tipo") == F.lit(CONDICAO_IF_TIPO_RESGATE))
@@ -2895,9 +2924,7 @@ def _num_if_cronograma_resgate_invalido(
     com_tabela = (
         redemptions.select(
             _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__nci"),
-            F.upper(F.trim(F.col(COL_COD_COND_RESGATE).cast("string"))).alias(
-                "__modo"
-            ),
+            _norm_code_validador(F.col(COL_COD_COND_RESGATE)).alias("__modo"),
         )
         .where(F.col("__modo") == F.lit(COD_COND_RESGATE_COM_TABELA))
         .join(conditions, "__nci", "inner")
@@ -2932,7 +2959,21 @@ def _num_if_cronograma_resgate_invalido(
         )
         .select("__num_if")
     )
-    invalid_roots = missing_schedule.unionByName(invalid_values).dropDuplicates()
+    # 2b/2c.resgate_schedule_parent NÃO entra aqui de propósito: cronograma sob
+    # pai inválido é resolvido descartando a LINHA no fecho
+    # (_poda_cronograma_sem_tabela), não o instrumento. São folhas — ninguém as
+    # referencia —, então podar linha conserta o parent sem custo de volume.
+    invalid_roots = (
+        missing_schedule
+        .unionByName(invalid_values)
+        .dropDuplicates()
+    )
+    logger.info(
+        "poda cronograma de resgate: %d NUM_IF sem cronograma (coverage) e %d "
+        "com valor inconversível (values).",
+        missing_schedule.dropDuplicates().count(),
+        invalid_values.dropDuplicates().count(),
+    )
     return (
         _copia_independente(dominio.select(COL_NUM_IF))
         .withColumn("__num_if", _norm_key_col(F.col(COL_NUM_IF)))
@@ -3236,8 +3277,14 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
                            query_num_if_path: Optional[str] = None,
                            faltantes: Optional[DataFrame] = None,
                            poda_subtipo: bool = True,
-                           poda_cronograma_resgate: bool = True) -> List:
-    """Seleciona NUM_IF no domínio podado; lista explícita nunca é substituída."""
+                           poda_cronograma_resgate: bool = True,
+                           permitir_lote_menor: bool = False) -> List:
+    """Seleciona NUM_IF no domínio podado; lista explícita nunca é substituída.
+
+    permitir_lote_menor só muda o caso em que o domínio VÁLIDO INTEIRO é menor
+    que n_instrumentos (acabou de onde repor): devolve todos os válidos em vez
+    de abortar, para o chamador compensar o déficit no fator K. Domínio válido
+    VAZIO aborta de qualquer forma — não há o que multiplicar."""
     if (num_ifs is None) == (n_instrumentos is None):
         raise ValueError(
             "informe exatamente uma seleção: num_ifs ou n_instrumentos"
@@ -3280,16 +3327,54 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
         if n < 1:
             raise ValueError("n_instrumentos deve ser >= 1")
         valores = [r[0] for r in valido.orderBy(F.rand(seed)).limit(n).collect()]
-        if len(valores) < n:
+        if len(valores) < n and permitir_lote_menor and valores:
+            # Acabou de onde repor. O lote continua 100% válido; quem compensa o
+            # déficit é o fator K, em _ajusta_fator_k_por_dominio.
+            logger.warning(
+                "Domínio VÁLIDO (%d) menor que --n-instrumentos (%d): seguindo "
+                "com os %d válidos; o fator K será recalculado para preservar o "
+                "volume pedido.", len(valores), n, len(valores))
+        elif len(valores) < n:
             raise ValueError(
-                f"Domínio VÁLIDO após a poda (subtipo/destino) tem só "
+                f"Domínio VÁLIDO após a poda (subtipo/destino/cronograma) tem só "
                 f"{len(valores)} instrumento(s); pedi {n}. Afrouxe os filtros "
-                "(--sem-poda-subtipo / menos faltantes), reduza --n-instrumentos "
-                "ou verifique os avisos de 'tipo(s) sem tabela-subtipo no spec'.")
+                "(--sem-poda-subtipo / --sem-poda-cronograma-resgate / menos "
+                "faltantes), reduza --n-instrumentos, remova --sem-ajuste-k para "
+                "compensar no fator K, ou verifique os avisos de 'tipo(s) sem "
+                "tabela-subtipo no spec'.")
         valores = sorted(valores)
     logger.info("Lote: %d instrumento(s) NUM_IF=%s", len(valores),
                 valores if len(valores) <= 20 else f"{valores[:20]}... (+{len(valores)-20})")
     return valores
+
+
+def _ajusta_fator_k_por_dominio(fator_k: int, n_pedido: Optional[int],
+                                n_obtido: int) -> int:
+    """Compensa no fator K o déficit de instrumentos do domínio válido.
+
+    O que se pede de verdade é VOLUME de sintéticos, e volume é
+    n_instrumentos × K. Quando a poda deixa o domínio válido menor que
+    n_instrumentos, o lote encolhe mas o alvo não muda — então o K sobe:
+
+        K_novo = teto( (n_pedido × K_original) / n_obtido )
+
+    Teto e não arredondamento porque entregar MENOS que o pedido é justamente o
+    que se quer evitar; o excedente é de no máximo n_obtido - 1 sintéticos.
+
+    No-op quando o lote veio completo, quando a seleção foi por lista explícita
+    (n_pedido None) ou quando não há instrumento algum."""
+    if n_pedido is None or n_obtido <= 0 or n_obtido >= n_pedido:
+        return fator_k
+    alvo = n_pedido * fator_k
+    novo_k = -(-alvo // n_obtido)  # teto inteiro, sem importar math
+    logger.warning(
+        "Fator K ajustado pelo domínio: pedido %d instrumento(s) × K=%d = %d "
+        "sintético(s); o domínio válido só tem %d, então K passa a %d "
+        "(%d × %d = %d sintético(s), %+d em relação ao alvo). Para abortar em "
+        "vez de ajustar, use --sem-ajuste-k.",
+        n_pedido, fator_k, alvo, n_obtido, novo_k, n_obtido, novo_k,
+        n_obtido * novo_k, n_obtido * novo_k - alvo)
+    return novo_k
 
 
 def _target_fk_rejections(
@@ -3665,8 +3750,13 @@ def seleciona_instrumentos_destino(
     poda_cronograma_resgate: bool = True,
     somente_ativos: bool = True,
     nullify_columns: Optional[Mapping[str, Sequence[str]]] = None,
+    permitir_lote_menor: bool = False,
 ) -> TargetInstrumentSelection:
-    """Admite exactly N roots whose complete FK closure is loadable in Oracle."""
+    """Admite exactly N roots whose complete FK closure is loadable in Oracle.
+
+    permitir_lote_menor aceita um lote menor que N quando o domínio se esgota,
+    para o chamador compensar o déficit no fator K. Nunca vale para lista
+    explícita de NUM_IF, que jamais é encurtada em silêncio."""
     if (num_ifs is None) == (n_instrumentos is None):
         raise ValueError(
             "informe exatamente uma seleção: num_ifs ou n_instrumentos"
@@ -3845,10 +3935,17 @@ def seleciona_instrumentos_destino(
             break
 
     if len(accepted) < requested:
-        raise ValueError(
-            "Domínio esgotado pela admissão FK do destino: "
-            f"{len(accepted)} instrumento(s) válido(s), pedi {requested}."
-        )
+        # Lista explícita nunca encolhe; só a amostragem por N pode ser
+        # compensada no fator K pelo chamador.
+        if not (permitir_lote_menor and accepted and n_instrumentos is not None):
+            raise ValueError(
+                "Domínio esgotado pela admissão FK do destino: "
+                f"{len(accepted)} instrumento(s) válido(s), pedi {requested}."
+            )
+        logger.warning(
+            "Admissão FK esgotou o domínio: %d instrumento(s) válido(s) para "
+            "%d pedido(s). Seguindo com os válidos; o fator K será recalculado "
+            "para preservar o volume.", len(accepted), requested)
     accepted = sorted(accepted[:requested])
     missing_df = (
         selective_missing.dropDuplicates().localCheckpoint(eager=True)
@@ -3997,12 +4094,24 @@ def _filtra_ativos(df: DataFrame, tabela: str) -> Tuple[DataFrame, Optional[str]
 
 
 def _poda_cronograma_sem_tabela(lotes: Dict[str, DataFrame]) -> Optional[int]:
-    """Remove do lote as CONDICAO_RESGATE cujo RESGATE pai não é COM TABELA.
+    """Remove do lote as CONDICAO_RESGATE cujo pai não é resgate ativo tipo 20
+    COM TABELA.
+
+    O validador (2b/2c.resgate_schedule_parent) só aceita cronograma cujo
+    NUM_CONDICAO_IF resolva para CONDICAO_IF ativa com COD_TIPO_CONDICAO_IF=20
+    E RESGATE ativo em COD_COND_RESGATE='COM TABELA'. Conferir apenas o MODO do
+    RESGATE deixa passar cronograma pendurado em condição de OUTRO tipo — era
+    exatamente o que reprovava 2c.rdb_resgate_schedule_parent.
+
+    Podar a LINHA (e não o instrumento) é de propósito: essas CONDICAO_RESGATE
+    são folhas, ninguém referencia elas, então descartá-las conserta o parent
+    sem tirar o instrumento do lote — ou seja, sem custo de volume.
 
     Devolve o nº de linhas podadas, ou None quando a poda não é aplicável
     (tabela fora do fecho / coluna ausente). Tolerante por construção."""
     cronograma = lotes.get(CRONOGRAMA_TABELA)
     resgate = lotes.get(RESGATE_TABELA)
+    condicao = lotes.get(CONDICAO_IF_TABLE)
     if cronograma is None or resgate is None:
         return None
     if CONDICAO_IF_PK not in cronograma.columns:
@@ -4013,12 +4122,35 @@ def _poda_cronograma_sem_tabela(lotes: Dict[str, DataFrame]) -> Optional[int]:
         return None
     pais_com_tabela = (
         resgate.where(
-            F.upper(F.trim(F.col(COL_COD_COND_RESGATE).cast("string")))
+            _norm_code_validador(F.col(COL_COD_COND_RESGATE))
             == F.lit(COD_COND_RESGATE_COM_TABELA)
         )
         .select(_norm_key_col(F.col(CONDICAO_IF_PK)).alias("__cron_key"))
         .dropDuplicates()
     )
+    # Segunda metade do predicado: a condição pai precisa ser do tipo 20. Os
+    # lotes já vêm filtrados por atividade (somente_ativos), então "estar no
+    # lote" == "ativa".
+    if condicao is not None and not (
+            {CONDICAO_IF_PK, CONDICAO_IF_TIPO_COL} - set(condicao.columns)):
+        condicoes_tipo_20 = (
+            condicao.where(
+                _norm_code_validador(F.col(CONDICAO_IF_TIPO_COL))
+                == F.lit(CONDICAO_IF_TIPO_RESGATE)
+            )
+            .select(_norm_key_col(F.col(CONDICAO_IF_PK)).alias("__cron_key"))
+            .dropDuplicates()
+        )
+        pais_com_tabela = pais_com_tabela.join(
+            condicoes_tipo_20, "__cron_key", "left_semi"
+        )
+    else:
+        logger.warning(
+            "poda cronograma: %s ausente do fecho ou sem %s/%s; conferindo só o "
+            "modo do %s. Cronograma sob condição de outro tipo pode reprovar "
+            "resgate_schedule_parent.",
+            CONDICAO_IF_TABLE, CONDICAO_IF_PK, CONDICAO_IF_TIPO_COL,
+            RESGATE_TABELA)
     marcado = cronograma.withColumn(
         "__cron_key", _norm_key_col(F.col(CONDICAO_IF_PK))
     )
@@ -4213,8 +4345,10 @@ def _calcula_lotes_com_proveniencia(
             )
             previous_provenance.unpersist(blocking=False)
             logger.info("poda cronograma [%s]: %d linha(s) removida(s) por pai "
-                        "%s <> '%s'; restam %d.", CRONOGRAMA_TABELA, podadas,
-                        COL_COD_COND_RESGATE, COD_COND_RESGATE_COM_TABELA,
+                        "que não é %s=%s ativo com %s='%s'; restam %d.",
+                        CRONOGRAMA_TABELA, podadas, CONDICAO_IF_TIPO_COL,
+                        CONDICAO_IF_TIPO_RESGATE, COL_COD_COND_RESGATE,
+                        COD_COND_RESGATE_COM_TABELA,
                         contagens[CRONOGRAMA_TABELA])
     for t in ordem:
         logger.info("Lote %s: %d linha(s).", t, contagens[t])
@@ -5963,6 +6097,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                      faltantes_parquet: Optional[str] = None,
                      poda_subtipo: bool = True,
                      poda_cronograma_resgate: bool = True,
+                     ajusta_fator_k: bool = True,
                      anular_cols: Optional[Mapping[str, Sequence[str]]] = None,
                       oracle_code_batch_size: int = DEFAULT_ORACLE_CODE_BATCH_SIZE,
                       tipo_oracle: Optional[int] = None,
@@ -6179,6 +6314,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                 faltantes=faltantes,
                 poda_subtipo=poda_subtipo,
                 poda_cronograma_resgate=poda_cronograma_resgate,
+                permitir_lote_menor=ajusta_fator_k,
             )
     else:
         admission_connection = _open_oracle_connection(spark._sc._jvm, *credentials)
@@ -6213,6 +6349,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                 poda_cronograma_resgate=poda_cronograma_resgate,
                 somente_ativos=somente_ativos,
                 nullify_columns=anular_cols,
+                permitir_lote_menor=ajusta_fator_k,
             )
         finally:
             admission_connection.close()
@@ -6221,6 +6358,12 @@ def executa_clonagem(spark, config, spec: dict, *,
         # Também substitui o input offline para a nulificação seletiva: somente
         # ausências confirmadas live podem alterar o sintético desta execução.
         faltantes = selection.missing_keys
+
+    # Déficit de instrumentos vira K maior, preservando o volume pedido (n × K).
+    # Na fase materialize o K já vem ajustado do artefato do plano — reajustar
+    # aqui multiplicaria o ajuste duas vezes.
+    if phase != "materialize" and ajusta_fator_k:
+        fator_k = _ajusta_fator_k_por_dominio(fator_k, n_instrumentos, len(valores))
 
     # Tipo do instrumento DERIVADO do lote — antes de qualquer round-trip Oracle.
     # É isto que substitui o antigo literal por produto e o que impede alocar
@@ -6684,6 +6827,7 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
     for field_name in (
         "poda_subtipo",
         "poda_cronograma_resgate",
+        "ajusta_fator_k",
         "dry_run",
         "somente_ativos",
     ):
@@ -6820,6 +6964,7 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
             faltantes_parquet=job.faltantes_parquet,
             poda_subtipo=job.poda_subtipo,
             poda_cronograma_resgate=job.poda_cronograma_resgate,
+            ajusta_fator_k=job.ajusta_fator_k,
             anular_cols=_merge_nullification_mappings(
                 profile.integrity.nullify_mapping(), anular_cols
             ),
@@ -7000,6 +7145,16 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                              "do domínio e repostos por outra amostra). Use só p/ "
                              "depurar — o sintético pode sair com dangling (Cat 1).")
     parser.add_argument(
+        "--sem-ajuste-k",
+        action="store_true",
+        help=(
+            "DESLIGA o ajuste automático do fator K. Por padrão, quando a poda "
+            "deixa o domínio VÁLIDO menor que --n-instrumentos, o K sobe para "
+            "preservar o volume pedido (n × K) sobre os instrumentos que "
+            "sobraram. Com este flag o run ABORTA nesse caso."
+        ),
+    )
+    parser.add_argument(
         "--sem-poda-cronograma-resgate",
         action="store_true",
         help=(
@@ -7108,6 +7263,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         faltantes_parquet=args.faltantes_parquet,
         poda_subtipo=not args.sem_poda_subtipo,
         poda_cronograma_resgate=not args.sem_poda_cronograma_resgate,
+        ajusta_fator_k=not args.sem_ajuste_k,
         somente_ativos=not args.sem_filtro_ativos,
         anular_cols=(
             _merge_anular_cols({}, args.anular_cols)
