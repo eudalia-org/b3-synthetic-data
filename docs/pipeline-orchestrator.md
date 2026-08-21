@@ -4,6 +4,15 @@ The first tracer runs immutable `engorda -> validate` branches through OCI Data 
 Copy `docs/pipeline-config.example.json`, replace its OCI values, and keep one config
 file per environment. `products` may enable any nonempty subset of the registry; both
 `run` and `adopt-inputs` reject products not enabled in that environment's config.
+Each product may define persistent `engorda`/`validate` overrides. Precedence is:
+stage defaults, common CLI flags, product config, then explicit `--set`.
+
+```json
+"lci": {
+  "capabilities": ["engorda", "validate"],
+  "engorda": {"n_instrumentos": 50000, "fator_k": 2}
+}
+```
 
 `scripts/run_pipeline.py` is self-contained for operator distribution and includes
 PEP 723 metadata for Python 3.11 and Click. Copy that one Python file to the Windows

@@ -1069,6 +1069,47 @@ def test_validated_set_applies_only_to_target_product_and_stage(tmp_path, capsys
     assert "option is not allowed" in capsys.readouterr().err
 
 
+def test_product_config_overrides_global_size_and_set_overrides_product_config(
+    tmp_path, capsys
+):
+    config = write_config(tmp_path)
+    payload = json.loads(config.read_text())
+    payload["products"]["lci"]["engorda"] = {
+        "n_instrumentos": 50000,
+        "fator_k": 2,
+    }
+    payload["products"]["lca"]["engorda"] = {
+        "n_instrumentos": 50000,
+        "fator_k": 2,
+    }
+    config.write_text(json.dumps(payload))
+    upstream = write_upstream(tmp_path)
+    args = run_args(
+        tmp_path,
+        config,
+        upstream,
+        "--product",
+        "lci,lca",
+        "--n-instrumentos",
+        "100000",
+        "--fator-k",
+        "1",
+        "--set",
+        "lci.engorda.n_instrumentos=45000",
+        "--dry-run",
+    )
+
+    assert P.main(args, adapter=NoCallsAdapter()) == 0
+    plan = json.loads(capsys.readouterr().out)
+    lci = plan["nodes"]["lci.engorda.plan"]["arguments"]
+    lca = plan["nodes"]["lca.engorda.plan"]["arguments"]
+
+    assert lci[lci.index("--n-instrumentos") + 1] == "45000"
+    assert lci[lci.index("--fator-k") + 1] == "2"
+    assert lca[lca.index("--n-instrumentos") + 1] == "50000"
+    assert lca[lca.index("--fator-k") + 1] == "2"
+
+
 def test_config_is_one_environment_and_rejects_unsupported_registry_entries(tmp_path):
     config = write_config(
         tmp_path,
@@ -1110,6 +1151,23 @@ def test_legacy_product_subset_config_remains_valid(tmp_path):
 )
 def test_config_rejects_empty_or_invalid_product_capabilities(tmp_path, products, error):
     config = write_config(tmp_path, extra={"products": products})
+
+    with pytest.raises(P.PipelineError, match=error):
+        P.load_config(config)
+
+
+@pytest.mark.parametrize(
+    "engorda,error",
+    [
+        ([], "must be an object"),
+        ({"unknown": 1}, "contains unsupported option"),
+    ],
+)
+def test_config_rejects_invalid_product_stage_options(tmp_path, engorda, error):
+    config = write_config(tmp_path)
+    payload = json.loads(config.read_text())
+    payload["products"]["lci"]["engorda"] = engorda
+    config.write_text(json.dumps(payload))
 
     with pytest.raises(P.PipelineError, match=error):
         P.load_config(config)

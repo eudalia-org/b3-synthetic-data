@@ -1639,6 +1639,20 @@ def load_config(path: str | Path) -> dict[str, Any]:
                 f"config.products.{product} enables unsupported registry capabilities: "
                 f"{', '.join(unsupported_capabilities)}"
             )
+        for stage in TRACER_STAGES:
+            stage_options = settings.get(stage, {})
+            if not isinstance(stage_options, dict):
+                raise PipelineError(
+                    f"config.products.{product}.{stage} must be an object"
+                )
+            unsupported_options = sorted(
+                set(stage_options) - OVERRIDE_KEYS[stage]
+            )
+            if unsupported_options:
+                raise PipelineError(
+                    f"config.products.{product}.{stage} contains unsupported option(s): "
+                    f"{', '.join(unsupported_options)}"
+                )
 
     defaults = config.get("stage_defaults", {})
     if not isinstance(defaults, dict) or any(
@@ -1900,10 +1914,12 @@ def build_pipeline_plan(
     for product in products:
         engorda_options = {
             **base_engorda_options,
+            **config["products"][product].get("engorda", {}),
             **overrides.get(product, {}).get("engorda", {}),
         }
         validate_options = {
             **base_validate_options,
+            **config["products"][product].get("validate", {}),
             **overrides.get(product, {}).get("validate", {}),
         }
         paths = _product_paths(run_root, product)

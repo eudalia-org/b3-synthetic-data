@@ -19,8 +19,14 @@
     "cdb_escalonamento": {"capabilities": ["engorda", "validate"]},
     "rdb_inclusao": {"capabilities": ["engorda", "validate"]},
     "rdb_resgate": {"capabilities": ["engorda", "validate"]},
-    "lci": {"capabilities": ["engorda", "validate"]},
-    "lca": {"capabilities": ["engorda", "validate"]},
+    "lci": {
+      "capabilities": ["engorda", "validate"],
+      "engorda": {"n_instrumentos": 50000, "fator_k": 2}
+    },
+    "lca": {
+      "capabilities": ["engorda", "validate"],
+      "engorda": {"n_instrumentos": 50000, "fator_k": 2}
+    },
     "ccb_pppre": {"capabilities": ["engorda", "validate"]},
     "ccb_pfpre": {"capabilities": ["engorda", "validate"]},
     "ccb_pgrpre": {"capabilities": ["engorda", "validate"]},
