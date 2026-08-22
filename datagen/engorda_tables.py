@@ -3952,6 +3952,35 @@ def _target_fk_rejections(
     return rejected, reasons, selective_missing
 
 
+def _hash_band_plan(domain_count: int, requested: int) -> Tuple[int, int, float]:
+    """Usa alvo=max(3*N, N+1000), bandas≈count/alvo e E[tamanho]=count/bandas."""
+    if domain_count < 0:
+        raise ValueError("domain_count deve ser >= 0")
+    if requested < 1:
+        raise ValueError("requested deve ser >= 1")
+    target_size = max(3 * requested, requested + 1000)
+    # Arredondamento inteiro aproxima E[count / bandas] do alvo tanto quanto possível.
+    band_count = max(1, (domain_count + target_size // 2) // target_size)
+    return target_size, band_count, domain_count / band_count
+
+
+def _ranked_hash_band_domain(
+    valid_domain: DataFrame,
+    seed: int,
+    band_count: int,
+) -> DataFrame:
+    """Atribui cada raiz a exatamente uma banda e posição hash determinísticas."""
+    if band_count < 1:
+        raise ValueError("band_count deve ser >= 1")
+    ranked = valid_domain.select(
+        F.col(COL_NUM_IF),
+        F.xxhash64(F.lit(seed), F.col(COL_NUM_IF).cast("string")).alias("__rank"),
+    )
+    return ranked.withColumn(
+        "__band", F.pmod(F.col("__rank"), F.lit(band_count))
+    )
+
+
 def seleciona_instrumentos_destino(
     spark,
     config,
@@ -4021,11 +4050,22 @@ def seleciona_instrumentos_destino(
                 f"fora_do_domínio={outside}, podados={pruned}"
             )
         candidate_pages = [sorted(eligible)]
+        band_count = 0
     else:
-        ranked = valid_domain.select(
-            F.col(COL_NUM_IF),
-            F.xxhash64(F.lit(seed), F.col(COL_NUM_IF).cast("string")).alias("__rank"),
+        valid_count = valid_domain.count()
+        target_size, band_count, expected_size = _hash_band_plan(
+            valid_count, requested
         )
+        logger.info(
+            "PERF hash_band_sampling count=%d bands=%d expected_size=%.1f "
+            "target_size=%d requested=%d",
+            valid_count,
+            band_count,
+            expected_size,
+            target_size,
+            requested,
+        )
+        ranked = _ranked_hash_band_domain(valid_domain, seed, band_count)
         candidate_pages = None
 
     accepted: List[int] = []
@@ -4033,6 +4073,9 @@ def seleciona_instrumentos_destino(
     selective_missing: Optional[DataFrame] = None
     accepted_lotes: Dict[str, DataFrame] = {}
     cursor: Optional[Tuple[int, int]] = None
+    current_band = 0
+    active_band: Optional[DataFrame] = None
+    active_band_index: Optional[int] = None
 
     while len(accepted) < requested:
         if candidate_pages is not None:
@@ -4040,20 +4083,38 @@ def seleciona_instrumentos_destino(
         else:
             remaining = requested - len(accepted)
             page_size = remaining + max(100, (remaining + 9) // 10)
-            page = ranked
-            if cursor is not None:
-                last_rank, last_num_if = cursor
-                page = page.where(
-                    (F.col("__rank") > F.lit(last_rank))
-                    | (
-                        (F.col("__rank") == F.lit(last_rank))
-                        & (F.col(COL_NUM_IF) > F.lit(last_num_if))
+            candidates = []
+            while current_band < band_count and not candidates:
+                if active_band_index != current_band:
+                    if active_band is not None:
+                        active_band.unpersist(blocking=False)
+                    active_band = ranked.where(
+                        F.col("__band") == F.lit(current_band)
+                    ).localCheckpoint(eager=True)
+                    active_band_index = current_band
+                page = active_band
+                if cursor is not None:
+                    last_rank, last_num_if = cursor
+                    page = page.where(
+                        (F.col("__rank") > F.lit(last_rank))
+                        | (
+                            (F.col("__rank") == F.lit(last_rank))
+                            & (F.col(COL_NUM_IF) > F.lit(last_num_if))
+                        )
                     )
-                )
-            rows = page.orderBy("__rank", COL_NUM_IF).limit(page_size).collect()
-            candidates = [int(row[COL_NUM_IF]) for row in rows]
-            if rows:
-                cursor = (int(rows[-1]["__rank"]), int(rows[-1][COL_NUM_IF]))
+                rows = page.orderBy("__rank", COL_NUM_IF).limit(page_size).collect()
+                candidates = [int(row[COL_NUM_IF]) for row in rows]
+                if rows:
+                    cursor = (
+                        int(rows[-1]["__rank"]),
+                        int(rows[-1][COL_NUM_IF]),
+                    )
+                    if len(rows) < page_size:
+                        current_band += 1
+                        cursor = None
+                else:
+                    current_band += 1
+                    cursor = None
 
         if not candidates:
             break
@@ -4154,6 +4215,9 @@ def seleciona_instrumentos_destino(
             frame.unpersist(blocking=False)
         if num_ifs is not None:
             break
+
+    if active_band is not None:
+        active_band.unpersist(blocking=False)
 
     if len(accepted) < requested:
         if not (permitir_lote_menor and accepted and n_instrumentos is not None):

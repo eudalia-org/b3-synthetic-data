@@ -12,6 +12,7 @@ import pytest
 pytest.importorskip("pyspark")
 
 from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
 
 from datagen import engorda_tables as eng
 
@@ -252,6 +253,192 @@ def _fixture(spark):
         integrity=eng.IntegrityPolicy(),
     )
     return sources, spec, plans, profile
+
+
+def _root_only_selection_harness(spark, monkeypatch, domain, reject=None):
+    profile = dataclasses.replace(
+        eng.get_product_profile("cdb_simplificado"),
+        integrity=eng.IntegrityPolicy(),
+    )
+    spec = {
+        eng.TABELA_RAIZ: {
+            "pk_cols": [eng.COL_NUM_IF],
+            "foreign_keys": [],
+            "static": False,
+        }
+    }
+    plans = {
+        eng.TABELA_RAIZ: eng.PlanoTabela(eng.TABELA_RAIZ, (eng.COL_NUM_IF,))
+    }
+    pages = []
+    current_candidates = []
+    monkeypatch.setattr(
+        eng,
+        "_dominio_instrumentos_elegiveis",
+        lambda *_args, **_kwargs: (domain, domain),
+    )
+
+    def closure(
+        _spark,
+        _config,
+        _spec,
+        _plans,
+        _order,
+        candidates,
+        _max_passadas,
+        **_kwargs,
+    ):
+        current_candidates[:] = candidates
+        pages.append(list(candidates))
+        root = spark.createDataFrame(
+            [(value,) for value in candidates], domain.schema
+        )
+        provenance = root.select(
+            eng.COL_NUM_IF,
+            F.col(eng.COL_NUM_IF).alias(eng.ROOT_PROVENANCE_COL),
+        )
+        return {eng.TABELA_RAIZ: root}, {eng.TABELA_RAIZ: provenance}
+
+    def admission(*_args, **_kwargs):
+        rejected = set() if reject is None else set(reject(current_candidates))
+        return rejected, {value: {"test rejection"} for value in rejected}, None
+
+    monkeypatch.setattr(eng, "_calcula_lotes_com_proveniencia", closure)
+    monkeypatch.setattr(eng, "_target_fk_rejections", admission)
+
+    def run(*, num_ifs=None, n_instrumentos=None, seed=42):
+        return eng.seleciona_instrumentos_destino(
+            spark,
+            {},
+            spec,
+            num_ifs=num_ifs,
+            n_instrumentos=n_instrumentos,
+            seed=seed,
+            profile=profile,
+            planos=plans,
+            ordem=[eng.TABELA_RAIZ],
+            max_passadas=1,
+            existing_key_lookup=lambda *_args: set(),
+            poda_subtipo=False,
+            poda_cronograma_resgate=False,
+            poda_conta=False,
+        )
+
+    return run, pages
+
+
+@pytest.mark.parametrize(
+    ("domain_count", "requested", "target_size", "band_count", "expected_size"),
+    [
+        (0, 1, 1001, 1, 0.0),
+        (1001, 1, 1001, 1, 1001.0),
+        (1502, 1, 1001, 2, 751.0),
+        (200_000, 1000, 3000, 67, 200_000 / 67),
+        (33_000_000, 110_000, 330_000, 100, 330_000.0),
+    ],
+)
+def test_hash_band_plan_targets_bounded_expected_size(
+    domain_count, requested, target_size, band_count, expected_size
+):
+    assert eng._hash_band_plan(domain_count, requested) == pytest.approx(
+        (target_size, band_count, expected_size)
+    )
+
+
+@pytest.mark.parametrize("domain_count, requested", [(-1, 1), (1, 0)])
+def test_hash_band_plan_rejects_invalid_counts(domain_count, requested):
+    with pytest.raises(ValueError):
+        eng._hash_band_plan(domain_count, requested)
+
+
+def test_hash_band_sampling_is_bounded_and_seeded_on_200k_domain(
+    spark, monkeypatch
+):
+    domain = (
+        spark.range(200_000)
+        .select((F.col("id") + 1).alias(eng.COL_NUM_IF))
+        .localCheckpoint(eager=True)
+    )
+    target_size, band_count, expected_size = eng._hash_band_plan(200_000, 1000)
+    ranked = eng._ranked_hash_band_domain(domain, seed=42, band_count=band_count)
+    band_sizes = [row["count"] for row in ranked.groupBy("__band").count().collect()]
+    assert target_size == 3000
+    assert expected_size == pytest.approx(2985.1, abs=0.1)
+    assert max(band_sizes) < 4000
+
+    run, pages = _root_only_selection_harness(spark, monkeypatch, domain)
+    first = run(n_instrumentos=1000, seed=42)
+    first_pages = list(pages)
+    pages.clear()
+    repeated = run(n_instrumentos=1000, seed=42)
+    pages.clear()
+    changed = run(n_instrumentos=1000, seed=43)
+
+    assert len(first.values) == 1000
+    assert first.values == repeated.values
+    assert first.values != changed.values
+    assert max(map(len, first_pages)) <= 1100
+    for selection in (first, repeated, changed):
+        for frame in selection.lotes.values():
+            frame.unpersist(blocking=False)
+    domain.unpersist(blocking=False)
+
+
+def test_hash_band_admission_refills_across_pages_and_bands_exactly(
+    spark, monkeypatch
+):
+    domain = (
+        spark.range(5000)
+        .select((F.col("id") + 1).alias(eng.COL_NUM_IF))
+        .localCheckpoint(eager=True)
+    )
+    _, band_count, _ = eng._hash_band_plan(5000, 10)
+    band_by_root = {
+        int(row[eng.COL_NUM_IF]): int(row["__band"])
+        for row in eng._ranked_hash_band_domain(
+            domain, seed=42, band_count=band_count
+        ).select(eng.COL_NUM_IF, "__band").collect()
+    }
+    run, pages = _root_only_selection_harness(
+        spark,
+        monkeypatch,
+        domain,
+        reject=lambda candidates: {
+            value for value in candidates if band_by_root[value] == 0
+        },
+    )
+
+    selection = run(n_instrumentos=10, seed=42)
+    seen = [value for page in pages for value in page]
+    page_bands = [{band_by_root[value] for value in page} for page in pages]
+
+    assert band_count == 5
+    assert len(selection.values) == 10
+    assert len(seen) == len(set(seen))
+    assert sum(bands == {0} for bands in page_bands) >= 2
+    assert page_bands[-1] == {1}
+    assert all(band_by_root[value] == 1 for value in selection.values)
+    for frame in selection.lotes.values():
+        frame.unpersist(blocking=False)
+    domain.unpersist(blocking=False)
+
+
+def test_explicit_target_selection_does_not_use_hash_bands(
+    spark, monkeypatch
+):
+    domain = spark.range(20).select((F.col("id") + 1).alias(eng.COL_NUM_IF))
+    run, _pages = _root_only_selection_harness(spark, monkeypatch, domain)
+    monkeypatch.setattr(
+        eng,
+        "_hash_band_plan",
+        lambda *_args: pytest.fail("explicit selection entered hash-band sampling"),
+    )
+
+    selection = run(num_ifs=[9, 3], seed=7)
+
+    assert selection.values == [3, 9]
+    for frame in selection.lotes.values():
+        frame.unpersist(blocking=False)
 
 
 def test_target_fk_admission_streams_all_child_edges_once(
