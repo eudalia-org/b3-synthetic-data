@@ -233,6 +233,17 @@ PRODUTOS_COM_PODA_SUBTIPO = frozenset({
     # validador — LCI {2,3,4,20}, LCA {1,3,5,20}.
     'lci',
     'lca',
+    # CCB: mesma situação. CCB_CONDICAO_SUBTYPES do validador é
+    # {1,2,4,5,14,20} e os subtipos sintetizáveis do produto coincidem
+    # EXATAMENTE com esse conjunto — condição de qualquer outro tipo (3, 6, 7,
+    # 15, 16, 17, 21, 22, 23, 24) sai sem linha-subtipo e reprova
+    # 2h.subtype_orphan / 2h.unknown_condition_type. As 5 variantes compartilham
+    # a mesma lista de tabelas, então todas precisam do gate.
+    'ccb_pppre',
+    'ccb_pfpre',
+    'ccb_pgrpre',
+    'ccb_favcp',
+    'ccb_fapre',
 })
 
 # ---------------------------------------------------------------------------
@@ -249,10 +260,17 @@ PRODUTOS_COM_PODA_SUBTIPO = frozenset({
 # linha —, então o custo de estar errado é um run que falha alto, não um
 # sintético silenciosamente sem lastro.
 # ---------------------------------------------------------------------------
-LASTRO_OBRIGATORIO_POR_PRODUTO: Dict[str, str] = {
-    "lci": "CREDITO_SCR",
-    "lca": "CREDITO_DC",
-}
+# VAZIO desde 2026-08-22: a amarração LCI->CREDITO_SCR / LCA->CREDITO_DC foi
+# tentada por NUM_IF e MEDIDA como falsa no QAB — 5.761.483 LCIs e 4.868.031
+# LCAs ativas, e ZERO delas casam por NUM_IF com o respectivo crédito. O
+# INNER JOIN na query zerava o domínio (ver os cabeçalhos nos blocos lci/lca
+# de queries_produtos.sql).
+#
+# O mecanismo abaixo continua pronto: assim que a coluna de vínculo REAL for
+# identificada, reintroduza a tabela de lastro em TABELAS_ENGORDA_POR_PRODUTO,
+# recoloque o filtro no bloco da query e volte a entrada aqui — o invariante
+# passa a valer de novo sem nenhuma outra mudança.
+LASTRO_OBRIGATORIO_POR_PRODUTO: Dict[str, str] = {}
 
 PRODUTOS_COM_PODA_CRONOGRAMA_RESGATE = frozenset({
     'cdb_resgate',
@@ -773,10 +791,7 @@ TABELAS_ENGORDA_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
         "HISTORICO_PU_CURVA",
         "PENDENCIA_IF",
     ),
-    # CREDITO_SCR entra no fecho: o lastro SCR é pré-requisito da LCI, e a
-    # query do produto só admite NUM_IF que já o tenha (CTE LASTRO_IF).
     "lci": (
-        "CREDITO_SCR",
         "INSTRUMENTO_FINANCEIRO",
         "TITULO",
         "CREDITO",
@@ -796,10 +811,7 @@ TABELAS_ENGORDA_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
         "CARTEIRA_COMITENTE",
         "CARTEIRA_PARTICIPANTE",
     ),
-    # CREDITO_DC entra no fecho: o direito creditório é pré-requisito da LCA,
-    # e a query do produto só admite NUM_IF que já o tenha (CTE DIREITO_CRED_IF).
     "lca": (
-        "CREDITO_DC",
         "INSTRUMENTO_FINANCEIRO",
         "TITULO",
         "IF_LCA",
@@ -820,6 +832,16 @@ TABELAS_ENGORDA_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
         "CARTEIRA_COMITENTE",
         "CARTEIRA_PARTICIPANTE",
     ),
+    # HISTORICO_IF_TITULO REMOVIDA das 5 listas CCB em 2026-08-22.
+    # Ela nao tem coluna NUM_IF; a unica FK declarada para o instrumento e
+    # NUM_IF_PERTENCE -> INSTRUMENTO_FINANCEIRO.NUM_IF, e medido no QAB essa
+    # coluna esta VAZIA em 100% das linhas:
+    #     HISTORICO_IF_TITULO ................ 176.538.102 linhas
+    #     com NUM_IF_PERTENCE preenchida .....           0
+    # Sem vinculo utilizavel, o fecho nao consegue dizer quais linhas sao de
+    # qual instrumento — monta_plano abortava com "SEM VINCULO PRINCIPAL".
+    # Nao e limitacao do motor nem spec incompleto: o dado nao tem o vinculo.
+    # A tabela e folha (so se auto-referencia), entao remove-la nao orfana nada.
     "ccb_pppre": (
         "INSTRUMENTO_FINANCEIRO",
         "TITULO",
@@ -832,7 +854,6 @@ TABELAS_ENGORDA_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
         "SPREAD",
         "RESGATE",
         "HISTORICO_PU_CURVA",
-        "HISTORICO_IF_TITULO",
         "ALTERACAO_IF",
         "TCTPIF_CCB",
         "TCTPCRONOGRAMA_CCB",
@@ -853,7 +874,6 @@ TABELAS_ENGORDA_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
         "SPREAD",
         "RESGATE",
         "HISTORICO_PU_CURVA",
-        "HISTORICO_IF_TITULO",
         "ALTERACAO_IF",
         "TCTPIF_CCB",
         "TCTPCRONOGRAMA_CCB",
@@ -874,7 +894,6 @@ TABELAS_ENGORDA_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
         "SPREAD",
         "RESGATE",
         "HISTORICO_PU_CURVA",
-        "HISTORICO_IF_TITULO",
         "ALTERACAO_IF",
         "TCTPIF_CCB",
         "TCTPCRONOGRAMA_CCB",
@@ -895,7 +914,6 @@ TABELAS_ENGORDA_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
         "SPREAD",
         "RESGATE",
         "HISTORICO_PU_CURVA",
-        "HISTORICO_IF_TITULO",
         "ALTERACAO_IF",
         "TCTPIF_CCB",
         "TCTPCRONOGRAMA_CCB",
@@ -916,7 +934,6 @@ TABELAS_ENGORDA_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
         "SPREAD",
         "RESGATE",
         "HISTORICO_PU_CURVA",
-        "HISTORICO_IF_TITULO",
         "ALTERACAO_IF",
         "TCTPIF_CCB",
         "TCTPCRONOGRAMA_CCB",
@@ -3438,8 +3455,21 @@ def _dominio_instrumentos_elegiveis(
 ) -> Tuple[DataFrame, DataFrame]:
     fonte = (_dominio_num_if_produto(spark, config, profile, query_num_if_path)
              .select(COL_NUM_IF).dropDuplicates())
-    logger.info("Produto %s: domínio de NUM_IF vindo integralmente da query.",
-                profile.name)
+    # Checkpoint + contagem do domínio ANTES de qualquer poda. Sem esta linha,
+    # "0 instrumento(s) válido(s)" é ambíguo entre "a query não devolveu nada" e
+    # "as podas levaram tudo" — que pedem correções opostas. Também corta a
+    # reexecução da query, que era refeita uma vez por poda (cada uma faz
+    # left_semi contra `fonte`).
+    fonte = fonte.localCheckpoint(eager=True)
+    n_dominio = fonte.count()
+    logger.info("Produto %s: domínio de NUM_IF vindo integralmente da query — "
+                "%d instrumento(s) ANTES da poda.", profile.name, n_dominio)
+    if n_dominio == 0:
+        logger.error(
+            "Produto %s: a QUERY devolveu domínio VAZIO — nenhuma poda foi "
+            "aplicada ainda. O problema está nos filtros do bloco %s de %s, não "
+            "nas podas nem na admissão FK.",
+            profile.name, profile.name, DEFAULT_QUERIES_FILENAME)
 
     # Poda de domínio: junta as exclusões dos itens 1/3/4 e tira do domínio.
     exclusoes: List[Tuple[str, DataFrame]] = []
@@ -3478,6 +3508,16 @@ def _dominio_instrumentos_elegiveis(
     else:
         valido = fonte
     valido = valido.localCheckpoint(eager=True)
+    n_valido = valido.count()
+    logger.info("Domínio VÁLIDO após a poda: %d de %d instrumento(s) "
+                "(%d podado(s)).", n_valido, n_dominio, n_dominio - n_valido)
+    if n_dominio and not n_valido:
+        logger.error(
+            "Produto %s: a QUERY devolveu %d instrumento(s), mas as PODAS "
+            "levaram todos. Veja qual poda acima removeu mais e afrouxe a "
+            "correspondente (--sem-poda-subtipo / --sem-poda-conta / "
+            "--sem-poda-cronograma-resgate / menos faltantes).",
+            profile.name, n_dominio)
     return fonte, valido
 
 
