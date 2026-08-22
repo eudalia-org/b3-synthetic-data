@@ -900,6 +900,36 @@ def test_target_fk_admission_fails_without_partial_selection(
         )
 
 
+def test_target_fk_admission_allows_nonempty_sampled_deficit_for_k_adjustment(
+    spark, monkeypatch
+):
+    sources, spec, plans, profile = _fixture(spark)
+    domain = sources[eng.TABELA_RAIZ].select(eng.COL_NUM_IF)
+    monkeypatch.setattr(eng, "_read_source", lambda _s, _c, table: sources[table])
+    monkeypatch.setattr(eng, "_dominio_num_if_produto", lambda *_a, **_k: domain)
+
+    selection = eng.seleciona_instrumentos_destino(
+        spark,
+        {},
+        spec,
+        num_ifs=None,
+        n_instrumentos=3,
+        seed=42,
+        profile=profile,
+        planos=plans,
+        ordem=list(plans),
+        max_passadas=6,
+        existing_key_lookup=lambda _table, _columns, keys, _numeric_flags: {
+            key for key in keys if key not in {("900",), ("901",)}
+        },
+        poda_subtipo=False,
+        poda_conta=False,
+        permitir_lote_menor=True,
+    )
+
+    assert selection.values == [3, 4]
+
+
 def test_target_fk_admission_skips_fks_nullified_before_write(
     spark, monkeypatch
 ):
@@ -1144,6 +1174,8 @@ def test_materialize_job_consumes_frozen_plan_without_resampling(tmp_path, monke
     assert captured["snapshot_faltantes"] is None
     assert captured["snapshot_lote_counts"] == {eng.TABELA_RAIZ: 2}
     assert captured["poda_cronograma_resgate"] is True
+    assert captured["poda_conta"] is True
+    assert captured["ajusta_fator_k"] is True
 
 
 def test_exact_pipeline_output_uri_passes_destination_safety_check():
@@ -1167,6 +1199,14 @@ def test_local_plan_artifact_is_immutable(tmp_path):
         eng._write_json_artifact(object(), str(path), {"version": 2})
 
     assert json.loads(path.read_text(encoding="utf-8")) == {"version": 1}
+
+
+@pytest.mark.parametrize(
+    ("row_count", "partitions"),
+    [(0, 1), (1, 1), (100_000, 1), (100_001, 2), (10_000_000, 64)],
+)
+def test_snapshot_partition_count_is_bounded(row_count, partitions):
+    assert eng._snapshot_partition_count(row_count) == partitions
 
 
 def test_selected_lote_snapshot_roundtrip_preserves_empty_and_selective_missing(
@@ -1239,6 +1279,12 @@ def test_selected_lote_snapshot_roundtrip_preserves_empty_and_selective_missing(
     assert descriptor["schema_version"] == eng.ENGORDA_SELECTED_LOTE_SCHEMA_VERSION
     assert descriptor["table_set"] == ["CHILD", eng.TABELA_RAIZ]
     assert descriptor["tables"]["CHILD"]["row_count"] == 0
+    assert spark.sparkContext._jsc.hadoopConfiguration().get(
+        "mapreduce.fileoutputcommitter.algorithm.version"
+    ) == "2"
+    assert len(list(Path(descriptor["tables"][eng.TABELA_RAIZ]["path"]).glob(
+        "part-*"
+    ))) == 1
     assert counts == {"CHILD": 0, eng.TABELA_RAIZ: 2}
     assert lotes[eng.TABELA_RAIZ].orderBy("NUM_IF").collect() == root.orderBy("NUM_IF").collect()
     assert lotes["CHILD"].count() == 0
@@ -1441,8 +1487,8 @@ def test_materialize_rejects_reservation_below_current_oracle_floor():
         eng._validate_reservation_live_pk_floors(planos, reservation)
 
 
-def test_phase_plan_snapshots_only_schedule_admitted_roots(spark, monkeypatch):
-    class SnapshotReached(RuntimeError):
+def test_phase_plan_freezes_adjusted_k_for_admitted_domain_deficit(spark, monkeypatch):
+    class PlanBuildReached(RuntimeError):
         pass
 
     class Connection:
@@ -1492,6 +1538,7 @@ def test_phase_plan_snapshots_only_schedule_admitted_roots(spark, monkeypatch):
 
     def select_admitted(*_args, **kwargs):
         assert kwargs["poda_cronograma_resgate"] is True
+        assert kwargs["permitir_lote_menor"] is True
         return eng.TargetInstrumentSelection(
             [20], None, {eng.TABELA_RAIZ: admitted_root}
         )
@@ -1504,17 +1551,24 @@ def test_phase_plan_snapshots_only_schedule_admitted_roots(spark, monkeypatch):
     def snapshot(_spark, _uri, lotes, _missing, **kwargs):
         assert kwargs["selected_num_ifs"] == [20]
         assert [row.NUM_IF for row in lotes[eng.TABELA_RAIZ].collect()] == [20]
-        raise SnapshotReached()
+        return {"snapshot": "descriptor"}
 
     monkeypatch.setattr(eng, "_create_selected_lote_snapshot", snapshot)
+    def build_plan(**kwargs):
+        assert kwargs["valores"] == [20]
+        assert kwargs["fator_k"] == 4
+        raise PlanBuildReached()
 
-    with pytest.raises(SnapshotReached):
+    monkeypatch.setattr(eng, "_build_engorda_plan", build_plan)
+
+    with pytest.raises(PlanBuildReached):
         eng.executa_clonagem(
             spark,
             config,
             spec,
             product_profile=profile,
-            n_instrumentos=1,
+            n_instrumentos=2,
+            fator_k=2,
             phase="plan",
             plan_uri="plan.json",
             specs_uri="spec.json",
@@ -1620,6 +1674,8 @@ def test_materialize_uses_frozen_lotes_and_rejects_spec_hash_divergence_before_s
         "_dominio_num_if_produto",
         "_num_if_inconsistentes_subtipo",
         "_num_if_cronograma_resgate_invalido",
+        "_num_if_conta_nao_elegivel",
+        "_ajusta_fator_k_por_dominio",
         "seleciona_instrumentos",
         "seleciona_instrumentos_destino",
         "calcula_lotes",

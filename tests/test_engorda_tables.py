@@ -74,6 +74,8 @@ class TestEngordaPhaseCli:
         assert args.raw_uri is None
         assert args.output_uri is None
         assert args.sem_poda_cronograma_resgate is False
+        assert args.sem_poda_conta is False
+        assert args.sem_ajuste_k is False
 
     def test_cli_disables_schedule_pruning_and_main_forwards_it(self, monkeypatch):
         captured = []
@@ -90,6 +92,22 @@ class TestEngordaPhaseCli:
 
         assert captured[0].poda_cronograma_resgate is False
 
+    def test_cli_disables_account_pruning_and_k_adjustment(self, monkeypatch):
+        captured = []
+        monkeypatch.setattr(
+            engorda_tables, "executar_job", lambda job: captured.append(job)
+        )
+
+        engorda_tables.main([
+            "--produto", "lci",
+            "--num-ifs", "123",
+            "--sem-poda-conta",
+            "--sem-ajuste-k",
+        ])
+
+        assert captured[0].poda_conta is False
+        assert captured[0].ajusta_fator_k is False
+
     def test_schedule_pruning_job_option_is_boolean(self):
         job = engorda_tables.EngordaJob(
             produto="cdb_simplificado",
@@ -99,6 +117,17 @@ class TestEngordaPhaseCli:
         )
 
         with pytest.raises(ValueError, match="poda_cronograma_resgate.*booleano"):
+            engorda_tables._validate_engorda_job(job)
+
+    @pytest.mark.parametrize("field", ["poda_conta", "ajusta_fator_k"])
+    def test_new_job_options_are_boolean(self, field):
+        job = engorda_tables.EngordaJob(
+            produto="lci",
+            num_ifs=(1,),
+            **{field: "yes"},
+        )
+
+        with pytest.raises(ValueError, match=rf"{field}.*booleano"):
             engorda_tables._validate_engorda_job(job)
 
     def test_materialize_uses_artifacts_and_rejects_resampling(self):
@@ -1315,13 +1344,14 @@ def test_schedule_guard_refills_sampling_but_rejects_explicit_invalid_root(
     )
 
     selected = engorda_tables.seleciona_instrumentos(
-        spark, {}, {}, None, 7, 42, profile, poda_subtipo=False
+        spark, {}, {}, None, 7, 42, profile, poda_subtipo=False, poda_conta=False
     )
     assert selected == [1, 9, 10, 11, 12, 13, 14]
 
     with pytest.raises(ValueError, match=r"PODADOS.*2"):
         engorda_tables.seleciona_instrumentos(
-            spark, {}, {}, [2], None, 42, profile, poda_subtipo=False
+            spark, {}, {}, [2], None, 42, profile,
+            poda_subtipo=False, poda_conta=False
         )
 
 
@@ -1351,6 +1381,10 @@ def test_schedule_guard_is_scoped_to_resgate_products():
 
 def test_post_closure_schedule_pruning_still_removes_sem_tabela_rows(spark):
     lotes = {
+        engorda_tables.CONDICAO_IF_TABLE: spark.createDataFrame(
+            [(1, "20"), (2, "20")],
+            "NUM_CONDICAO_IF long, COD_TIPO_CONDICAO_IF string",
+        ),
         engorda_tables.RESGATE_TABELA: spark.createDataFrame(
             [(1, " sem tabela "), (2, "COM TABELA")],
             "NUM_CONDICAO_IF long, COD_COND_RESGATE string",
@@ -1367,6 +1401,140 @@ def test_post_closure_schedule_pruning_still_removes_sem_tabela_rows(spark):
     assert [row.NUM_CONDICAO_IF for row in lotes[
         engorda_tables.CRONOGRAMA_TABELA
     ].collect()] == [2]
+
+
+def test_post_closure_schedule_parent_matches_validator_case_and_type(spark):
+    lotes = {
+        engorda_tables.CONDICAO_IF_TABLE: spark.createDataFrame(
+            [(1, "20", None), (2, "21", None), (3, "20.0", None),
+             (4, "20.00", None), (5, "20", "2026-01-01"),
+             (6, "20", None)],
+            "NUM_CONDICAO_IF long, COD_TIPO_CONDICAO_IF string, "
+            "DAT_EXCLUSAO string",
+        ),
+        engorda_tables.RESGATE_TABELA: spark.createDataFrame(
+            [(1, "com tabela", None), (2, "COM TABELA", None),
+             (3, "COM TABELA", None), (4, "COM TABELA", None),
+             (5, "COM TABELA", None), (6, "COM TABELA", "2026-01-01")],
+            "NUM_CONDICAO_IF long, COD_COND_RESGATE string, DAT_EXCLUSAO string",
+        ),
+        engorda_tables.CRONOGRAMA_TABELA: spark.createDataFrame(
+            [(10, 1), (20, 2), (30, 3), (40, 4), (50, 5), (60, 6)],
+            "NUM_ID_CONDICAO_RESGATE long, NUM_CONDICAO_IF long",
+        ),
+    }
+
+    assert engorda_tables._poda_cronograma_sem_tabela(lotes) == 5
+    assert [row.NUM_CONDICAO_IF for row in lotes[
+        engorda_tables.CRONOGRAMA_TABELA
+    ].collect()] == [3]
+
+
+def test_sampled_domain_deficit_adjusts_k_but_empty_domain_still_fails(
+    spark, monkeypatch
+):
+    profile = engorda_tables.get_product_profile("lci")
+    domain = spark.createDataFrame([(1,), (2,)], "NUM_IF long")
+    monkeypatch.setattr(
+        engorda_tables, "_dominio_num_if_produto", lambda *_args, **_kwargs: domain
+    )
+
+    selected = engorda_tables.seleciona_instrumentos(
+        spark, {}, {}, None, 5, 42, profile,
+        poda_subtipo=False, poda_cronograma_resgate=False, poda_conta=False,
+        permitir_lote_menor=True,
+    )
+
+    assert selected == [1, 2]
+    assert engorda_tables._ajusta_fator_k_por_dominio(2, 5, len(selected)) == 5
+    assert engorda_tables._ajusta_fator_k_por_dominio(2, None, 1) == 2
+
+    empty = spark.createDataFrame([], "NUM_IF long")
+    monkeypatch.setattr(
+        engorda_tables, "_dominio_num_if_produto", lambda *_args, **_kwargs: empty
+    )
+    with pytest.raises(ValueError, match=r"tem só 0 instrumento"):
+        engorda_tables.seleciona_instrumentos(
+            spark, {}, {}, None, 5, 42, profile,
+            poda_subtipo=False, poda_cronograma_resgate=False, poda_conta=False,
+            permitir_lote_menor=True,
+        )
+
+
+def _account_sources(spark):
+    return {
+        engorda_tables.CONTA_PARTICIPANTE_TABELA: spark.createDataFrame(
+            [
+                ("100.00", "1.0", "12345.40-1"),
+                ("101", "2", "12345.40-2"),
+                ("102", "1", "INVALID"),
+                ("103", "1", "12345.10-3"),
+            ],
+            "NUM_CONTA_PARTICIPANTE string, NUM_ID_SITUACAO_CONTA string, "
+            "COD_CONTA_PARTICIPANTE string",
+        ),
+        engorda_tables.V_FAMILIA_CONTAS_TABELA: spark.createDataFrame(
+            [("12345.40-1", "1.0", "L"), ("12345.10-3", "2", "L")],
+            "COD_CONTA_MEMBRO string, NUM_ID_AREA_ATUACAO string, "
+            "COD_TIPO_ACESSO string",
+        ),
+        "TITULO": spark.createDataFrame(
+            [(1, "100.0"), (2, "101"), (3, ""), (4, None)],
+            "NUM_IF long, NUM_CONTA_PARTICIPANTE string",
+        ),
+        "DEPOSITO_AUTOMATICO_IF": spark.createDataFrame(
+            [(5, "102")], "NUM_IF long, NUM_CONTA_PARTICIPANTE string"
+        ),
+        "OPERACAO": spark.createDataFrame(
+            [(6, "103", None), (7, "100", None)],
+            "NUM_IF long, NUM_CONTA_PARTICIPANTE_P1 string, "
+            "NUM_CONTA_PARTICIPANTE_P2 string",
+        ),
+    }
+
+
+def test_account_pruning_uses_full_family_and_validator_canonicalization(
+    spark, monkeypatch
+):
+    sources = _account_sources(spark)
+    monkeypatch.setattr(
+        engorda_tables, "_read_source",
+        lambda _spark, _config, table: sources[table],
+    )
+    domain = spark.createDataFrame([(root,) for root in range(1, 8)], "NUM_IF long")
+
+    excluded = engorda_tables._num_if_conta_nao_elegivel(spark, {}, domain)
+
+    assert {row.NUM_IF for row in excluded.collect()} == {2, 3, 5, 6}
+
+
+def test_account_pruning_falls_back_partially_and_fails_open(spark, monkeypatch):
+    sources = _account_sources(spark)
+    domain = spark.createDataFrame([(6,), (7,)], "NUM_IF long")
+
+    def without_family(_spark, _config, table):
+        if table == engorda_tables.V_FAMILIA_CONTAS_TABELA:
+            raise OSError("view unavailable")
+        return sources[table]
+
+    monkeypatch.setattr(engorda_tables, "_read_source", without_family)
+    assert engorda_tables._num_if_conta_nao_elegivel(
+        spark, {}, domain
+    ).count() == 0
+
+    monkeypatch.setattr(
+        engorda_tables, "_read_source",
+        lambda *_args: (_ for _ in ()).throw(OSError("raw unavailable")),
+    )
+    assert engorda_tables._num_if_conta_nao_elegivel(
+        spark, {}, domain
+    ).count() == 0
+
+
+def test_account_pruning_scope_includes_cdb_variants_lci_and_lca():
+    assert engorda_tables.PRODUTOS_COM_PODA_CONTA == {
+        "cdb_simplificado", "cdb_resgate", "cdb_escalonamento", "lci", "lca"
+    }
 
 
 def test_meu_numero_uses_reserved_ordinal_interval(spark):
