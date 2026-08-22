@@ -403,6 +403,55 @@ CONDICAO_IF_TIPO_RESGATE = "20"
 CONDICAO_RESGATE_DATE_COL = "DAT_RESGATE"
 CONDICAO_RESGATE_PCT_COL = "VAL_PERCENTUAL"
 
+# ---------------------------------------------------------------------------
+# Poda de conta participante não elegível (item 6).
+#
+# 6.required.active_account não exige que a conta EXISTA no destino — a admissão
+# FK live já garante isso, e CONTA_PARTICIPANTE é static (a FK mantém o valor da
+# origem). Ele exige que a conta seja ELEGÍVEL, um predicado bem mais estreito:
+#     NUM_ID_SITUACAO_CONTA = 1
+#     COD_CONTA_PARTICIPANTE casa ^[0-9]{5}\.(40|10)-[0-9]$
+#     V_FAMILIA_CONTAS: NUM_ID_AREA_ATUACAO = 1 e COD_TIPO_ACESSO = 'L'
+# Conta em branco (não nula, mas vazia após trim) também é inválida; conta NULA
+# é aceita — o validador só olha referências não nulas.
+#
+# A poda avalia esse predicado contra o snapshot RAW. PRESSUPOSTO: o RAW e o QAB
+# concordam quanto ao cadastro de contas. Era falso enquanto havia drift entre
+# OCI e Oracle; com o drift corrigido, passa a valer. Se voltarem a divergir,
+# esta poda deixa passar conta que o validador reprova — o sintoma é o
+# 6.required.active_account reaparecer com contagem baixa.
+#
+# V_FAMILIA_CONTAS é uma VIEW do destino e pode não existir no RAW: nesse caso o
+# predicado roda PARCIAL (só situação + formato do código), com WARNING.
+CONTA_PARTICIPANTE_TABELA = "CONTA_PARTICIPANTE"
+V_FAMILIA_CONTAS_TABELA = "V_FAMILIA_CONTAS"
+COL_NUM_CONTA_PARTICIPANTE = "NUM_CONTA_PARTICIPANTE"
+COL_COD_CONTA_PARTICIPANTE = "COD_CONTA_PARTICIPANTE"
+COL_NUM_ID_SITUACAO_CONTA = "NUM_ID_SITUACAO_CONTA"
+COL_COD_CONTA_MEMBRO = "COD_CONTA_MEMBRO"
+COL_NUM_ID_AREA_ATUACAO = "NUM_ID_AREA_ATUACAO"
+COL_COD_TIPO_ACESSO = "COD_TIPO_ACESSO"
+CONTA_SITUACAO_ELEGIVEL = "1"
+CONTA_AREA_ATUACAO_ELEGIVEL = "1"
+CONTA_TIPO_ACESSO_ELEGIVEL = "L"
+CONTA_COD_PATTERN = r"^[0-9]{5}\.(40|10)-[0-9]$"
+# Espelha ACCOUNT_REFERENCES do validate_products, na mesma ordem.
+REFERENCIAS_CONTA: Tuple[Tuple[str, str], ...] = (
+    ("TITULO", COL_NUM_CONTA_PARTICIPANTE),
+    ("DEPOSITO_AUTOMATICO_IF", COL_NUM_CONTA_PARTICIPANTE),
+    ("OPERACAO", "NUM_CONTA_PARTICIPANTE_P1"),
+    ("OPERACAO", "NUM_CONTA_PARTICIPANTE_P2"),
+)
+# Produtos em que account_check_enabled=True no validador; nos demais (rdb, ccb,
+# gravame, credito_scr, dicre) o check sai como WARN e podar seria custo à toa.
+PRODUTOS_COM_PODA_CONTA = frozenset({
+    'cdb_simplificado',
+    'cdb_resgate',
+    'cdb_escalonamento',
+    'lci',
+    'lca',
+})
+
 CONTROLE_OPERACIONAL_DATE_SQL = (
     "SELECT DAT_CTL_OPER "
     "FROM CETIP.CONTROLE_OPERACIONAL "
@@ -558,6 +607,7 @@ class EngordaJob:
     faltantes_parquet: Optional[str] = None
     poda_subtipo: bool = True
     poda_cronograma_resgate: bool = True
+    poda_conta: bool = True
     ajusta_fator_k: bool = True
     somente_ativos: bool = True
     anular_cols: Optional[Mapping[str, Sequence[str]]] = None
@@ -2706,6 +2756,20 @@ def _norm_code_validador(col):
     return F.regexp_replace(F.trim(col.cast("string")), r"\.0$", "")
 
 
+def _canon_key_validador(col):
+    """Cópia exata de _canon_key_col do validate_products.
+
+    É a normalização com que o validador casa as referências de conta contra o
+    CONTA_PARTICIPANTE do destino: só remove zeros à direita quando o valor É
+    numérico com ponto decimal ('4265684.00' -> '4265684'), preservando
+    intacto qualquer valor não numérico."""
+    value = F.trim(col.cast("string"))
+    stripped = F.regexp_replace(
+        F.regexp_replace(value, r"(\.\d*?)0+$", "$1"), r"\.$", ""
+    )
+    return F.when(value.rlike(r"^-?\d+\.\d*0*$"), stripped).otherwise(value)
+
+
 def _fk_key_col(col, data_type: T.DataType):
     text = col.cast("string")
     if isinstance(data_type, T.NumericType):
@@ -2983,6 +3047,134 @@ def _num_if_cronograma_resgate_invalido(
     )
 
 
+def _contas_elegiveis(spark, config) -> Optional[DataFrame]:
+    """Contas do RAW que satisfazem o predicado de 6.required.active_account.
+
+    Devolve um DataFrame de uma coluna (__conta, já canonizada) ou None quando a
+    fonte não permite avaliar. Ver o cabeçalho de CONTA_PARTICIPANTE_TABELA para
+    o pressuposto RAW == QAB."""
+    try:
+        contas = _read_source(spark, config, CONTA_PARTICIPANTE_TABELA)
+    except Exception as exc:
+        logger.warning("poda conta: não li a fonte de %s (%s); poda IGNORADA — "
+                       "6.required.active_account pode reprovar.",
+                       CONTA_PARTICIPANTE_TABELA, exc)
+        return None
+    obrigatorias = {COL_NUM_CONTA_PARTICIPANTE, COL_NUM_ID_SITUACAO_CONTA,
+                    COL_COD_CONTA_PARTICIPANTE}
+    faltando = sorted(obrigatorias - set(contas.columns))
+    if faltando:
+        logger.warning("poda conta: %s sem coluna(s) %s; poda IGNORADA.",
+                       CONTA_PARTICIPANTE_TABELA, faltando)
+        return None
+
+    elegiveis = contas.select(
+        _canon_key_validador(F.col(COL_NUM_CONTA_PARTICIPANTE)).alias("__conta"),
+        _canon_key_validador(F.col(COL_NUM_ID_SITUACAO_CONTA)).alias("__situacao"),
+        F.trim(F.col(COL_COD_CONTA_PARTICIPANTE).cast("string")).alias("__cod"),
+    ).where(
+        (F.col("__situacao") == F.lit(CONTA_SITUACAO_ELEGIVEL))
+        & F.col("__cod").rlike(CONTA_COD_PATTERN)
+    )
+
+    # Metade da família de contas: existe como VIEW no destino e pode não estar
+    # no RAW. Sem ela o predicado fica parcial — melhor parcial e avisado do que
+    # nenhum, porque situação/formato já derrubam a maioria dos inelegíveis.
+    familia = None
+    try:
+        familia = _read_source(spark, config, V_FAMILIA_CONTAS_TABELA)
+    except Exception as exc:
+        logger.warning(
+            "poda conta: %s indisponível no RAW (%s); conferindo apenas "
+            "%s=%s e o formato de %s. Conta reprovada só por área/acesso ainda "
+            "pode passar e derrubar 6.required.active_account.",
+            V_FAMILIA_CONTAS_TABELA, exc, COL_NUM_ID_SITUACAO_CONTA,
+            CONTA_SITUACAO_ELEGIVEL, COL_COD_CONTA_PARTICIPANTE)
+    if familia is not None:
+        need = {COL_COD_CONTA_MEMBRO, COL_NUM_ID_AREA_ATUACAO, COL_COD_TIPO_ACESSO}
+        ausentes = sorted(need - set(familia.columns))
+        if ausentes:
+            logger.warning("poda conta: %s sem coluna(s) %s; predicado PARCIAL.",
+                           V_FAMILIA_CONTAS_TABELA, ausentes)
+        else:
+            familia_ok = (
+                familia.select(
+                    F.trim(F.col(COL_COD_CONTA_MEMBRO).cast("string")).alias("__cod"),
+                    _canon_key_validador(F.col(COL_NUM_ID_AREA_ATUACAO)).alias("__area"),
+                    # Sem trim: o validador compara o cast cru contra 'L'.
+                    F.col(COL_COD_TIPO_ACESSO).cast("string").alias("__acesso"),
+                )
+                .where(
+                    (F.col("__area") == F.lit(CONTA_AREA_ATUACAO_ELEGIVEL))
+                    & (F.col("__acesso") == F.lit(CONTA_TIPO_ACESSO_ELEGIVEL))
+                )
+                .select("__cod")
+                .dropDuplicates()
+            )
+            elegiveis = elegiveis.join(familia_ok, "__cod", "left_semi")
+    return elegiveis.select("__conta").dropDuplicates()
+
+
+def _num_if_conta_nao_elegivel(spark, config, dominio: DataFrame) -> DataFrame:
+    """NUM_IF que referenciam conta participante inelegível ou em branco.
+
+    Espelha 6.required.active_account: as MESMAS quatro colunas de referência,
+    a MESMA canonização de chave e o MESMO predicado de elegibilidade. Conta
+    nula é aceita (o validador ignora referência nula); conta em branco não."""
+    vazio = dominio.select(COL_NUM_IF).limit(0)
+    elegiveis = _contas_elegiveis(spark, config)
+    if elegiveis is None:
+        return vazio
+
+    alvo = dominio.select(
+        _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")
+    ).dropDuplicates()
+    ruins: Optional[DataFrame] = None
+    for tabela, coluna in REFERENCIAS_CONTA:
+        try:
+            src = _read_source(spark, config, tabela)
+        except Exception as exc:
+            logger.warning("poda conta: não li a fonte de %s (%s); referência "
+                           "%s.%s ignorada.", tabela, exc, tabela, coluna)
+            continue
+        if COL_NUM_IF not in src.columns or coluna not in src.columns:
+            logger.warning("poda conta: %s sem %s/%s; referência ignorada.",
+                           tabela, COL_NUM_IF, coluna)
+            continue
+        refs = (
+            src.select(
+                _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if"),
+                F.col(coluna).cast("string").alias("__bruto"),
+                _canon_key_validador(F.col(coluna)).alias("__conta"),
+            )
+            .join(alvo, "__num_if", "left_semi")
+            .where(F.col("__bruto").isNotNull())
+        )
+        em_branco = refs.where(F.trim(F.col("__bruto")) == F.lit(""))
+        inelegivel = refs.where(F.trim(F.col("__bruto")) != F.lit("")).join(
+            elegiveis, "__conta", "left_anti"
+        )
+        parcial = (
+            em_branco.select("__num_if")
+            .unionByName(inelegivel.select("__num_if"))
+            .dropDuplicates()
+        )
+        ruins = parcial if ruins is None else ruins.unionByName(parcial)
+
+    if ruins is None:
+        logger.warning("poda conta: nenhuma referência de conta legível; poda "
+                       "IGNORADA.")
+        return vazio
+    ruins = ruins.dropDuplicates()
+    return (
+        _copia_independente(dominio.select(COL_NUM_IF))
+        .withColumn("__num_if", _norm_key_col(F.col(COL_NUM_IF)))
+        .join(ruins, "__num_if", "left_semi")
+        .select(COL_NUM_IF)
+        .dropDuplicates()
+    )
+
+
 def _parse_faltantes_arg(txt: str) -> List[Tuple[str, str, List[str]]]:
     """'TABELA.COLUNA=v1,v2;TAB2.COL2=v3' -> [(TAB, COL, [v1, v2]), ...]."""
     out: List[Tuple[str, str, List[str]]] = []
@@ -3230,6 +3422,7 @@ def _dominio_instrumentos_elegiveis(
     faltantes: Optional[DataFrame] = None,
     poda_subtipo: bool = True,
     poda_cronograma_resgate: bool = True,
+    poda_conta: bool = True,
 ) -> Tuple[DataFrame, DataFrame]:
     fonte = (_dominio_num_if_produto(spark, config, profile, query_num_if_path)
              .select(COL_NUM_IF).dropDuplicates())
@@ -3250,6 +3443,11 @@ def _dominio_instrumentos_elegiveis(
         exclusoes.append((
             "cronograma de resgate COM TABELA",
             _num_if_cronograma_resgate_invalido(spark, config, fonte),
+        ))
+    if poda_conta and profile.name in PRODUTOS_COM_PODA_CONTA:
+        exclusoes.append((
+            "conta participante inelegível (item 6)",
+            _num_if_conta_nao_elegivel(spark, config, fonte),
         ))
     if faltantes is not None:
         exclusoes.append(("chave inexistente no destino (Cat 3/4)",
@@ -3278,6 +3476,7 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
                            faltantes: Optional[DataFrame] = None,
                            poda_subtipo: bool = True,
                            poda_cronograma_resgate: bool = True,
+                           poda_conta: bool = True,
                            permitir_lote_menor: bool = False) -> List:
     """Seleciona NUM_IF no domínio podado; lista explícita nunca é substituída.
 
@@ -3301,6 +3500,7 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
         faltantes=faltantes,
         poda_subtipo=poda_subtipo,
         poda_cronograma_resgate=poda_cronograma_resgate,
+        poda_conta=poda_conta,
     )
 
     if num_ifs:
@@ -3748,6 +3948,7 @@ def seleciona_instrumentos_destino(
     faltantes: Optional[DataFrame] = None,
     poda_subtipo: bool = True,
     poda_cronograma_resgate: bool = True,
+    poda_conta: bool = True,
     somente_ativos: bool = True,
     nullify_columns: Optional[Mapping[str, Sequence[str]]] = None,
     permitir_lote_menor: bool = False,
@@ -3774,6 +3975,7 @@ def seleciona_instrumentos_destino(
             faltantes=faltantes,
             poda_subtipo=poda_subtipo,
             poda_cronograma_resgate=poda_cronograma_resgate,
+            poda_conta=poda_conta,
         )
     requested = len(num_ifs) if num_ifs is not None else int(n_instrumentos)
     if requested < 1:
@@ -6097,6 +6299,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                      faltantes_parquet: Optional[str] = None,
                      poda_subtipo: bool = True,
                      poda_cronograma_resgate: bool = True,
+                     poda_conta: bool = True,
                      ajusta_fator_k: bool = True,
                      anular_cols: Optional[Mapping[str, Sequence[str]]] = None,
                       oracle_code_batch_size: int = DEFAULT_ORACLE_CODE_BATCH_SIZE,
@@ -6314,6 +6517,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                 faltantes=faltantes,
                 poda_subtipo=poda_subtipo,
                 poda_cronograma_resgate=poda_cronograma_resgate,
+                poda_conta=poda_conta,
                 permitir_lote_menor=ajusta_fator_k,
             )
     else:
@@ -6347,6 +6551,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                 faltantes=None,
                 poda_subtipo=poda_subtipo,
                 poda_cronograma_resgate=poda_cronograma_resgate,
+                poda_conta=poda_conta,
                 somente_ativos=somente_ativos,
                 nullify_columns=anular_cols,
                 permitir_lote_menor=ajusta_fator_k,
@@ -6827,6 +7032,7 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
     for field_name in (
         "poda_subtipo",
         "poda_cronograma_resgate",
+        "poda_conta",
         "ajusta_fator_k",
         "dry_run",
         "somente_ativos",
@@ -6964,6 +7170,7 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
             faltantes_parquet=job.faltantes_parquet,
             poda_subtipo=job.poda_subtipo,
             poda_cronograma_resgate=job.poda_cronograma_resgate,
+            poda_conta=job.poda_conta,
             ajusta_fator_k=job.ajusta_fator_k,
             anular_cols=_merge_nullification_mappings(
                 profile.integrity.nullify_mapping(), anular_cols
@@ -7145,6 +7352,17 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                              "do domínio e repostos por outra amostra). Use só p/ "
                              "depurar — o sintético pode sair com dangling (Cat 1).")
     parser.add_argument(
+        "--sem-poda-conta",
+        action="store_true",
+        help=(
+            "DESLIGA a poda de domínio do item 6 (por padrão os NUM_IF que "
+            "referenciam conta participante inelegível — situação <> 1, código "
+            "fora de .40/.10, ou sem família de contas área 1 / acesso L — são "
+            "tirados do domínio e repostos por outra amostra). Use só p/ "
+            "depurar: sem a poda o validador reprova 6.required.active_account."
+        ),
+    )
+    parser.add_argument(
         "--sem-ajuste-k",
         action="store_true",
         help=(
@@ -7263,6 +7481,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         faltantes_parquet=args.faltantes_parquet,
         poda_subtipo=not args.sem_poda_subtipo,
         poda_cronograma_resgate=not args.sem_poda_cronograma_resgate,
+        poda_conta=not args.sem_poda_conta,
         ajusta_fator_k=not args.sem_ajuste_k,
         somente_ativos=not args.sem_filtro_ativos,
         anular_cols=(
