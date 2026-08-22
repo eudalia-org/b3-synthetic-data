@@ -65,6 +65,118 @@
     ],
     "static": true
   },
+  "ALERTA": {
+    "pk_cols": [
+      "NUM_ID_ALERTA"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_CONTA_PARTICIPANTE"
+        ],
+        "parent_table": "CONTA_PARTICIPANTE",
+        "parent_columns": [
+          "NUM_CONTA_PARTICIPANTE"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_GRUPO_FUNCAO"
+        ],
+        "parent_table": "GRUPO_FUNCAO",
+        "parent_columns": [
+          "NUM_ID_GRUPO_FUNCAO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_ORIGEM_ALERTA"
+        ],
+        "parent_table": "ORIGEM_ALERTA",
+        "parent_columns": [
+          "NUM_ID_ORIGEM_ALERTA"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_ALERTA"
+        ],
+        "parent_table": "TIPO_ALERTA",
+        "parent_columns": [
+          "NUM_ID_TIPO_ALERTA"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "DAT_CRIACAO",
+      "DAT_INICIO_VALIDADE",
+      "NOM_ALERTA",
+      "NUM_ID_ALERTA",
+      "NUM_ID_ORIGEM_ALERTA",
+      "NUM_ID_TIPO_ALERTA"
+    ],
+    "static": true
+  },
+  "ALTERACAO_IF": {
+    "pk_cols": [
+      "NUM_ID_ALTERACAO_IF"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_ID_ARQUIVO_IF"
+        ],
+        "parent_table": "ARQUIVO_IF",
+        "parent_columns": [
+          "NUM_ID_ARQUIVO_IF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_ARQUIVO_IF_ANT"
+        ],
+        "parent_table": "ARQUIVO_IF",
+        "parent_columns": [
+          "NUM_ID_ARQUIVO_IF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_IF"
+        ],
+        "parent_table": "INSTRUMENTO_FINANCEIRO",
+        "parent_columns": [
+          "NUM_IF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_ENTIDADE_APROV"
+        ],
+        "parent_table": "USUARIO",
+        "parent_columns": [
+          "NUM_ID_ENTIDADE"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_ENTIDADE_ATUALIZ"
+        ],
+        "parent_table": "USUARIO",
+        "parent_columns": [
+          "NUM_ID_ENTIDADE"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "COD_TIPO_ALTERACAO",
+      "DAT_ALTERACAO",
+      "NUM_ID_ALTERACAO_IF",
+      "NUM_ID_ENTIDADE_ATUALIZ",
+      "NUM_IF"
+    ],
+    "static": true
+  },
   "AMORTIZACAO": {
     "pk_cols": [
       "NUM_CONDICAO_IF"
@@ -131,6 +243,154 @@
     "not_null_cols": [
       "IND_EXCLUIDO",
       "NUM_ID_AREA_ATUACAO"
+    ],
+    "static": true
+  },
+  "ARQUIVO_IF": {
+    "pk_cols": [
+      "NUM_ID_ARQUIVO_IF"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_ID_ARQUIVO_TRANSF"
+        ],
+        "parent_table": "ARQUIVO_TRANSF",
+        "parent_columns": [
+          "NUM_ID_ARQUIVO_TRANSF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_IF"
+        ],
+        "parent_table": "INSTRUMENTO_FINANCEIRO",
+        "parent_columns": [
+          "NUM_IF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_PENDENCIA_IF"
+        ],
+        "parent_table": "PENDENCIA_IF",
+        "parent_columns": [
+          "NUM_ID_PENDENCIA_IF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_STATUS_ARQUIVO"
+        ],
+        "parent_table": "STATUS_ARQUIVO",
+        "parent_columns": [
+          "NUM_ID_STATUS_ARQUIVO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_ARQUIVO"
+        ],
+        "parent_table": "TIPO_ARQUIVO",
+        "parent_columns": [
+          "NUM_ID_TIPO_ARQUIVO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_ENTIDADE_APROVADOR"
+        ],
+        "parent_table": "USUARIO",
+        "parent_columns": [
+          "NUM_ID_ENTIDADE"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_ENTIDADE_EXCLUSAO"
+        ],
+        "parent_table": "USUARIO",
+        "parent_columns": [
+          "NUM_ID_ENTIDADE"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "DAT_INCLUSAO",
+      "NUM_ID_ARQUIVO_IF",
+      "NUM_ID_ARQUIVO_TRANSF",
+      "NUM_IF"
+    ],
+    "static": true
+  },
+  "ARQUIVO_LOTE": {
+    "pk_cols": [
+      "NUM_ID_ARQUIVO_LOTE"
+    ],
+    "not_null_cols": [
+      "COD_ARQUIVO_LOTE",
+      "DAT_INCLUSAO",
+      "NUM_ID_ARQUIVO_LOTE"
+    ],
+    "static": true
+  },
+  "ARQUIVO_TRANSF": {
+    "pk_cols": [
+      "NUM_ID_ARQUIVO_TRANSF"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_ID_ARQUIVO_LOTE"
+        ],
+        "parent_table": "ARQUIVO_LOTE",
+        "parent_columns": [
+          "NUM_ID_ARQUIVO_LOTE"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_STATUS_GED"
+        ],
+        "parent_table": "TIPO_STATUS_GED",
+        "parent_columns": [
+          "NUM_ID_TIPO_STATUS_GED"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_ENTIDADE_USUARIO"
+        ],
+        "parent_table": "USUARIO",
+        "parent_columns": [
+          "NUM_ID_ENTIDADE"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "NOM_ARQUIVO",
+      "NOM_TIPO_MIME",
+      "NUM_ID_ARQUIVO_TRANSF"
+    ],
+    "static": true
+  },
+  "ARQUIVO_TRANSF_CONTEUDO": {
+    "pk_cols": [
+      "NUM_ID_ARQUIVO_TRANSF_CONT"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_ID_ARQUIVO_TRANSF_CONT"
+        ],
+        "parent_table": "ARQUIVO_TRANSF",
+        "parent_columns": [
+          "NUM_ID_ARQUIVO_TRANSF"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "NUM_ID_ARQUIVO_TRANSF_CONT"
     ],
     "static": true
   },
@@ -800,6 +1060,178 @@
     ],
     "static": true
   },
+  "COMPLEMENTO_CONTRATO": {
+    "pk_cols": [
+      "NUM_IF"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_ID_CONTRATO_PADRAO"
+        ],
+        "parent_table": "CONTRATO_PADRAO",
+        "parent_columns": [
+          "NUM_ID_CONTRATO_PADRAO"
+        ]
+      },
+      {
+        "columns": [
+          "COD_ESTADO_REGISTRO"
+        ],
+        "parent_table": "ESTADO_REGISTRO",
+        "parent_columns": [
+          "COD_ESTADO_REGISTRO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_FATOR_RISCO_ATIVO"
+        ],
+        "parent_table": "FATOR_RISCO",
+        "parent_columns": [
+          "NUM_ID_FATOR_RISCO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_FATOR_RISCO_PASSIVO"
+        ],
+        "parent_table": "FATOR_RISCO",
+        "parent_columns": [
+          "NUM_ID_FATOR_RISCO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_FATOR_RISCO_DCE_ATIVO"
+        ],
+        "parent_table": "FATOR_RISCO_DCE",
+        "parent_columns": [
+          "NUM_ID_FATOR_RISCO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_FATOR_RISCO_DCE_PASSIVO"
+        ],
+        "parent_table": "FATOR_RISCO_DCE",
+        "parent_columns": [
+          "NUM_ID_FATOR_RISCO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_FUNCIONALIDADE"
+        ],
+        "parent_table": "FUNCIONALIDADE",
+        "parent_columns": [
+          "NUM_ID_FUNCIONALIDADE"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_IF"
+        ],
+        "parent_table": "INSTRUMENTO_FINANCEIRO",
+        "parent_columns": [
+          "NUM_IF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_PAIS"
+        ],
+        "parent_table": "PAIS",
+        "parent_columns": [
+          "NUM_ID_PAIS"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_SITUACAO_CONTRATO"
+        ],
+        "parent_table": "SITUACAO_CONTRATO",
+        "parent_columns": [
+          "NUM_ID_SITUACAO_CONTRATO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_SITUACAO_SITUACAO_FINAL"
+        ],
+        "parent_table": "SITUACAO_CONTRATO",
+        "parent_columns": [
+          "NUM_ID_SITUACAO_CONTRATO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_SUBSTATUS_CONTRATO"
+        ],
+        "parent_table": "SUBSTATUS_CONTRATO",
+        "parent_columns": [
+          "NUM_ID_SUBSTATUS_CONTRATO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_ADESAO_CONTRATO"
+        ],
+        "parent_table": "TIPO_ADESAO_CONTRATO",
+        "parent_columns": [
+          "NUM_ID_TIPO_ADESAO_CONTRATO"
+        ]
+      },
+      {
+        "columns": [
+          "COD_TIPO_CONTRATO"
+        ],
+        "parent_table": "TIPO_CONTRATO",
+        "parent_columns": [
+          "COD_TIPO_CONTRATO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_EXERCICIO"
+        ],
+        "parent_table": "TIPO_EXERCICIO",
+        "parent_columns": [
+          "NUM_ID_TIPO_EXERCICIO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_TIPO_IF_DERIVATIVO"
+        ],
+        "parent_table": "TIPO_IF",
+        "parent_columns": [
+          "NUM_TIPO_IF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_INDICADOR"
+        ],
+        "parent_table": "TIPO_INDICADOR",
+        "parent_columns": [
+          "NUM_ID_TIPO_INDICADOR"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "COD_TIPO_CONTRATO",
+      "DAT_INCLUSAO",
+      "IND_CESSAO_ATIVO_REFERENCIA",
+      "IND_HEDGE_PORFOLIO",
+      "IND_PAGAMENTO_PREMIO",
+      "IND_PERC_RECUP_INF_REGISTRO",
+      "NUM_ID_SITUACAO_CONTRATO",
+      "NUM_ID_SITUACAO_SITUACAO_FINAL",
+      "NUM_IF"
+    ],
+    "static": true
+  },
   "CONDICAO_IF": {
     "pk_cols": [
       "NUM_CONDICAO_IF"
@@ -1170,6 +1602,61 @@
       "NUM_ID_TIPO_MENSAGEM",
       "TSP_FINAL",
       "TSP_INICIAL"
+    ],
+    "static": true
+  },
+  "CONTRATO_PADRAO": {
+    "pk_cols": [
+      "NUM_ID_CONTRATO_PADRAO"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_ID_INDICADOR_EXTERNO_P1"
+        ],
+        "parent_table": "INDICADOR_EXTERNO",
+        "parent_columns": [
+          "NUM_ID_INDICADOR_EXTERNO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_INDICADOR_EXTERNO_P2"
+        ],
+        "parent_table": "INDICADOR_EXTERNO",
+        "parent_columns": [
+          "NUM_ID_INDICADOR_EXTERNO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_IF_EXTERNO"
+        ],
+        "parent_table": "TIPO_IF_EXTERNO",
+        "parent_columns": [
+          "NUM_ID_TIPO_IF_EXTERNO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_ENTIDADE_ATUALIZ"
+        ],
+        "parent_table": "USUARIO",
+        "parent_columns": [
+          "NUM_ID_ENTIDADE"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "COD_CONTRATO_PADRAO",
+      "DAT_ALTERACAO",
+      "DAT_INCLUSAO",
+      "DES_CONTRATO_PADRAO",
+      "NUM_ID_CONTRATO_PADRAO",
+      "NUM_ID_ENTIDADE_ATUALIZ",
+      "NUM_ID_INDICADOR_EXTERNO_P1",
+      "NUM_ID_INDICADOR_EXTERNO_P2",
+      "NUM_ID_TIPO_IF_EXTERNO"
     ],
     "static": true
   },
@@ -2201,6 +2688,35 @@
     ],
     "static": true
   },
+  "FATOR_RISCO": {
+    "pk_cols": [
+      "NUM_ID_FATOR_RISCO"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_ID_OBJETO_SERVICO"
+        ],
+        "parent_table": "OBJETO_SERVICO",
+        "parent_columns": [
+          "NUM_ID_OBJETO_SERVICO"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "NUM_ID_FATOR_RISCO"
+    ],
+    "static": true
+  },
+  "FATOR_RISCO_DCE": {
+    "pk_cols": [
+      "NUM_ID_FATOR_RISCO"
+    ],
+    "not_null_cols": [
+      "NUM_ID_FATOR_RISCO"
+    ],
+    "static": true
+  },
   "FONTE_APURACAO": {
     "pk_cols": [
       "NUM_ID_FONTE_APURACAO"
@@ -2282,6 +2798,17 @@
     ],
     "static": true
   },
+  "FUNCIONALIDADE": {
+    "pk_cols": [
+      "NUM_ID_FUNCIONALIDADE"
+    ],
+    "not_null_cols": [
+      "DAT_INCLUSAO",
+      "NOM_FUNCIONALIDADE",
+      "NUM_ID_FUNCIONALIDADE"
+    ],
+    "static": true
+  },
   "GARANTIA": {
     "pk_cols": [
       "NUM_ID_GARANTIA"
@@ -2331,6 +2858,60 @@
     ],
     "static": true
   },
+  "GRAVAME_GRAU_PENHOR": {
+    "pk_cols": [
+      "NUM_ID_GRAVAME_GRAU_PENHOR"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_ID_COMITENTE"
+        ],
+        "parent_table": "COMITENTE",
+        "parent_columns": [
+          "NUM_ID_ENTIDADE"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_COMITENTE_GARANTIDO"
+        ],
+        "parent_table": "COMITENTE",
+        "parent_columns": [
+          "NUM_ID_ENTIDADE"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_IF_GARANTIA"
+        ],
+        "parent_table": "INSTRUMENTO_FINANCEIRO",
+        "parent_columns": [
+          "NUM_IF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_IF_GRAVAME"
+        ],
+        "parent_table": "INSTRUMENTO_FINANCEIRO",
+        "parent_columns": [
+          "NUM_IF"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "DAT_INCLUSAO",
+      "IND_BLOQUEIO_PRENOTACAO",
+      "NUM_GRAU_PENHOR",
+      "NUM_ID_COMITENTE",
+      "NUM_ID_GRAVAME_GRAU_PENHOR",
+      "NUM_IF_GARANTIA",
+      "NUM_IF_GRAVAME",
+      "QTD_IF_GARANTIA"
+    ],
+    "static": true
+  },
   "GRP_FORMA_PAGAMENTO": {
     "pk_cols": [
       "NUM_ID_GRP_FORMA_PAGAMENTO"
@@ -2349,6 +2930,51 @@
       "COD_GRP_MODALIDADE_LIQUIDACAO",
       "IND_EXCLUIDO",
       "NOM_GRP_MODALIDADE_LIQUIDACAO"
+    ],
+    "static": true
+  },
+  "GRUPO_FUNCAO": {
+    "pk_cols": [
+      "NUM_ID_GRUPO_FUNCAO"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_ID_AREA_ATUACAO"
+        ],
+        "parent_table": "AREA_ATUACAO",
+        "parent_columns": [
+          "NUM_ID_AREA_ATUACAO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_ENTIDADE_ATUALIZ"
+        ],
+        "parent_table": "USUARIO",
+        "parent_columns": [
+          "NUM_ID_ENTIDADE"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "IND_COMPOE_PERFIL",
+      "IND_EXCLUIDO",
+      "IND_PLATAFORMA_BAIXA",
+      "NOM_GRUPO_FUNCAO",
+      "NUM_ID_AREA_ATUACAO",
+      "NUM_ID_GRUPO_FUNCAO"
+    ],
+    "static": true
+  },
+  "GRUPO_ROTINA": {
+    "pk_cols": [
+      "NUM_ID_GRUPO_ROTINA"
+    ],
+    "not_null_cols": [
+      "COD_GRUPO_ROTINA",
+      "NOM_GRUPO_ROTINA",
+      "NUM_ID_GRUPO_ROTINA"
     ],
     "static": true
   },
@@ -2471,6 +3097,449 @@
     ],
     "static": true
   },
+  "HISTORICO_IF_TITULO": {
+    "pk_cols": [
+      "NUM_ID_HISTORICO_IF_TITULO"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_ID_FORMA_PAGAMENTO"
+        ],
+        "parent_table": "FORMA_PAGAMENTO",
+        "parent_columns": [
+          "NUM_ID_FORMA_PAGAMENTO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_HISTORICO_IF_TITULO_ANT"
+        ],
+        "parent_table": "HISTORICO_IF_TITULO",
+        "parent_columns": [
+          "NUM_ID_HISTORICO_IF_TITULO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_INDICE_VALORIZACAO"
+        ],
+        "parent_table": "INDICE_VALORIZACAO",
+        "parent_columns": [
+          "NUM_INDICE_VALORIZACAO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_INDICE_VALORIZACAO_2"
+        ],
+        "parent_table": "INDICE_VALORIZACAO",
+        "parent_columns": [
+          "NUM_INDICE_VALORIZACAO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_IF_PERTENCE"
+        ],
+        "parent_table": "INSTRUMENTO_FINANCEIRO",
+        "parent_columns": [
+          "NUM_IF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_LOCAL_NEGOCIACAO"
+        ],
+        "parent_table": "LOCAL_NEGOCIACAO",
+        "parent_columns": [
+          "NUM_ID_LOCAL_NEGOCIACAO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_MODALIDADE_CREDITO"
+        ],
+        "parent_table": "MODALIDADE_CREDITO",
+        "parent_columns": [
+          "NUM_ID_MODALIDADE_CREDITO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_MOTIVO_SITUACAO_IF"
+        ],
+        "parent_table": "MOTIVO_SITUACAO_IF",
+        "parent_columns": [
+          "NUM_ID_MOTIVO_SITUACAO_IF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_MUNICIPIO_CREDOR"
+        ],
+        "parent_table": "MUNICIPIO",
+        "parent_columns": [
+          "NUM_ID_MUNICIPIO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_MUNICIPIO_DEVEDOR"
+        ],
+        "parent_table": "MUNICIPIO",
+        "parent_columns": [
+          "NUM_ID_MUNICIPIO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_MUNICIPIO_EMISSAO"
+        ],
+        "parent_table": "MUNICIPIO",
+        "parent_columns": [
+          "NUM_ID_MUNICIPIO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_MUNICIPIO_IMOVEL"
+        ],
+        "parent_table": "MUNICIPIO",
+        "parent_columns": [
+          "NUM_ID_MUNICIPIO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_MUNICIPIO_PAGAMENTO"
+        ],
+        "parent_table": "MUNICIPIO",
+        "parent_columns": [
+          "NUM_ID_MUNICIPIO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_ORIG_DESL_LIQ"
+        ],
+        "parent_table": "ORIGEM_DESLOC_LIQUID",
+        "parent_columns": [
+          "NUM_ID_ORIG_DESL_LIQ"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_PAIS"
+        ],
+        "parent_table": "PAIS",
+        "parent_columns": [
+          "NUM_ID_PAIS"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_QUALIFICACAO_CREDITO"
+        ],
+        "parent_table": "QUALIFICACAO",
+        "parent_columns": [
+          "NUM_ID_QUALIFICACAO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_QUALIFICACAO_FINALIDADE"
+        ],
+        "parent_table": "QUALIFICACAO",
+        "parent_columns": [
+          "NUM_ID_QUALIFICACAO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_QUALIFICACAO_VCP"
+        ],
+        "parent_table": "QUALIFICACAO",
+        "parent_columns": [
+          "NUM_ID_QUALIFICACAO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_TIPO_MOTIVO_BLOQUEIO_RESTR"
+        ],
+        "parent_table": "TCTPTIPO_MOTIVO_BLOQUEIO_RESTR",
+        "parent_columns": [
+          "NUM_TIPO_MOTIVO_BLOQUEIO_RESTR"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_TIPO_RITO_OFERTA"
+        ],
+        "parent_table": "TCTPTIPO_RITO_OFERTA",
+        "parent_columns": [
+          "NUM_TIPO_RITO_OFERTA"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_TIPO_SETOR_RECEBIVEL"
+        ],
+        "parent_table": "TCTPTIPO_SETOR_RECEBIVEL",
+        "parent_columns": [
+          "NUM_TIPO_SETOR_RECEBIVEL"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_TIPO_STATUS_NEGOCIACAO"
+        ],
+        "parent_table": "TCTPTIPO_STATUS_NEGOCIACAO",
+        "parent_columns": [
+          "NUM_TIPO_STATUS_NEGOCIACAO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_CREDITO"
+        ],
+        "parent_table": "TIPO_CREDITO",
+        "parent_columns": [
+          "NUM_ID_TIPO_CREDITO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_GARANTIA"
+        ],
+        "parent_table": "TIPO_GARANTIA",
+        "parent_columns": [
+          "NUM_ID_TIPO_GARANTIA"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_GARANTIA_ADIC_1"
+        ],
+        "parent_table": "TIPO_GARANTIA",
+        "parent_columns": [
+          "NUM_ID_TIPO_GARANTIA"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_GARANTIA_ADIC_2"
+        ],
+        "parent_table": "TIPO_GARANTIA",
+        "parent_columns": [
+          "NUM_ID_TIPO_GARANTIA"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_GARANTIA_ADIC_3"
+        ],
+        "parent_table": "TIPO_GARANTIA",
+        "parent_columns": [
+          "NUM_ID_TIPO_GARANTIA"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_GARANTIA_ADIC_4"
+        ],
+        "parent_table": "TIPO_GARANTIA",
+        "parent_columns": [
+          "NUM_ID_TIPO_GARANTIA"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_TIPO_IF"
+        ],
+        "parent_table": "TIPO_IF",
+        "parent_columns": [
+          "NUM_TIPO_IF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_INDICADOR"
+        ],
+        "parent_table": "TIPO_INDICADOR",
+        "parent_columns": [
+          "NUM_ID_TIPO_INDICADOR"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_NEGOCIADOR_SECUND"
+        ],
+        "parent_table": "TIPO_NEGOCIADOR_SECUNDARIO",
+        "parent_columns": [
+          "NUM_ID_TIPO_NEGOCIADOR_SECUND"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_REGIME_TITULO"
+        ],
+        "parent_table": "TIPO_REGIME_TITULO",
+        "parent_columns": [
+          "NUM_ID_TIPO_REGIME_TITULO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_TITULO_SUSTENTAVEL"
+        ],
+        "parent_table": "TIPO_TITULO_SUSTENTAVEL",
+        "parent_columns": [
+          "NUM_ID_TIPO_TITULO_SUSTENTAVEL"
+        ]
+      },
+      {
+        "columns": [
+          "COD_TP_UNIDADE_TEMPO_CORRECAO"
+        ],
+        "parent_table": "TIPO_UNIDADE_TEMPO",
+        "parent_columns": [
+          "COD_TIPO_UNIDADE_TEMPO"
+        ]
+      },
+      {
+        "columns": [
+          "COD_TP_UNIDADE_TEMPO_JUROS"
+        ],
+        "parent_table": "TIPO_UNIDADE_TEMPO",
+        "parent_columns": [
+          "COD_TIPO_UNIDADE_TEMPO"
+        ]
+      },
+      {
+        "columns": [
+          "COD_TP_UNIDADE_TEMPO_PREMIO"
+        ],
+        "parent_table": "TIPO_UNIDADE_TEMPO",
+        "parent_columns": [
+          "COD_TIPO_UNIDADE_TEMPO"
+        ]
+      },
+      {
+        "columns": [
+          "COD_TP_UNIDADE_TEMP_CORRECAO_2"
+        ],
+        "parent_table": "TIPO_UNIDADE_TEMPO",
+        "parent_columns": [
+          "COD_TIPO_UNIDADE_TEMPO"
+        ]
+      },
+      {
+        "columns": [
+          "COD_TP_UNID_TEMPO_AMORTIZACAO"
+        ],
+        "parent_table": "TIPO_UNIDADE_TEMPO",
+        "parent_columns": [
+          "COD_TIPO_UNIDADE_TEMPO"
+        ]
+      },
+      {
+        "columns": [
+          "COD_TP_UNID_TEMPO_PARTICIPACAO"
+        ],
+        "parent_table": "TIPO_UNIDADE_TEMPO",
+        "parent_columns": [
+          "COD_TIPO_UNIDADE_TEMPO"
+        ]
+      },
+      {
+        "columns": [
+          "COD_TP_UNID_TEMPO_TABELA_PRICE"
+        ],
+        "parent_table": "TIPO_UNIDADE_TEMPO",
+        "parent_columns": [
+          "COD_TIPO_UNIDADE_TEMPO"
+        ]
+      },
+      {
+        "columns": [
+          "COD_TP_UNI_TEMPO_ATU_MONETARIA"
+        ],
+        "parent_table": "TIPO_UNIDADE_TEMPO",
+        "parent_columns": [
+          "COD_TIPO_UNIDADE_TEMPO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_UF_CARTORIO"
+        ],
+        "parent_table": "UF",
+        "parent_columns": [
+          "NUM_ID_UF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_UF_CREDOR"
+        ],
+        "parent_table": "UF",
+        "parent_columns": [
+          "NUM_ID_UF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_UF_DEVEDOR"
+        ],
+        "parent_table": "UF",
+        "parent_columns": [
+          "NUM_ID_UF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_UF_EMISSAO"
+        ],
+        "parent_table": "UF",
+        "parent_columns": [
+          "NUM_ID_UF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_UF_IMOVEL"
+        ],
+        "parent_table": "UF",
+        "parent_columns": [
+          "NUM_ID_UF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_UF_PAGAMENTO"
+        ],
+        "parent_table": "UF",
+        "parent_columns": [
+          "NUM_ID_UF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_USUARIO"
+        ],
+        "parent_table": "USUARIO",
+        "parent_columns": [
+          "NUM_ID_ENTIDADE"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "NUM_ID_HISTORICO_IF_TITULO"
+    ],
+    "static": true
+  },
   "HISTORICO_PU_CURVA": {
     "pk_cols": [
       "NUM_HISTORICO_PU_CURVA"
@@ -2563,6 +3632,62 @@
     ],
     "static": true
   },
+  "IF_GRVM": {
+    "pk_cols": [
+      "NUM_IF"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_IF"
+        ],
+        "parent_table": "INSTRUMENTO_FINANCEIRO",
+        "parent_columns": [
+          "NUM_IF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TP_COND_EXEC_CONT_GAR"
+        ],
+        "parent_table": "TIPO_COND_EXEC_CONT_GAR",
+        "parent_columns": [
+          "NUM_ID_TP_COND_EXEC_CONT_GAR"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_CONST_GRAVAME"
+        ],
+        "parent_table": "TIPO_CONST_GRAVAME",
+        "parent_columns": [
+          "NUM_ID_TIPO_CONST_GRAVAME"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_GARANTIA_GRAVAME"
+        ],
+        "parent_table": "TIPO_GARANTIA_GRAVAME",
+        "parent_columns": [
+          "NUM_ID_TIPO_GARANTIA_GRAVAME"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TP_RESP_EXEC_GARANTIA"
+        ],
+        "parent_table": "TIPO_RESP_EXEC_GARANTIA",
+        "parent_columns": [
+          "NUM_ID_TP_RESP_EXEC_GARANTIA"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "NUM_IF"
+    ],
+    "static": true
+  },
   "IF_LCA": {
     "pk_cols": [
       "NUM_IF"
@@ -2610,6 +3735,39 @@
       "COD_INDEXADOR_CREDITO",
       "DES_INDEXADOR_CREDITO",
       "NUM_ID_INDEXADOR_CREDITO"
+    ],
+    "static": true
+  },
+  "INDICADOR_EXTERNO": {
+    "pk_cols": [
+      "NUM_ID_INDICADOR_EXTERNO"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_ID_ORGAO_REGULADOR"
+        ],
+        "parent_table": "ORGAO_REGULADOR",
+        "parent_columns": [
+          "NUM_ID_ORGAO_REGULADOR"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_INDICADOR_EXTERNO"
+        ],
+        "parent_table": "TIPO_INDICADOR_EXTERNO",
+        "parent_columns": [
+          "NUM_ID_TIPO_INDICADOR_EXTERNO"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "COD_INDICADOR_EXTERNO",
+      "NOM_INDICADOR_EXTERNO",
+      "NUM_ID_INDICADOR_EXTERNO",
+      "NUM_ID_ORGAO_REGULADOR",
+      "NUM_ID_TIPO_INDICADOR_EXTERNO"
     ],
     "static": true
   },
@@ -4016,6 +5174,27 @@
     ],
     "static": true
   },
+  "ORGAO_REGULADOR": {
+    "pk_cols": [
+      "NUM_ID_ORGAO_REGULADOR"
+    ],
+    "not_null_cols": [
+      "NOM_ORGAO_REGULADOR",
+      "NUM_ID_ORGAO_REGULADOR"
+    ],
+    "static": true
+  },
+  "ORIGEM_ALERTA": {
+    "pk_cols": [
+      "NUM_ID_ORIGEM_ALERTA"
+    ],
+    "not_null_cols": [
+      "COD_ORIGEM_ALERTA",
+      "DES_ORIGEM_ALERTA",
+      "NUM_ID_ORIGEM_ALERTA"
+    ],
+    "static": true
+  },
   "ORIGEM_CAPITAL": {
     "pk_cols": [
       "NUM_ID_ORIGEM_CAPITAL"
@@ -4779,6 +5958,48 @@
     ],
     "static": true
   },
+  "PROTOCOLO": {
+    "pk_cols": [
+      "NUM_ID_PROTOCOLO"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_CONTA_RESPONSAVEL"
+        ],
+        "parent_table": "CONTA_PARTICIPANTE",
+        "parent_columns": [
+          "NUM_CONTA_PARTICIPANTE"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_SITUACAO_PROTOCOLO"
+        ],
+        "parent_table": "SITUACAO_PROTOCOLO",
+        "parent_columns": [
+          "NUM_ID_SITUACAO_PROTOCOLO"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_PROTOCOLO"
+        ],
+        "parent_table": "TIPO_PROTOCOLO",
+        "parent_columns": [
+          "NUM_ID_TIPO_PROTOCOLO"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "COD_PROTOCOLO",
+      "DAT_INCLUSAO",
+      "NUM_ID_PROTOCOLO",
+      "NUM_ID_SITUACAO_PROTOCOLO",
+      "NUM_ID_TIPO_PROTOCOLO"
+    ],
+    "static": true
+  },
   "QUALIFICACAO": {
     "pk_cols": [
       "NUM_ID_QUALIFICACAO"
@@ -5163,6 +6384,46 @@
     ],
     "static": true
   },
+  "ROTINA": {
+    "pk_cols": [
+      "NUM_ID_ROTINA"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_ID_GRUPO_ROTINA"
+        ],
+        "parent_table": "GRUPO_ROTINA",
+        "parent_columns": [
+          "NUM_ID_GRUPO_ROTINA"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_ROTINA_RELACIONADA"
+        ],
+        "parent_table": "ROTINA",
+        "parent_columns": [
+          "NUM_ID_ROTINA"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_ROTINA"
+        ],
+        "parent_table": "TIPO_ROTINA",
+        "parent_columns": [
+          "NUM_ID_TIPO_ROTINA"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "COD_ROTINA",
+      "DES_ROTINA",
+      "NUM_ID_ROTINA"
+    ],
+    "static": true
+  },
   "SETOR_ECONOMICO": {
     "pk_cols": [
       "NUM_ID_SETOR_ECONOMICO"
@@ -5277,6 +6538,29 @@
       "IND_EXCLUIDO",
       "NOM_SITUACAO_CONTA",
       "NUM_ID_SITUACAO_CONTA"
+    ],
+    "static": true
+  },
+  "SITUACAO_CONTRATO": {
+    "pk_cols": [
+      "NUM_ID_SITUACAO_CONTRATO"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_TIPO_IF"
+        ],
+        "parent_table": "TIPO_IF",
+        "parent_columns": [
+          "NUM_TIPO_IF"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "DES_SITUACAO_CONTRATO",
+      "IND_MOSTRA_REL_SIC",
+      "NUM_ID_SITUACAO_CONTRATO",
+      "NUM_TIPO_IF"
     ],
     "static": true
   },
@@ -5422,6 +6706,15 @@
     ],
     "static": true
   },
+  "SITUACAO_PROTOCOLO": {
+    "pk_cols": [
+      "NUM_ID_SITUACAO_PROTOCOLO"
+    ],
+    "not_null_cols": [
+      "NUM_ID_SITUACAO_PROTOCOLO"
+    ],
+    "static": true
+  },
   "SITUACAO_QUALIFICACAO": {
     "pk_cols": [
       "NUM_ID_SITUACAO_QUALIFICACAO"
@@ -5493,6 +6786,17 @@
     ],
     "static": true
   },
+  "STATUS_ARQUIVO": {
+    "pk_cols": [
+      "NUM_ID_STATUS_ARQUIVO"
+    ],
+    "not_null_cols": [
+      "DAT_INCLUSAO",
+      "DES_STATUS_ARQUIVO",
+      "NUM_ID_STATUS_ARQUIVO"
+    ],
+    "static": true
+  },
   "STATUS_CESTA": {
     "pk_cols": [
       "NUM_ID_STATUS_CESTA"
@@ -5500,6 +6804,17 @@
     "not_null_cols": [
       "COD_STATUS_CESTA",
       "NUM_ID_STATUS_CESTA"
+    ],
+    "static": true
+  },
+  "SUBSTATUS_CONTRATO": {
+    "pk_cols": [
+      "NUM_ID_SUBSTATUS_CONTRATO"
+    ],
+    "not_null_cols": [
+      "COD_SUBSTATUS_CONTRATO",
+      "DES_SUBSTATUS_CONTRATO",
+      "NUM_ID_SUBSTATUS_CONTRATO"
     ],
     "static": true
   },
@@ -5523,6 +6838,47 @@
       "IND_FINANCEIRO",
       "NOM_ST_CONTA",
       "NUM_ID_ST_CONTA"
+    ],
+    "static": true
+  },
+  "TCTPCADEIA_IPOC": {
+    "pk_cols": [
+      "NUM_CADEIA_IPOC"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_IF"
+        ],
+        "parent_table": "INSTRUMENTO_FINANCEIRO",
+        "parent_columns": [
+          "NUM_IF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_IPOC_ANTERIOR"
+        ],
+        "parent_table": "TCTPCADEIA_IPOC",
+        "parent_columns": [
+          "NUM_CADEIA_IPOC"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_SITUACAO_CADEIA"
+        ],
+        "parent_table": "TCTPSITUACAO_CADEIA_IPOC",
+        "parent_columns": [
+          "NUM_SITUACAO_CADEIA"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "COD_IPOC",
+      "NUM_CADEIA_IPOC",
+      "NUM_IF",
+      "NUM_SITUACAO_CADEIA"
     ],
     "static": true
   },
@@ -5667,6 +7023,47 @@
     ],
     "static": true
   },
+  "TCTPGRUPO_PRODUTO_FGC": {
+    "pk_cols": [
+      "NUM_ID_GRUPO_PRODUTO_FGC"
+    ],
+    "not_null_cols": [
+      "NOME_GRUPO_PRODUTO_FGC",
+      "NUM_ID_GRUPO_PRODUTO_FGC"
+    ],
+    "static": true
+  },
+  "TCTPIF_CCB": {
+    "pk_cols": [
+      "NUM_ID_IF_CCB"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_IF"
+        ],
+        "parent_table": "INSTRUMENTO_FINANCEIRO",
+        "parent_columns": [
+          "NUM_IF"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_ID_TIPO_PRODUTO_FGC"
+        ],
+        "parent_table": "TCTPTIPO_PRODUTO_FGC",
+        "parent_columns": [
+          "NUM_ID_TIPO_PRODUTO_FGC"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "IND_BAIXA_VENCIMENTO",
+      "NUM_ID_IF_CCB",
+      "NUM_IF"
+    ],
+    "static": true
+  },
   "TCTPIROP_ATIV": {
     "pk_cols": [
       "NUM_IROP_ATIV"
@@ -5704,6 +7101,16 @@
       "NUM_CHAV_IROP",
       "NUM_IROP_ATIV",
       "NUM_STUS_IROP"
+    ],
+    "static": true
+  },
+  "TCTPSITUACAO_CADEIA_IPOC": {
+    "pk_cols": [
+      "NUM_SITUACAO_CADEIA"
+    ],
+    "not_null_cols": [
+      "DESC_SITUACAO_CADEIA",
+      "NUM_SITUACAO_CADEIA"
     ],
     "static": true
   },
@@ -5803,6 +7210,29 @@
     ],
     "static": true
   },
+  "TCTPTIPO_PRODUTO_FGC": {
+    "pk_cols": [
+      "NUM_ID_TIPO_PRODUTO_FGC"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_ID_GRUPO_PRODUTO_FGC"
+        ],
+        "parent_table": "TCTPGRUPO_PRODUTO_FGC",
+        "parent_columns": [
+          "NUM_ID_GRUPO_PRODUTO_FGC"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "DATA_INCLUSAO",
+      "IND_EXIBE_FGC",
+      "NOME_TIPO_PRODUTO_FGC",
+      "NUM_ID_TIPO_PRODUTO_FGC"
+    ],
+    "static": true
+  },
   "TCTPTIPO_RITO_OFERTA": {
     "pk_cols": [
       "NUM_TIPO_RITO_OFERTA"
@@ -5878,6 +7308,26 @@
     ],
     "static": true
   },
+  "TIPO_ADESAO_CONTRATO": {
+    "pk_cols": [
+      "NUM_ID_TIPO_ADESAO_CONTRATO"
+    ],
+    "not_null_cols": [
+      "NUM_ID_TIPO_ADESAO_CONTRATO"
+    ],
+    "static": true
+  },
+  "TIPO_ALERTA": {
+    "pk_cols": [
+      "NUM_ID_TIPO_ALERTA"
+    ],
+    "not_null_cols": [
+      "COD_TIPO_ALERTA",
+      "DES_TIPO_ALERTA",
+      "NUM_ID_TIPO_ALERTA"
+    ],
+    "static": true
+  },
   "TIPO_AMORTIZACAO": {
     "pk_cols": [
       "NUM_ID_TIPO_AMORTIZACAO"
@@ -5886,6 +7336,28 @@
       "COD_TIPO_AMORTIZACAO",
       "NOM_TIPO_AMORTIZACAO",
       "NUM_ID_TIPO_AMORTIZACAO"
+    ],
+    "static": true
+  },
+  "TIPO_ARQUIVO": {
+    "pk_cols": [
+      "NUM_ID_TIPO_ARQUIVO"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_ID_ROTINA"
+        ],
+        "parent_table": "ROTINA",
+        "parent_columns": [
+          "NUM_ID_ROTINA"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "COD_TIPO_ARQUIVO",
+      "NOM_TIPO_ARQUIVO",
+      "NUM_ID_TIPO_ARQUIVO"
     ],
     "static": true
   },
@@ -5950,6 +7422,24 @@
     ],
     "static": true
   },
+  "TIPO_COND_EXEC_CONT_GAR": {
+    "pk_cols": [
+      "NUM_ID_TP_COND_EXEC_CONT_GAR"
+    ],
+    "not_null_cols": [
+      "NUM_ID_TP_COND_EXEC_CONT_GAR"
+    ],
+    "static": true
+  },
+  "TIPO_CONST_GRAVAME": {
+    "pk_cols": [
+      "NUM_ID_TIPO_CONST_GRAVAME"
+    ],
+    "not_null_cols": [
+      "NUM_ID_TIPO_CONST_GRAVAME"
+    ],
+    "static": true
+  },
   "TIPO_CONTA": {
     "pk_cols": [
       "NUM_ID_TIPO_CONTA"
@@ -5988,6 +7478,16 @@
       "NUM_ID_ENTIDADE",
       "NUM_ID_ST_CONTA",
       "NUM_ID_TIPO_CONTA"
+    ],
+    "static": true
+  },
+  "TIPO_CONTRATO": {
+    "pk_cols": [
+      "COD_TIPO_CONTRATO"
+    ],
+    "not_null_cols": [
+      "COD_TIPO_CONTRATO",
+      "NOM_TIPO_CONTRATO"
     ],
     "static": true
   },
@@ -6162,6 +7662,17 @@
     ],
     "static": true
   },
+  "TIPO_EXERCICIO": {
+    "pk_cols": [
+      "NUM_ID_TIPO_EXERCICIO"
+    ],
+    "not_null_cols": [
+      "DAT_INCLUSAO",
+      "NOM_TIPO_EXERCICIO",
+      "NUM_ID_TIPO_EXERCICIO"
+    ],
+    "static": true
+  },
   "TIPO_FIXING": {
     "pk_cols": [
       "NUM_ID_TIPO_FIXING"
@@ -6189,6 +7700,15 @@
     ],
     "not_null_cols": [
       "NUM_ID_TIPO_GARANTIA"
+    ],
+    "static": true
+  },
+  "TIPO_GARANTIA_GRAVAME": {
+    "pk_cols": [
+      "NUM_ID_TIPO_GARANTIA_GRAVAME"
+    ],
+    "not_null_cols": [
+      "NUM_ID_TIPO_GARANTIA_GRAVAME"
     ],
     "static": true
   },
@@ -6241,6 +7761,39 @@
     ],
     "static": true
   },
+  "TIPO_IF_EXTERNO": {
+    "pk_cols": [
+      "NUM_ID_TIPO_IF_EXTERNO"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "NUM_ID_ORGAO_REGULADOR"
+        ],
+        "parent_table": "ORGAO_REGULADOR",
+        "parent_columns": [
+          "NUM_ID_ORGAO_REGULADOR"
+        ]
+      },
+      {
+        "columns": [
+          "NUM_TIPO_IF"
+        ],
+        "parent_table": "TIPO_IF",
+        "parent_columns": [
+          "NUM_TIPO_IF"
+        ]
+      }
+    ],
+    "not_null_cols": [
+      "COD_TIPO_IF_EXTERNO",
+      "NOM_TIPO_IF_EXTERNO",
+      "NUM_ID_ORGAO_REGULADOR",
+      "NUM_ID_TIPO_IF_EXTERNO",
+      "NUM_TIPO_IF"
+    ],
+    "static": true
+  },
   "TIPO_IF_GRUPO": {
     "pk_cols": [
       "NUM_ID_TIPO_IF_GRUPO"
@@ -6259,6 +7812,16 @@
     "not_null_cols": [
       "NOM_TIPO_INDICADOR",
       "NUM_ID_TIPO_INDICADOR"
+    ],
+    "static": true
+  },
+  "TIPO_INDICADOR_EXTERNO": {
+    "pk_cols": [
+      "NUM_ID_TIPO_INDICADOR_EXTERNO"
+    ],
+    "not_null_cols": [
+      "NOM_TIPO_INDICADOR_EXTERNO",
+      "NUM_ID_TIPO_INDICADOR_EXTERNO"
     ],
     "static": true
   },
@@ -6516,6 +8079,15 @@
     ],
     "static": true
   },
+  "TIPO_PROTOCOLO": {
+    "pk_cols": [
+      "NUM_ID_TIPO_PROTOCOLO"
+    ],
+    "not_null_cols": [
+      "NUM_ID_TIPO_PROTOCOLO"
+    ],
+    "static": true
+  },
   "TIPO_QUALIFICACAO_MTM": {
     "pk_cols": [
       "COD_ID_TIPO_QUALIFICACAO_MTM"
@@ -6585,6 +8157,45 @@
       "NUM_ID_TIPO_ENTIDADE",
       "NUM_ID_TIPO_ENTIDADE_PARA",
       "NUM_ID_TIPO_RELACAO"
+    ],
+    "static": true
+  },
+  "TIPO_RESP_EXEC_GARANTIA": {
+    "pk_cols": [
+      "NUM_ID_TP_RESP_EXEC_GARANTIA"
+    ],
+    "not_null_cols": [
+      "NUM_ID_TP_RESP_EXEC_GARANTIA"
+    ],
+    "static": true
+  },
+  "TIPO_ROTINA": {
+    "pk_cols": [
+      "NUM_ID_TIPO_ROTINA"
+    ],
+    "not_null_cols": [
+      "COD_TIPO_ROTINA",
+      "NOM_TIPO_ROTINA",
+      "NUM_ID_TIPO_ROTINA"
+    ],
+    "static": true
+  },
+  "TIPO_STATUS_GED": {
+    "pk_cols": [
+      "NUM_ID_TIPO_STATUS_GED"
+    ],
+    "not_null_cols": [
+      "NUM_ID_TIPO_STATUS_GED"
+    ],
+    "static": true
+  },
+  "TIPO_TITULO_SUSTENTAVEL": {
+    "pk_cols": [
+      "NUM_ID_TIPO_TITULO_SUSTENTAVEL"
+    ],
+    "not_null_cols": [
+      "NOM_TIPO_TITULO_SUSTENTAVEL",
+      "NUM_ID_TIPO_TITULO_SUSTENTAVEL"
     ],
     "static": true
   },
