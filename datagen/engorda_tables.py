@@ -224,7 +224,35 @@ PRODUTOS_COM_PODA_SUBTIPO = frozenset({
     'cdb_simplificado',
     'cdb_resgate',
     'cdb_escalonamento',
+    # LCI/LCA: o validador só reconhece 4 tipos de condição por produto
+    # (LCI_CONDITION_SUBTYPES / LCA_CONDITION_SUBTYPES) e o fecho clona TODA
+    # CONDICAO_IF ativa do instrumento, de qualquer tipo. Sem a poda, uma
+    # condição de tipo fora desses 4 vem sem a linha-subtipo (a tabela não está
+    # na lista do produto) e reprova 2e./2g..subtype_orphan. Conferido: os
+    # subtipos sintetizáveis de cada um coincidem exatamente com o mapa do
+    # validador — LCI {2,3,4,20}, LCA {1,3,5,20}.
+    'lci',
+    'lca',
 })
+
+# ---------------------------------------------------------------------------
+# Lastro obrigatório por produto.
+#
+# Regra de negócio: LCI não existe sem crédito SCR e LCA não existe sem direito
+# creditório. A query do produto já restringe o domínio (CTEs LASTRO_IF e
+# DIREITO_CRED_IF), mas filtro de domínio é FILTRO, não garantia: some se o CTE
+# for removido, se a tabela virar static por --tratar-como-static, ou se um
+# lote materializado vier de um plano antigo.
+#
+# _valida_lastro_obrigatorio transforma a regra em INVARIANTE conferida sobre o
+# fecho já montado, imediatamente antes de sintetizar. Só aborta — nunca altera
+# linha —, então o custo de estar errado é um run que falha alto, não um
+# sintético silenciosamente sem lastro.
+# ---------------------------------------------------------------------------
+LASTRO_OBRIGATORIO_POR_PRODUTO: Dict[str, str] = {
+    "lci": "CREDITO_SCR",
+    "lca": "CREDITO_DC",
+}
 
 PRODUTOS_COM_PODA_CRONOGRAMA_RESGATE = frozenset({
     'cdb_resgate',
@@ -765,7 +793,10 @@ TABELAS_ENGORDA_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
         "HISTORICO_PU_CURVA",
         "PENDENCIA_IF",
     ),
+    # CREDITO_SCR entra no fecho: o lastro SCR é pré-requisito da LCI, e a
+    # query do produto só admite NUM_IF que já o tenha (CTE LASTRO_IF).
     "lci": (
+        "CREDITO_SCR",
         "INSTRUMENTO_FINANCEIRO",
         "TITULO",
         "CREDITO",
@@ -785,7 +816,10 @@ TABELAS_ENGORDA_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
         "CARTEIRA_COMITENTE",
         "CARTEIRA_PARTICIPANTE",
     ),
+    # CREDITO_DC entra no fecho: o direito creditório é pré-requisito da LCA,
+    # e a query do produto só admite NUM_IF que já o tenha (CTE DIREITO_CRED_IF).
     "lca": (
+        "CREDITO_DC",
         "INSTRUMENTO_FINANCEIRO",
         "TITULO",
         "IF_LCA",
@@ -4576,6 +4610,53 @@ def calcula_lotes(spark, config, spec: dict, planos: Dict[str, PlanoTabela],
     return lotes
 
 
+def _valida_lastro_obrigatorio(produto: str, lotes: Dict[str, DataFrame]) -> None:
+    """Aborta se algum instrumento do lote nascer SEM a linha de lastro.
+
+    Invariante de negócio: LCI exige CREDITO_SCR e LCA exige CREDITO_DC (ver
+    LASTRO_OBRIGATORIO_POR_PRODUTO). Conferido sobre o fecho já montado, não
+    sobre o domínio, justamente para não depender de o CTE da query continuar lá.
+
+    Só levanta — nunca altera linha. Produto sem lastro declarado é no-op."""
+    tabela = LASTRO_OBRIGATORIO_POR_PRODUTO.get(produto)
+    if tabela is None:
+        return
+    raiz = lotes.get(TABELA_RAIZ)
+    if raiz is None:
+        return
+    lastro = lotes.get(tabela)
+    if lastro is None:
+        raise ValueError(
+            f"Produto {produto}: {tabela} está fora do fecho, mas é lastro "
+            f"OBRIGATÓRIO — todo instrumento precisa nascer vinculado a ela. "
+            f"Inclua {tabela} em TABELAS_ENGORDA_POR_PRODUTO[{produto!r}] e não "
+            "a passe em --tratar-como-static."
+        )
+    if COL_NUM_IF not in lastro.columns:
+        raise ValueError(
+            f"Produto {produto}: {tabela} não expõe {COL_NUM_IF}; sem isso não "
+            "há como provar o vínculo de lastro por instrumento."
+        )
+    raizes = raiz.select(
+        _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")
+    ).dropDuplicates()
+    com_lastro = lastro.select(
+        _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")
+    ).dropDuplicates()
+    sem_lastro = raizes.join(com_lastro, "__num_if", "left_anti")
+    n_sem = sem_lastro.count()
+    if n_sem:
+        amostra = [row["__num_if"] for row in sem_lastro.limit(10).collect()]
+        raise ValueError(
+            f"Produto {produto}: {n_sem} instrumento(s) do lote SEM linha em "
+            f"{tabela} (lastro obrigatório). Amostra: {amostra}. O domínio da "
+            f"query precisa exigir {tabela} — ver o CTE no bloco {produto} de "
+            f"{DEFAULT_QUERIES_FILENAME}."
+        )
+    logger.info("Lastro obrigatório [%s]: os %d instrumento(s) do lote têm "
+                "linha em %s.", produto, raizes.count(), tabela)
+
+
 # ---------------------------------------------------------------------------
 # Sintetização: lote × K, mapeamento de PK e reescrita de FKs.
 # ---------------------------------------------------------------------------
@@ -6597,6 +6678,9 @@ def executa_clonagem(spark, config, spec: dict, *,
                 max_passadas,
                 somente_ativos=somente_ativos,
             )
+    # Invariante de lastro: conferido sobre o fecho (não sobre o domínio), então
+    # vale para os três caminhos — dry-run, admissão FK live e lote de snapshot.
+    _valida_lastro_obrigatorio(produto, lotes)
     if credentials is not None:
         _apply_oracle_pk_floors(spark._sc._jvm, credentials, planos)
 
