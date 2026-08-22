@@ -392,7 +392,75 @@ DEP_IF AS (
         INNER JOIN FILTRO_BASE FB
             ON FB.NUM_IF = DP.NUM_IF
     WHERE DP.NUM_IF IS NOT NULL
+),
+ROTA_ELEGIVEL AS (
+    -- Ver cabeçalho acima antes de alterar/remover.
+    SELECT DISTINCT TOS.NUM_ID_TIPO_OPER_OBJETO_SERV
+    FROM {{RAW_TIPO_OPER_OBJETO_SERV}} TOS
+        INNER JOIN {{RAW_TIPO_OPERACAO}} TOP
+            ON TOP.NUM_ID_TIPO_OPERACAO = TOS.NUM_ID_TIPO_OPERACAO
+    WHERE TOS.NUM_ID_OBJETO_SERVICO = 75
+        AND TRIM(TOP.COD_TIPO_OPERACAO) = '1'
+        AND TRIM(TOS.IND_DISPONIVEL_IDENTIFICACAO) = 'S'
+),
+ROTA_INVALIDA AS (
+    -- Basta UMA operação fora da rota elegível para reprovar o instrumento
+    -- inteiro, porque o check é linha a linha sobre OPERACAO.
+    SELECT DISTINCT O.NUM_IF
+    FROM {{RAW_OPERACAO}} O
+        LEFT JOIN ROTA_ELEGIVEL RE
+            ON RE.NUM_ID_TIPO_OPER_OBJETO_SERV = O.NUM_ID_TIPO_OPER_OBJETO_SERV
+    WHERE RE.NUM_ID_TIPO_OPER_OBJETO_SERV IS NULL
+),
+LOTE_ELEGIVEL AS (
+    -- 6e.lookup.lot: INSTRUMENTO_FINANCEIRO.NUM_ID_LOTE precisa resolver para um
+    -- LOTE de NUM_ID_TIPO_LOTE = 1 com conta participante.
+    -- NB: o validador também exige o lote ATIVO no destino; não filtro
+    -- DAT_EXCLUSAO aqui porque a coluna não está declarada no spec de LOTE.
+    SELECT DISTINCT L.NUM_ID_LOTE
+    FROM {{RAW_LOTE}} L
+    WHERE L.NUM_ID_TIPO_LOTE = 1
+        AND L.NUM_CONTA_PARTICIPANTE IS NOT NULL
+),
+CARTEIRA_DUPLICADA AS (
+    -- 6e.wallet.*.local: a chave natural da carteira precisa ser única por
+    -- instrumento. Quando a origem já tem duas linhas com a mesma chave, o
+    -- clone herda a duplicidade — então o instrumento sai do domínio.
+    SELECT DISTINCT NUM_IF FROM (
+        SELECT CC.NUM_IF
+        FROM {{RAW_CARTEIRA_COMITENTE}} CC
+        GROUP BY CC.NUM_IF, CC.NUM_ID_ENTIDADE, CC.COD_TIPO_POSICAO_CARTEIRA,
+                 CC.NUM_SISTEMA, CC.NUM_CONTA_PARTICIPANTE
+        HAVING COUNT(*) > 1
+        UNION ALL
+        SELECT CP.NUM_IF
+        FROM {{RAW_CARTEIRA_PARTICIPANTE}} CP
+        GROUP BY CP.NUM_IF, CP.COD_TIPO_POSICAO_CARTEIRA, CP.NUM_SISTEMA,
+                 CP.NUM_CONTA_PARTICIPANTE
+        HAVING COUNT(*) > 1
+    ) D
 )
+-- ===========================================================================
+-- ROTA DE OPERAÇÃO (6e/6g.lookup.route).
+--
+-- O check exige que TODA operação sintética use rota elegível — ele roda sobre
+-- `tables["OPERACAO"]` inteira, sem recorte por tipo de operação:
+--     bad = operations.join(eligible_routes, "route_id", "left_anti")
+-- Rota elegível = objeto de serviço 75 (LCI) / 843 (LCA) + COD_TIPO_OPERACAO='1'
+-- + IND_DISPONIVEL_IDENTIFICACAO='S'.
+--
+-- MEDIDO no QAB (LCI): existe UMA única rota elegível, e mesmo assim
+--     LCIs ativas ..................................... 5.761.483
+--     LCIs com TODAS as operações em rota elegível ..... 5.740.976  (99,6%)
+-- ou seja, o filtro custa ~0,36% do domínio. A intuição de que instrumentos
+-- reais teriam movimentações em outras rotas NÃO se confirma neste dado.
+--
+-- ATENÇÃO: o número acima é do LCI. O equivalente para LCA (objeto 843,
+-- NUM_TIPO_IF=96) NÃO foi medido — se lá o filtro zerar o domínio, remova o
+-- INNER/ANTI JOIN de ROTA_INVALIDA deste bloco e trate como divergência do
+-- validador (o check do CDB, que passa, ressalva "historical operation types
+-- are not constrained"; o de LCI/LCA não tem essa ressalva).
+-- ===========================================================================
 -- ===========================================================================
 -- LASTRO (CREDITO_SCR): amarração TENTADA e REVERTIDA em 2026-08-22.
 --
@@ -423,6 +491,14 @@ SELECT DISTINCT F.NUM_IF
 FROM FLAGS_IF F
     INNER JOIN DEP_IF DEP
         ON DEP.NUM_IF = F.NUM_IF
+    INNER JOIN {{RAW_INSTRUMENTO_FINANCEIRO}} IFL
+        ON IFL.NUM_IF = F.NUM_IF
+    INNER JOIN LOTE_ELEGIVEL LE
+        ON LE.NUM_ID_LOTE = IFL.NUM_ID_LOTE
+    LEFT ANTI JOIN ROTA_INVALIDA RI
+        ON RI.NUM_IF = F.NUM_IF
+    LEFT ANTI JOIN CARTEIRA_DUPLICADA CD
+        ON CD.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_OPERACAO}} O
         ON O.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_DADO_OPERACAO}} DOP
@@ -470,7 +546,75 @@ DEP_IF AS (
         INNER JOIN FILTRO_BASE FB
             ON FB.NUM_IF = DP.NUM_IF
     WHERE DP.NUM_IF IS NOT NULL
+),
+ROTA_ELEGIVEL AS (
+    -- Ver cabeçalho acima antes de alterar/remover.
+    SELECT DISTINCT TOS.NUM_ID_TIPO_OPER_OBJETO_SERV
+    FROM {{RAW_TIPO_OPER_OBJETO_SERV}} TOS
+        INNER JOIN {{RAW_TIPO_OPERACAO}} TOP
+            ON TOP.NUM_ID_TIPO_OPERACAO = TOS.NUM_ID_TIPO_OPERACAO
+    WHERE TOS.NUM_ID_OBJETO_SERVICO = 843
+        AND TRIM(TOP.COD_TIPO_OPERACAO) = '1'
+        AND TRIM(TOS.IND_DISPONIVEL_IDENTIFICACAO) = 'S'
+),
+ROTA_INVALIDA AS (
+    -- Basta UMA operação fora da rota elegível para reprovar o instrumento
+    -- inteiro, porque o check é linha a linha sobre OPERACAO.
+    SELECT DISTINCT O.NUM_IF
+    FROM {{RAW_OPERACAO}} O
+        LEFT JOIN ROTA_ELEGIVEL RE
+            ON RE.NUM_ID_TIPO_OPER_OBJETO_SERV = O.NUM_ID_TIPO_OPER_OBJETO_SERV
+    WHERE RE.NUM_ID_TIPO_OPER_OBJETO_SERV IS NULL
+),
+LOTE_ELEGIVEL AS (
+    -- 6g.lookup.lot_root_type: INSTRUMENTO_FINANCEIRO.NUM_ID_LOTE precisa resolver para um
+    -- LOTE de NUM_ID_TIPO_LOTE = 2 com conta participante.
+    -- NB: o validador também exige o lote ATIVO no destino; não filtro
+    -- DAT_EXCLUSAO aqui porque a coluna não está declarada no spec de LOTE.
+    SELECT DISTINCT L.NUM_ID_LOTE
+    FROM {{RAW_LOTE}} L
+    WHERE L.NUM_ID_TIPO_LOTE = 2
+        AND L.NUM_CONTA_PARTICIPANTE IS NOT NULL
+),
+CARTEIRA_DUPLICADA AS (
+    -- 6g.wallet.*.local: a chave natural da carteira precisa ser única por
+    -- instrumento. Quando a origem já tem duas linhas com a mesma chave, o
+    -- clone herda a duplicidade — então o instrumento sai do domínio.
+    SELECT DISTINCT NUM_IF FROM (
+        SELECT CC.NUM_IF
+        FROM {{RAW_CARTEIRA_COMITENTE}} CC
+        GROUP BY CC.NUM_IF, CC.NUM_ID_ENTIDADE, CC.COD_TIPO_POSICAO_CARTEIRA,
+                 CC.NUM_SISTEMA, CC.NUM_CONTA_PARTICIPANTE
+        HAVING COUNT(*) > 1
+        UNION ALL
+        SELECT CP.NUM_IF
+        FROM {{RAW_CARTEIRA_PARTICIPANTE}} CP
+        GROUP BY CP.NUM_IF, CP.COD_TIPO_POSICAO_CARTEIRA, CP.NUM_SISTEMA,
+                 CP.NUM_CONTA_PARTICIPANTE
+        HAVING COUNT(*) > 1
+    ) D
 )
+-- ===========================================================================
+-- ROTA DE OPERAÇÃO (6e/6g.lookup.route).
+--
+-- O check exige que TODA operação sintética use rota elegível — ele roda sobre
+-- `tables["OPERACAO"]` inteira, sem recorte por tipo de operação:
+--     bad = operations.join(eligible_routes, "route_id", "left_anti")
+-- Rota elegível = objeto de serviço 75 (LCI) / 843 (LCA) + COD_TIPO_OPERACAO='1'
+-- + IND_DISPONIVEL_IDENTIFICACAO='S'.
+--
+-- MEDIDO no QAB (LCI): existe UMA única rota elegível, e mesmo assim
+--     LCIs ativas ..................................... 5.761.483
+--     LCIs com TODAS as operações em rota elegível ..... 5.740.976  (99,6%)
+-- ou seja, o filtro custa ~0,36% do domínio. A intuição de que instrumentos
+-- reais teriam movimentações em outras rotas NÃO se confirma neste dado.
+--
+-- ATENÇÃO: o número acima é do LCI. O equivalente para LCA (objeto 843,
+-- NUM_TIPO_IF=96) NÃO foi medido — se lá o filtro zerar o domínio, remova o
+-- INNER/ANTI JOIN de ROTA_INVALIDA deste bloco e trate como divergência do
+-- validador (o check do CDB, que passa, ressalva "historical operation types
+-- are not constrained"; o de LCI/LCA não tem essa ressalva).
+-- ===========================================================================
 -- ===========================================================================
 -- DIREITO CREDITÓRIO (CREDITO_DC): amarração TENTADA e REVERTIDA em 2026-08-22.
 --
@@ -490,6 +634,14 @@ SELECT DISTINCT F.NUM_IF
 FROM FLAGS_IF F
     INNER JOIN DEP_IF DEP
         ON DEP.NUM_IF = F.NUM_IF
+    INNER JOIN {{RAW_INSTRUMENTO_FINANCEIRO}} IFL
+        ON IFL.NUM_IF = F.NUM_IF
+    INNER JOIN LOTE_ELEGIVEL LE
+        ON LE.NUM_ID_LOTE = IFL.NUM_ID_LOTE
+    LEFT ANTI JOIN ROTA_INVALIDA RI
+        ON RI.NUM_IF = F.NUM_IF
+    LEFT ANTI JOIN CARTEIRA_DUPLICADA CD
+        ON CD.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_OPERACAO}} O
         ON O.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_DADO_OPERACAO}} DOP
