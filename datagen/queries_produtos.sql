@@ -392,11 +392,23 @@ DEP_IF AS (
         INNER JOIN FILTRO_BASE FB
             ON FB.NUM_IF = DP.NUM_IF
     WHERE DP.NUM_IF IS NOT NULL
+),
+LASTRO_IF AS (
+    -- LCI só é sintetizada COM lastro: o CREDITO_SCR passou a fazer parte do
+    -- fecho do produto (TABELAS_ENGORDA_POR_PRODUTO['lci']), e clonar uma LCI
+    -- sem crédito SCR geraria instrumento sem lastro no destino.
+    -- Ver cabeçalho do arquivo antes de alterar/remover.
+    SELECT DISTINCT SCR.NUM_IF
+    FROM {{RAW_CREDITO_SCR}} SCR
+    WHERE SCR.DAT_EXCLUSAO IS NULL
+        AND SCR.NUM_IF IS NOT NULL
 )
 SELECT DISTINCT F.NUM_IF
 FROM FLAGS_IF F
     INNER JOIN DEP_IF DEP
         ON DEP.NUM_IF = F.NUM_IF
+    INNER JOIN LASTRO_IF LST
+        ON LST.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_OPERACAO}} O
         ON O.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_DADO_OPERACAO}} DOP
@@ -444,11 +456,23 @@ DEP_IF AS (
         INNER JOIN FILTRO_BASE FB
             ON FB.NUM_IF = DP.NUM_IF
     WHERE DP.NUM_IF IS NOT NULL
+),
+DIREITO_CRED_IF AS (
+    -- LCA só é sintetizada COM direito creditório: o CREDITO_DC passou a fazer
+    -- parte do fecho do produto (TABELAS_ENGORDA_POR_PRODUTO['lca']), e clonar
+    -- uma LCA sem direito creditório geraria instrumento sem lastro no destino.
+    -- Ver cabeçalho do arquivo antes de alterar/remover.
+    SELECT DISTINCT CDC.NUM_IF
+    FROM {{RAW_CREDITO_DC}} CDC
+    WHERE CDC.DAT_EXCLUSAO IS NULL
+        AND CDC.NUM_IF IS NOT NULL
 )
 SELECT DISTINCT F.NUM_IF
 FROM FLAGS_IF F
     INNER JOIN DEP_IF DEP
         ON DEP.NUM_IF = F.NUM_IF
+    INNER JOIN DIREITO_CRED_IF DCR
+        ON DCR.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_OPERACAO}} O
         ON O.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_DADO_OPERACAO}} DOP
