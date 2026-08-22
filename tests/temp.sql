@@ -40,7 +40,12 @@ WHERE ac.owner='CETIP' AND ac.table_name='HISTORICO_IF_TITULO'
 -- 3) NUM_IF_PERTENCE é usável? (é nullable no spec)
 SELECT COUNT(*) total, COUNT(NUM_IF_PERTENCE) preenchidos FROM CETIP.HISTORICO_IF_TITULO;
 
--- 4) Quanto se perde: CCB tem histórico de título? (rode só se (1) devolver NUM_IF)
-SELECT COUNT(*) FROM CETIP.HISTORICO_IF_TITULO H
-JOIN CETIP.INSTRUMENTO_FINANCEIRO I ON I.NUM_IF = H.NUM_IF
-WHERE I.NUM_TIPO_IF = 53 AND I.DAT_EXCLUSAO IS NULL;
+-- Os CCBs que a query do produto seleciona (topo, NUM_IF_PERTENCE IS NULL)
+-- têm histórico de título alcançável por esse vínculo?
+SELECT COUNT(*)                          AS linhas_historico,
+       COUNT(DISTINCT H.NUM_IF_PERTENCE) AS ccbs_com_historico
+FROM   CETIP.HISTORICO_IF_TITULO H
+JOIN   CETIP.INSTRUMENTO_FINANCEIRO I ON I.NUM_IF = H.NUM_IF_PERTENCE
+WHERE  I.NUM_TIPO_IF = 53
+  AND  I.NUM_IF_PERTENCE IS NULL
+  AND  I.DAT_EXCLUSAO IS NULL;
