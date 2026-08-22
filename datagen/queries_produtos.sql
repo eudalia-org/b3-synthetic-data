@@ -392,23 +392,37 @@ DEP_IF AS (
         INNER JOIN FILTRO_BASE FB
             ON FB.NUM_IF = DP.NUM_IF
     WHERE DP.NUM_IF IS NOT NULL
-),
-LASTRO_IF AS (
-    -- LCI só é sintetizada COM lastro: o CREDITO_SCR passou a fazer parte do
-    -- fecho do produto (TABELAS_ENGORDA_POR_PRODUTO['lci']), e clonar uma LCI
-    -- sem crédito SCR geraria instrumento sem lastro no destino.
-    -- Ver cabeçalho do arquivo antes de alterar/remover.
-    SELECT DISTINCT SCR.NUM_IF
-    FROM {{RAW_CREDITO_SCR}} SCR
-    WHERE SCR.DAT_EXCLUSAO IS NULL
-        AND SCR.NUM_IF IS NOT NULL
 )
+-- ===========================================================================
+-- LASTRO (CREDITO_SCR): amarração TENTADA e REVERTIDA em 2026-08-22.
+--
+-- A hipótese era que o lastro da LCI fosse CREDITO_SCR.NUM_IF = LCI.NUM_IF.
+-- Medido no QAB, é FALSO:
+--     LCIs ativas (NUM_TIPO_IF=81) .................... 5.761.483
+--     LCIs com CREDITO_SCR pelo mesmo NUM_IF ..........         0
+-- O INNER JOIN zerava o domínio e o run abortava com
+--     "Domínio esgotado pela admissão FK do destino: 0 instrumento(s)".
+--
+-- A distribuição de CREDITO_SCR (DAT_EXCLUSAO IS NULL) mostra por quê:
+--     NUM_TIPO_IF   linhas      instrumentos distintos (NUM_IF)
+--          143      2.468.640            0     <- o grosso, com NUM_IF NULO
+--           86          1.624        1.624
+--           53             55           55
+--          123             10           10
+--            5              7            7
+--           13              4            4
+-- NUM_TIPO_IF 81 (LCI) e 96 (LCA) NÃO APARECEM. E o tipo dominante (143) tem
+-- NUM_IF nulo em todas as linhas. Ou seja, CREDITO_SCR.NUM_IF não é — e não
+-- pode ser — o caminho da LCI até o lastro.
+--
+-- NÃO recoloque este join. Descobrir o vínculo real exige alguém que conheça o
+-- modelo: o candidato mais provável é NUM_ID_LOTE (via LOTE), já que é a única
+-- outra FK de CREDITO_SCR que não é tabela de domínio.
+-- ===========================================================================
 SELECT DISTINCT F.NUM_IF
 FROM FLAGS_IF F
     INNER JOIN DEP_IF DEP
         ON DEP.NUM_IF = F.NUM_IF
-    INNER JOIN LASTRO_IF LST
-        ON LST.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_OPERACAO}} O
         ON O.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_DADO_OPERACAO}} DOP
@@ -456,23 +470,26 @@ DEP_IF AS (
         INNER JOIN FILTRO_BASE FB
             ON FB.NUM_IF = DP.NUM_IF
     WHERE DP.NUM_IF IS NOT NULL
-),
-DIREITO_CRED_IF AS (
-    -- LCA só é sintetizada COM direito creditório: o CREDITO_DC passou a fazer
-    -- parte do fecho do produto (TABELAS_ENGORDA_POR_PRODUTO['lca']), e clonar
-    -- uma LCA sem direito creditório geraria instrumento sem lastro no destino.
-    -- Ver cabeçalho do arquivo antes de alterar/remover.
-    SELECT DISTINCT CDC.NUM_IF
-    FROM {{RAW_CREDITO_DC}} CDC
-    WHERE CDC.DAT_EXCLUSAO IS NULL
-        AND CDC.NUM_IF IS NOT NULL
 )
+-- ===========================================================================
+-- DIREITO CREDITÓRIO (CREDITO_DC): amarração TENTADA e REVERTIDA em 2026-08-22.
+--
+-- A hipótese era que o direito creditório da LCA fosse
+-- CREDITO_DC.NUM_IF = LCA.NUM_IF. Medido no QAB, é FALSO:
+--     LCAs ativas (NUM_TIPO_IF=96) .................... 4.868.031
+--     LCAs com CREDITO_DC pelo mesmo NUM_IF ...........         0
+-- O INNER JOIN zerava o domínio e o run abortava com
+--     "Domínio esgotado pela admissão FK do destino: 0 instrumento(s)".
+--
+-- NÃO recoloque este join sem antes descobrir por qual coluna o CREDITO_DC se
+-- liga à LCA. O diagnóstico que responde isso é o que já está comentado no
+-- bloco `direito_creditorio` deste arquivo: distribuição de
+-- CREDITO_DC.NUM_TIPO_IF.
+-- ===========================================================================
 SELECT DISTINCT F.NUM_IF
 FROM FLAGS_IF F
     INNER JOIN DEP_IF DEP
         ON DEP.NUM_IF = F.NUM_IF
-    INNER JOIN DIREITO_CRED_IF DCR
-        ON DCR.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_OPERACAO}} O
         ON O.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_DADO_OPERACAO}} DOP
