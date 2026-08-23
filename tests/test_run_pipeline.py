@@ -996,9 +996,9 @@ def test_registry_maps_generator_products_to_validator_profiles(
 
 def test_validate_only_product_rejects_engorda_interval(tmp_path, capsys):
     config = write_config(tmp_path)
-    upstream = write_upstream(tmp_path, products=("gravame",))
+    upstream = write_upstream(tmp_path, products=("lastro",))
     args = run_args(tmp_path, config, upstream, "--dry-run")
-    args[args.index("cdb_simplificado")] = "gravame"
+    args[args.index("cdb_simplificado")] = "lastro"
 
     assert P.main(args, adapter=NoCallsAdapter()) == 2
     assert "lacks requested stage capability: engorda" in capsys.readouterr().err
@@ -1263,11 +1263,11 @@ def test_adopt_validate_only_product_requires_and_records_synthetic_uri(
     tmp_path, capsys
 ):
     config = write_config(tmp_path)
-    output = tmp_path / "gravame-inputs.json"
+    output = tmp_path / "lastro-inputs.json"
     argv = [
         "adopt-inputs",
         "--config", str(config),
-        "--product", "gravame",
+        "--product", "lastro",
         "--raw-uri", "oci://source@namespace/raw",
         "--faltantes-uri", "oci://source@namespace/faltantes",
         "--output-manifest", str(output),
@@ -1276,11 +1276,11 @@ def test_adopt_validate_only_product_requires_and_records_synthetic_uri(
     assert P.main([*argv, "--dry-run"], adapter=NoCallsAdapter()) == 2
     assert "require --synthetic-uri" in capsys.readouterr().err
 
-    synthetic = "oci://source@namespace/gravame-output"
-    argv += ["--synthetic-uri", f"gravame={synthetic}"]
+    synthetic = "oci://source@namespace/lastro-output"
+    argv += ["--synthetic-uri", f"lastro={synthetic}"]
     assert P.main([*argv, "--dry-run"], adapter=NoCallsAdapter()) == 0
     dry = json.loads(capsys.readouterr().out)
-    assert dry["artifacts"]["products"]["gravame"]["synthetic"]["uri"] == synthetic
+    assert dry["artifacts"]["products"]["lastro"]["synthetic"]["uri"] == synthetic
 
     adapter = FakeAdapter(existing=(
         "oci://source@namespace/raw",
@@ -1289,7 +1289,7 @@ def test_adopt_validate_only_product_requires_and_records_synthetic_uri(
     ))
     assert P.main(argv, adapter=adapter) == 0
     adopted = json.loads(output.read_text())
-    assert adopted["artifacts"]["products"]["gravame"]["synthetic"][
+    assert adopted["artifacts"]["products"]["lastro"]["synthetic"][
         "producer"
     ] == "external"
 

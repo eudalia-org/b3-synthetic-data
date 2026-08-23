@@ -391,7 +391,7 @@ PRODUCTS: dict[str, dict[str, Any]] = {
     "ccb_pgrpre": {"validator_product": "ccb", "capabilities": _ENGORDA_VALIDATE},
     "ccb_favcp": {"validator_product": "ccb", "capabilities": _ENGORDA_VALIDATE},
     "ccb_fapre": {"validator_product": "ccb", "capabilities": _ENGORDA_VALIDATE},
-    "gravame": {"validator_product": "gravame", "capabilities": _VALIDATE_ONLY},
+    "gravame": {"validator_product": "gravame", "capabilities": _ENGORDA_VALIDATE},
     "lastro": {"validator_product": "credito_scr", "capabilities": _VALIDATE_ONLY},
     "direito_creditorio": {"validator_product": "dicre", "capabilities": _VALIDATE_ONLY},
 }

@@ -117,6 +117,6 @@ The first tracer supports `cdb_simplificado`, `cdb_resgate`, `cdb_escalonamento`
 `ccb_favcp`, `ccb_fapre`, `gravame`, `lastro`, and `direito_creditorio`. Validation
 accepts `PASS` or `PARTIAL` only when the report contains zero ERROR findings and its
 product/input lineage matches the branch exactly.
-The five CCB variants support `engorda -> validate`. `gravame`, `lastro`, and
-`direito_creditorio` are exposed as validate-only because the current generic engorda
-does not provide their required root/domain contract yet.
+The five CCB variants and `gravame` support `engorda -> validate`. `lastro` and
+`direito_creditorio` remain validate-only because the current generic engorda does not
+provide their required root/domain contract yet.
