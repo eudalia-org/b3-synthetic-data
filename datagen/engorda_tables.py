@@ -176,7 +176,7 @@ from decimal import Decimal
 from functools import reduce
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from pyspark import SparkFiles
+from pyspark import SparkFiles, StorageLevel
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
@@ -4152,9 +4152,9 @@ def seleciona_instrumentos_destino(
                 if active_band_index != current_band:
                     if active_band is not None:
                         active_band.unpersist(blocking=False)
-                    active_band = ranked.where(
-                        F.col("__band") == F.lit(current_band)
-                    ).localCheckpoint(eager=True)
+                    active_band = _durable_local_checkpoint(
+                        ranked.where(F.col("__band") == F.lit(current_band))
+                    )
                     active_band_index = current_band
                 page = active_band
                 if cursor is not None:
@@ -4256,18 +4256,16 @@ def seleciona_instrumentos_destino(
                     .select(*table_pk)
                     .dropDuplicates()
                 )
-                accepted_page_lote = (
+                accepted_page_lote = _durable_local_checkpoint(
                     lotes[table]
                     .join(accepted_keys, table_pk, "left_semi")
-                    .localCheckpoint(eager=True)
                 )
                 if table in accepted_lotes:
                     previous_lote = accepted_lotes[table]
-                    accepted_lotes[table] = (
+                    accepted_lotes[table] = _durable_local_checkpoint(
                         previous_lote
                         .unionByName(accepted_page_lote)
                         .dropDuplicates(table_pk)
-                        .localCheckpoint(eager=True)
                     )
                     previous_lote.unpersist(blocking=False)
                     accepted_page_lote.unpersist(blocking=False)
@@ -4296,7 +4294,7 @@ def seleciona_instrumentos_destino(
         )
     accepted = sorted(accepted[:requested])
     missing_df = (
-        selective_missing.dropDuplicates().localCheckpoint(eager=True)
+        _durable_local_checkpoint(selective_missing.dropDuplicates())
         if selective_missing is not None else None
     )
     logger.info(
@@ -4497,6 +4495,11 @@ def _poda_cronograma_sem_tabela(lotes: Dict[str, DataFrame]) -> Optional[int]:
     return antes - depois
 
 
+def _durable_local_checkpoint(frame: DataFrame) -> DataFrame:
+    """Cut lineage while replicating blocks across two executors."""
+    return frame.persist(StorageLevel.MEMORY_AND_DISK_2).localCheckpoint(eager=True)
+
+
 def _calcula_lotes_com_proveniencia(
     spark,
     config,
@@ -4542,7 +4545,7 @@ def _calcula_lotes_com_proveniencia(
     sel = spark.createDataFrame([(v,) for v in num_if_valores], [COL_NUM_IF])
     sel = sel.select(F.col(COL_NUM_IF).cast(raiz_src.schema[COL_NUM_IF].dataType))
     lote_raiz = raiz_src.join(F.broadcast(sel), on=COL_NUM_IF, how="left_semi")
-    lotes[TABELA_RAIZ] = lote_raiz.localCheckpoint(eager=True)
+    lotes[TABELA_RAIZ] = _durable_local_checkpoint(lote_raiz)
     contagens[TABELA_RAIZ] = lotes[TABELA_RAIZ].count()
     if contagens[TABELA_RAIZ] != len(num_if_valores):
         raise ValueError(
@@ -4555,7 +4558,7 @@ def _calcula_lotes_com_proveniencia(
             F.col(COL_NUM_IF).alias(ROOT_PROVENANCE_COL),
         )
         .dropDuplicates()
-        .localCheckpoint(eager=True)
+        .transform(_durable_local_checkpoint)
     )
     contagens_proveniencia[TABELA_RAIZ] = contagens[TABELA_RAIZ]
 
@@ -4598,14 +4601,14 @@ def _calcula_lotes_com_proveniencia(
             for extra in partes[1:]:
                 lote_t = lote_t.unionByName(extra)
             lote_t = lote_t.dropDuplicates(list(plano.pk_cols))
-            lote_t = lote_t.localCheckpoint(eager=True)
+            lote_t = _durable_local_checkpoint(lote_t)
             proveniencia_t = partes_proveniencia[0]
             for extra in partes_proveniencia[1:]:
                 proveniencia_t = proveniencia_t.unionByName(extra)
             proveniencia_t = (
                 proveniencia_t.dropDuplicates(
                     [*plano.pk_cols, ROOT_PROVENANCE_COL]
-                ).localCheckpoint(eager=True)
+                ).transform(_durable_local_checkpoint)
             )
             n = lote_t.count()
             n_proveniencia = proveniencia_t.count()

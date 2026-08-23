@@ -1396,6 +1396,25 @@ def test_snapshot_partition_count_is_bounded(row_count, partitions):
     assert eng._snapshot_partition_count(row_count) == partitions
 
 
+def test_durable_local_checkpoint_requests_replication_two():
+    calls = []
+
+    class Frame:
+        def persist(self, storage_level):
+            calls.append(("persist", storage_level))
+            return self
+
+        def localCheckpoint(self, *, eager):
+            calls.append(("checkpoint", eager))
+            return "checkpointed"
+
+    assert eng._durable_local_checkpoint(Frame()) == "checkpointed"
+    assert calls == [
+        ("persist", eng.StorageLevel.MEMORY_AND_DISK_2),
+        ("checkpoint", True),
+    ]
+
+
 def test_selected_lote_snapshot_roundtrip_preserves_empty_and_selective_missing(
     spark, tmp_path, monkeypatch
 ):
