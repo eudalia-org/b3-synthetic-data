@@ -656,12 +656,35 @@ FROM FLAGS_IF F
 
 -- BEGIN QUERY: ccb_pppre
 -- CCB PPPRE: pagamento de parcelas com indexador prefixado.
+WITH OPER_REGISTRO AS (
+    -- 6h.lookup.registration_route: todo CCB ativo precisa ter AO MENOS UMA
+    -- operação de registro na rota aprovada — objeto de serviço 47,
+    -- COD_TIPO_OPERACAO = '1' e identificação habilitada. O check ignora as
+    -- rotas históricas ("historical routes ignored"), então basta existir uma;
+    -- é o mesmo desenho do 6.required.operation_tos do CDB (lá, objeto 44), e
+    -- NÃO o linha-a-linha de 6e/6g.lookup.route (LCI/LCA).
+    --
+    -- MEDIDO no QAB: 2.227.477 CCBs (NUM_TIPO_IF=53) têm essa rota, contra
+    -- lotes de 100.000 por run — folga suficiente mesmo depois de o domínio
+    -- ainda ser repartido entre as 5 variantes por indexador/forma de pagamento.
+    SELECT DISTINCT O.NUM_IF
+    FROM {{RAW_OPERACAO}} O
+        INNER JOIN {{RAW_TIPO_OPER_OBJETO_SERV}} TOS
+            ON TOS.NUM_ID_TIPO_OPER_OBJETO_SERV = O.NUM_ID_TIPO_OPER_OBJETO_SERV
+        INNER JOIN {{RAW_TIPO_OPERACAO}} TOP
+            ON TOP.NUM_ID_TIPO_OPERACAO = TOS.NUM_ID_TIPO_OPERACAO
+    WHERE TOS.NUM_ID_OBJETO_SERVICO = 47
+        AND TRIM(TOP.COD_TIPO_OPERACAO) = '1'
+        AND TRIM(TOS.IND_DISPONIVEL_IDENTIFICACAO) = 'S'
+)
 SELECT DISTINCT I.NUM_IF
 FROM {{RAW_INSTRUMENTO_FINANCEIRO}} I
     INNER JOIN {{RAW_FORMA_PAGAMENTO}} FP
         ON FP.NUM_ID_FORMA_PAGAMENTO = I.NUM_ID_FORMA_PAGAMENTO
     INNER JOIN {{RAW_ACTPCCB_CONDICAO_IF}} ACIF
         ON ACIF.NUM_IF = I.NUM_IF
+    INNER JOIN OPER_REGISTRO ORG
+        ON ORG.NUM_IF = I.NUM_IF
 WHERE I.NUM_TIPO_IF = 53
     AND I.NUM_IF_PERTENCE IS NULL
     AND I.DAT_EXCLUSAO IS NULL
@@ -671,12 +694,35 @@ WHERE I.NUM_TIPO_IF = 53
 
 -- BEGIN QUERY: ccb_pfpre
 -- CCB PFPRE: pagamento de parcelas fixas com indexador prefixado.
+WITH OPER_REGISTRO AS (
+    -- 6h.lookup.registration_route: todo CCB ativo precisa ter AO MENOS UMA
+    -- operação de registro na rota aprovada — objeto de serviço 47,
+    -- COD_TIPO_OPERACAO = '1' e identificação habilitada. O check ignora as
+    -- rotas históricas ("historical routes ignored"), então basta existir uma;
+    -- é o mesmo desenho do 6.required.operation_tos do CDB (lá, objeto 44), e
+    -- NÃO o linha-a-linha de 6e/6g.lookup.route (LCI/LCA).
+    --
+    -- MEDIDO no QAB: 2.227.477 CCBs (NUM_TIPO_IF=53) têm essa rota, contra
+    -- lotes de 100.000 por run — folga suficiente mesmo depois de o domínio
+    -- ainda ser repartido entre as 5 variantes por indexador/forma de pagamento.
+    SELECT DISTINCT O.NUM_IF
+    FROM {{RAW_OPERACAO}} O
+        INNER JOIN {{RAW_TIPO_OPER_OBJETO_SERV}} TOS
+            ON TOS.NUM_ID_TIPO_OPER_OBJETO_SERV = O.NUM_ID_TIPO_OPER_OBJETO_SERV
+        INNER JOIN {{RAW_TIPO_OPERACAO}} TOP
+            ON TOP.NUM_ID_TIPO_OPERACAO = TOS.NUM_ID_TIPO_OPERACAO
+    WHERE TOS.NUM_ID_OBJETO_SERVICO = 47
+        AND TRIM(TOP.COD_TIPO_OPERACAO) = '1'
+        AND TRIM(TOS.IND_DISPONIVEL_IDENTIFICACAO) = 'S'
+)
 SELECT DISTINCT I.NUM_IF
 FROM {{RAW_INSTRUMENTO_FINANCEIRO}} I
     INNER JOIN {{RAW_FORMA_PAGAMENTO}} FP
         ON FP.NUM_ID_FORMA_PAGAMENTO = I.NUM_ID_FORMA_PAGAMENTO
     INNER JOIN {{RAW_ACTPCCB_CONDICAO_IF}} ACIF
         ON ACIF.NUM_IF = I.NUM_IF
+    INNER JOIN OPER_REGISTRO ORG
+        ON ORG.NUM_IF = I.NUM_IF
 WHERE I.NUM_TIPO_IF = 53
     AND I.NUM_IF_PERTENCE IS NULL
     AND I.DAT_EXCLUSAO IS NULL
@@ -686,12 +732,35 @@ WHERE I.NUM_TIPO_IF = 53
 
 -- BEGIN QUERY: ccb_pgrpre
 -- CCB PGRPRE: pagamento de rendimento prefixado com indexador VCP.
+WITH OPER_REGISTRO AS (
+    -- 6h.lookup.registration_route: todo CCB ativo precisa ter AO MENOS UMA
+    -- operação de registro na rota aprovada — objeto de serviço 47,
+    -- COD_TIPO_OPERACAO = '1' e identificação habilitada. O check ignora as
+    -- rotas históricas ("historical routes ignored"), então basta existir uma;
+    -- é o mesmo desenho do 6.required.operation_tos do CDB (lá, objeto 44), e
+    -- NÃO o linha-a-linha de 6e/6g.lookup.route (LCI/LCA).
+    --
+    -- MEDIDO no QAB: 2.227.477 CCBs (NUM_TIPO_IF=53) têm essa rota, contra
+    -- lotes de 100.000 por run — folga suficiente mesmo depois de o domínio
+    -- ainda ser repartido entre as 5 variantes por indexador/forma de pagamento.
+    SELECT DISTINCT O.NUM_IF
+    FROM {{RAW_OPERACAO}} O
+        INNER JOIN {{RAW_TIPO_OPER_OBJETO_SERV}} TOS
+            ON TOS.NUM_ID_TIPO_OPER_OBJETO_SERV = O.NUM_ID_TIPO_OPER_OBJETO_SERV
+        INNER JOIN {{RAW_TIPO_OPERACAO}} TOP
+            ON TOP.NUM_ID_TIPO_OPERACAO = TOS.NUM_ID_TIPO_OPERACAO
+    WHERE TOS.NUM_ID_OBJETO_SERVICO = 47
+        AND TRIM(TOP.COD_TIPO_OPERACAO) = '1'
+        AND TRIM(TOS.IND_DISPONIVEL_IDENTIFICACAO) = 'S'
+)
 SELECT DISTINCT I.NUM_IF
 FROM {{RAW_INSTRUMENTO_FINANCEIRO}} I
     INNER JOIN {{RAW_FORMA_PAGAMENTO}} FP
         ON FP.NUM_ID_FORMA_PAGAMENTO = I.NUM_ID_FORMA_PAGAMENTO
     INNER JOIN {{RAW_ACTPCCB_CONDICAO_IF}} ACIF
         ON ACIF.NUM_IF = I.NUM_IF
+    INNER JOIN OPER_REGISTRO ORG
+        ON ORG.NUM_IF = I.NUM_IF
 WHERE I.NUM_TIPO_IF = 53
     AND I.NUM_IF_PERTENCE IS NULL
     AND I.DAT_EXCLUSAO IS NULL
@@ -701,12 +770,35 @@ WHERE I.NUM_TIPO_IF = 53
 
 -- BEGIN QUERY: ccb_favcp
 -- CCB FAVCP: liquidação fora do âmbito B3 com indexador VCP.
+WITH OPER_REGISTRO AS (
+    -- 6h.lookup.registration_route: todo CCB ativo precisa ter AO MENOS UMA
+    -- operação de registro na rota aprovada — objeto de serviço 47,
+    -- COD_TIPO_OPERACAO = '1' e identificação habilitada. O check ignora as
+    -- rotas históricas ("historical routes ignored"), então basta existir uma;
+    -- é o mesmo desenho do 6.required.operation_tos do CDB (lá, objeto 44), e
+    -- NÃO o linha-a-linha de 6e/6g.lookup.route (LCI/LCA).
+    --
+    -- MEDIDO no QAB: 2.227.477 CCBs (NUM_TIPO_IF=53) têm essa rota, contra
+    -- lotes de 100.000 por run — folga suficiente mesmo depois de o domínio
+    -- ainda ser repartido entre as 5 variantes por indexador/forma de pagamento.
+    SELECT DISTINCT O.NUM_IF
+    FROM {{RAW_OPERACAO}} O
+        INNER JOIN {{RAW_TIPO_OPER_OBJETO_SERV}} TOS
+            ON TOS.NUM_ID_TIPO_OPER_OBJETO_SERV = O.NUM_ID_TIPO_OPER_OBJETO_SERV
+        INNER JOIN {{RAW_TIPO_OPERACAO}} TOP
+            ON TOP.NUM_ID_TIPO_OPERACAO = TOS.NUM_ID_TIPO_OPERACAO
+    WHERE TOS.NUM_ID_OBJETO_SERVICO = 47
+        AND TRIM(TOP.COD_TIPO_OPERACAO) = '1'
+        AND TRIM(TOS.IND_DISPONIVEL_IDENTIFICACAO) = 'S'
+)
 SELECT DISTINCT I.NUM_IF
 FROM {{RAW_INSTRUMENTO_FINANCEIRO}} I
     INNER JOIN {{RAW_FORMA_PAGAMENTO}} FP
         ON FP.NUM_ID_FORMA_PAGAMENTO = I.NUM_ID_FORMA_PAGAMENTO
     INNER JOIN {{RAW_ACTPCCB_CONDICAO_IF}} ACIF
         ON ACIF.NUM_IF = I.NUM_IF
+    INNER JOIN OPER_REGISTRO ORG
+        ON ORG.NUM_IF = I.NUM_IF
 WHERE I.NUM_TIPO_IF = 53
     AND I.NUM_IF_PERTENCE IS NULL
     AND I.DAT_EXCLUSAO IS NULL
@@ -716,12 +808,35 @@ WHERE I.NUM_TIPO_IF = 53
 
 -- BEGIN QUERY: ccb_fapre
 -- CCB FAPRE: liquidação fora do âmbito B3 com indexador prefixado.
+WITH OPER_REGISTRO AS (
+    -- 6h.lookup.registration_route: todo CCB ativo precisa ter AO MENOS UMA
+    -- operação de registro na rota aprovada — objeto de serviço 47,
+    -- COD_TIPO_OPERACAO = '1' e identificação habilitada. O check ignora as
+    -- rotas históricas ("historical routes ignored"), então basta existir uma;
+    -- é o mesmo desenho do 6.required.operation_tos do CDB (lá, objeto 44), e
+    -- NÃO o linha-a-linha de 6e/6g.lookup.route (LCI/LCA).
+    --
+    -- MEDIDO no QAB: 2.227.477 CCBs (NUM_TIPO_IF=53) têm essa rota, contra
+    -- lotes de 100.000 por run — folga suficiente mesmo depois de o domínio
+    -- ainda ser repartido entre as 5 variantes por indexador/forma de pagamento.
+    SELECT DISTINCT O.NUM_IF
+    FROM {{RAW_OPERACAO}} O
+        INNER JOIN {{RAW_TIPO_OPER_OBJETO_SERV}} TOS
+            ON TOS.NUM_ID_TIPO_OPER_OBJETO_SERV = O.NUM_ID_TIPO_OPER_OBJETO_SERV
+        INNER JOIN {{RAW_TIPO_OPERACAO}} TOP
+            ON TOP.NUM_ID_TIPO_OPERACAO = TOS.NUM_ID_TIPO_OPERACAO
+    WHERE TOS.NUM_ID_OBJETO_SERVICO = 47
+        AND TRIM(TOP.COD_TIPO_OPERACAO) = '1'
+        AND TRIM(TOS.IND_DISPONIVEL_IDENTIFICACAO) = 'S'
+)
 SELECT DISTINCT I.NUM_IF
 FROM {{RAW_INSTRUMENTO_FINANCEIRO}} I
     INNER JOIN {{RAW_FORMA_PAGAMENTO}} FP
         ON FP.NUM_ID_FORMA_PAGAMENTO = I.NUM_ID_FORMA_PAGAMENTO
     INNER JOIN {{RAW_ACTPCCB_CONDICAO_IF}} ACIF
         ON ACIF.NUM_IF = I.NUM_IF
+    INNER JOIN OPER_REGISTRO ORG
+        ON ORG.NUM_IF = I.NUM_IF
 WHERE I.NUM_TIPO_IF = 53
     AND I.NUM_IF_PERTENCE IS NULL
     AND I.DAT_EXCLUSAO IS NULL
