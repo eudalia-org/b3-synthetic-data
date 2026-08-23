@@ -845,7 +845,58 @@ WHERE I.NUM_TIPO_IF = 53
 -- END QUERY: ccb_fapre
 
 -- BEGIN QUERY: gravame
-
+-- Query Spark SQL que define o domínio de GRAVAMEs a clonar.
+-- Contrato: retornar somente uma coluna chamada NUM_IF, sem valores nulos.
+-- filtro num_tipo_if 175 (GRVM), ativo e não cancelado.
+--
+-- POR QUE NÃO HÁ JOIN COM IF_GRVM / COMPLEMENTO_CONTRATO / PARAMETRO_PONTA /
+-- ARQUIVO_IF / PROTOCOLO / DADO_OPERACAO / LANCAMENTO:
+-- as checagens 2i.*.edge são de ÓRFÃO, não de cobertura —
+--     bad = children.join(parent_ids, "parent_id", "left_anti")
+-- ou seja, exigem que todo FILHO presente tenha pai no fecho, e não que todo
+-- pai tenha filho. Como o fecho desce da raiz, isso já vale por construção.
+-- Exigir a presença dos filhos aqui é sobre-restrição: medido no QAB, o
+-- predicado "tem operação com DADO_OPERACAO E LANCAMENTO" dá ZERO gravames e
+-- zeraria o domínio inteiro.
+--
+-- O ÚNICO filtro obrigatório é a rota de registro (6i.lookup.registration_route,
+-- "Every active Gravame has an approved registration route"), que é do tipo
+-- "existe ao menos uma" por raiz.
+--
+-- ATENÇÃO — a rota do GRAVAME é diferente dos demais produtos:
+--   objeto de serviço 1132 + COD_TIPO_OPERACAO = '520'  (não '1')
+--   e o check NÃO confere IND_DISPONIVEL_IDENTIFICACAO.
+-- Comparar: CDB 44/'1', CCB 47/'1', LCI 75/'1', LCA 843/'1'.
+--
+-- MEDIDO no QAB:
+--   existe exatamente UMA rota assim: NUM_ID_TIPO_OPER_OBJETO_SERV = 15394
+--   (é uma das rotas "root-side" que o próprio validador lista em
+--    2i.operation_route_membership: 15394 e 15512);
+--   gravames ativos e não cancelados ............. 9.417.279
+--   com essa rota de registro ....................     2.403   <- TETO DO DOMÍNIO
+-- Ou seja, o domínio do produto é ~2.4 mil instrumentos. Para volume maior,
+-- conte com o ajuste automático de K (n × K é preservado).
+WITH FILTRO_BASE AS (
+    SELECT DISTINCT IFE.NUM_IF
+    FROM {{RAW_INSTRUMENTO_FINANCEIRO}} IFE
+    WHERE IFE.NUM_TIPO_IF = 175
+        AND IFE.DAT_EXCLUSAO IS NULL
+        AND IFE.DAT_CANCELAMENTO IS NULL
+),
+OPER_REGISTRO AS (
+    SELECT DISTINCT O.NUM_IF
+    FROM {{RAW_OPERACAO}} O
+        INNER JOIN {{RAW_TIPO_OPER_OBJETO_SERV}} TOS
+            ON TOS.NUM_ID_TIPO_OPER_OBJETO_SERV = O.NUM_ID_TIPO_OPER_OBJETO_SERV
+        INNER JOIN {{RAW_TIPO_OPERACAO}} TOP
+            ON TOP.NUM_ID_TIPO_OPERACAO = TOS.NUM_ID_TIPO_OPERACAO
+    WHERE TOS.NUM_ID_OBJETO_SERVICO = 1132
+        AND TRIM(TOP.COD_TIPO_OPERACAO) = '520'
+)
+SELECT DISTINCT F.NUM_IF
+FROM FILTRO_BASE F
+    INNER JOIN OPER_REGISTRO ORG
+        ON ORG.NUM_IF = F.NUM_IF;
 -- END QUERY: gravame
 
 -- BEGIN QUERY: lastro

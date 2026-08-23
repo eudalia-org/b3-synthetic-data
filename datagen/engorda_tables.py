@@ -942,21 +942,31 @@ TABELAS_ENGORDA_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
         "GARANTIA",
         "TCTPCADEIA_IPOC",
     ),
+    # GRAVAME: 5 tabelas REMOVIDAS da lista em 2026-08-23 por não terem caminho
+    # de FK até a raiz — o monta_plano abortava com "SEM VÍNCULO PRINCIPAL".
+    #   CONTA e ARQUIVO_TRANSF são PAIS no grafo (PARAMETRO_PONTA.NUM_CONTA e
+    #     ARQUIVO_IF.NUM_ID_ARQUIVO_TRANSF apontam PARA elas). O fecho desce
+    #     pai->filho e nunca sobe: são cadastro compartilhado, como o LOTE.
+    #   ARQUIVO_TRANSF_CONTEUDO só pendura em ARQUIVO_TRANSF; sem ela, fica sem
+    #     caminho nenhum.
+    #   GRAVAME_GRAU_PENHOR liga por NUM_IF_GRAVAME/NUM_IF_GARANTIA — nome
+    #     diferente de NUM_IF, então não conta como vínculo principal.
+    #   ALERTA não tem FK para nada do fecho.
+    # Custo no validador: CONTA/ARQUIVO_TRANSF/ARQUIVO_TRANSF_CONTEUDO são
+    # GRAVAME_CORE_OUTPUT_TABLES, então 2i.output_tables sai como SEV_WARN e
+    # curto-circuita o grupo 2i inteiro (cobertura PARTIAL, nenhum ERROR).
+    # GRAVAME_GRAU_PENHOR não é CORE e 6i.lookup.guarantee é pulado em silêncio
+    # quando ela está ausente — remover sai de graça.
     "gravame": (
         "INSTRUMENTO_FINANCEIRO",
         "COMPLEMENTO_CONTRATO",
         "IF_GRVM",
         "PARAMETRO_PONTA",
-        "CONTA",
         "OPERACAO",
         "LANCAMENTO",
         "DADO_OPERACAO",
-        "ARQUIVO_TRANSF",
-        "ARQUIVO_TRANSF_CONTEUDO",
         "ARQUIVO_IF",
         "PROTOCOLO",
-        "GRAVAME_GRAU_PENHOR",
-        "ALERTA",
     ),
     "lastro": (
         "LOTE",
@@ -1272,6 +1282,60 @@ def _build_product_profile(
         ),
         date_strategy=rules["ajuste_datas"],
     )
+
+
+# ---------------------------------------------------------------------------
+# Complemento de FK aplicado ao spec EM MEMÓRIA.
+#
+# Existe para FK que o dado tem mas o spec do CETIP não declara. Sem a
+# declaração, monta_plano não enxerga vínculo principal e aborta — mesmo com a
+# coluna presente e populada na origem.
+#
+# PROTOCOLO.NUM_IF -> INSTRUMENTO_FINANCEIRO.NUM_IF: medido no QAB, 9.414.816
+# dos 9.417.279 gravames ativos têm PROTOCOLO por NUM_IF, e o próprio validador
+# exige a coluna (requirements de check_gravame_graph). A FK simplesmente não
+# está no spec.
+#
+# Aplicado no startup, ao spec já carregado — o arquivo de spec NÃO é alterado.
+# Idempotente: se a FK já estiver declarada, não duplica. Sem efeito para
+# produtos onde a tabela é static (a FK só é lida quando ela é sintetizável).
+# ---------------------------------------------------------------------------
+FK_COMPLEMENTO_POR_TABELA: Dict[str, Tuple[Dict[str, Any], ...]] = {
+    "PROTOCOLO": (
+        {"columns": ["NUM_IF"],
+         "parent_table": TABELA_RAIZ,
+         "parent_columns": [COL_NUM_IF]},
+    ),
+}
+
+
+def aplica_fk_complementar(spec: dict) -> List[str]:
+    """Acrescenta ao spec em memória as FKs de FK_COMPLEMENTO_POR_TABELA.
+
+    Devolve a lista do que foi acrescentado, para log. Não toca no arquivo."""
+    aplicadas: List[str] = []
+    for tabela, fks in FK_COMPLEMENTO_POR_TABELA.items():
+        cfg = spec.get(tabela)
+        if cfg is None:
+            logger.warning("complemento de FK: %s não está no spec; ignorada.", tabela)
+            continue
+        atuais = _fk_list(cfg)
+        for fk in fks:
+            cols, pai = list(fk["columns"]), fk["parent_table"]
+            pcols = list(fk["parent_columns"])
+            ja_tem = any(
+                list(x.get("columns") or []) == cols
+                and x.get("parent_table") == pai
+                and list(x.get("parent_columns") or []) == pcols
+                for x in atuais
+            )
+            if ja_tem:
+                continue
+            cfg.setdefault("foreign_keys", []).append(copy.deepcopy(fk))
+            aplicadas.append(f"{tabela}.{cols} -> {pai}.{pcols}")
+    if aplicadas:
+        logger.info("Complemento de FK aplicado ao spec em memória: %s", aplicadas)
+    return aplicadas
 
 
 def _validate_product_profile(profile: ProductProfile) -> None:
@@ -6520,6 +6584,7 @@ def executa_clonagem(spark, config, spec: dict, *,
     else:
         logger.info("Produto %s não altera colunas de data.", product_profile.name)
     spec = normalize_specs(spec)
+    aplica_fk_complementar(spec)
     spec_sha256 = hashlib.sha256(_canonical_json(spec).encode("ascii")).hexdigest()
     logger.info("Spec carregado: %d tabela(s); engordáveis (não-static) antes dos "
                 "parâmetros: %d.", len(spec),
