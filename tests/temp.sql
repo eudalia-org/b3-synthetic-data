@@ -98,4 +98,51 @@ WHERE I.NUM_TIPO_IF = 53 AND I.DAT_EXCLUSAO IS NULL
                     AND TRIM(op.COD_TIPO_OPERACAO) = '1'
                     AND TRIM(tos.IND_DISPONIVEL_IDENTIFICACAO) = 'S'));
 
+1)
+SELECT tos.NUM_ID_TIPO_OPER_OBJETO_SERV, tos.NUM_ID_OBJETO_SERVICO,
+       op.COD_TIPO_OPERACAO, tos.IND_DISPONIVEL_IDENTIFICACAO
+FROM   CETIP.TIPO_OPER_OBJETO_SERV tos
+JOIN   CETIP.TIPO_OPERACAO op ON op.NUM_ID_TIPO_OPERACAO = tos.NUM_ID_TIPO_OPERACAO
+WHERE  tos.NUM_ID_OBJETO_SERVICO = 1132
+  AND  TRIM(op.COD_TIPO_OPERACAO) = '520';
+
+20
+SELECT /*+ PARALLEL(16) */
+       COUNT(*)                                                    AS base_175,
+       COUNT(CASE WHEN rota = 1 THEN 1 END)                        AS c1_rota_1132_520,
+       COUNT(CASE WHEN grvm = 1 THEN 1 END)                        AS c2_if_grvm,
+       COUNT(CASE WHEN ctr  = 1 THEN 1 END)                        AS c3_complemento_contrato,
+       COUNT(CASE WHEN ppt  = 1 THEN 1 END)                        AS c4_parametro_ponta,
+       COUNT(CASE WHEN aif  = 1 THEN 1 END)                        AS c5_arquivo_if,
+       COUNT(CASE WHEN prt  = 1 THEN 1 END)                        AS c6_protocolo,
+       COUNT(CASE WHEN oper = 1 THEN 1 END)                        AS c7_oper_com_dado_e_lanc,
+       COUNT(CASE WHEN rota = 1 AND grvm = 1 AND ctr = 1 AND ppt = 1
+                   AND aif = 1 AND prt = 1 AND oper = 1
+                  THEN 1 END)                                      AS dominio_final
+FROM (
+  SELECT I.NUM_IF,
+    CASE WHEN EXISTS (SELECT 1 FROM CETIP.OPERACAO O
+                      JOIN CETIP.TIPO_OPER_OBJETO_SERV tos
+                        ON tos.NUM_ID_TIPO_OPER_OBJETO_SERV = O.NUM_ID_TIPO_OPER_OBJETO_SERV
+                      JOIN CETIP.TIPO_OPERACAO op
+                        ON op.NUM_ID_TIPO_OPERACAO = tos.NUM_ID_TIPO_OPERACAO
+                      WHERE O.NUM_IF = I.NUM_IF
+                        AND tos.NUM_ID_OBJETO_SERVICO = 1132
+                        AND TRIM(op.COD_TIPO_OPERACAO) = '520') THEN 1 ELSE 0 END AS rota,
+    CASE WHEN EXISTS (SELECT 1 FROM CETIP.IF_GRVM              X WHERE X.NUM_IF = I.NUM_IF) THEN 1 ELSE 0 END AS grvm,
+    CASE WHEN EXISTS (SELECT 1 FROM CETIP.COMPLEMENTO_CONTRATO X WHERE X.NUM_IF = I.NUM_IF) THEN 1 ELSE 0 END AS ctr,
+    CASE WHEN EXISTS (SELECT 1 FROM CETIP.PARAMETRO_PONTA      X WHERE X.NUM_IF = I.NUM_IF) THEN 1 ELSE 0 END AS ppt,
+    CASE WHEN EXISTS (SELECT 1 FROM CETIP.ARQUIVO_IF           X WHERE X.NUM_IF = I.NUM_IF) THEN 1 ELSE 0 END AS aif,
+    CASE WHEN EXISTS (SELECT 1 FROM CETIP.PROTOCOLO            X WHERE X.NUM_IF = I.NUM_IF) THEN 1 ELSE 0 END AS prt,
+    CASE WHEN EXISTS (SELECT 1 FROM CETIP.OPERACAO O
+                      WHERE O.NUM_IF = I.NUM_IF
+                        AND EXISTS (SELECT 1 FROM CETIP.DADO_OPERACAO D
+                                    WHERE D.NUM_ID_OPERACAO = O.NUM_ID_OPERACAO)
+                        AND EXISTS (SELECT 1 FROM CETIP.LANCAMENTO L
+                                    WHERE L.NUM_ID_OPERACAO = O.NUM_ID_OPERACAO)) THEN 1 ELSE 0 END AS oper
+  FROM CETIP.INSTRUMENTO_FINANCEIRO I
+  WHERE I.NUM_TIPO_IF      = 175
+    AND I.DAT_EXCLUSAO     IS NULL
+    AND I.DAT_CANCELAMENTO IS NULL
+);
 
