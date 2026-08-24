@@ -382,6 +382,27 @@ ENGORDA_OPERATIONAL_DATE_COLS_BY_TABLE = {
         "DAT_LIMITE_IDENTIFICACAO",
         "DAT_SITUACAO",
     ),
+    # COMPLEMENTO_CONTRATO.DAT_INCLUSAO é data de NEGÓCIO, não de auditoria: o
+    # validador a lê como `contract_date` e exige, em 5i.date_order,
+    #     contract_date <= INSTRUMENTO_FINANCEIRO.DAT_VENCIMENTO
+    #
+    # Como DAT_INCLUSAO está em ENGORDA_COLS_TIMESTAMP, ela vinha recebendo o
+    # INSTANTE DO RUN, enquanto DAT_VENCIMENTO recebe data_operacional + prazo.
+    # Quando a data operacional está atrasada em relação ao relógio — no run que
+    # reprovou, DAT_CTL_OPER 2026-06-03 contra timestamp 2026-08-22, 80 dias —
+    # todo gravame cujo prazo original fosse menor que essa diferença saía com
+    # o contrato DEPOIS do vencimento. Foram 750 casos.
+    #
+    # A regra 3 (datas do controle operacional) roda DEPOIS da regra 2
+    # (timestamps) em aplica_regras_engorda, então declarar a coluna aqui
+    # sobrepõe o timestamp pela data operacional e a ordem passa a valer por
+    # construção, independentemente do atraso do DAT_CTL_OPER:
+    #     contract_date  = data_operacional
+    #     DAT_VENCIMENTO = data_operacional + prazo, com prazo >= 1
+    #
+    # COMPLEMENTO_CONTRATO só existe no fecho do gravame, então nenhum outro
+    # produto é afetado.
+    "COMPLEMENTO_CONTRATO": (ENGORDA_COL_DAT_INCLUSAO,),
 }
 ENGORDA_EVENT_LIQUIDATION_COL = "DAT_LIQUIDACAO"
 ENGORDA_EVENT_DERIVED_COLS = (
