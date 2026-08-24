@@ -1396,7 +1396,7 @@ def test_snapshot_partition_count_is_bounded(row_count, partitions):
     assert eng._snapshot_partition_count(row_count) == partitions
 
 
-def test_durable_local_checkpoint_requests_replication_two():
+def test_durable_materialize_replicates_cache_and_preserves_lineage():
     calls = []
 
     class Frame:
@@ -1404,14 +1404,10 @@ def test_durable_local_checkpoint_requests_replication_two():
             calls.append(("persist", storage_level))
             return self
 
-        def localCheckpoint(self, *, eager):
-            calls.append(("checkpoint", eager))
-            return "checkpointed"
-
-    assert eng._durable_local_checkpoint(Frame()) == "checkpointed"
+    frame = Frame()
+    assert eng._durable_materialize(frame) is frame
     assert calls == [
         ("persist", eng.StorageLevel.MEMORY_AND_DISK_2),
-        ("checkpoint", True),
     ]
 
 
