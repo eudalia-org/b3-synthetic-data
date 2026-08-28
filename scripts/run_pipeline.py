@@ -32,7 +32,7 @@ import click
 MANIFEST_VERSION = 1
 CONFIG_VERSION = 1
 PUBLIC_STAGES = ("extract", "faltantes", "engorda", "validate", "load", "verify")
-TRACER_STAGES = ("engorda", "validate")
+TRACER_STAGES = ("engorda", "validate", "load")
 OVERRIDE_KEYS = {
     "engorda": {
         "n_instrumentos", "fator_k", "seed", "specs", "meu_numero_prefix",
@@ -42,6 +42,7 @@ OVERRIDE_KEYS = {
         "fail_severity", "validate_against", "shape_baseline",
         "application_capacity_contract",
     },
+    "load": {"specs", "num_partitions", "batch_size"},
 }
 TERMINAL_SUCCESS = {"SUCCEEDED"}
 TERMINAL_FAILURE = {"FAILED", "CANCELED", "CANCELLED", "STOPPED"}
@@ -373,27 +374,27 @@ def cancel_run(run_id: str, opts: Mapping[str, Any] | None = None) -> str:
 
 # Generator product -> validator profile. This registry stays lightweight so the
 # local CLI never imports the Spark-heavy generator or validator modules.
-_ENGORDA_VALIDATE = frozenset({"engorda", "validate"})
-_VALIDATE_ONLY = frozenset({"validate"})
+_ENGORDA_VALIDATE_LOAD = frozenset({"engorda", "validate", "load"})
+_VALIDATE_LOAD = frozenset({"validate", "load"})
 PRODUCTS: dict[str, dict[str, Any]] = {
     "cdb_simplificado": {
         "validator_product": "cdb_simplificado",
-        "capabilities": _ENGORDA_VALIDATE,
+        "capabilities": _ENGORDA_VALIDATE_LOAD,
     },
-    "cdb_resgate": {"validator_product": "cdb", "capabilities": _ENGORDA_VALIDATE},
-    "cdb_escalonamento": {"validator_product": "cdb", "capabilities": _ENGORDA_VALIDATE},
-    "rdb_inclusao": {"validator_product": "rdb", "capabilities": _ENGORDA_VALIDATE},
-    "rdb_resgate": {"validator_product": "rdb", "capabilities": _ENGORDA_VALIDATE},
-    "lci": {"validator_product": "lci", "capabilities": _ENGORDA_VALIDATE},
-    "lca": {"validator_product": "lca", "capabilities": _ENGORDA_VALIDATE},
-    "ccb_pppre": {"validator_product": "ccb", "capabilities": _ENGORDA_VALIDATE},
-    "ccb_pfpre": {"validator_product": "ccb", "capabilities": _ENGORDA_VALIDATE},
-    "ccb_pgrpre": {"validator_product": "ccb", "capabilities": _ENGORDA_VALIDATE},
-    "ccb_favcp": {"validator_product": "ccb", "capabilities": _ENGORDA_VALIDATE},
-    "ccb_fapre": {"validator_product": "ccb", "capabilities": _ENGORDA_VALIDATE},
-    "gravame": {"validator_product": "gravame", "capabilities": _ENGORDA_VALIDATE},
-    "lastro": {"validator_product": "credito_scr", "capabilities": _VALIDATE_ONLY},
-    "direito_creditorio": {"validator_product": "dicre", "capabilities": _VALIDATE_ONLY},
+    "cdb_resgate": {"validator_product": "cdb", "capabilities": _ENGORDA_VALIDATE_LOAD},
+    "cdb_escalonamento": {"validator_product": "cdb", "capabilities": _ENGORDA_VALIDATE_LOAD},
+    "rdb_inclusao": {"validator_product": "rdb", "capabilities": _ENGORDA_VALIDATE_LOAD},
+    "rdb_resgate": {"validator_product": "rdb", "capabilities": _ENGORDA_VALIDATE_LOAD},
+    "lci": {"validator_product": "lci", "capabilities": _ENGORDA_VALIDATE_LOAD},
+    "lca": {"validator_product": "lca", "capabilities": _ENGORDA_VALIDATE_LOAD},
+    "ccb_pppre": {"validator_product": "ccb", "capabilities": _ENGORDA_VALIDATE_LOAD},
+    "ccb_pfpre": {"validator_product": "ccb", "capabilities": _ENGORDA_VALIDATE_LOAD},
+    "ccb_pgrpre": {"validator_product": "ccb", "capabilities": _ENGORDA_VALIDATE_LOAD},
+    "ccb_favcp": {"validator_product": "ccb", "capabilities": _ENGORDA_VALIDATE_LOAD},
+    "ccb_fapre": {"validator_product": "ccb", "capabilities": _ENGORDA_VALIDATE_LOAD},
+    "gravame": {"validator_product": "gravame", "capabilities": _ENGORDA_VALIDATE_LOAD},
+    "lastro": {"validator_product": "credito_scr", "capabilities": _VALIDATE_LOAD},
+    "direito_creditorio": {"validator_product": "dicre", "capabilities": _VALIDATE_LOAD},
 }
 
 
@@ -416,6 +417,10 @@ class OciExecutionError(RuntimeError):
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
+
+
+class AmbiguousLoadState(RuntimeError):
+    """A load may be running remotely but its terminal state is unknown."""
 
 
 @dataclass(frozen=True)
@@ -846,6 +851,65 @@ class ModuleAdapter:
         )
         return reserve_ranges(**kwargs)
 
+    def _storage(self, auth: Mapping[str, Any]) -> OciCliStorage:
+        return OciCliStorage(
+            auth,
+            transport=self._transport(),
+            auth_builder=self._auth_flags,
+        )
+
+    def put_json_create_once(
+        self, uri: str, payload: Mapping[str, Any], *, auth: dict[str, str]
+    ) -> str:
+        try:
+            metadata = self._storage(auth).put(
+                uri, _json_bytes(payload), no_overwrite=True
+            )
+        except PreconditionFailed as exc:
+            raise PipelineError(f"create-once JSON object already exists: {uri}") from exc
+        return metadata.etag
+
+    def acquire_load_lease(
+        self,
+        uri: str,
+        environment: str,
+        run_id: str,
+        ttl_seconds: int,
+        *,
+        auth: dict[str, str],
+    ) -> _Lease:
+        return _acquire_lease(
+            self._storage(auth), uri, environment, run_id, "oracle-load", ttl_seconds
+        )
+
+    def renew_load_lease(
+        self,
+        uri: str,
+        lease: _Lease,
+        ttl_seconds: int,
+        *,
+        auth: dict[str, str],
+    ) -> _Lease:
+        return _renew_lease(self._storage(auth), uri, lease, ttl_seconds)
+
+    def quarantine_load_lease(
+        self,
+        uri: str,
+        lease: _Lease,
+        reason: str,
+        *,
+        auth: dict[str, str],
+    ) -> _Lease:
+        return _quarantine_lease(self._storage(auth), uri, lease, reason)
+
+    def release_load_lease(
+        self, uri: str, lease: _Lease, *, auth: dict[str, str]
+    ) -> None:
+        try:
+            self._storage(auth).delete(uri, if_match=lease.etag)
+        except (ObjectNotFound, PreconditionFailed) as exc:
+            raise PipelineError("lost environment load lease before release") from exc
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -1144,6 +1208,11 @@ def _acquire_lease(
             continue
         if current.get("environment") != environment:
             raise ReservationError("lease environment does not match the requested environment")
+        if current.get("quarantined") is True:
+            raise LeaseUnavailable(
+                f"environment {environment!r} has a quarantined load lease from "
+                f"run {current.get('run_id')!r}"
+            )
         if _parse_timestamp(current.get("expires_at"), "lease.expires_at") > _now():
             raise LeaseUnavailable(
                 f"environment {environment!r} is leased by run {current.get('run_id')!r}"
@@ -1165,6 +1234,22 @@ def _renew_lease(storage: Storage, uri: str, lease: _Lease, ttl_seconds: int) ->
         metadata = storage.put(uri, _json_bytes(payload), if_match=lease.etag)
     except PreconditionFailed as error:
         raise ReservationError("lost environment lease while renewing it") from error
+    return _Lease(payload, metadata.etag)
+
+
+def _quarantine_lease(
+    storage: Storage, uri: str, lease: _Lease, reason: str
+) -> _Lease:
+    payload = {
+        **lease.payload,
+        "quarantined": True,
+        "quarantined_at": _timestamp(_now()),
+        "quarantine_reason": reason,
+    }
+    try:
+        metadata = storage.put(uri, _json_bytes(payload), if_match=lease.etag)
+    except PreconditionFailed as error:
+        raise ReservationError("lost environment lease while quarantining it") from error
     return _Lease(payload, metadata.etag)
 
 
@@ -1654,12 +1739,30 @@ def load_config(path: str | Path) -> dict[str, Any]:
                     f"{', '.join(unsupported_options)}"
                 )
 
+    if any(
+        "load" in settings["capabilities"]
+        for settings in configured_products.values()
+    ):
+        _need_string(applications, "load", "config.applications")
+        load = config.get("load")
+        if not isinstance(load, dict):
+            raise PipelineError("config.load must be an object")
+        for name in ("lease_uri", "claim_root"):
+            if not _need_string(load, name, "config.load").startswith("oci://"):
+                raise PipelineError(f"config.load.{name} must be an oci:// URI")
+        _need_string(load, "target_schema", "config.load")
+        load["lease_ttl_seconds"] = _positive(
+            load.get("lease_ttl_seconds", 300), "config.load.lease_ttl_seconds"
+        )
+
     defaults = config.get("stage_defaults", {})
     if not isinstance(defaults, dict) or any(
         stage not in TRACER_STAGES or not isinstance(values, dict)
         for stage, values in defaults.items()
     ):
-        raise PipelineError("config.stage_defaults may contain only engorda/validate objects")
+        raise PipelineError(
+            "config.stage_defaults may contain only engorda/validate/load objects"
+        )
     return config
 
 
@@ -1694,7 +1797,7 @@ def selected_stages(first: str, last: str) -> tuple[str, ...]:
     interval = PUBLIC_STAGES[PUBLIC_STAGES.index(first) : PUBLIC_STAGES.index(last) + 1]
     if any(stage not in TRACER_STAGES for stage in interval):
         raise PipelineError(
-            "first tracer supports only the inclusive engorda through validate slice"
+            "runner supports only the inclusive engorda through load slice"
         )
     return interval
 
@@ -1857,6 +1960,62 @@ def build_validator_argv(
     return argv
 
 
+def parse_resume_load_manifests(values: Sequence[str]) -> dict[str, str]:
+    manifests: dict[str, str] = {}
+    for raw in values:
+        product, separator, uri = raw.partition("=")
+        if not separator or product not in PRODUCTS or not uri.startswith("oci://"):
+            raise PipelineError(
+                "--resume-load-manifest must use product=oci://bucket@namespace/path"
+            )
+        if product in manifests:
+            raise PipelineError(f"duplicate --resume-load-manifest for {product}")
+        manifests[product] = uri
+    return manifests
+
+
+def build_load_argv(
+    product: str,
+    pipeline_run_id: str,
+    synthetic_uri: str,
+    validation_report_uri: str,
+    manifest_uri: str,
+    pipeline_manifest_uri: str,
+    target_schema: str,
+    options: dict[str, Any],
+    previous_load_manifest: str | None,
+) -> list[str]:
+    specs = options.get("specs")
+    if not isinstance(specs, str) or not specs.startswith("oci://"):
+        raise PipelineError(f"product {product} requires load.specs as an oci:// URI")
+    argv = [
+        "--product", product,
+        "--run-id", pipeline_run_id,
+        "--validation-product", PRODUCTS[product]["validator_product"],
+        "--input-base", synthetic_uri,
+        "--validation-report", validation_report_uri,
+        "--manifest-uri", manifest_uri,
+        "--pipeline-manifest-uri", pipeline_manifest_uri,
+        "--expected-target-schema", target_schema,
+        "--specs", specs,
+        "--skip-validation",
+    ]
+    for key, flag in (
+        ("num_partitions", "--num-partitions"),
+        ("batch_size", "--batch-size"),
+    ):
+        if options.get(key) is not None:
+            argv += [flag, str(_positive(options[key], f"load.{key}"))]
+    if previous_load_manifest is not None:
+        argv += ["--previous-load-manifest", previous_load_manifest]
+    return argv
+
+
+def _load_claim_uri(claim_root: str, environment: str, synthetic_uri: str) -> str:
+    identity = hashlib.sha256(synthetic_uri.rstrip("/").encode()).hexdigest()
+    return uri_join(claim_root, environment, f"{identity}.json")
+
+
 def _product_paths(run_root: str, product: str) -> dict[str, str]:
     base = uri_join(run_root, "products", product)
     return {
@@ -1864,6 +2023,7 @@ def _product_paths(run_root: str, product: str) -> dict[str, str]:
         "reservations": uri_join(base, "engorda", "reservations.json"),
         "synthetic": uri_join(base, "synthetic"),
         "validation_report": uri_join(base, "validation", "report.json"),
+        "load_manifest": uri_join(base, "load", "manifest.json"),
     }
 
 
@@ -1896,11 +2056,23 @@ def build_pipeline_plan(
     )
     base_engorda_options = dict(config.get("stage_defaults", {}).get("engorda", {}))
     base_validate_options = dict(config.get("stage_defaults", {}).get("validate", {}))
+    base_load_options = dict(config.get("stage_defaults", {}).get("load", {}))
     for name in ("n_instrumentos", "fator_k", "seed"):
         value = getattr(args, name, None)
         if value is not None:
             base_engorda_options[name] = value
     overrides = parse_stage_overrides(args.set_values)
+    resume_manifests = parse_resume_load_manifests(
+        getattr(args, "resume_load_manifest", ())
+    )
+    invalid_resumes = sorted(set(resume_manifests) - set(products))
+    if invalid_resumes:
+        raise PipelineError(
+            "--resume-load-manifest references unselected product(s): "
+            + ", ".join(invalid_resumes)
+        )
+    if resume_manifests and "load" not in stages:
+        raise PipelineError("--resume-load-manifest requires an interval containing load")
 
     nodes: dict[str, dict[str, Any]] = {}
     artifacts: dict[str, Any] = {"products": {}}
@@ -1922,10 +2094,19 @@ def build_pipeline_plan(
             **config["products"][product].get("validate", {}),
             **overrides.get(product, {}).get("validate", {}),
         }
+        load_options = {
+            **base_load_options,
+            **config["products"][product].get("load", {}),
+            **overrides.get(product, {}).get("load", {}),
+        }
+        if "specs" not in load_options and engorda_options.get("specs") is not None:
+            load_options["specs"] = engorda_options["specs"]
         paths = _product_paths(run_root, product)
         product_artifacts: dict[str, Any] = {}
         artifacts["products"][product] = product_artifacts
         dependency: str | None = None
+        synthetic_uri: str | None = None
+        validation_report_uri: str | None = None
         if "engorda" in stages:
             query_num_if_sql = engorda_options.get("query_num_if_sql")
             if not isinstance(query_num_if_sql, str) or not query_num_if_sql.startswith(
@@ -2015,6 +2196,59 @@ def build_pipeline_plan(
                 "input_uri": synthetic_uri,
                 "output_uri": paths["validation_report"],
             }
+            dependency = validate_id
+            validation_report_uri = paths["validation_report"]
+        if "load" in stages:
+            if synthetic_uri is None:
+                synthetic_uri = _artifact_uri(upstream, "synthetic", product)
+                product_artifacts["synthetic"] = {
+                    "uri": synthetic_uri,
+                    "producer": "upstream",
+                }
+            if validation_report_uri is None:
+                validation_report_uri = _artifact_uri(
+                    upstream, "validation_report", product
+                )
+                product_artifacts["validation_report"] = {
+                    "uri": validation_report_uri,
+                    "producer": "upstream",
+                }
+            product_artifacts["load_manifest"] = {
+                "uri": paths["load_manifest"],
+                "producer": "current_run",
+            }
+            load_id = f"{product}.load"
+            nodes[load_id] = {
+                "id": load_id,
+                "product": product,
+                "stage": "load",
+                "operation": "load",
+                "lane": "oracle-load",
+                "dependencies": [dependency] if dependency else [],
+                "application_id": config["applications"]["load"],
+                "arguments": build_load_argv(
+                    product,
+                    args.run_id,
+                    synthetic_uri,
+                    validation_report_uri,
+                    paths["load_manifest"],
+                    manifest_uri,
+                    config["load"]["target_schema"],
+                    load_options,
+                    resume_manifests.get(product),
+                ),
+                "input_uri": synthetic_uri,
+                "validation_report_uri": validation_report_uri,
+                "output_uri": paths["load_manifest"],
+                "pipeline_manifest_uri": manifest_uri,
+                "claim_uri": _load_claim_uri(
+                    config["load"]["claim_root"],
+                    config["environment"],
+                    synthetic_uri,
+                ),
+                "previous_load_manifest": resume_manifests.get(product),
+                "target_schema": config["load"]["target_schema"],
+            }
 
     return {
         "run_id": args.run_id,
@@ -2039,6 +2273,16 @@ def build_pipeline_plan(
             "reserved_kinds": ["table_pk", "meu_numero_ordinal"],
             "allocator_kinds": ["cod_if", "cod_operacao"],
             "reuse": "forbidden",
+        },
+        "load_contract": {
+            "lease_uri": config["load"]["lease_uri"],
+            "lease_ttl_seconds": config["load"]["lease_ttl_seconds"],
+            "claim_root": config["load"]["claim_root"],
+            "approval_required": "load" in stages,
+            "approved": bool(getattr(args, "approve_load", False)),
+            "mode": "APPEND",
+            "automatic_retries": 0,
+            "automatic_rollback": False,
         },
     }
 
@@ -2092,6 +2336,254 @@ def _validation_gate(
         "product_matches": product_matches,
         "input_matches": input_matches,
         "accepted": accepted,
+    }
+
+
+def _load_manifest_gate(
+    manifest: dict[str, Any], node: Mapping[str, Any], pipeline_run_id: str
+) -> dict[str, Any]:
+    if not isinstance(manifest, dict):
+        raise PipelineError("load manifest must be a JSON object")
+    expected = {
+        "schema_version": 1,
+        "kind": "load-attempt",
+        "run_id": pipeline_run_id,
+        "product": node["product"],
+        "validation_product": PRODUCTS[node["product"]]["validator_product"],
+        "input_uri": node["input_uri"].rstrip("/"),
+        "validation_report_uri": node["validation_report_uri"],
+        "pipeline_manifest_uri": node["pipeline_manifest_uri"],
+        "target_schema": node["target_schema"].upper(),
+    }
+    if node.get("previous_load_manifest") is not None:
+        expected["previous_load_manifest"] = node["previous_load_manifest"]
+    matches = {
+        key: (
+            str(manifest.get(key, "")).rstrip("/") == str(value).rstrip("/")
+            if key == "input_uri"
+            else manifest.get(key) == value
+        )
+        for key, value in expected.items()
+    }
+    ordered_tables = manifest.get("ordered_tables")
+    entries = manifest.get("tables")
+    inventory_valid = (
+        isinstance(ordered_tables, list)
+        and bool(ordered_tables)
+        and all(isinstance(table, str) and table for table in ordered_tables)
+        and isinstance(entries, list)
+        and all(isinstance(entry, dict) for entry in entries)
+        and [entry.get("table") for entry in entries if isinstance(entry, dict)]
+        == ordered_tables
+    )
+    entries_valid = inventory_valid and all(
+        isinstance(entry.get("owner"), str)
+        and entry["owner"].upper() == node["target_schema"].upper()
+        and isinstance(entry.get("name"), str)
+        and bool(entry["name"])
+        and isinstance(entry.get("expected_rows"), int)
+        and not isinstance(entry["expected_rows"], bool)
+        and entry["expected_rows"] >= 0
+        and isinstance(entry.get("rollbackable"), bool)
+        and (
+            not entry["rollbackable"]
+            or (
+                isinstance(entry.get("pk_col"), str)
+                and bool(entry["pk_col"])
+                and isinstance(entry.get("synthetic_pk_min"), int)
+                and not isinstance(entry["synthetic_pk_min"], bool)
+                and isinstance(entry.get("synthetic_pk_max"), int)
+                and not isinstance(entry["synthetic_pk_max"], bool)
+                and entry["synthetic_pk_min"] <= entry["synthetic_pk_max"]
+            )
+        )
+        for entry in entries
+    )
+    transformations = manifest.get("transformations")
+    transformations_valid = isinstance(transformations, list) and all(
+        isinstance(item, dict)
+        and item.get("kind") in {
+            "nullify-self-reference",
+            "oracle-audit-substitution",
+        }
+        and item.get("table") in ordered_tables
+        and isinstance(item.get("columns"), (list, dict))
+        and bool(item["columns"])
+        for item in transformations
+    )
+    accepted = (
+        all(matches.values())
+        and inventory_valid
+        and entries_valid
+        and transformations_valid
+    )
+    return {
+        "accepted": accepted,
+        "matches": matches,
+        "inventory_valid": inventory_valid,
+        "entries_valid": entries_valid,
+        "transformations_valid": transformations_valid,
+    }
+
+
+def _known_load_succeeded(
+    adapter: Any, load_manifest: Mapping[str, Any], product: str, auth: dict[str, str]
+) -> bool:
+    pipeline_uri = load_manifest.get("pipeline_manifest_uri")
+    if not isinstance(pipeline_uri, str) or not pipeline_uri.startswith("oci://"):
+        return False
+    if not adapter.uri_exists(pipeline_uri, auth=auth):
+        return False
+    pipeline_manifest = adapter.read_json(pipeline_uri, auth=auth)
+    try:
+        return pipeline_manifest["nodes"][f"{product}.load"]["state"] == "SUCCEEDED"
+    except (KeyError, TypeError):
+        return False
+
+
+def _load_attempt_matches_node(
+    manifest: Mapping[str, Any], node: Mapping[str, Any]
+) -> bool:
+    return (
+        manifest.get("schema_version") == 1
+        and manifest.get("kind") == "load-attempt"
+        and manifest.get("product") == node["product"]
+        and manifest.get("validation_product")
+        == PRODUCTS[node["product"]]["validator_product"]
+        and str(manifest.get("input_uri", "")).rstrip("/")
+        == node["input_uri"].rstrip("/")
+        and manifest.get("validation_report_uri") == node["validation_report_uri"]
+        and str(manifest.get("target_schema", "")).upper()
+        == node["target_schema"].upper()
+        and isinstance(manifest.get("pipeline_manifest_uri"), str)
+    )
+
+
+def _validate_resume_chain(
+    adapter: Any,
+    node: Mapping[str, Any],
+    claim: Mapping[str, Any],
+    previous_uri: str,
+    auth: dict[str, str],
+) -> None:
+    first_uri = claim.get("first_load_manifest")
+    if not isinstance(first_uri, str) or not first_uri.startswith("oci://"):
+        raise PipelineError("load claim has an invalid first_load_manifest")
+    visited: set[str] = set()
+    current_uri = previous_uri
+    while True:
+        if current_uri in visited:
+            raise PipelineError("previous load manifest chain contains a cycle")
+        visited.add(current_uri)
+        if not adapter.uri_exists(current_uri, auth=auth):
+            raise PipelineError("previous load manifest chain is incomplete")
+        manifest = adapter.read_json(current_uri, auth=auth)
+        if not _load_attempt_matches_node(manifest, node):
+            raise PipelineError("previous load manifest does not match product/input contract")
+        if _known_load_succeeded(adapter, manifest, node["product"], auth):
+            raise PipelineError("cannot resume a load attempt known to have succeeded")
+        parent_uri = manifest.get("previous_load_manifest")
+        if parent_uri is None:
+            if current_uri != first_uri:
+                raise PipelineError("resume chain does not terminate at the claimed first attempt")
+            return
+        if not isinstance(parent_uri, str) or not parent_uri.startswith("oci://"):
+            raise PipelineError("previous load manifest chain contains an invalid URI")
+        current_uri = parent_uri
+
+
+def _prepare_load_attempt(
+    node: dict[str, Any], plan: dict[str, Any], adapter: Any, auth: dict[str, str]
+) -> dict[str, Any]:
+    report = adapter.read_json(node["validation_report_uri"], auth=auth)
+    validation = _validation_gate(
+        report,
+        expected_product=PRODUCTS[node["product"]]["validator_product"],
+        expected_input=node["input_uri"],
+    )
+    inventory = report.get("table_inventory")
+    counts = report.get("counts")
+    exact_error_count = counts.get("error") if isinstance(counts, dict) else None
+    validation["load_report_valid"] = (
+        report.get("verdict") in {"PASS", "PARTIAL"}
+        and isinstance(exact_error_count, int)
+        and not isinstance(exact_error_count, bool)
+        and exact_error_count == 0
+    )
+    normalized_inventory = (
+        [table.strip().rsplit(".", 1)[-1].upper() for table in inventory]
+        if isinstance(inventory, list)
+        and all(isinstance(table, str) for table in inventory)
+        else []
+    )
+    inventory_owners_match = (
+        isinstance(inventory, list)
+        and all(
+            "." not in table
+            or table.strip().split(".", 1)[0].upper() == node["target_schema"].upper()
+            for table in inventory
+            if isinstance(table, str)
+        )
+    )
+    validation["inventory_valid"] = (
+        report.get("schema_version") == 2
+        and isinstance(inventory, list)
+        and bool(inventory)
+        and all(isinstance(table, str) and table.strip() for table in inventory)
+        and len(normalized_inventory) == len(set(normalized_inventory))
+        and inventory_owners_match
+    )
+    validation["accepted"] = (
+        validation["accepted"]
+        and validation["load_report_valid"]
+        and validation["inventory_valid"]
+    )
+    if not validation["accepted"]:
+        return {"validation": validation, "accepted": False}
+
+    previous_uri = node.get("previous_load_manifest")
+    if previous_uri is None:
+        claim_etag = adapter.put_json_create_once(
+            node["claim_uri"],
+            {
+                "schema_version": 1,
+                "kind": "load-claim",
+                "environment": plan["environment"],
+                "product": node["product"],
+                "input_uri": node["input_uri"].rstrip("/"),
+                "first_load_manifest": node["output_uri"],
+                "created_at": utc_now(),
+            },
+            auth=auth,
+        )
+        return {
+            "validation": validation,
+            "accepted": True,
+            "resume": False,
+            "claim_etag": claim_etag,
+        }
+
+    if not adapter.uri_exists(node["claim_uri"], auth=auth):
+        raise PipelineError(
+            f"resume has no load claim for synthetic input {node['input_uri']}"
+        )
+    claim = adapter.read_json(node["claim_uri"], auth=auth)
+    if (
+        claim.get("schema_version") != 1
+        or claim.get("kind") != "load-claim"
+        or claim.get("environment") != plan["environment"]
+        or
+        claim.get("product") != node["product"]
+        or str(claim.get("input_uri", "")).rstrip("/")
+        != node["input_uri"].rstrip("/")
+    ):
+        raise PipelineError("load claim does not match the resumed product/input")
+    _validate_resume_chain(adapter, node, claim, previous_uri, auth)
+    return {
+        "validation": validation,
+        "accepted": True,
+        "resume": True,
+        "previous_manifest_found": True,
     }
 
 
@@ -2192,6 +2684,17 @@ def _execute_remote_node(
                         f"run_id={data_flow_run_id} validation-gate"
                     )
                     return NodeResult("FAILED", attempts, detail)
+            elif node["operation"] == "load":
+                manifest = adapter.read_json(node["output_uri"], auth=auth)
+                detail["load_manifest"] = _load_manifest_gate(
+                    manifest, node, pipeline_run_id
+                )
+                if not detail["load_manifest"]["accepted"]:
+                    progress.emit(
+                        f"[failed] {node['id']} FAILED attempt={attempt_number} "
+                        f"run_id={data_flow_run_id} load-manifest-gate"
+                    )
+                    return NodeResult("FAILED", attempts, detail)
             describe = getattr(adapter, "describe_uri", None)
             if describe is not None and node.get("output_uri"):
                 detail["output_metadata"] = describe(
@@ -2206,6 +2709,51 @@ def _execute_remote_node(
         if stop.is_set():
             return NodeResult("CANCELLED", attempts, {})
     return NodeResult("FAILED", attempts, {})
+
+
+def _execute_load_node(
+    node: dict[str, Any],
+    plan: dict[str, Any],
+    config: dict[str, Any],
+    adapter: Any,
+    auth: dict[str, str],
+    poll_seconds: float,
+    active: dict[str, str],
+    active_lock: threading.Lock,
+    stop: threading.Event,
+    on_attempt: Callable[[str, dict[str, Any]], None],
+    progress: ProgressReporter,
+) -> NodeResult:
+    preparation = _prepare_load_attempt(node, plan, adapter, auth)
+    if not preparation["accepted"]:
+        progress.emit(f"[failed] {node['id']} validation-gate")
+        return NodeResult("FAILED", [], {"load_preparation": preparation})
+
+    try:
+        result = _execute_remote_node(
+            node,
+            config,
+            plan["run_id"],
+            plan["data_flow_options"],
+            adapter,
+            auth,
+            0,
+            poll_seconds,
+            active,
+            active_lock,
+            stop,
+            on_attempt,
+            progress,
+        )
+    except Exception as exc:
+        raise AmbiguousLoadState(
+            f"load state is unknown after OCI/Data Flow error: {exc}"
+        ) from exc
+    return NodeResult(
+        result.state,
+        result.attempts,
+        {"load_preparation": preparation, **result.detail},
+    )
 
 
 def _execute_reservation_node(
@@ -2251,6 +2799,19 @@ def execute_plan(
     stop = threading.Event()
     futures: dict[Future[NodeResult], str] = {}
     nodes = plan["nodes"]
+    serial_lanes = {"reservation-cas", "oracle-load"}
+    load_node_ids = [
+        f"{product}.load"
+        for product in plan["products"]
+        if f"{product}.load" in nodes
+    ]
+    load_positions = {node_id: index for index, node_id in enumerate(load_node_ids)}
+    load_lease: Any | None = None
+    load_lease_renewed_at = 0.0
+    load_lease_error: str | None = None
+    load_lease_quarantined = False
+    load_contract = plan.get("load_contract", {})
+    load_lease_ttl = int(load_contract.get("lease_ttl_seconds", 300))
 
     def set_node(node_id: str, **changes: Any) -> None:
         store.update(lambda payload: payload["nodes"][node_id].update(changes))
@@ -2272,9 +2833,48 @@ def execute_plan(
     interrupted = False
     try:
         while True:
+            if (
+                load_lease is not None
+                and time.monotonic() - load_lease_renewed_at >= load_lease_ttl / 2
+            ):
+                try:
+                    load_lease = adapter.renew_load_lease(
+                        load_contract["lease_uri"],
+                        load_lease,
+                        load_lease_ttl,
+                        auth=auth,
+                    )
+                    load_lease_renewed_at = time.monotonic()
+                    progress.emit("[load] environment lease renewed")
+                except Exception as exc:
+                    load_lease_error = f"{type(exc).__name__}: {exc}"
+                    progress.emit(f"[failed] load lease renewal failed: {exc}")
+                    stop.set()
+                    with active_lock:
+                        active_ids = list(active)
+                    for data_flow_run_id in active_ids:
+                        try:
+                            adapter.cancel_run(data_flow_run_id, auth)
+                        except Exception as cancel_exc:
+                            store.update(
+                                lambda payload,
+                                run_id=data_flow_run_id,
+                                error=str(cancel_exc): payload.setdefault(
+                                    "cancellation_errors", {}
+                                ).update({run_id: error})
+                            )
             states = {node_id: store.payload["nodes"][node_id]["state"] for node_id in nodes}
             for node_id, node in nodes.items():
                 if states[node_id] != "PENDING" or node_id in futures.values():
+                    continue
+                if node["lane"] == "oracle-load" and load_lease_error is not None:
+                    set_node(
+                        node_id,
+                        state="BLOCKED",
+                        finished_at=utc_now(),
+                        error=load_lease_error,
+                    )
+                    states[node_id] = "BLOCKED"
                     continue
                 dependency_states = [states[dependency] for dependency in node["dependencies"]]
                 if any(state in {"FAILED", "BLOCKED", "CANCELLED"} for state in dependency_states):
@@ -2283,15 +2883,56 @@ def execute_plan(
                     continue
                 if not all(state == "SUCCEEDED" for state in dependency_states):
                     continue
-                if node["lane"] == "reservation-cas" and any(
-                    nodes[active_node_id]["lane"] == "reservation-cas"
+                if node["lane"] == "oracle-load" and any(
+                    states[previous_id] not in NODE_TERMINAL
+                    for previous_id in load_node_ids[:load_positions[node_id]]
+                ):
+                    continue
+                if node["lane"] in serial_lanes and any(
+                    nodes[active_node_id]["lane"] == node["lane"]
                     for active_node_id in futures.values()
                 ):
                     continue
+                if node["lane"] == "oracle-load" and load_lease is None:
+                    try:
+                        progress.emit("[load] acquiring environment lease")
+                        load_lease = adapter.acquire_load_lease(
+                            load_contract["lease_uri"],
+                            plan["environment"],
+                            plan["run_id"],
+                            load_lease_ttl,
+                            auth=auth,
+                        )
+                        load_lease_renewed_at = time.monotonic()
+                    except Exception as exc:
+                        load_lease_error = f"{type(exc).__name__}: {exc}"
+                        set_node(
+                            node_id,
+                            state="FAILED",
+                            finished_at=utc_now(),
+                            error=load_lease_error,
+                        )
+                        states[node_id] = "FAILED"
+                        continue
                 set_node(node_id, state="RUNNING", started_at=utc_now())
                 if node["operation"] == "reserve":
                     future = executor.submit(
                         _execute_reservation_node, node, plan, adapter, auth, progress
+                    )
+                elif node["operation"] == "load":
+                    future = executor.submit(
+                        _execute_load_node,
+                        node,
+                        plan,
+                        config,
+                        adapter,
+                        auth,
+                        poll_seconds,
+                        active,
+                        active_lock,
+                        stop,
+                        record_attempt,
+                        progress,
                     )
                 else:
                     future = executor.submit(
@@ -2334,6 +2975,30 @@ def execute_plan(
                         finished_at=utc_now(),
                         error=f"{type(exc).__name__}: {exc}",
                     )
+                    if isinstance(exc, AmbiguousLoadState):
+                        load_lease_error = f"{type(exc).__name__}: {exc}"
+                        if load_lease is not None:
+                            load_lease_quarantined = True
+                            try:
+                                load_lease = adapter.quarantine_load_lease(
+                                    load_contract["lease_uri"],
+                                    load_lease,
+                                    load_lease_error,
+                                    auth=auth,
+                                )
+                                store.update(
+                                    lambda payload: payload.update(
+                                        load_lease_quarantined_at=utc_now()
+                                    )
+                                )
+                                progress.emit(
+                                    "[failed] load environment quarantined until manual release"
+                                )
+                            except Exception as quarantine_exc:
+                                load_lease_error += (
+                                    "; lease quarantine failed: "
+                                    f"{type(quarantine_exc).__name__}: {quarantine_exc}"
+                                )
                 else:
                     set_node(
                         node_id,
@@ -2361,6 +3026,17 @@ def execute_plan(
     finally:
         stop.set()
         executor.shutdown(wait=True, cancel_futures=True)
+        if load_lease is not None and not load_lease_quarantined:
+            try:
+                adapter.release_load_lease(
+                    load_contract["lease_uri"], load_lease, auth=auth
+                )
+                progress.emit("[load] environment lease released")
+            except Exception as exc:
+                load_lease_error = f"{type(exc).__name__}: {exc}"
+                store.update(
+                    lambda payload: payload.update(load_lease_error=load_lease_error)
+                )
 
     if interrupted:
         def cancel_remaining(payload: dict[str, Any]) -> None:
@@ -2371,7 +3047,9 @@ def execute_plan(
 
         store.update(cancel_remaining)
         return 130
-    return 1 if any(node["state"] != "SUCCEEDED" for node in store.payload["nodes"].values()) else 0
+    return 1 if load_lease_error or any(
+        node["state"] != "SUCCEEDED" for node in store.payload["nodes"].values()
+    ) else 0
 
 
 def _initial_manifest(plan: dict[str, Any], upstream_path: str) -> dict[str, Any]:
@@ -2390,6 +3068,7 @@ def _initial_manifest(plan: dict[str, Any], upstream_path: str) -> dict[str, Any
         "upstream_manifest": str(Path(upstream_path).resolve()),
         "artifacts": plan["artifacts"],
         "reservation_contract": plan["reservation_contract"],
+        "load_contract": plan["load_contract"],
         "nodes": {
             node_id: {**node, "state": "PENDING", "attempts": []}
             for node_id, node in plan["nodes"].items()
@@ -2451,6 +3130,8 @@ def run_command(
         print(json.dumps({"dry_run": True, **plan}, indent=2, sort_keys=True))
         progress.emit("[done] dry-run complete (no remote calls)")
         return 0
+    if plan["load_contract"]["approval_required"] and not args.approve_load:
+        raise PipelineError("interval containing load requires --approve-load")
 
     adapter = adapter or ModuleAdapter(
         timeout_seconds=args.oci_timeout_seconds,
@@ -2458,17 +3139,30 @@ def run_command(
         progress=progress,
     )
     auth = _auth_from_args(args)
+    auth_application = next(
+        (
+            node["application_id"]
+            for node in plan["nodes"].values()
+            if node.get("application_id")
+        ),
+        None,
+    )
     _ensure_adapter_auth(
         adapter,
         auth,
         allow_prompt=args.auth_prompt,
-        application_id=config["applications"]["engorda_plan"],
+        application_id=auth_application,
         force_refresh=args.auth_refresh_seconds > 0,
     )
     immutable_outputs = [
         (f"materialize output for {node['product']}", node["output_uri"])
         for node in plan["nodes"].values()
         if node["operation"] == "materialize"
+    ]
+    immutable_outputs += [
+        (f"load manifest for {node['product']}", node["output_uri"])
+        for node in plan["nodes"].values()
+        if node["operation"] == "load"
     ]
     for label, uri in (
         ("run path", plan["run_root"]),
@@ -2680,6 +3374,16 @@ def cli(context: click.Context) -> None:
     "set_values",
     multiple=True,
     help="Validated product.stage.key=value override; repeat as needed.",
+)
+@click.option(
+    "--resume-load-manifest",
+    multiple=True,
+    help="Resume as product=oci://.../load/manifest.json; repeat as needed.",
+)
+@click.option(
+    "--approve-load",
+    is_flag=True,
+    help="Explicitly authorize APPEND effects when the interval includes load.",
 )
 @click.option("--dry-run", is_flag=True, help="Resolve the plan without remote calls.")
 @_auth_options

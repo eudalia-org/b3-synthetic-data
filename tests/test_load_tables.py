@@ -1,5 +1,8 @@
+import json
 import os
+import sys
 from decimal import Decimal
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -87,6 +90,18 @@ class TestGetLoadEnv:
             monkeypatch.delenv(key, raising=False)
         with pytest.raises(SystemExit):
             load_tables.get_load_env()
+
+    def test_explicit_input_overrides_base_prefix_and_tuning(self, monkeypatch):
+        for key, value in self.BASE.items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setenv("DATAGEN_LOAD_PREFIX", "stale")
+        config = load_tables.get_load_env(
+            "oci://other@ns/exact/", num_partitions=12, batch_size=345
+        )
+        assert load_tables.resolved_input_uri(config) == "oci://other@ns/exact"
+        assert config["DATAGEN_LOAD_PREFIX"] == ""
+        assert config["DATAGEN_JDBC_NUM_PARTITIONS"] == "12"
+        assert config["DATAGEN_JDBC_BATCH_SIZE"] == "345"
 
 
 REQUIRED = (
@@ -255,19 +270,19 @@ class TestIsStatic:
 
 
 class TestResolveLoadTables:
-    def test_requested_drops_static_keeps_order(self):
-        assert load_tables.resolve_load_tables(
-            SPECS, ["LANCAMENTO", "TIPO_DEBITO", "ENTIDADE"]
-        ) == ["LANCAMENTO", "ENTIDADE"]
+    def test_requested_static_is_rejected(self):
+        with pytest.raises(ValueError, match="marked static"):
+            load_tables.resolve_load_tables(SPECS, ["TIPO_DEBITO"])
 
-    def test_requested_table_absent_is_kept(self):
-        assert load_tables.resolve_load_tables(SPECS, ["OTHER"]) == ["OTHER"]
+    def test_requested_table_absent_is_rejected(self):
+        with pytest.raises(ValueError, match="absent from specs"):
+            load_tables.resolve_load_tables(SPECS, ["OTHER"])
 
     def test_none_returns_all_non_static_in_order(self):
         assert load_tables.resolve_load_tables(SPECS, None) == ["ENTIDADE", "LANCAMENTO"]
 
     def test_empty_result_exits(self):
-        with pytest.raises(SystemExit):
+        with pytest.raises(ValueError, match="marked static"):
             load_tables.resolve_load_tables(SPECS, ["TIPO_DEBITO"])
 
 
@@ -302,22 +317,51 @@ class TestTopoSortForLoad:
             FK_SPECS, ["OTHER", "JUROS_FLUTUANTE", "CONDICAO_IF"]
         ) == ["OTHER", "CONDICAO_IF", "JUROS_FLUTUANTE"]
 
-    def test_self_reference_does_not_break(self):
+    def test_unsupported_self_reference_is_rejected(self):
         specs = {"USUARIO": {"pk_cols": ["NUM_ID_ENTIDADE"], "foreign_keys": [
             {"columns": ["NUM_ID_SUP"], "parent_table": "USUARIO",
              "parent_columns": ["NUM_ID_ENTIDADE"]}]}}
-        assert load_tables.topo_sort_for_load(specs, ["USUARIO"]) == ["USUARIO"]
+        with pytest.raises(ValueError, match="self-referencing"):
+            load_tables.topo_sort_for_load(specs, ["USUARIO"])
 
-    def test_cycle_returns_each_table_once(self):
+    def test_null_on_insert_self_reference_is_allowed(self):
+        specs = {"INSTRUMENTO_FINANCEIRO": {
+            "pk_cols": ["NUM_IF"],
+            "foreign_keys": [{
+                "columns": ["NUM_IF_ORIGEM"],
+                "parent_table": "CETIP.INSTRUMENTO_FINANCEIRO",
+                "parent_columns": ["NUM_IF"],
+            }],
+        }}
+        assert load_tables.topo_sort_for_load(
+            specs, ["INSTRUMENTO_FINANCEIRO"]
+        ) == ["INSTRUMENTO_FINANCEIRO"]
+
+    def test_schema_qualified_parent_still_orders_before_child(self):
+        specs = {
+            **FK_SPECS,
+            "JUROS_FLUTUANTE": {
+                **FK_SPECS["JUROS_FLUTUANTE"],
+                "foreign_keys": [{
+                    "columns": ["NUM_CONDICAO_IF"],
+                    "parent_table": "CETIP.CONDICAO_IF",
+                    "parent_columns": ["NUM_CONDICAO_IF"],
+                }],
+            },
+        }
+        assert load_tables.topo_sort_for_load(
+            specs, ["JUROS_FLUTUANTE", "CONDICAO_IF"]
+        ) == ["CONDICAO_IF", "JUROS_FLUTUANTE"]
+
+    def test_cycle_is_rejected(self):
         specs = {
             "A": {"pk_cols": ["AID"], "foreign_keys": [
                 {"columns": ["BID"], "parent_table": "B", "parent_columns": ["BID"]}]},
             "B": {"pk_cols": ["BID"], "foreign_keys": [
                 {"columns": ["AID"], "parent_table": "A", "parent_columns": ["AID"]}]},
         }
-        out = load_tables.topo_sort_for_load(specs, ["A", "B"])
-        assert sorted(out) == ["A", "B"]
-        assert len(out) == 2
+        with pytest.raises(ValueError, match="cycle"):
+            load_tables.topo_sort_for_load(specs, ["A", "B"])
 
 
 class TestResolveLoadTablesTopoOrder:
@@ -399,30 +443,197 @@ class TestBuildExistingKeysQuery:
 
 
 class TestManifest:
-    CFG = {"DATAGEN_LOAD_BASE_URI": "oci://bucket@ns/load"}
-
-    def test_manifest_path(self):
-        assert load_tables.manifest_path(self.CFG, "20260617T120000Z") == (
-            "oci://bucket@ns/load/_load_manifests/20260617T120000Z"
-        )
-
     def test_build_manifest_shape(self):
-        entries = [{"table": "LANCAMENTO", "rollbackable": True}]
-        m = load_tables.build_manifest("RID", "2026-06-17T12:00:00Z", "CETIP", entries)
+        entries = [{
+            "table": "LANCAMENTO", "expected_rows": 3, "rollbackable": True,
+            "synthetic_pk_min": 10, "synthetic_pk_max": 12,
+        }]
+        m = load_tables.build_manifest(
+            run_id="RID",
+            product="cdb_pos",
+            validation_product="cdb",
+            input_uri="oci://bucket@ns/synthetic/",
+            validation_report_uri="oci://bucket@ns/report.json",
+            pipeline_manifest_uri="oci://bucket@ns/pipeline.json",
+            previous_load_manifest="oci://bucket@ns/previous.json",
+            created_utc="2026-06-17T12:00:00Z",
+            target_schema="cetip",
+            tables=["LANCAMENTO"],
+            entries=entries,
+            transformations=[],
+        )
         assert m == {
+            "schema_version": 1,
+            "kind": "load-attempt",
             "run_id": "RID",
+            "product": "cdb_pos",
+            "validation_product": "cdb",
+            "input_uri": "oci://bucket@ns/synthetic",
+            "validation_report_uri": "oci://bucket@ns/report.json",
+            "pipeline_manifest_uri": "oci://bucket@ns/pipeline.json",
+            "previous_load_manifest": "oci://bucket@ns/previous.json",
             "created_utc": "2026-06-17T12:00:00Z",
             "target_schema": "CETIP",
+            "ordered_tables": ["LANCAMENTO"],
             "tables": entries,
+            "transformations": [],
         }
+
+    def test_local_manifest_write_is_exact_and_immutable(self, tmp_path):
+        path = tmp_path / "nested" / "manifest.json"
+        manifest = {"schema_version": 1, "kind": "load-attempt", "run_id": "R1"}
+        assert load_tables.write_manifest(None, str(path), manifest) == str(path)
+        assert json.loads(path.read_text()) == manifest
+        original = path.read_bytes()
+        with pytest.raises(ValueError, match="already exists"):
+            load_tables.write_manifest(None, str(path), {"run_id": "R2"})
+        assert path.read_bytes() == original
+
+    def test_profiles_expected_rows_pk_range_and_transformations(self, monkeypatch):
+        numeric_type = type("NumericType", (), {})
+        functions = ModuleType("pyspark.sql.functions")
+        functions.min = lambda column: ("min", column)
+        functions.max = lambda column: ("max", column)
+        types = ModuleType("pyspark.sql.types")
+        types.NumericType = numeric_type
+        sql = ModuleType("pyspark.sql")
+        sql.functions = functions
+        pyspark = ModuleType("pyspark")
+        pyspark.sql = sql
+        monkeypatch.setitem(sys.modules, "pyspark", pyspark)
+        monkeypatch.setitem(sys.modules, "pyspark.sql", sql)
+        monkeypatch.setitem(sys.modules, "pyspark.sql.functions", functions)
+        monkeypatch.setitem(sys.modules, "pyspark.sql.types", types)
+
+        fields = [
+            SimpleNamespace(name="NUM_IF", dataType=numeric_type()),
+            SimpleNamespace(name="NUM_IF_ORIGEM", dataType=object()),
+            SimpleNamespace(name="DAT_INCLUSAO", dataType=object()),
+        ]
+
+        class Frame:
+            columns = [field.name for field in fields]
+            schema = SimpleNamespace(fields=fields)
+
+            def count(self):
+                return 3
+
+            def agg(self, *_args):
+                return SimpleNamespace(first=lambda: (10, 12))
+
+        spark = SimpleNamespace(read=SimpleNamespace(parquet=lambda _path: Frame()))
+        config = {"DATAGEN_LOAD_BASE_URI": "/input", "DATAGEN_LOAD_PREFIX": ""}
+        specs = {"INSTRUMENTO_FINANCEIRO": {"pk_cols": ["NUM_IF"]}}
+        entries, transformations = load_tables.capture_manifest_entries(
+            spark, {}, config, specs, "CETIP", ["INSTRUMENTO_FINANCEIRO"]
+        )
+        assert entries[0]["expected_rows"] == 3
+        assert entries[0]["synthetic_pk_min"] == 10
+        assert entries[0]["synthetic_pk_max"] == 12
+        assert entries[0]["rollbackable"] is True
+        assert [item["kind"] for item in transformations] == [
+            "nullify-self-reference", "oracle-audit-substitution"
+        ]
+
+
+class TestValidationReportGate:
+    BASE_REPORT = {
+        "schema_version": 2,
+        "verdict": "PARTIAL",
+        "counts": {"error": 0},
+        "product": "cdb",
+        "resolved_input": "oci://bucket@ns/synthetic/",
+        "table_inventory": ["CHILD", "PARENT"],
+    }
+
+    def test_reads_exact_local_object_and_returns_inventory(self, tmp_path):
+        path = tmp_path / "report.json"
+        path.write_text(json.dumps(self.BASE_REPORT))
+        report = load_tables.read_exact_json_object(None, str(path))
+        assert load_tables.validation_table_inventory(
+            report, "cdb", "oci://bucket@ns/synthetic"
+        ) == ["CHILD", "PARENT"]
+
+    @pytest.mark.parametrize(
+        ("replacement", "message"),
+        [
+            ({"schema_version": 1}, "schema_version"),
+            ({"verdict": "FAIL"}, "verdict"),
+            ({"counts": {"error": 1}}, "ERROR"),
+            ({"counts": {"error": True}}, "integer"),
+            ({"product": "rdb"}, "product"),
+            ({"resolved_input": "oci://wrong"}, "resolved_input"),
+            ({"table_inventory": []}, "nonempty"),
+            ({"table_inventory": ["A", "a"]}, "unique"),
+        ],
+    )
+    def test_rejects_invalid_report_contract(self, replacement, message):
+        report = {**self.BASE_REPORT, **replacement}
+        with pytest.raises(ValueError, match=message):
+            load_tables.validation_table_inventory(
+                report, "cdb", "oci://bucket@ns/synthetic"
+            )
+
+    def test_rejects_non_object_json(self, tmp_path):
+        path = tmp_path / "report.json"
+        path.write_text("[]")
+        with pytest.raises(ValueError, match="object"):
+            load_tables.read_exact_json_object(None, str(path))
+
+
+class TestExpectedTargetSchema:
+    def test_matches_case_insensitively(self):
+        assert load_tables.require_expected_target_schema("cetip", "CETIP") == "CETIP"
+
+    def test_rejects_mismatch(self):
+        with pytest.raises(ValueError, match="does not match"):
+            load_tables.require_expected_target_schema("ADMIN", "CETIP")
+
+    def test_rejects_inventory_owner_outside_target_schema(self):
+        with pytest.raises(ValueError, match="expected CETIP"):
+            load_tables.require_inventory_target_schema(
+                ["OTHER.INSTRUMENTO_FINANCEIRO"], "CETIP"
+            )
+
+    def test_accepts_unqualified_and_matching_owner(self):
+        load_tables.require_inventory_target_schema(
+            ["INSTRUMENTO_FINANCEIRO", "cetip.titulo"], "CETIP"
+        )
 
 
 class TestSkipValidationArg:
+    REQUIRED_ARGS = [
+        "--validation-report", "report.json",
+        "--product", "cdb_pos",
+        "--validation-product", "cdb",
+        "--manifest-uri", "manifest.json",
+        "--pipeline-manifest-uri", "pipeline.json",
+        "--expected-target-schema", "CETIP",
+    ]
+
     def test_default_false(self, monkeypatch):
-        monkeypatch.setattr("sys.argv", ["load_tables", "--specs", "specs.json"])
+        monkeypatch.setattr("sys.argv", ["load_tables", *self.REQUIRED_ARGS])
         assert load_tables.parse_arguments().skip_validation is False
 
     def test_flag_true(self, monkeypatch):
-        monkeypatch.setattr("sys.argv",
-                            ["load_tables", "--specs", "specs.json", "--skip-validation"])
+        monkeypatch.setattr(
+            "sys.argv", ["load_tables", *self.REQUIRED_ARGS, "--skip-validation"]
+        )
         assert load_tables.parse_arguments().skip_validation is True
+
+    def test_requires_orchestrated_contract(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["load_tables"])
+        with pytest.raises(SystemExit):
+            load_tables.parse_arguments()
+
+    def test_parses_input_and_tuning_overrides(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", [
+            "load_tables", *self.REQUIRED_ARGS,
+            "--input-base", "oci://exact", "--num-partitions", "8",
+            "--batch-size", "500", "--previous-load-manifest", "previous.json",
+        ])
+        args = load_tables.parse_arguments()
+        assert (args.input_base, args.num_partitions, args.batch_size) == (
+            "oci://exact", 8, 500
+        )
+        assert args.previous_load_manifest == "previous.json"

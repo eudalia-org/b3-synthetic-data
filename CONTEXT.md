@@ -27,3 +27,19 @@ _Avoid_: Credito SCR, Credito DC, DICRE
 **DICRE IROP closure**:
 The conditional family of IROP records linked to a Credito DC. Presence varies by DICRE subtype, but present records remain part of the aggregate.
 _Avoid_: Mandatory CCB closure, mandatory CMER closure
+
+**Product validation**:
+The evidence report that a synthetic product aggregate satisfied its product contract against a specific input URI. An accepted report is PASS or PARTIAL with no ERROR findings.
+_Avoid_: Load preflight, schema check
+
+**Oracle load**:
+One explicitly approved APPEND attempt that writes a validated synthetic product aggregate to the target database.
+_Avoid_: Import, merge, synchronization
+
+**Load attempt manifest**:
+The immutable recovery record created before an Oracle load starts. It identifies the validated input, ordered tables, write transformations, and each synthetic numeric primary-key range.
+_Avoid_: Pipeline manifest, validation report
+
+**Load claim**:
+The durable assertion that a synthetic product aggregate has already had a load attempt. A later attempt is a resume linked to the preceding load attempt manifest.
+_Avoid_: Reservation, environment lease

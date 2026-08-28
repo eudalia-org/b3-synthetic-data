@@ -7,34 +7,41 @@
   "applications": {
     "engorda_plan": "ocid1.dataflowapplication.oc1..replace-engorda-plan",
     "engorda_materialize": "ocid1.dataflowapplication.oc1..replace-engorda-materialize",
-    "validate": "ocid1.dataflowapplication.oc1..replace-validator"
+    "validate": "ocid1.dataflowapplication.oc1..replace-validator",
+    "load": "ocid1.dataflowapplication.oc1..replace-loader"
   },
   "reservations": {
     "lease_uri": "oci://synthetic-data@namespace/pipeline-control/qab/lease.json",
     "ledger_uri": "oci://synthetic-data@namespace/pipeline-control/qab/reservations.json"
   },
+  "load": {
+    "lease_uri": "oci://synthetic-data@namespace/pipeline-control/qab/load-lease.json",
+    "claim_root": "oci://synthetic-data@namespace/pipeline-control/load-claims",
+    "target_schema": "CETIP",
+    "lease_ttl_seconds": 300
+  },
   "products": {
-    "cdb_simplificado": {"capabilities": ["engorda", "validate"]},
-    "cdb_resgate": {"capabilities": ["engorda", "validate"]},
-    "cdb_escalonamento": {"capabilities": ["engorda", "validate"]},
-    "rdb_inclusao": {"capabilities": ["engorda", "validate"]},
-    "rdb_resgate": {"capabilities": ["engorda", "validate"]},
+    "cdb_simplificado": {"capabilities": ["engorda", "validate", "load"]},
+    "cdb_resgate": {"capabilities": ["engorda", "validate", "load"]},
+    "cdb_escalonamento": {"capabilities": ["engorda", "validate", "load"]},
+    "rdb_inclusao": {"capabilities": ["engorda", "validate", "load"]},
+    "rdb_resgate": {"capabilities": ["engorda", "validate", "load"]},
     "lci": {
-      "capabilities": ["engorda", "validate"],
+      "capabilities": ["engorda", "validate", "load"],
       "engorda": {"n_instrumentos": 50000, "fator_k": 2}
     },
     "lca": {
-      "capabilities": ["engorda", "validate"],
+      "capabilities": ["engorda", "validate", "load"],
       "engorda": {"n_instrumentos": 50000, "fator_k": 2}
     },
-    "ccb_pppre": {"capabilities": ["engorda", "validate"]},
-    "ccb_pfpre": {"capabilities": ["engorda", "validate"]},
-    "ccb_pgrpre": {"capabilities": ["engorda", "validate"]},
-    "ccb_favcp": {"capabilities": ["engorda", "validate"]},
-    "ccb_fapre": {"capabilities": ["engorda", "validate"]},
-    "gravame": {"capabilities": ["engorda", "validate"]},
-    "lastro": {"capabilities": ["validate"]},
-    "direito_creditorio": {"capabilities": ["validate"]}
+    "ccb_pppre": {"capabilities": ["engorda", "validate", "load"]},
+    "ccb_pfpre": {"capabilities": ["engorda", "validate", "load"]},
+    "ccb_pgrpre": {"capabilities": ["engorda", "validate", "load"]},
+    "ccb_favcp": {"capabilities": ["engorda", "validate", "load"]},
+    "ccb_fapre": {"capabilities": ["engorda", "validate", "load"]},
+    "gravame": {"capabilities": ["engorda", "validate", "load"]},
+    "lastro": {"capabilities": ["validate", "load"]},
+    "direito_creditorio": {"capabilities": ["validate", "load"]}
   },
   "stage_defaults": {
     "engorda": {
@@ -47,6 +54,10 @@
     "validate": {
       "fail_severity": "error",
       "validate_against": "union"
+    },
+    "load": {
+      "num_partitions": 256,
+      "batch_size": 10000
     }
   }
 }

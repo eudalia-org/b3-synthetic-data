@@ -1,0 +1,7 @@
+# Use explicit claims and manifests for Oracle load attempts
+
+Oracle load is an explicitly approved, APPEND-only stage that consumes the exact synthetic URI and an accepted product-validation report. Loads are serialized in CLI product order under a renewable environment lease, never retried or rolled back automatically, and a failed product does not block later products. A create-once claim prevents an unnoticed second attempt; a resume must name the previous immutable load attempt manifest. The manifest is written before the first INSERT and records the synthetic numeric PK ranges so a manual rollback cannot delete rows loaded by later products.
+
+An OCI submission or polling error leaves the load state ambiguous. In that case the input claim remains, the environment lease is persistently quarantined without automatic expiry, and later loads are blocked until an operator verifies the remote run and manually removes the quarantine; only a known terminal failure permits the next product to load.
+
+We deliberately accept old PASS or PARTIAL reports with zero ERROR findings and skip the loader's separate target preflight. This favors delayed, operator-approved loads and avoids repeating expensive checks, while accepting that Oracle drift can cause a partial load. Missing/static tables, unresolved FK cycles, report/input mismatches, and target-schema mismatches fail before insertion. Known self-reference nullification and Oracle-evaluated audit timestamps remain explicit write transformations in the manifest.

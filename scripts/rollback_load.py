@@ -7,6 +7,7 @@ import os
 import re
 import sys
 from typing import TYPE_CHECKING
+from urllib.parse import unquote, urlsplit
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
@@ -25,7 +26,6 @@ DEFAULT_CHUNK_SIZE = "5000000"
 REQUIRED_ENV_VARS = (
     "DATAGEN_TARGET_JDBC_URL",
     "DATAGEN_TARGET_DB_PASSWORD",
-    "DATAGEN_LOAD_BASE_URI",
 )
 IDENTIFIER_PATTERN = re.compile(r"^[A-Z][A-Z0-9_$#]*$")
 
@@ -50,11 +50,13 @@ def positive_int(value: str) -> int:
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Roll back a load_tables.py run by deleting rows appended above each"
-            " table's pre-load max PK."
+            "Roll back a load_tables.py attempt by deleting its exact recorded"
+            " synthetic numeric-PK ranges."
         )
     )
-    parser.add_argument("--run-id", required=True, help="Run id of the load manifest to roll back.")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--manifest-uri", help="Exact load manifest JSON object.")
+    source.add_argument("--run-id", help="Legacy run id under DATAGEN_LOAD_BASE_URI.")
     parser.add_argument(
         "--chunk-size",
         type=positive_int,
@@ -85,7 +87,7 @@ def rollback_order(entries: list) -> list:
     return list(reversed(entries))
 
 
-def get_env() -> dict[str, str]:
+def get_env(require_load_base: bool = True) -> dict[str, str]:
     config = {}
     missing = []
     for name in REQUIRED_ENV_VARS:
@@ -94,6 +96,11 @@ def get_env() -> dict[str, str]:
             missing.append(name)
         else:
             config[name] = value.rstrip("/")
+    load_base = os.environ.get("DATAGEN_LOAD_BASE_URI")
+    if load_base:
+        config["DATAGEN_LOAD_BASE_URI"] = load_base.rstrip("/")
+    elif require_load_base:
+        missing.append("DATAGEN_LOAD_BASE_URI")
     if missing:
         logger.error("Missing required environment variable(s): %s", ", ".join(missing))
         sys.exit(1)
@@ -146,14 +153,95 @@ def execute_statement(spark: SparkSession, properties: dict[str, str], sql: str)
         conn.close()
 
 
-def read_manifest(spark: SparkSession, config: dict[str, str], run_id: str) -> dict:
+def _local_artifact_path(uri: str) -> str | None:
+    parsed = urlsplit(uri)
+    if not parsed.scheme:
+        return uri
+    if parsed.scheme == "file" and parsed.netloc in {"", "localhost"}:
+        return unquote(parsed.path)
+    return None
+
+
+def _read_exact_json_object(spark: SparkSession, uri: str) -> dict:
+    try:
+        local_path = _local_artifact_path(uri)
+        if local_path is not None:
+            with open(local_path, encoding="utf-8") as handle:
+                parsed = json.load(handle)
+        else:
+            jvm = spark._jvm
+            path = jvm.org.apache.hadoop.fs.Path(uri)
+            fs = path.getFileSystem(spark._jsc.hadoopConfiguration())
+            if not fs.exists(path) or fs.getFileStatus(path).isDirectory():
+                raise ValueError(f"expected one JSON object at {uri!r}")
+            stream = fs.open(path)
+            try:
+                text = jvm.org.apache.commons.io.IOUtils.toString(
+                    stream, jvm.java.nio.charset.StandardCharsets.UTF_8
+                )
+            finally:
+                stream.close()
+            parsed = json.loads(text)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        logger.error("Failed to read manifest %s: %s", uri, exc)
+        sys.exit(1)
+    if not isinstance(parsed, dict):
+        logger.error("Manifest %s must contain a JSON object", uri)
+        sys.exit(1)
+    return parsed
+
+
+def read_manifest(
+    spark: SparkSession,
+    config: dict[str, str],
+    run_id: str | None = None,
+    manifest_uri: str | None = None,
+) -> dict:
+    if manifest_uri is not None:
+        return _read_exact_json_object(spark, manifest_uri)
     path = f"{config['DATAGEN_LOAD_BASE_URI']}/_load_manifests/{run_id}"
     try:
         text = "\n".join(spark.sparkContext.textFile(path).collect())
-        return json.loads(text)
+        parsed = json.loads(text)
     except Exception as exc:
         logger.error("Failed to read manifest %s: %s", path, exc)
         sys.exit(1)
+    if not isinstance(parsed, dict):
+        logger.error("Manifest %s must contain a JSON object", path)
+        sys.exit(1)
+    return parsed
+
+
+def is_exact_load_manifest(manifest: dict) -> bool:
+    version = manifest.get("schema_version")
+    kind = manifest.get("kind")
+    if version is None and kind is None:
+        return False
+    if version != 1 or kind != "load-attempt":
+        raise ValueError("Unsupported load manifest schema or kind")
+    entries = manifest.get("tables")
+    if not isinstance(entries, list):
+        raise ValueError("Load manifest tables must be a list")
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("Load manifest table entries must be objects")
+        if not entry.get("rollbackable"):
+            continue
+        for key in ("synthetic_pk_min", "synthetic_pk_max"):
+            value = entry.get(key)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"Rollbackable table requires integer {key}")
+        if entry["synthetic_pk_min"] > entry["synthetic_pk_max"]:
+            raise ValueError("synthetic_pk_min must not exceed synthetic_pk_max")
+    return True
+
+
+def require_exact_load_manifest(manifest: dict) -> None:
+    if not is_exact_load_manifest(manifest):
+        raise ValueError(
+            "Legacy load manifests have no exact synthetic PK ranges and cannot be "
+            "rolled back safely"
+        )
 
 
 def pk_chunk_ranges(lower_exclusive: int, upper: int, chunk_size: int) -> list[tuple[int, int]]:
@@ -183,6 +271,24 @@ def scalar(spark, properties, query):
 
 def rollback_table(spark, properties, entry, chunk_size, index, total, dry_run=False) -> int:
     owner, name, pk_col = entry["owner"], entry["name"], entry["pk_col"]
+    if "synthetic_pk_min" in entry or "synthetic_pk_max" in entry:
+        lower = entry["synthetic_pk_min"]
+        upper = entry["synthetic_pk_max"]
+        ranges = pk_chunk_ranges(lower - 1, upper, chunk_size)
+        logger.info(
+            "[%d/%d] %s: %s exact synthetic PK [%s, %s] in %d chunk(s)",
+            index, total, entry["table"],
+            "DRY RUN — would delete" if dry_run else "deleting",
+            lower, upper, len(ranges),
+        )
+        if dry_run:
+            return len(ranges)
+        for lo, hi in ranges:
+            execute_statement(
+                spark, properties, delete_above_sql(owner, name, pk_col, lo, hi)
+            )
+        return len(ranges)
+
     max_before = entry["max_pk_before"]
     o, t, p = validate_identifier(owner), validate_identifier(name), validate_identifier(pk_col)
     current_max = scalar(spark, properties, f"SELECT MAX({p}) FROM {o}.{t}")
@@ -214,12 +320,15 @@ def rollback_table(spark, properties, entry, chunk_size, index, total, dry_run=F
 
 def main() -> None:
     args = parse_arguments()
-    config = get_env()
+    config = get_env(require_load_base=args.manifest_uri is None)
     spark = create_spark_session("DataGenRollbackLoad")
     properties = build_connection_properties(config)
     failures = []
     try:
-        manifest = read_manifest(spark, config, args.run_id)
+        manifest = read_manifest(
+            spark, config, run_id=args.run_id, manifest_uri=args.manifest_uri
+        )
+        require_exact_load_manifest(manifest)
         entries = [e for e in manifest.get("tables", [])]
         # Delete children before parents (reverse of the parent-first load order)
         # so a parent delete never hits ORA-02292 from a still-present child.
@@ -233,7 +342,8 @@ def main() -> None:
         total = len(rollbackable)
         if args.dry_run:
             logger.info("DRY RUN: no rows will be deleted.")
-        logger.info("Rolling back run_id=%s: %d rollbackable table(s)", args.run_id, total)
+        source = args.manifest_uri or args.run_id
+        logger.info("Rolling back manifest=%s: %d rollbackable table(s)", source, total)
         for index, entry in enumerate(rollbackable, start=1):
             try:
                 rollback_table(spark, properties, entry, args.chunk_size, index, total,

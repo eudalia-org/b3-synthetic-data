@@ -43,10 +43,17 @@ def write_config(tmp_path, *, capabilities=None, extra=None):
             "engorda_plan": "app-plan",
             "engorda_materialize": "app-materialize",
             "validate": "app-validate",
+            "load": "app-load",
         },
         "reservations": {
             "lease_uri": "oci://bucket@namespace/control/lease.json",
             "ledger_uri": "oci://bucket@namespace/control/ledger.json",
+        },
+        "load": {
+            "lease_uri": "oci://bucket@namespace/control/load-lease.json",
+            "claim_root": "oci://bucket@namespace/control/load-claims",
+            "target_schema": "CETIP",
+            "lease_ttl_seconds": 300,
         },
         "products": products,
         "stage_defaults": {
@@ -54,9 +61,11 @@ def write_config(tmp_path, *, capabilities=None, extra=None):
                 "n_instrumentos": 4,
                 "fator_k": 2,
                 "seed": 7,
+                "specs": "oci://source@namespace/specs.json",
                 "query_num_if_sql": "oci://source@namespace/queries_produtos.sql",
             },
             "validate": {"fail_severity": "error", "validate_against": "union"},
+            "load": {"num_partitions": 16, "batch_size": 1000},
         },
     }
     if extra:
@@ -79,7 +88,11 @@ def write_upstream(tmp_path, *, products=None):
                 "synthetic": {
                     "uri": f"oci://source@namespace/synthetic/{product}",
                     "producer": "upstream",
-                }
+                },
+                "validation_report": {
+                    "uri": f"oci://source@namespace/validation/{product}/report.json",
+                    "producer": "upstream",
+                },
             }
             for product in products
         },
@@ -126,10 +139,11 @@ def run_args(tmp_path, config, upstream, *extra):
 
 
 class FakeAdapter:
-    def __init__(self, *, failed_prefixes=(), reports=None, existing=()):
+    def __init__(self, *, failed_prefixes=(), reports=None, existing=(), objects=None):
         self.failed_prefixes = tuple(failed_prefixes)
         self.reports = reports or {}
         self.existing = set(existing)
+        self.objects = dict(objects or {})
         self.calls = []
         self.created = {}
         self.cancelled = []
@@ -140,10 +154,16 @@ class FakeAdapter:
         self.max_active = 0
         self._active_reservations = 0
         self.max_active_reservations = 0
+        self._active_loads = 0
+        self.max_active_loads = 0
+        self.load_lease_acquisitions = 0
+        self.load_lease_releases = 0
+        self.load_lease_renewals = []
+        self.load_lease_quarantines = []
 
     def uri_exists(self, uri, *, auth):
         self.calls.append(("uri_exists", uri, auth))
-        return uri in self.existing
+        return uri in self.existing or uri in self.objects
 
     def describe_uri(self, uri, *, auth):
         self.calls.append(("describe_uri", uri, auth))
@@ -165,16 +185,63 @@ class FakeAdapter:
             }
             self._active.add(run_id)
             self.max_active = max(self.max_active, len(self._active))
+            if "-load-" in display_name:
+                self._active_loads += 1
+                self.max_active_loads = max(self.max_active_loads, self._active_loads)
         return {"data": {"id": run_id}}
 
     def get_run_state(self, run_id, opts):
         time.sleep(0.005)
         with self._lock:
             self._active.discard(run_id)
+            if "-load-" in self.created[run_id]["display_name"]:
+                self._active_loads -= 1
         display_name = self.created[run_id]["display_name"]
         return "FAILED" if display_name.startswith(self.failed_prefixes) else "SUCCEEDED"
 
     def read_json(self, uri, *, auth):
+        if uri in self.objects:
+            return dict(self.objects[uri])
+        if uri.endswith("/load/manifest.json"):
+            load_call = next(
+                call
+                for call in self.created.values()
+                if "--manifest-uri" in call["arguments"]
+                and call["arguments"][call["arguments"].index("--manifest-uri") + 1]
+                == uri
+            )
+            arguments = load_call["arguments"]
+
+            def value(flag):
+                return arguments[arguments.index(flag) + 1]
+
+            manifest = {
+                "schema_version": 1,
+                "kind": "load-attempt",
+                "run_id": value("--run-id"),
+                "product": value("--product"),
+                "validation_product": value("--validation-product"),
+                "input_uri": value("--input-base"),
+                "validation_report_uri": value("--validation-report"),
+                "pipeline_manifest_uri": value("--pipeline-manifest-uri"),
+                "target_schema": value("--expected-target-schema"),
+                "ordered_tables": ["INSTRUMENTO_FINANCEIRO"],
+                "tables": [{
+                    "table": "INSTRUMENTO_FINANCEIRO",
+                    "owner": "CETIP",
+                    "name": "INSTRUMENTO_FINANCEIRO",
+                    "expected_rows": 1,
+                    "pk_col": "NUM_IF",
+                    "synthetic_pk_min": 100,
+                    "synthetic_pk_max": 100,
+                    "rollbackable": True,
+                }],
+                "transformations": [],
+            }
+            if "--previous-load-manifest" in arguments:
+                manifest["previous_load_manifest"] = value("--previous-load-manifest")
+            self.objects[uri] = manifest
+            return dict(manifest)
         generator_product = next(
             (product for product in ALL_PRODUCTS if f"/{product}/" in uri),
             "cdb_simplificado",
@@ -186,16 +253,24 @@ class FakeAdapter:
         else:
             payload = {"verdict": "PASS", "counts": {"error": 0}}
         validation_call = next(
-            call
-            for call in self.created.values()
-            if "--report-path" in call["arguments"]
-            and call["arguments"][call["arguments"].index("--report-path") + 1] == uri
+            (
+                call
+                for call in self.created.values()
+                if "--report-path" in call["arguments"]
+                and call["arguments"][call["arguments"].index("--report-path") + 1]
+                == uri
+            ),
+            None,
         )
-        arguments = validation_call["arguments"]
         payload.setdefault("product", P.PRODUCTS[generator_product]["validator_product"])
-        payload.setdefault(
-            "resolved_input", arguments[arguments.index("--input-base") + 1]
-        )
+        if validation_call is not None:
+            arguments = validation_call["arguments"]
+            input_uri = arguments[arguments.index("--input-base") + 1]
+        else:
+            input_uri = f"oci://source@namespace/synthetic/{generator_product}"
+        payload.setdefault("resolved_input", input_uri)
+        payload.setdefault("schema_version", 2)
+        payload.setdefault("table_inventory", ["INSTRUMENTO_FINANCEIRO"])
         return payload
 
     def reserve_ranges(self, **kwargs):
@@ -216,7 +291,30 @@ class FakeAdapter:
         self.cancelled.append((run_id, opts))
 
     def upload_file(self, path, uri, *, auth):
-        self.uploads.append((json.loads(Path(path).read_text()), uri, auth))
+        payload = json.loads(Path(path).read_text())
+        self.uploads.append((payload, uri, auth))
+        self.objects[uri] = payload
+
+    def put_json_create_once(self, uri, payload, *, auth):
+        if uri in self.objects:
+            raise P.PipelineError(f"create-once JSON object already exists: {uri}")
+        self.objects[uri] = dict(payload)
+        return "claim-etag"
+
+    def acquire_load_lease(self, uri, environment, run_id, ttl_seconds, *, auth):
+        self.load_lease_acquisitions += 1
+        return P._Lease({"environment": environment, "run_id": run_id}, "lease-etag")
+
+    def renew_load_lease(self, uri, lease, ttl_seconds, *, auth):
+        self.load_lease_renewals.append(ttl_seconds)
+        return lease
+
+    def quarantine_load_lease(self, uri, lease, reason, *, auth):
+        self.load_lease_quarantines.append(reason)
+        return lease
+
+    def release_load_lease(self, uri, lease, *, auth):
+        self.load_lease_releases += 1
 
 
 class NoCallsAdapter:
@@ -239,8 +337,10 @@ class PollingAdapter(FakeAdapter):
         return states[index]
 
 
-def read_run_manifest(tmp_path):
-    return json.loads((tmp_path / "local-runs" / "qab" / "run-001" / "manifest.json").read_text())
+def read_run_manifest(tmp_path, run_id="run-001"):
+    return json.loads(
+        (tmp_path / "local-runs" / "qab" / run_id / "manifest.json").read_text()
+    )
 
 
 def test_click_cli_reports_submission_and_each_mocked_poll(tmp_path):
@@ -917,6 +1017,43 @@ def test_dry_run_is_offline_and_prints_resolved_argv(tmp_path, capsys):
     assert not (tmp_path / "local-runs").exists()
 
 
+def test_load_dry_run_needs_no_approval_and_uses_exact_artifacts(tmp_path, capsys):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+    args = run_args(tmp_path, config, upstream, "--dry-run")
+    args[args.index("engorda")] = "load"
+    args[args.index("validate")] = "load"
+
+    assert P.main(args, adapter=NoCallsAdapter()) == 0
+
+    plan = json.loads(capsys.readouterr().out)
+    node = plan["nodes"]["cdb_simplificado.load"]
+    assert plan["load_contract"]["approval_required"] is True
+    assert plan["load_contract"]["approved"] is False
+    assert node["input_uri"] == "oci://source@namespace/synthetic/cdb_simplificado"
+    assert node["validation_report_uri"].endswith(
+        "/validation/cdb_simplificado/report.json"
+    )
+    assert node["output_uri"].endswith(
+        "/products/cdb_simplificado/load/manifest.json"
+    )
+    assert node["arguments"][node["arguments"].index("--run-id") + 1] == "run-001"
+    assert "--skip-validation" in node["arguments"]
+    assert "--continue-on-error" not in node["arguments"]
+
+
+def test_live_load_requires_explicit_approval_before_remote_calls(tmp_path, capsys):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+    args = run_args(tmp_path, config, upstream)
+    args[args.index("engorda")] = "load"
+    args[args.index("validate")] = "load"
+
+    assert P.main(args, adapter=NoCallsAdapter()) == 2
+    assert "requires --approve-load" in capsys.readouterr().err
+    assert not (tmp_path / "local-runs").exists()
+
+
 def test_synthetic_output_uri_is_exact_across_plan_materialize_validator_and_artifact(
     tmp_path, capsys
 ):
@@ -1029,7 +1166,7 @@ def test_rejects_unsupported_product_and_non_tracer_interval(tmp_path, capsys):
     interval = run_args(tmp_path, config, upstream, "--dry-run")
     interval[interval.index("engorda")] = "extract"
     assert P.main(interval, adapter=NoCallsAdapter()) == 2
-    assert "first tracer supports only" in capsys.readouterr().err
+    assert "engorda through load" in capsys.readouterr().err
 
 
 def test_validated_set_applies_only_to_target_product_and_stage(tmp_path, capsys):
@@ -1323,6 +1460,161 @@ def test_dependency_execution_is_concurrent_and_isolates_failed_branch(tmp_path)
     assert len(adapter.reservations) == 2
     assert adapter.max_active_reservations == 1
     assert adapter.uploads[0][0]["status"] == "FAILED"
+
+
+def test_loads_are_serial_in_product_order_and_failure_does_not_block_next(tmp_path):
+    config = write_config(tmp_path)
+    upstream = write_upstream(
+        tmp_path, products=("cdb_simplificado", "lci")
+    )
+    args = run_args(
+        tmp_path,
+        config,
+        upstream,
+        "--product",
+        "lci",
+        "--approve-load",
+    )
+    args[args.index("engorda")] = "load"
+    args[args.index("validate")] = "load"
+    args[args.index("0", args.index("--max-retries"))] = "3"
+    adapter = FakeAdapter(failed_prefixes=("cdb_simplificado-load",))
+
+    assert P.main(args, adapter=adapter) == 1
+
+    load_calls = [
+        call for call in adapter.created.values() if "--manifest-uri" in call["arguments"]
+    ]
+    assert [call["arguments"][1] for call in load_calls] == ["cdb_simplificado", "lci"]
+    assert len(load_calls) == 2
+    assert adapter.max_active_loads == 1
+    assert adapter.load_lease_acquisitions == 1
+    assert adapter.load_lease_releases == 1
+    manifest = read_run_manifest(tmp_path)
+    assert manifest["nodes"]["cdb_simplificado.load"]["state"] == "FAILED"
+    assert manifest["nodes"]["lci.load"]["state"] == "SUCCEEDED"
+
+
+def test_load_claim_blocks_unmarked_second_attempt(tmp_path):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+    adapter = FakeAdapter()
+
+    first = run_args(tmp_path, config, upstream, "--approve-load")
+    first[first.index("engorda")] = "load"
+    first[first.index("validate")] = "load"
+    assert P.main(first, adapter=adapter) == 0
+
+    second = run_args(tmp_path, config, upstream, "--approve-load")
+    second[second.index("engorda")] = "load"
+    second[second.index("validate")] = "load"
+    second[second.index("run-001")] = "run-002"
+    assert P.main(second, adapter=adapter) == 1
+
+    load_calls = [
+        call for call in adapter.created.values() if "--manifest-uri" in call["arguments"]
+    ]
+    assert len(load_calls) == 1
+    assert "already exists" in read_run_manifest(tmp_path, run_id="run-002")["nodes"][
+        "cdb_simplificado.load"
+    ]["error"]
+
+
+def test_resume_rejects_a_load_known_to_have_succeeded(tmp_path):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+    adapter = FakeAdapter()
+
+    first = run_args(tmp_path, config, upstream, "--approve-load")
+    first[first.index("engorda")] = "load"
+    first[first.index("validate")] = "load"
+    assert P.main(first, adapter=adapter) == 0
+    prior = (
+        "oci://bucket@namespace/runs/qab/run-001/products/"
+        "cdb_simplificado/load/manifest.json"
+    )
+
+    second = run_args(
+        tmp_path,
+        config,
+        upstream,
+        "--approve-load",
+        "--resume-load-manifest",
+        f"cdb_simplificado={prior}",
+    )
+    second[second.index("engorda")] = "load"
+    second[second.index("validate")] = "load"
+    second[second.index("run-001")] = "run-002"
+
+    assert P.main(second, adapter=adapter) == 1
+    error = read_run_manifest(tmp_path, "run-002")["nodes"][
+        "cdb_simplificado.load"
+    ]["error"]
+    assert "known to have succeeded" in error
+
+
+def test_failed_current_validation_blocks_dependent_load(tmp_path):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+    args = run_args(tmp_path, config, upstream, "--approve-load")
+    args[args.index("--from") + 1] = "validate"
+    args[args.index("--to") + 1] = "load"
+    adapter = FakeAdapter(
+        reports={"cdb_simplificado": {"verdict": "FAIL", "counts": {"error": 1}}}
+    )
+
+    assert P.main(args, adapter=adapter) == 1
+    manifest = read_run_manifest(tmp_path)
+    assert manifest["nodes"]["cdb_simplificado.validate"]["state"] == "FAILED"
+    assert manifest["nodes"]["cdb_simplificado.load"]["state"] == "BLOCKED"
+    assert not [
+        call for call in adapter.created.values() if "--manifest-uri" in call["arguments"]
+    ]
+
+
+def test_load_rejects_noncanonical_report_before_creating_claim(tmp_path):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+    args = run_args(tmp_path, config, upstream, "--approve-load")
+    args[args.index("--from") + 1] = "load"
+    args[args.index("--to") + 1] = "load"
+    adapter = FakeAdapter(
+        reports={
+            "cdb_simplificado": {
+                "verdict": "pass",
+                "counts": {"error": 0},
+                "table_inventory": ["A", "a"],
+            }
+        }
+    )
+
+    assert P.main(args, adapter=adapter) == 1
+    assert not [
+        payload for payload in adapter.objects.values()
+        if payload.get("kind") == "load-claim"
+    ]
+    assert not adapter.created
+
+
+def test_ambiguous_submit_failure_retains_load_claim(tmp_path):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+    args = run_args(tmp_path, config, upstream, "--approve-load")
+    args[args.index("--from") + 1] = "load"
+    args[args.index("--to") + 1] = "load"
+
+    class SubmitFailureAdapter(FakeAdapter):
+        def create_run(self, arguments, display_name, opts):
+            raise P.OciExecutionError("submit failed")
+
+    adapter = SubmitFailureAdapter()
+    assert P.main(args, adapter=adapter) == 1
+    assert [
+        payload for payload in adapter.objects.values()
+        if payload.get("kind") == "load-claim"
+    ]
+    assert adapter.load_lease_releases == 0
+    assert adapter.load_lease_quarantines
 
 
 @pytest.mark.parametrize(

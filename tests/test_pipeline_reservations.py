@@ -417,6 +417,22 @@ def test_expired_lease_is_taken_over_but_live_lease_is_not():
         reserve(store, REQUEST_B, RESERVATION_B, "run-b")
 
 
+def test_quarantined_lease_never_expires_automatically():
+    store = FakeStorage()
+    store.seed(REQUEST_A, plan(REQUEST_A, "plan-a"))
+    store.seed(LEASE, {
+        "artifact_type": "pipeline_environment_lease",
+        "schema_version": 1,
+        "environment": "qab",
+        "run_id": "ambiguous-load",
+        "quarantined": True,
+        "expires_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+    })
+
+    with pytest.raises(R.LeaseUnavailable, match="quarantined"):
+        reserve(store, REQUEST_A, RESERVATION_A, "run-a")
+
+
 def test_existing_create_once_reservation_is_idempotent():
     store = FakeStorage()
     store.seed(REQUEST_A, plan(REQUEST_A, "plan-a"))

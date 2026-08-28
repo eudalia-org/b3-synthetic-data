@@ -7,11 +7,13 @@ import os
 import re
 import sys
 import time
+import uuid
 from collections import namedtuple
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import unquote, urlsplit
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
@@ -36,7 +38,6 @@ PARQUET_REBASE_CONF = {
 REQUIRED_ENV_VARS = (
     "DATAGEN_TARGET_JDBC_URL",
     "DATAGEN_TARGET_DB_PASSWORD",
-    "DATAGEN_LOAD_BASE_URI",
 )
 IDENTIFIER_PATTERN = re.compile(r"^[A-Z][A-Z0-9_$#]*$")
 
@@ -500,6 +501,22 @@ def parse_arguments() -> argparse.Namespace:
         help="Run id for the rollback manifest. Defaults to a UTC timestamp.",
     )
     parser.add_argument(
+        "--input-base",
+        help=("Exact synthetic input root. Overrides DATAGEN_LOAD_BASE_URI and "
+              "DATAGEN_LOAD_PREFIX."),
+    )
+    parser.add_argument("--validation-report", required=True)
+    parser.add_argument("--product", required=True, help="Generator product name.")
+    parser.add_argument(
+        "--validation-product", required=True, help="Expected validation report profile."
+    )
+    parser.add_argument("--manifest-uri", required=True, help="Exact load manifest JSON object.")
+    parser.add_argument("--pipeline-manifest-uri", required=True)
+    parser.add_argument("--expected-target-schema", required=True)
+    parser.add_argument("--previous-load-manifest")
+    parser.add_argument("--num-partitions", type=positive_int)
+    parser.add_argument("--batch-size", type=positive_int)
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Validate the synthetic data against the target schema and exit; insert nothing.",
@@ -547,7 +564,18 @@ def parse_tables(tables: str | None, tables_file: str | None) -> list[str]:
     return deduped
 
 
-def get_load_env() -> dict[str, str]:
+def normalize_input_base(value: str) -> str:
+    normalized = value.rstrip("/")
+    if not normalized:
+        raise ValueError("input base must not be empty")
+    return normalized
+
+
+def get_load_env(
+    input_base: str | None = None,
+    num_partitions: int | None = None,
+    batch_size: int | None = None,
+) -> dict[str, str]:
     config = {}
     missing = []
 
@@ -557,6 +585,18 @@ def get_load_env() -> dict[str, str]:
             missing.append(name)
         else:
             config[name] = value.rstrip("/")
+
+    env_base = os.environ.get("DATAGEN_LOAD_BASE_URI")
+    if input_base:
+        config["DATAGEN_LOAD_BASE_URI"] = normalize_input_base(input_base)
+        config["DATAGEN_LOAD_PREFIX"] = ""
+    elif env_base:
+        config["DATAGEN_LOAD_BASE_URI"] = normalize_input_base(env_base)
+        config["DATAGEN_LOAD_PREFIX"] = os.environ.get(
+            "DATAGEN_LOAD_PREFIX", ""
+        ).strip("/")
+    else:
+        missing.append("DATAGEN_LOAD_BASE_URI")
 
     if missing:
         logger.error("Missing required environment variable(s): %s", ", ".join(missing))
@@ -571,12 +611,15 @@ def get_load_env() -> dict[str, str]:
     config["DATAGEN_TARGET_SCHEMA"] = os.environ.get(
         "DATAGEN_TARGET_SCHEMA", config["DATAGEN_TARGET_DB_USER"]
     )
-    config["DATAGEN_LOAD_PREFIX"] = os.environ.get("DATAGEN_LOAD_PREFIX", "").strip("/")
-    config["DATAGEN_JDBC_NUM_PARTITIONS"] = os.environ.get(
-        "DATAGEN_JDBC_NUM_PARTITIONS", DEFAULT_NUM_PARTITIONS
+    config["DATAGEN_JDBC_NUM_PARTITIONS"] = str(
+        num_partitions if num_partitions is not None else os.environ.get(
+            "DATAGEN_JDBC_NUM_PARTITIONS", DEFAULT_NUM_PARTITIONS
+        )
     )
-    config["DATAGEN_JDBC_BATCH_SIZE"] = os.environ.get(
-        "DATAGEN_JDBC_BATCH_SIZE", DEFAULT_BATCH_SIZE
+    config["DATAGEN_JDBC_BATCH_SIZE"] = str(
+        batch_size if batch_size is not None else os.environ.get(
+            "DATAGEN_JDBC_BATCH_SIZE", DEFAULT_BATCH_SIZE
+        )
     )
     config["DATAGEN_JDBC_READ_TIMEOUT_MS"] = os.environ.get(
         "DATAGEN_JDBC_READ_TIMEOUT_MS", DEFAULT_READ_TIMEOUT_MS
@@ -600,6 +643,74 @@ def load_specs(spark: SparkSession, path: str) -> dict:
     except Exception as exc:
         logger.error("Failed to read specs %s: %s", path, exc)
         sys.exit(1)
+
+
+def _local_artifact_path(uri: str) -> str | None:
+    parsed = urlsplit(uri)
+    if not parsed.scheme:
+        return uri
+    if parsed.scheme == "file" and parsed.netloc in {"", "localhost"}:
+        return unquote(parsed.path)
+    return None
+
+
+def read_exact_json_object(spark: SparkSession, uri: str) -> dict:
+    local_path = _local_artifact_path(uri)
+    try:
+        if local_path is not None:
+            with open(local_path, encoding="utf-8") as handle:
+                parsed = json.load(handle)
+        else:
+            jvm = spark._jvm
+            path = jvm.org.apache.hadoop.fs.Path(uri)
+            fs = path.getFileSystem(spark._jsc.hadoopConfiguration())
+            if not fs.exists(path) or fs.getFileStatus(path).isDirectory():
+                raise ValueError(f"expected one JSON object at {uri!r}")
+            stream = fs.open(path)
+            try:
+                text = jvm.org.apache.commons.io.IOUtils.toString(
+                    stream, jvm.java.nio.charset.StandardCharsets.UTF_8
+                )
+            finally:
+                stream.close()
+            parsed = json.loads(text)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"failed to read JSON object {uri!r}: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"JSON artifact {uri!r} must contain an object")
+    return parsed
+
+
+def validation_table_inventory(
+    report: dict, expected_product: str, input_base: str
+) -> list[str]:
+    if report.get("schema_version") != 2:
+        raise ValueError("validation report schema_version must be 2")
+    verdict = report.get("verdict")
+    if verdict not in {"PASS", "PARTIAL"}:
+        raise ValueError("validation report verdict must be PASS or PARTIAL")
+    counts = report.get("counts")
+    error_count = counts.get("error") if isinstance(counts, dict) else None
+    if isinstance(error_count, bool) or not isinstance(error_count, int):
+        raise ValueError("validation report counts.error must be an integer")
+    if error_count != 0:
+        raise ValueError("validation report contains ERROR findings")
+    if report.get("product") != expected_product:
+        raise ValueError("validation report product does not match --validation-product")
+    resolved_input = report.get("resolved_input")
+    if not isinstance(resolved_input, str) or normalize_input_base(
+        resolved_input
+    ) != normalize_input_base(input_base):
+        raise ValueError("validation report resolved_input does not match input base")
+    inventory = report.get("table_inventory")
+    if not isinstance(inventory, list) or not inventory:
+        raise ValueError("validation report table_inventory must be a nonempty list")
+    if any(not isinstance(table, str) or not table.strip() for table in inventory):
+        raise ValueError("validation report table_inventory must contain nonempty strings")
+    normalized = [table_path_name(table.strip()).upper() for table in inventory]
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("validation report table_inventory must contain unique tables")
+    return [table.strip() for table in inventory]
 
 
 def table_path_name(table: str) -> str:
@@ -679,6 +790,20 @@ def build_load_path(config: dict[str, str], table: str) -> str:
     return "/".join(path_parts)
 
 
+def resolved_input_uri(config: dict[str, str]) -> str:
+    parts = [config["DATAGEN_LOAD_BASE_URI"]]
+    if config["DATAGEN_LOAD_PREFIX"]:
+        parts.append(config["DATAGEN_LOAD_PREFIX"])
+    return normalize_input_base("/".join(parts))
+
+
+def require_expected_target_schema(actual: str, expected: str) -> str:
+    actual_normalized = validate_identifier(actual)
+    if actual_normalized != validate_identifier(expected):
+        raise ValueError("DATAGEN_TARGET_SCHEMA does not match --expected-target-schema")
+    return actual_normalized
+
+
 def pk_cols_for(specs: dict, table: str) -> list[str]:
     entry = specs.get(table_path_name(table).upper(), {})
     return list(entry.get("pk_cols", []))
@@ -704,8 +829,9 @@ def topo_sort_for_load(specs: dict, tables: list[str]) -> list[str]:
     thus carrying no FK metadata) keep their original relative order. Only the
     parents that are themselves in the load set are considered, so an FK to a
     table that isn't being loaded (e.g. a static/code parent) imposes no
-    constraint. Self-references are ignored; a dependency cycle is broken by
-    emitting the rest in input order, so every input table is returned once.
+    constraint. Known null-on-insert self-references are ignored; every other
+    self-reference or inter-table dependency cycle is rejected because no safe
+    parent-first insert order exists.
 
     Assumes ``tables`` is already de-duplicated (the callers — ``parse_tables``
     and the unique ``specs`` keys — guarantee this); two strings normalizing to
@@ -717,8 +843,21 @@ def topo_sort_for_load(specs: dict, tables: list[str]) -> list[str]:
     for t in tables:
         deps: set[str] = set()
         for fk in _fk_list(specs.get(norm[t], {})):
-            parent = (fk.get("parent_table") or "").upper()
-            if parent and parent != norm[t] and parent in present:
+            parent = table_path_name(str(fk.get("parent_table") or "")).upper()
+            if parent == norm[t]:
+                nullable_self_refs = {
+                    column.upper()
+                    for column in NULL_ON_INSERT.get(norm[t], ())
+                }
+                self_ref_columns = {
+                    str(column).upper() for column in (fk.get("columns") or ())
+                }
+                if not self_ref_columns or not self_ref_columns <= nullable_self_refs:
+                    raise ValueError(
+                        f"Unsupported self-referencing FK in load inventory: {norm[t]}"
+                    )
+                continue
+            if parent and parent in present:
                 deps.add(parent)
         parents[t] = deps
 
@@ -732,9 +871,9 @@ def topo_sort_for_load(specs: dict, tables: list[str]) -> list[str]:
                 emitted.add(norm[t])
                 remaining.pop(i)
                 break
-        else:  # only cyclic tables left -> emit them in input order
-            result.extend(remaining)
-            break
+        else:
+            cycle = ", ".join(table_path_name(table).upper() for table in remaining)
+            raise ValueError(f"Inter-table foreign-key cycle in load inventory: {cycle}")
     return result
 
 
@@ -742,11 +881,11 @@ def resolve_load_tables(specs: dict, requested: list[str] | None) -> list[str]:
     if requested:
         result = []
         for table in requested:
+            normalized = table_path_name(table).upper()
+            if normalized not in specs:
+                raise ValueError(f"Inventory table {table!r} is absent from specs")
             if is_static(specs, table):
-                logger.info("Skipping static table %s", table)
-                continue
-            if table_path_name(table).upper() not in specs:
-                logger.info("Table %s not in specs; treating as non-static", table)
+                raise ValueError(f"Inventory table {table!r} is marked static")
             result.append(table)
     else:
         result = [name for name, entry in specs.items() if not entry.get("static")]
@@ -757,6 +896,18 @@ def resolve_load_tables(specs: dict, requested: list[str] | None) -> list[str]:
     # Load parents before children so synthetic FK rows never reference a
     # synthetic parent that hasn't been appended yet (ORA-02291).
     return topo_sort_for_load(specs, result)
+
+
+def require_inventory_target_schema(tables: list[str], target_schema: str) -> None:
+    expected = validate_identifier(target_schema)
+    for table in tables:
+        if "." not in table:
+            continue
+        owner, _ = table_owner_and_name(expected, table)
+        if owner != expected:
+            raise ValueError(
+                f"Inventory table {table!r} targets owner {owner}, expected {expected}"
+            )
 
 
 def guard_applies(pk_cols: list[str], pk_is_numeric: bool) -> bool:
@@ -1098,17 +1249,68 @@ def load_tables(
         sys.exit(1)
 
 
-def manifest_path(config: dict[str, str], run_id: str) -> str:
-    return f"{config['DATAGEN_LOAD_BASE_URI']}/_load_manifests/{run_id}"
+def manifest_transformations(table: str, columns: list[str]) -> list[dict]:
+    table_name = table_path_name(table).upper()
+    actual = {column.upper(): column for column in columns}
+    transformations = []
+    nulled = [actual[column] for column in NULL_ON_INSERT.get(table_name, [])
+              if column in actual]
+    if nulled:
+        transformations.append({
+            "kind": "nullify-self-reference",
+            "table": table,
+            "columns": nulled,
+        })
+    audit = oracle_audit_columns(table, columns)
+    if audit:
+        expressions = {
+            column: (
+                "TO_CHAR(DATAGEN_CLOCK.INSERTED_AT, 'YYYYMMDDHH24MISSFF2')"
+                if kind == "formatted" else "DATAGEN_CLOCK.INSERTED_AT"
+            )
+            for column, kind in audit.items()
+        }
+        transformations.append({
+            "kind": "oracle-audit-substitution",
+            "table": table,
+            "columns": expressions,
+        })
+    return transformations
 
 
-def build_manifest(run_id: str, created: str, target_schema: str, entries: list[dict]) -> dict:
-    return {
+def build_manifest(
+    *,
+    run_id: str,
+    product: str,
+    validation_product: str,
+    input_uri: str,
+    validation_report_uri: str,
+    pipeline_manifest_uri: str,
+    previous_load_manifest: str | None,
+    created_utc: str,
+    target_schema: str,
+    tables: list[str],
+    entries: list[dict],
+    transformations: list[dict],
+) -> dict:
+    manifest = {
+        "schema_version": 1,
+        "kind": "load-attempt",
         "run_id": run_id,
-        "created_utc": created,
-        "target_schema": target_schema,
+        "product": product,
+        "validation_product": validation_product,
+        "input_uri": normalize_input_base(input_uri),
+        "validation_report_uri": validation_report_uri,
+        "pipeline_manifest_uri": pipeline_manifest_uri,
+        "created_utc": created_utc,
+        "target_schema": validate_identifier(target_schema),
+        "ordered_tables": list(tables),
         "tables": entries,
+        "transformations": transformations,
     }
+    if previous_load_manifest is not None:
+        manifest["previous_load_manifest"] = previous_load_manifest
+    return manifest
 
 
 def capture_manifest_entries(
@@ -1118,67 +1320,113 @@ def capture_manifest_entries(
     specs: dict,
     target_schema: str,
     tables: list[str],
-) -> list[dict]:
+    limit: int | None = None,
+) -> tuple[list[dict], list[dict]]:
+    from pyspark.sql import functions as F
     from pyspark.sql.types import NumericType
 
     entries = []
+    transformations = []
     for table in tables:
         owner, table_name = table_owner_and_name(target_schema, table)
         pk_cols = pk_cols_for(specs, table)
-        pk_col, max_before, rollbackable = None, None, False
+        df = spark.read.parquet(build_load_path(config, table_path_name(table)))
+        if limit is not None:
+            df = df.limit(limit)
+        expected_rows = df.count()
+        pk_col, synthetic_min, synthetic_max, rollbackable = None, None, None, False
         if len(pk_cols) == 1:
-            schema = spark.read.parquet(
-                build_load_path(config, table_path_name(table))
-            ).schema
-            col_map = {f.name.upper(): f for f in schema.fields}
+            col_map = {field.name.upper(): field for field in df.schema.fields}
             field = col_map.get(pk_cols[0].upper())
             if field is not None and isinstance(field.dataType, NumericType):
-                rollbackable = True
                 pk_col = validate_identifier(pk_cols[0])
-                rows = read_rows(
-                    spark,
-                    properties,
-                    f"SELECT MAX({pk_col}) AS M "
-                    f"FROM {validate_identifier(owner)}.{validate_identifier(table_name)}",
-                )
-                max_before = int(rows[0][0]) if rows and rows[0][0] is not None else None
+                bounds = df.agg(F.min(field.name), F.max(field.name)).first()
+                synthetic_min = normalize_pk_bound(bounds[0])
+                synthetic_max = normalize_pk_bound(bounds[1])
+                if expected_rows and (synthetic_min is None or synthetic_max is None):
+                    raise ValueError(f"Could not profile numeric PK bounds for {table}")
+                if expected_rows and any(
+                    isinstance(bound, bool) or not isinstance(bound, int)
+                    for bound in (synthetic_min, synthetic_max)
+                ):
+                    raise ValueError(f"Numeric PK bounds for {table} must be integral")
+                rollbackable = expected_rows > 0
+        transformations.extend(manifest_transformations(table, df.columns))
         entries.append(
             {
                 "table": table,
                 "owner": owner,
                 "name": table_name,
+                "expected_rows": expected_rows,
                 "pk_col": pk_col,
-                "max_pk_before": max_before,
+                "synthetic_pk_min": synthetic_min,
+                "synthetic_pk_max": synthetic_max,
                 "rollbackable": rollbackable,
             }
         )
-    return entries
+    return entries, transformations
 
 
-def write_manifest(spark: SparkSession, config: dict[str, str], run_id: str, manifest: dict) -> str:
-    path = manifest_path(config, run_id)
-    spark.sparkContext.parallelize([json.dumps(manifest)], 1).saveAsTextFile(path)
-    return path
+def write_manifest(spark: SparkSession, uri: str, manifest: dict) -> str:
+    text = json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n"
+    local_path = _local_artifact_path(uri)
+    if local_path is not None:
+        path = Path(local_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex}")
+        try:
+            with open(temporary, "x", encoding="ascii", newline="\n") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.link(temporary, path)
+            except FileExistsError as exc:
+                raise ValueError(f"Load manifest already exists at {uri!r}") from exc
+        finally:
+            temporary.unlink(missing_ok=True)
+        return uri
+
+    jvm = spark._jvm
+    path = jvm.org.apache.hadoop.fs.Path(uri)
+    fs = path.getFileSystem(spark._jsc.hadoopConfiguration())
+    stream = fs.create(path, False)
+    try:
+        stream.write(bytearray(text.encode("ascii")))
+    finally:
+        stream.close()
+    return uri
 
 
 def main() -> None:
     args = parse_arguments()
-    config = get_load_env()
+    config = get_load_env(args.input_base, args.num_partitions, args.batch_size)
     spark = create_spark_session("DataGenLoadTables")
     try:
-        specs = load_specs(spark, args.specs)
-        requested = (
-            parse_tables(args.tables, args.tables_file)
-            if (args.tables or args.tables_file)
-            else None
+        input_uri = resolved_input_uri(config)
+        report = read_exact_json_object(spark, args.validation_report)
+        inventory = validation_table_inventory(
+            report, args.validation_product, input_uri
         )
-        tables = resolve_load_tables(specs, requested)
+        specs = load_specs(spark, args.specs)
+        if args.tables or args.tables_file:
+            selected = parse_tables(args.tables, args.tables_file)
+            selected_names = [table_path_name(table).upper() for table in selected]
+            inventory_names = [table_path_name(table).upper() for table in inventory]
+            if selected_names != inventory_names:
+                raise ValueError(
+                    "--tables/--tables-file must exactly match validation table_inventory"
+                )
         target_schema = config["DATAGEN_TARGET_SCHEMA"]
+        require_expected_target_schema(target_schema, args.expected_target_schema)
+        require_inventory_target_schema(inventory, target_schema)
+        tables = resolve_load_tables(specs, inventory)
         properties = build_connection_properties(config)
 
         if args.skip_validation:
-            logger.warning("Pre-flight validation SKIPPED (--skip-validation); relying on "
-                           "the target's disabled/relaxed constraints.")
+            logger.warning(
+                "Load pre-flight SKIPPED (--skip-validation); numeric PK guard remains enabled."
+            )
         else:
             logger.info("Pre-flight validation against %s ...", target_schema)
             violations = validate_load(
@@ -1193,11 +1441,24 @@ def main() -> None:
             return
 
         run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        entries = capture_manifest_entries(
-            spark, properties, config, specs, target_schema, tables)
+        entries, transformations = capture_manifest_entries(
+            spark, properties, config, specs, target_schema, tables, args.limit
+        )
         manifest = build_manifest(
-            run_id, datetime.now(timezone.utc).isoformat(), target_schema, entries)
-        path = write_manifest(spark, config, run_id, manifest)
+            run_id=run_id,
+            product=args.product,
+            validation_product=args.validation_product,
+            input_uri=input_uri,
+            validation_report_uri=args.validation_report,
+            pipeline_manifest_uri=args.pipeline_manifest_uri,
+            previous_load_manifest=args.previous_load_manifest,
+            created_utc=datetime.now(timezone.utc).isoformat(),
+            target_schema=target_schema,
+            tables=tables,
+            entries=entries,
+            transformations=transformations,
+        )
+        path = write_manifest(spark, args.manifest_uri, manifest)
         logger.info("Load run_id=%s; manifest written to %s", run_id, path)
 
         load_tables(spark, config, specs, tables,

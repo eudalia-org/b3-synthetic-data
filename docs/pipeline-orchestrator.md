@@ -1,15 +1,15 @@
 # Pipeline Orchestrator
 
-The first tracer runs immutable `engorda -> validate` branches through OCI Data Flow.
+The runner executes immutable `engorda -> validate -> load` branches through OCI Data Flow.
 Copy `docs/pipeline-config.example.json`, replace its OCI values, and keep one config
 file per environment. `products` may enable any nonempty subset of the registry; both
 `run` and `adopt-inputs` reject products not enabled in that environment's config.
-Each product may define persistent `engorda`/`validate` overrides. Precedence is:
+Each product may define persistent `engorda`/`validate`/`load` overrides. Precedence is:
 stage defaults, common CLI flags, product config, then explicit `--set`.
 
 ```json
 "lci": {
-  "capabilities": ["engorda", "validate"],
+  "capabilities": ["engorda", "validate", "load"],
   "engorda": {"n_instrumentos": 50000, "fator_k": 2}
 }
 ```
@@ -117,6 +117,57 @@ The first tracer supports `cdb_simplificado`, `cdb_resgate`, `cdb_escalonamento`
 `ccb_favcp`, `ccb_fapre`, `gravame`, `lastro`, and `direito_creditorio`. Validation
 accepts `PASS` or `PARTIAL` only when the report contains zero ERROR findings and its
 product/input lineage matches the branch exactly.
-The five CCB variants and `gravame` support `engorda -> validate`. `lastro` and
-`direito_creditorio` remain validate-only because the current generic engorda does not
-provide their required root/domain contract yet.
+The five CCB variants and `gravame` support `engorda -> validate -> load`. `lastro` and
+`direito_creditorio` support validation and load of adopted synthetic outputs, but not
+engorda because the generic generator does not provide their root/domain contract yet.
+
+## Load validated output
+
+Load is APPEND-only and requires explicit approval. It consumes the exact synthetic
+URI and validation report recorded by the branch. PASS and PARTIAL reports are
+accepted only with zero ERROR findings and matching product/input lineage. The loader
+does not repeat its separate Oracle preflight; it still applies the numeric PK guard.
+
+```powershell
+uv run --no-project .\run_pipeline.py run `
+  --config .\pipeline-qab.json `
+  --product cdb_resgate `
+  --from validate `
+  --to load `
+  --upstream-manifest .\adopted-inputs.json `
+  --approve-load
+```
+
+Use `--from load --to load` with the manifest from a prior successful validation to
+load later. Validation reports do not expire. `--dry-run` never requires approval and
+prints `approval_required=true` without making remote calls.
+
+Loads run one product at a time in `--product` order under the environment's renewable
+`load.lease_uri`. A failed product does not block later products, but no load receives
+an automatic whole-job retry. The runner never rolls back automatically.
+
+Before the first INSERT, the load application writes one immutable JSON manifest under
+`products/<product>/load/manifest.json`. It records the ordered validated table
+inventory, explicit write transformations, and each synthetic numeric PK range. A
+create-once claim under `load.claim_root` blocks an unnoticed second attempt. Resume a
+failed or unknown attempt explicitly:
+
+```powershell
+--resume-load-manifest cdb_resgate=oci://bucket@namespace/.../load/manifest.json `
+--approve-load
+```
+
+A known successful attempt cannot be resumed. Manual rollback accepts the exact
+manifest URI and deletes only its reserved synthetic PK ranges, in child-before-parent
+order:
+
+```powershell
+python scripts/rollback_load.py `
+  --manifest-uri oci://bucket@namespace/.../load/manifest.json `
+  --dry-run
+```
+
+If OCI submission fails before returning a Data Flow run ID, the claim is retained
+because the outcome is ambiguous. The runner also marks the environment load lease as
+quarantined and blocks subsequent loads without an automatic expiry. Inspect OCI runs
+before manually removing the claim and lease; the remote load may still be active.
