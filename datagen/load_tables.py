@@ -31,6 +31,7 @@ DEFAULT_NUM_PARTITIONS = "256"
 DEFAULT_BATCH_SIZE = "10000"
 DEFAULT_READ_TIMEOUT_MS = "600000"
 DEFAULT_ISOLATION_LEVEL = "READ_COMMITTED"
+OFFLINE_ARTIFACT_MARKER = "_DATAGEN_OFFLINE.json"
 PARQUET_REBASE_CONF = {
     "spark.sql.parquet.datetimeRebaseModeInRead": "CORRECTED",
     "spark.sql.parquet.int96RebaseModeInRead": "CORRECTED",
@@ -652,6 +653,27 @@ def _local_artifact_path(uri: str) -> str | None:
     if parsed.scheme == "file" and parsed.netloc in {"", "localhost"}:
         return unquote(parsed.path)
     return None
+
+
+def exact_object_exists(spark: SparkSession, uri: str) -> bool:
+    local_path = _local_artifact_path(uri)
+    if local_path is not None:
+        return Path(local_path).is_file()
+    jvm = spark._jvm
+    path = jvm.org.apache.hadoop.fs.Path(uri)
+    fs = path.getFileSystem(spark._jsc.hadoopConfiguration())
+    return fs.exists(path) and not fs.getFileStatus(path).isDirectory()
+
+
+def reject_offline_input(spark: SparkSession, input_uri: str) -> None:
+    marker_uri = f"{normalize_input_base(input_uri)}/{OFFLINE_ARTIFACT_MARKER}"
+    if not exact_object_exists(spark, marker_uri):
+        return
+    marker = read_exact_json_object(spark, marker_uri)
+    raise ValueError(
+        "Synthetic input is an offline no-oracle artifact and is not eligible "
+        f"for load: {marker!r}"
+    )
 
 
 def read_exact_json_object(spark: SparkSession, uri: str) -> dict:
@@ -1404,6 +1426,7 @@ def main() -> None:
     spark = create_spark_session("DataGenLoadTables")
     try:
         input_uri = resolved_input_uri(config)
+        reject_offline_input(spark, input_uri)
         report = read_exact_json_object(spark, args.validation_report)
         inventory = validation_table_inventory(
             report, args.validation_product, input_uri

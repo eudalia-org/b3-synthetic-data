@@ -43,3 +43,7 @@ _Avoid_: Pipeline manifest, validation report
 **Load claim**:
 The durable assertion that a synthetic product aggregate has already had a load attempt. A later attempt is a resume linked to the preceding load attempt manifest.
 _Avoid_: Reservation, environment lease
+
+**Offline synthetic artifact**:
+A synthetic product aggregate generated without Oracle admission, PK-floor checks, or official business-key allocation. It may be inspected or validated but is never eligible for Oracle load.
+_Avoid_: Dry run, loadable synthetic artifact

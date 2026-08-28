@@ -35,7 +35,12 @@ class TestEngordaPhaseCli:
             "reservations": "oci://bucket@ns/run/reservation.json",
             "synthetic": "oci://bucket@ns/run/synthetic/cdb_resgate",
         }
-        options = {"n_instrumentos": 10, "fator_k": 2, "seed": 7}
+        options = {
+            "n_instrumentos": 10,
+            "fator_k": 2,
+            "seed": 7,
+            "no_oracle": True,
+        }
 
         planned = engorda_tables.parse_arguments(
             run_pipeline.build_engorda_plan_argv(
@@ -57,8 +62,10 @@ class TestEngordaPhaseCli:
         )
 
         assert planned.phase == "plan"
+        assert planned.no_oracle is True
         assert planned.plan_uri == paths["selection_plan"]
         assert materialized.phase == "materialize"
+        assert materialized.no_oracle is True
         assert materialized.reservation_uri == paths["reservations"]
         assert materialized.output_uri == paths["synthetic"]
 
@@ -354,7 +361,112 @@ class TestEngordaArtifacts:
         assert plan["cod_if"] == {"count": 6, "oracle_type": 49}
         assert plan["cod_operacao"] == {"count": 0}
         assert plan["meu_numero"] == {"ordinal_count_demand": 0}
+        assert "oracle_access" not in plan
         assert engorda_tables._validate_plan_artifact(plan) == plan
+
+    def test_plan_builder_marks_no_oracle_artifact_as_offline(self):
+        profile = engorda_tables.get_product_profile("cdb_simplificado")
+        profile = dataclasses.replace(
+            profile,
+            business_keys=dataclasses.replace(profile.business_keys, operation=None),
+        )
+
+        plan = engorda_tables._build_engorda_plan(
+            config={
+                "DATAGEN_RAW_BASE_URI": "oci://raw@ns/run/RAW",
+                "DATAGEN_RAW_PREFIX": "",
+                "DATAGEN_SYNTHETIC_BASE_URI": "oci://out@ns",
+                "DATAGEN_CLONE_PREFIX": "run/synthetic/cdb",
+            },
+            specs_uri="oci://cfg@ns/spec.json",
+            spec_sha256="a" * 64,
+            product_profile=profile,
+            valores=[10],
+            fator_k=1,
+            seed=7,
+            engorda_ts=datetime(2026, 8, 18, 10, 0),
+            controle_operacional_date=date(2026, 8, 18),
+            tipo_derivado=49,
+            planos={
+                "INSTRUMENTO_FINANCEIRO": engorda_tables.PlanoTabela(
+                    "INSTRUMENTO_FINANCEIRO", ("NUM_IF",)
+                )
+            },
+            lotes={"INSTRUMENTO_FINANCEIRO": type(
+                "Frame", (), {"count": lambda _self: 1}
+            )()},
+            faltantes_uri=None,
+            query_num_if_uri="oci://cfg@ns/queries_produtos.sql",
+            selected_lote=self._selected_lote(),
+            no_oracle=True,
+        )
+
+        assert plan["oracle_access"] == "disabled"
+        assert engorda_tables._validate_plan_artifact(plan) == plan
+
+    def test_offline_code_map_writes_deterministic_placeholders(
+        self, spark, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            engorda_tables,
+            "_iter_oracle_code_batches",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("offline map called Oracle")
+            ),
+        )
+        slots = spark.createDataFrame(
+            [(1, 100), (2, 101)], "ORDINAL long, NUM_IF_NOVO long"
+        )
+        path = str(tmp_path / "offline-codes")
+
+        mapping = engorda_tables._materialize_code_map(
+            spark,
+            slots,
+            code_kind="COD_IF",
+            generated_alias="COD_IF_GERADO",
+            out_path=path,
+            dry_run=False,
+            offline=True,
+            credentials=None,
+            batch_size=10,
+            engorda_date=date(2026, 8, 28),
+            policy=engorda_tables.get_product_profile(
+                "cdb_simplificado"
+            ).business_keys,
+        )
+
+        codes = [row.COD_IF_GERADO for row in mapping.orderBy("ORDINAL").collect()]
+        assert codes == ["SYN10000001", "SYN10000002"]
+
+    def test_materialize_offline_marker_records_load_prohibition(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            engorda_tables,
+            "_write_json_artifact",
+            lambda _spark, uri, payload: captured.update(uri=uri, payload=payload),
+        )
+
+        engorda_tables._write_offline_artifact_marker(
+            object(),
+            "oci://bucket@ns/run/synthetic/cdb",
+            "cdb_resgate",
+            {"plan_id": "plan-123"},
+        )
+
+        assert captured == {
+            "uri": (
+                "oci://bucket@ns/run/synthetic/cdb/"
+                f"{engorda_tables.OFFLINE_ARTIFACT_MARKER}"
+            ),
+            "payload": {
+                "artifact_type": "datagen_offline_synthetic",
+                "schema_version": 1,
+                "product": "cdb_resgate",
+                "oracle_access": "disabled",
+                "load_eligible": False,
+                "plan_id": "plan-123",
+            },
+        }
 
     def test_plan_builder_uses_supplied_lote_counts_without_recounting_frames(
         self, spark

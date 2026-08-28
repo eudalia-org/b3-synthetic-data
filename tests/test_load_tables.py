@@ -581,6 +581,21 @@ class TestValidationReportGate:
             load_tables.read_exact_json_object(None, str(path))
 
 
+class TestOfflineInput:
+    def test_rejects_no_oracle_marker_before_load(self, tmp_path):
+        marker = tmp_path / load_tables.OFFLINE_ARTIFACT_MARKER
+        marker.write_text(json.dumps({
+            "artifact_type": "datagen_offline_synthetic",
+            "load_eligible": False,
+        }))
+
+        with pytest.raises(ValueError, match="not eligible for load"):
+            load_tables.reject_offline_input(None, str(tmp_path))
+
+    def test_accepts_input_without_offline_marker(self, tmp_path):
+        load_tables.reject_offline_input(None, str(tmp_path))
+
+
 class TestExpectedTargetSchema:
     def test_matches_case_insensitively(self):
         assert load_tables.require_expected_target_schema("cetip", "CETIP") == "CETIP"

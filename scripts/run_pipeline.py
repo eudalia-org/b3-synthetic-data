@@ -36,7 +36,7 @@ TRACER_STAGES = ("engorda", "validate", "load")
 OVERRIDE_KEYS = {
     "engorda": {
         "n_instrumentos", "fator_k", "seed", "specs", "meu_numero_prefix",
-        "query_num_if_sql",
+        "query_num_if_sql", "no_oracle",
     },
     "validate": {
         "fail_severity", "validate_against", "shape_baseline",
@@ -51,6 +51,7 @@ NODE_TERMINAL = {"SUCCEEDED", "FAILED", "BLOCKED", "CANCELLED"}
 MANIFEST_REPLACE_ATTEMPTS = 8
 MANIFEST_REPLACE_DELAY_SECONDS = 0.05
 MANIFEST_REPLACE_MAX_DELAY_SECONDS = 0.5
+OFFLINE_ARTIFACT_MARKER = "_DATAGEN_OFFLINE.json"
 
 RUN_ARGS_FLAG = "--arguments"
 PENDING_STATES = {"ACCEPTED", "IN_PROGRESS", "CANCELING", "STOPPING"}
@@ -1818,18 +1819,25 @@ def read_upstream_manifest(path: str | Path, environment: str) -> dict[str, Any]
 
 
 def _artifact_uri(manifest: dict[str, Any], name: str, product: str | None = None) -> str:
+    return _artifact_descriptor(manifest, name, product)["uri"]
+
+
+def _artifact_descriptor(
+    manifest: dict[str, Any], name: str, product: str | None = None
+) -> dict[str, Any]:
     try:
         artifact = manifest["artifacts"]
         if product is not None:
             artifact = artifact["products"][product]
         value = artifact[name]
-        uri = value["uri"] if isinstance(value, dict) else value
+        descriptor = dict(value) if isinstance(value, dict) else {"uri": value}
+        uri = descriptor["uri"]
     except (KeyError, TypeError) as exc:
         label = f"{product}.{name}" if product else name
         raise PipelineError(f"upstream manifest lacks required {label} lineage") from exc
     if not isinstance(uri, str) or not uri.startswith("oci://"):
         raise PipelineError(f"upstream {name} lineage must be an oci:// URI")
-    return uri
+    return descriptor
 
 
 def _positive(value: Any, name: str) -> int:
@@ -1901,6 +1909,11 @@ def build_engorda_plan_argv(
     ):
         if options.get(key) is not None:
             argv += [flag, str(options[key])]
+    if options.get("no_oracle") is not None:
+        if type(options["no_oracle"]) is not bool:
+            raise PipelineError("engorda.no_oracle must be boolean")
+        if options["no_oracle"]:
+            argv.append("--no-oracle")
     return argv
 
 
@@ -1932,6 +1945,11 @@ def build_engorda_materialize_argv(
         argv += ["--specs", str(options["specs"])]
     if options.get("query_num_if_sql") is not None:
         argv += ["--query-num-if-sql", str(options["query_num_if_sql"])]
+    if options.get("no_oracle") is not None:
+        if type(options["no_oracle"]) is not bool:
+            raise PipelineError("engorda.no_oracle must be boolean")
+        if options["no_oracle"]:
+            argv.append("--no-oracle")
     return argv
 
 
@@ -2042,6 +2060,8 @@ def build_pipeline_plan(
             + ", ".join(unavailable_inputs)
         )
     stages = selected_stages(args.from_stage, args.to_stage)
+    if getattr(args, "no_oracle", False) and "engorda" not in stages:
+        raise PipelineError("--no-oracle requires an interval containing engorda")
     for product in products:
         capabilities = config["products"][product]["capabilities"]
         unavailable = [stage for stage in stages if stage not in capabilities]
@@ -2061,6 +2081,8 @@ def build_pipeline_plan(
         value = getattr(args, name, None)
         if value is not None:
             base_engorda_options[name] = value
+    if getattr(args, "no_oracle", False):
+        base_engorda_options["no_oracle"] = True
     overrides = parse_stage_overrides(args.set_values)
     resume_manifests = parse_resume_load_manifests(
         getattr(args, "resume_load_manifest", ())
@@ -2106,8 +2128,16 @@ def build_pipeline_plan(
         artifacts["products"][product] = product_artifacts
         dependency: str | None = None
         synthetic_uri: str | None = None
+        synthetic_descriptor: dict[str, Any] | None = None
         validation_report_uri: str | None = None
         if "engorda" in stages:
+            no_oracle = engorda_options.get("no_oracle", False)
+            if type(no_oracle) is not bool:
+                raise PipelineError(f"product {product} engorda.no_oracle must be boolean")
+            if no_oracle and "load" in stages:
+                raise PipelineError(
+                    f"product {product} uses no_oracle and is not eligible for load"
+                )
             query_num_if_sql = engorda_options.get("query_num_if_sql")
             if not isinstance(query_num_if_sql, str) or not query_num_if_sql.startswith(
                 "oci://"
@@ -2121,6 +2151,11 @@ def build_pipeline_plan(
                     "uri": paths[name],
                     "producer": "current_run",
                 }
+            synthetic_descriptor = product_artifacts["synthetic"]
+            synthetic_descriptor.update({
+                "oracle_access": "disabled" if no_oracle else "live",
+                "load_eligible": not no_oracle,
+            })
             plan_id = f"{product}.engorda.plan"
             reserve_id = f"{product}.engorda.reserve"
             materialize_id = f"{product}.engorda.materialize"
@@ -2168,15 +2203,13 @@ def build_pipeline_plan(
             }
             dependency = materialize_id
         if "validate" in stages:
-            synthetic_uri = (
-                paths["synthetic"]
-                if dependency
-                else _artifact_uri(upstream, "synthetic", product)
-            )
-            product_artifacts["synthetic"] = {
-                "uri": synthetic_uri,
-                "producer": "current_run" if dependency else "upstream",
-            }
+            if synthetic_descriptor is None:
+                synthetic_descriptor = _artifact_descriptor(
+                    upstream, "synthetic", product
+                )
+                synthetic_descriptor["producer"] = "upstream"
+            synthetic_uri = synthetic_descriptor["uri"]
+            product_artifacts["synthetic"] = dict(synthetic_descriptor)
             product_artifacts["validation_report"] = {
                 "uri": paths["validation_report"],
                 "producer": "current_run",
@@ -2200,11 +2233,19 @@ def build_pipeline_plan(
             validation_report_uri = paths["validation_report"]
         if "load" in stages:
             if synthetic_uri is None:
-                synthetic_uri = _artifact_uri(upstream, "synthetic", product)
-                product_artifacts["synthetic"] = {
-                    "uri": synthetic_uri,
-                    "producer": "upstream",
-                }
+                synthetic_descriptor = _artifact_descriptor(
+                    upstream, "synthetic", product
+                )
+                synthetic_descriptor["producer"] = "upstream"
+                synthetic_uri = synthetic_descriptor["uri"]
+                product_artifacts["synthetic"] = dict(synthetic_descriptor)
+            if synthetic_descriptor is not None and (
+                synthetic_descriptor.get("load_eligible") is False
+                or synthetic_descriptor.get("oracle_access") == "disabled"
+            ):
+                raise PipelineError(
+                    f"product {product} synthetic artifact is offline and not eligible for load"
+                )
             if validation_report_uri is None:
                 validation_report_uri = _artifact_uri(
                     upstream, "validation_report", product
@@ -2275,9 +2316,11 @@ def build_pipeline_plan(
             "reuse": "forbidden",
         },
         "load_contract": {
-            "lease_uri": config["load"]["lease_uri"],
-            "lease_ttl_seconds": config["load"]["lease_ttl_seconds"],
-            "claim_root": config["load"]["claim_root"],
+            "lease_uri": config.get("load", {}).get("lease_uri"),
+            "lease_ttl_seconds": config.get("load", {}).get(
+                "lease_ttl_seconds", 300
+            ),
+            "claim_root": config.get("load", {}).get("claim_root"),
             "approval_required": "load" in stages,
             "approved": bool(getattr(args, "approve_load", False)),
             "mode": "APPEND",
@@ -2495,6 +2538,15 @@ def _validate_resume_chain(
 def _prepare_load_attempt(
     node: dict[str, Any], plan: dict[str, Any], adapter: Any, auth: dict[str, str]
 ) -> dict[str, Any]:
+    offline_marker_uri = uri_join(node["input_uri"], OFFLINE_ARTIFACT_MARKER)
+    if adapter.uri_exists(offline_marker_uri, auth=auth):
+        marker = adapter.read_json(offline_marker_uri, auth=auth)
+        return {
+            "accepted": False,
+            "offline_artifact": True,
+            "offline_marker_uri": offline_marker_uri,
+            "marker": marker,
+        }
     report = adapter.read_json(node["validation_report_uri"], auth=auth)
     validation = _validation_gate(
         report,
@@ -3369,6 +3421,11 @@ def cli(context: click.Context) -> None:
 @click.option("--n-instrumentos", type=int)
 @click.option("--fator-k", type=int)
 @click.option("--seed", type=int)
+@click.option(
+    "--no-oracle",
+    is_flag=True,
+    help="Generate an offline synthetic artifact that is forbidden from load.",
+)
 @click.option(
     "--set",
     "set_values",

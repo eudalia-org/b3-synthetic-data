@@ -600,6 +600,7 @@ DEFAULT_SEED = 42
 MAPA_NUM_IF_TABLE = "MAPA_CLONE_NUM_IF"
 MAPA_COD_IF_TABLE = "MAPA_CLONE_COD_IF"
 MAPA_COD_OPERACAO_TABLE = "MAPA_CLONE_COD_OPERACAO"
+OFFLINE_ARTIFACT_MARKER = "_DATAGEN_OFFLINE.json"
 DEFAULT_ORACLE_CODE_BATCH_SIZE = 50_000
 MAX_MEU_NUMERO_ORDINAL = 9_999_999
 MEU_PREFIX_PATTERN = re.compile(r"^[1-9][0-9]{2}$")
@@ -732,6 +733,7 @@ class EngordaJob:
     anular_cols: Optional[Mapping[str, Sequence[str]]] = None
     oracle_code_batch_size: int = DEFAULT_ORACLE_CODE_BATCH_SIZE
     dry_run: bool = False
+    no_oracle: bool = False
     specs_uri: Optional[str] = None
     clone_prefix: Optional[str] = None
     # Confere (não define) o tipo derivado do lote. Ver _deriva_tipo_oracle.
@@ -5637,13 +5639,22 @@ def _join_code_chunks(slots: DataFrame, code_chunks: DataFrame,
 
 
 def _materialize_code_map(spark: SparkSession, slots: DataFrame, *, code_kind: str,
-                          generated_alias: str, out_path: Optional[str], dry_run: bool,
-                          credentials: Optional[Tuple[str, str, str]], batch_size: int,
-                          engorda_date: date, policy: BusinessKeyPolicy) -> DataFrame:
+                           generated_alias: str, out_path: Optional[str], dry_run: bool,
+                           credentials: Optional[Tuple[str, str, str]], batch_size: int,
+                           engorda_date: date, policy: BusinessKeyPolicy,
+                           offline: bool = False) -> DataFrame:
     """Anexa códigos por ordinal, mantendo no driver somente o lote corrente."""
     total = slots.count()
-    if dry_run:
-        return slots.withColumn(generated_alias, _dry_placeholder(code_kind, policy))
+    if dry_run or offline:
+        mapping = slots.withColumn(
+            generated_alias, _dry_placeholder(code_kind, policy)
+        )
+        if offline:
+            if out_path is None:
+                raise ValueError("destino é obrigatório para mapa de código offline")
+            mapping.write.mode("overwrite").parquet(out_path)
+            return spark.read.parquet(out_path)
+        return mapping
     if out_path is None or credentials is None:
         raise ValueError("destino e credenciais são obrigatórios fora do dry-run")
     jdbc_url, user, password = credentials
@@ -5696,6 +5707,26 @@ def _attach_generated_code(df: DataFrame, mapping: DataFrame, *, pk_col: str,
         if c == code_col else F.col(f"d.{c}").alias(c)
         for c in df.columns
     ])
+
+
+def _write_offline_artifact_marker(
+    spark: SparkSession,
+    output_base: str,
+    product: str,
+    plan: Optional[Mapping[str, Any]],
+) -> None:
+    _write_json_artifact(
+        spark,
+        f"{output_base}/{OFFLINE_ARTIFACT_MARKER}",
+        {
+            "artifact_type": "datagen_offline_synthetic",
+            "schema_version": 1,
+            "product": product,
+            "oracle_access": "disabled",
+            "load_eligible": False,
+            "plan_id": plan.get("plan_id") if plan is not None else None,
+        },
+    )
 
 
 def _generate_meu_numeros(
@@ -6540,6 +6571,7 @@ def _build_engorda_plan(
     prazo_vencimento_dias: Optional[int] = None,
     anular_cols: Optional[Mapping[str, Sequence[str]]] = None,
     meu_numero_prefix: Optional[str] = None,
+    no_oracle: bool = False,
 ) -> dict[str, Any]:
     source_counts = (
         {table: int(count) for table, count in lote_counts.items()}
@@ -6629,6 +6661,8 @@ def _build_engorda_plan(
                if meu_numero_prefix is not None else {}),
         },
     }
+    if no_oracle:
+        body["oracle_access"] = "disabled"
     return {**body, "plan_id": _plan_id(body)}
 
 
@@ -6662,6 +6696,8 @@ def _validate_plan_artifact(plan: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("artefato de plano possui spec_sha256 inválido")
     if not isinstance(plan["tables"], dict) or not plan["tables"]:
         raise ValueError("artefato de plano precisa conter tables")
+    if plan.get("oracle_access", "live") not in {"live", "disabled"}:
+        raise ValueError("artefato de plano possui oracle_access inválido")
     selected_lote = _validate_selected_lote_descriptor(
         plan["selected_lote"], expected_tables=set(plan["tables"])
     )
@@ -6817,8 +6853,9 @@ def executa_clonagem(spark, config, spec: dict, *,
                       anular_cols: Optional[Mapping[str, Sequence[str]]] = None,
                       oracle_code_batch_size: int = DEFAULT_ORACLE_CODE_BATCH_SIZE,
                       tipo_oracle: Optional[int] = None,
-                      somente_ativos: bool = True,
-                      dry_run: bool = False,
+                       somente_ativos: bool = True,
+                       dry_run: bool = False,
+                       no_oracle: bool = False,
                       phase: str = "all",
                       plan_uri: Optional[str] = None,
                        planned_artifact: Optional[Mapping[str, Any]] = None,
@@ -6872,6 +6909,11 @@ def executa_clonagem(spark, config, spec: dict, *,
     if phase == "materialize":
         if planned_artifact is None or reservation is None:
             raise ValueError("materialize exige plano e reserva validados")
+        planned_no_oracle = planned_artifact.get("oracle_access", "live") == "disabled"
+        if no_oracle != planned_no_oracle:
+            raise ValueError(
+                "materialize --no-oracle diverge do oracle_access congelado no plano"
+            )
         meu_reservation = reservation.get("meu_numero") or {}
         requested_meu_numero_prefix = (
             planned_artifact.get("meu_numero") or {}
@@ -6888,7 +6930,7 @@ def executa_clonagem(spark, config, spec: dict, *,
             "Produto %s não gera meu-número; prefixo informado será ignorado.",
             product_profile.name,
         )
-    credentials = None if dry_run else _oracle_credentials(config)
+    credentials = None if (dry_run or no_oracle) else _oracle_credentials(config)
     anular_cols = _merge_nullification_mappings(
         product_profile.integrity.nullify_mapping(), anular_cols
     )
@@ -6906,8 +6948,8 @@ def executa_clonagem(spark, config, spec: dict, *,
         elif controle_operacional_date is None:
             controle_operacional_date = engorda_ts.date()
             logger.warning(
-                "Dry-run sem --data-controle-operacional: usando a data da "
-                "engorda (%s) apenas para simulação.", controle_operacional_date)
+                "Execução sem Oracle e sem --data-controle-operacional: usando "
+                "a data da engorda (%s).", controle_operacional_date)
         logger.info("Timestamp de engorda: %s; data operacional: %s "
                     "(prazo de %s: %s)",
                     engorda_ts.isoformat(sep=" "), controle_operacional_date,
@@ -7023,8 +7065,8 @@ def executa_clonagem(spark, config, spec: dict, *,
             )
     elif credentials is None:
         logger.warning(
-            "Dry-run: admissão live de todas as FKs contra o Oracle não executada; "
-            "o resultado é estruturalmente válido, mas parcial quanto a drift."
+            "Sem Oracle: admissão live de todas as FKs não executada; o resultado "
+            "é offline e inelegível para load."
         )
         with _perf_timer("domain_query_selection", product=product_profile.name):
             valores = seleciona_instrumentos(
@@ -7177,6 +7219,7 @@ def executa_clonagem(spark, config, spec: dict, *,
             prazo_vencimento_dias=prazo_vencimento_dias,
             anular_cols=anular_cols,
             meu_numero_prefix=requested_meu_numero_prefix,
+            no_oracle=no_oracle,
         )
     if phase == "plan":
         with _perf_timer("plan_artifact_write", product=product_profile.name):
@@ -7306,7 +7349,7 @@ def executa_clonagem(spark, config, spec: dict, *,
             generated_alias="COD_IF_GERADO",
             out_path=(None if is_dry_run
                       else f"{output_base}/{MAPA_COD_IF_TABLE}"),
-            dry_run=is_dry_run, credentials=credentials,
+            dry_run=is_dry_run, offline=no_oracle, credentials=credentials,
             batch_size=oracle_code_batch_size,
             engorda_date=code_allocation_date, policy=business_policy)
         instrumentos = _attach_generated_code(
@@ -7330,7 +7373,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                 generated_alias="COD_OPERACAO_GERADO",
                 out_path=(None if is_dry_run
                           else f"{output_base}/{MAPA_COD_OPERACAO_TABLE}"),
-                dry_run=is_dry_run, credentials=credentials,
+                dry_run=is_dry_run, offline=no_oracle, credentials=credentials,
                 batch_size=oracle_code_batch_size,
                 engorda_date=code_allocation_date, policy=business_policy)
             operacoes = _attach_generated_code(
@@ -7350,7 +7393,7 @@ def executa_clonagem(spark, config, spec: dict, *,
 
         _validate_business_keys(instrumentos, operacoes, business_policy)
 
-        if (not is_dry_run and operation_policy is not None
+        if (not is_dry_run and not no_oracle and operation_policy is not None
                 and operation_policy.generate_meu_numero):
             if (credentials is None or meu_numero_prefix is None
                     or operacoes is None):
@@ -7381,6 +7424,13 @@ def executa_clonagem(spark, config, spec: dict, *,
                            F.col(K_COL).alias("K"),
                            F.col(f"new_{COL_NUM_IF}").alias("NUM_IF_NOVO")))
         escreve_tabela(spark, mapa_if, f"{output_base}/{MAPA_NUM_IF_TABLE}")
+        if no_oracle:
+            _write_offline_artifact_marker(
+                spark,
+                output_base,
+                product_profile.name,
+                current_plan,
+            )
 
     if dry_run:
         _prepare_outputs(None, True)
@@ -7404,7 +7454,13 @@ def executa_clonagem(spark, config, spec: dict, *,
                 time.perf_counter() - inicio, product_profile.name,
                 COL_NUM_TIPO_IF, tipo_derivado, len(valores), fator_k,
                 engorda_ts.isoformat(sep=" "),
-                "DRY-RUN (nada gravado)" if dry_run else f"gravado em {save_base}")
+                (
+                    "DRY-RUN (nada gravado)"
+                    if dry_run else (
+                        f"OFFLINE gravado em {save_base}"
+                        if no_oracle else f"gravado em {save_base}"
+                    )
+                ))
     for t in ordem:
         s = stats.get(t, {})
         logger.info("  %-32s lote=%-8s sinteticos=%-8s remap=%s datas=%s anuladas=%s",
@@ -7555,9 +7611,12 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
             and (not isinstance(job.controle_operacional_date, date)
                  or isinstance(job.controle_operacional_date, datetime))):
         raise ValueError("controle_operacional_date precisa ser date")
-    if (job.controle_operacional_date is not None and not job.dry_run
+    if (job.controle_operacional_date is not None
+            and not (job.dry_run or job.no_oracle)
             and job.phase != "materialize"):
-        raise ValueError("controle_operacional_date só pode ser informado no dry-run")
+        raise ValueError(
+            "controle_operacional_date só pode ser informado sem acesso Oracle"
+        )
     for field_name in (
         "poda_subtipo",
         "poda_cronograma_resgate",
@@ -7565,6 +7624,7 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
         "politica_estrita_operacao",
         "ajusta_fator_k",
         "dry_run",
+        "no_oracle",
         "somente_ativos",
     ):
         if type(getattr(job, field_name)) is not bool:
@@ -7602,7 +7662,7 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
         )
     logger.info(
         "Job produto=%s phase=%s query=%s specs=%s destino=%s tipo_oracle=%s "
-        "dry_run=%s",
+        "dry_run=%s no_oracle=%s",
         profile.name,
         job.phase,
         job.query_num_if_path or profile.query_filename,
@@ -7610,6 +7670,7 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
         clone_base_path(config),
         job.tipo_oracle if job.tipo_oracle is not None else "derivado do lote",
         job.dry_run,
+        job.no_oracle,
     )
 
     spark = create_spark_session(f"DataGenEngorda_{profile.name}")
@@ -7639,6 +7700,13 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
             )
             if planned_artifact["product"] != profile.name:
                 raise ValueError("produto do plano diverge do job")
+            planned_no_oracle = (
+                planned_artifact.get("oracle_access", "live") == "disabled"
+            )
+            if job.no_oracle != planned_no_oracle:
+                raise ValueError(
+                    "materialize --no-oracle diverge do oracle_access do plano"
+                )
             lineage = {
                 "raw_uri": _area(
                     config["DATAGEN_RAW_BASE_URI"], config.get("DATAGEN_RAW_PREFIX")
@@ -7710,6 +7778,7 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
             tipo_oracle=tipo_oracle,
             somente_ativos=job.somente_ativos,
             dry_run=job.dry_run,
+            no_oracle=job.no_oracle,
             phase=job.phase,
             plan_uri=job.plan_uri,
             planned_artifact=planned_artifact,
@@ -7941,6 +8010,15 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--dry-run", action="store_true",
                         help="Valida e loga; não grava nada.")
+    parser.add_argument(
+        "--no-oracle",
+        action="store_true",
+        help=(
+            "Gera e grava um artefato OFFLINE sem consultar/alocar no Oracle. "
+            "Usa placeholders determinísticos e marca o output como inelegível "
+            "para load."
+        ),
+    )
     parser.add_argument("--specs", default=None,
                         help="Override de DATAGEN_SPECS_URI (specs.json único). "
                              "É o spec que DEFINE quais tabelas são engordadas: "
@@ -8026,6 +8104,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         cod_if_pattern=args.cod_if_pattern,
         cod_if_dry_prefix=args.cod_if_dry_prefix,
         dry_run=args.dry_run,
+        no_oracle=args.no_oracle,
         specs_uri=args.specs,
         clone_prefix=args.clone_prefix,
         phase=args.phase,

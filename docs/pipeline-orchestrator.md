@@ -171,3 +171,25 @@ If OCI submission fails before returning a Data Flow run ID, the claim is retain
 because the outcome is ambiguous. The runner also marks the environment load lease as
 quarantined and blocks subsequent loads without an automatic expiry. Inspect OCI runs
 before manually removing the claim and lease; the remote load may still be active.
+
+## Generate without Oracle
+
+Use `--no-oracle` only for inspection/test artifacts. Engorda skips live FK admission,
+target PK floors, business-key allocators, and meu-numero collision checks. It writes
+deterministic placeholders and `_DATAGEN_OFFLINE.json`, while pipeline lineage records
+`oracle_access=disabled` and `load_eligible=false`.
+
+```powershell
+uv run --no-project .\run_pipeline.py run `
+  --config .\pipeline-qab.json `
+  --product cdb_resgate `
+  --from engorda `
+  --to engorda `
+  --upstream-manifest .\adopted-inputs.json `
+  --no-oracle
+```
+
+`--to engorda` is fully offline. Extending the interval to `validate` still allows the
+validator application to query Oracle; only engorda receives `--no-oracle`. An interval
+containing load is rejected. For one product in a multi-product run, use
+`--set cdb_resgate.engorda.no_oracle=true`.
