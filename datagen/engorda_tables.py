@@ -489,6 +489,70 @@ REFERENCIAS_CONTA: Tuple[Tuple[str, str], ...] = (
     ("OPERACAO", "NUM_CONTA_PARTICIPANTE_P1"),
     ("OPERACAO", "NUM_CONTA_PARTICIPANTE_P2"),
 )
+# ---------------------------------------------------------------------------
+# Política ESTRITA de operação (item 7) — SOMENTE cdb_simplificado.
+#
+# Restaura _strict_lookup_eligible_domain do
+# engorda_tables_old_cdb_simplificad0.py, a versão que passou 100% na validação
+# automática E na humana.
+#
+# A regra NÃO é "existe ao menos uma operação de registro" — disso o CTE
+# OPER_REGISTRO da query já cuida. A regra é:
+#     TODA operação do instrumento tem de ser registro válido.
+# Basta UMA operação fora do padrão para o instrumento inteiro sair do domínio.
+#
+# Sem ela, instrumentos com movimentação/resgate na história entram e o fecho
+# traz as operações extras junto. Num lote de 100 isso produziu:
+#     OPERACAO 111 (esperado 100)      DADO_OPERACAO 222 (esperado 200)
+#     LANCAMENTO / ESPECIFICACAO / ESPECIFICACAO_COMITENTE 111
+# e, por arrasto, os totais de valor que não fecham contra o IF e qtdResgatada
+# > 0 no TITULO de um produto que é só depósito.
+#
+# ESCOPO: o frozenset tem UM produto. Qualquer outro nem chama a função.
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Filtro de saldo de carteira (item 8) — SOMENTE cdb_simplificado.
+#
+# Restaura as duas entradas de FILTROS_FONTE do
+# engorda_tables_old_cdb_simplificad0.py:
+#     "CARTEIRA_COMITENTE":    QTD_CARTEIRA_COMITENTE    > 0
+#     "CARTEIRA_PARTICIPANTE": QTD_CARTEIRA_PARTICIPANTE > 0
+#
+# ATENÇÃO — isto NÃO é predicado de domínio e por isso NÃO cabe na query.
+# O antigo aplicava em _read_source, ou seja, descartava a LINHA de carteira
+# sem saldo, mantendo o instrumento. A query de queries_produtos.sql devolve só
+# NUM_IF; ela decide QUAIS instrumentos entram, não QUAIS linhas de cada tabela
+# são clonadas. As CTEs COM_IF/CPA_IF da query original são COUNT() de
+# relatório e não aparecem no SELECT final — não filtram nada.
+#
+# Consequência herdada do antigo: um instrumento cuja única carteira tenha
+# saldo zero fica SEM linha de carteira no sintético. As duas tabelas são
+# FOLHA no spec (ninguém as referencia), então remover linha não orfana nada.
+# ---------------------------------------------------------------------------
+PRODUTOS_COM_FILTRO_CARTEIRA_SALDO = frozenset({
+    'cdb_simplificado',
+})
+FILTRO_CARTEIRA_SALDO_POR_TABELA: Dict[str, str] = {
+    "CARTEIRA_COMITENTE": "QTD_CARTEIRA_COMITENTE",
+    "CARTEIRA_PARTICIPANTE": "QTD_CARTEIRA_PARTICIPANTE",
+}
+
+PRODUTOS_COM_POLITICA_ESTRITA_OPERACAO = frozenset({
+    'cdb_simplificado',
+})
+OPERACAO_TABELA = "OPERACAO"
+TIPO_OPER_OBJETO_SERV_TABELA = "TIPO_OPER_OBJETO_SERV"
+TIPO_OPERACAO_TABELA = "TIPO_OPERACAO"
+OPERACAO_OBJETO_SERVICO_CDB = "44"
+OPERACAO_COD_TIPO_REGISTRO = "1"
+OPERACAO_IND_IDENTIFICACAO = "S"
+COL_NUM_ID_TIPO_OPER_OBJETO_SERV = "NUM_ID_TIPO_OPER_OBJETO_SERV"
+COL_NUM_ID_TIPO_OPERACAO = "NUM_ID_TIPO_OPERACAO"
+COL_NUM_ID_OBJETO_SERVICO = "NUM_ID_OBJETO_SERVICO"
+COL_IND_DISPONIVEL_IDENTIFICACAO = "IND_DISPONIVEL_IDENTIFICACAO"
+COL_COD_TIPO_OPERACAO = "COD_TIPO_OPERACAO"
+OPERACAO_CONTAS_PONTA = ("NUM_CONTA_PARTICIPANTE_P1", "NUM_CONTA_PARTICIPANTE_P2")
+
 PRODUTOS_COM_PODA_CONTA = frozenset({
     "cdb_simplificado",
     "cdb_resgate",
@@ -655,6 +719,7 @@ class EngordaJob:
     poda_subtipo: bool = True
     poda_cronograma_resgate: bool = True
     poda_conta: bool = True
+    politica_estrita_operacao: bool = True
     ajusta_fator_k: bool = True
     somente_ativos: bool = True
     anular_cols: Optional[Mapping[str, Sequence[str]]] = None
@@ -3227,6 +3292,126 @@ def _contas_elegiveis(spark, config) -> Optional[DataFrame]:
     return elegiveis.select("__conta").dropDuplicates()
 
 
+def _num_if_operacao_nao_registro(spark, config,
+                                  dominio: DataFrame) -> DataFrame:
+    """NUM_IF que tem ALGUMA operação fora do registro válido (item 7).
+
+    Réplica de _strict_lookup_eligible_domain do código antigo de
+    cdb_simplificado. Operação válida = rota com objeto de serviço 44,
+    identificação habilitada e COD_TIPO_OPERACAO '1', MAIS as duas contas de
+    ponta preenchidas, existentes, em situação 1 e com código no formato
+    .40/.10.
+
+    NULL conta como INVÁLIDO — o antigo usava ~coalesce(valid_op, False). Com
+    left join, rota ou conta inexistente deixa colunas nulas; sem o coalesce o
+    ~ devolveria NULL e a linha escaparia do filtro.
+
+    Tolerante: fonte ilegível ou coluna ausente devolve poda VAZIA com WARNING.
+    """
+    vazio = dominio.select(COL_NUM_IF).limit(0)
+    fontes: Dict[str, DataFrame] = {}
+    for tabela in (OPERACAO_TABELA, TIPO_OPER_OBJETO_SERV_TABELA,
+                   TIPO_OPERACAO_TABELA, CONTA_PARTICIPANTE_TABELA):
+        try:
+            fontes[tabela] = _read_source(spark, config, tabela)
+        except Exception as exc:
+            logger.warning(
+                "política estrita de operação: não li a fonte de %s (%s); poda "
+                "IGNORADA — o lote pode trazer operação fora do registro.",
+                tabela, exc)
+            return vazio
+
+    obrigatorias = (
+        (OPERACAO_TABELA, (COL_NUM_IF, COL_NUM_ID_TIPO_OPER_OBJETO_SERV,
+                           *OPERACAO_CONTAS_PONTA)),
+        (TIPO_OPER_OBJETO_SERV_TABELA, (COL_NUM_ID_TIPO_OPER_OBJETO_SERV,
+                                        COL_NUM_ID_OBJETO_SERVICO,
+                                        COL_NUM_ID_TIPO_OPERACAO,
+                                        COL_IND_DISPONIVEL_IDENTIFICACAO)),
+        (TIPO_OPERACAO_TABELA, (COL_NUM_ID_TIPO_OPERACAO, COL_COD_TIPO_OPERACAO)),
+        (CONTA_PARTICIPANTE_TABELA, (COL_NUM_CONTA_PARTICIPANTE,
+                                     COL_NUM_ID_SITUACAO_CONTA,
+                                     COL_COD_CONTA_PARTICIPANTE)),
+    )
+    faltando = [f"{tab}.{col}" for tab, cols in obrigatorias
+                for col in cols if col not in fontes[tab].columns]
+    if faltando:
+        logger.warning("política estrita de operação: coluna(s) ausente(s) %s; "
+                       "poda IGNORADA.", faltando)
+        return vazio
+
+    alvo = dominio.select(
+        _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")
+    ).dropDuplicates()
+    ops = fontes[OPERACAO_TABELA].select(
+        _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if"),
+        _norm_key_col(F.col(COL_NUM_ID_TIPO_OPER_OBJETO_SERV)).alias("__rota"),
+        *[F.col(coluna).alias(f"__conta_{i}")
+          for i, coluna in enumerate(OPERACAO_CONTAS_PONTA)],
+    ).join(alvo, on="__num_if", how="left_semi")
+
+    rotas = fontes[TIPO_OPER_OBJETO_SERV_TABELA].select(
+        _norm_key_col(F.col(COL_NUM_ID_TIPO_OPER_OBJETO_SERV)).alias("__rota"),
+        _norm_key_col(F.col(COL_NUM_ID_OBJETO_SERVICO)).alias("__objeto"),
+        _norm_key_col(F.col(COL_NUM_ID_TIPO_OPERACAO)).alias("__tipo_oper"),
+        F.trim(F.col(COL_IND_DISPONIVEL_IDENTIFICACAO).cast("string")).alias("__ident"),
+    ).dropDuplicates(["__rota"])
+    tipos = fontes[TIPO_OPERACAO_TABELA].select(
+        _norm_key_col(F.col(COL_NUM_ID_TIPO_OPERACAO)).alias("__tipo_oper"),
+        F.trim(F.col(COL_COD_TIPO_OPERACAO).cast("string")).alias("__cod_oper"),
+    ).dropDuplicates(["__tipo_oper"])
+    contas_ok = fontes[CONTA_PARTICIPANTE_TABELA].select(
+        _norm_key_col(F.col(COL_NUM_CONTA_PARTICIPANTE)).alias("__conta_key"),
+        _norm_key_col(F.col(COL_NUM_ID_SITUACAO_CONTA)).alias("__situacao"),
+        F.trim(F.col(COL_COD_CONTA_PARTICIPANTE).cast("string")).alias("__cod_conta"),
+    ).where(
+        (F.col("__situacao") == F.lit(CONTA_SITUACAO_ELEGIVEL))
+        & F.col("__cod_conta").rlike(CONTA_COD_PATTERN)
+    ).select("__conta_key").dropDuplicates()
+
+    joined = ops.join(rotas, on="__rota", how="left").join(
+        tipos, on="__tipo_oper", how="left")
+    for i in range(len(OPERACAO_CONTAS_PONTA)):
+        bruto = F.col(f"__conta_{i}")
+        joined = joined.withColumn(f"__key_{i}", _norm_key_col(bruto)).join(
+            contas_ok.select(F.col("__conta_key").alias(f"__key_{i}"),
+                             F.lit(True).alias(f"__ok_{i}")),
+            on=f"__key_{i}", how="left",
+        ).withColumn(
+            f"__ponta_ok_{i}",
+            F.coalesce(
+                bruto.isNotNull()
+                & (F.trim(bruto.cast("string")) != F.lit(""))
+                & F.col(f"__ok_{i}"),
+                F.lit(False),
+            ),
+        )
+
+    valida = (
+        F.col("__rota").isNotNull()
+        & (F.col("__rota") != F.lit(""))
+        & F.col("__objeto").isNotNull()
+        & (F.col("__objeto") == F.lit(OPERACAO_OBJETO_SERVICO_CDB))
+        & (F.col("__ident") == F.lit(OPERACAO_IND_IDENTIFICACAO))
+        & F.col("__tipo_oper").isNotNull()
+        & (F.col("__cod_oper") == F.lit(OPERACAO_COD_TIPO_REGISTRO))
+    )
+    for i in range(len(OPERACAO_CONTAS_PONTA)):
+        valida = valida & F.col(f"__ponta_ok_{i}")
+
+    ruins = joined.where(
+        ~F.coalesce(valida, F.lit(False))
+    ).select("__num_if").dropDuplicates()
+
+    return (
+        _copia_independente(dominio.select(COL_NUM_IF))
+        .withColumn("__num_if", _norm_key_col(F.col(COL_NUM_IF)))
+        .join(ruins, on="__num_if", how="left_semi")
+        .select(COL_NUM_IF)
+        .dropDuplicates()
+    )
+
+
 def _num_if_conta_nao_elegivel(spark, config, dominio: DataFrame) -> DataFrame:
     """Find roots with non-null blank or validator-ineligible account references."""
     vazio = dominio.select(COL_NUM_IF).limit(0)
@@ -3537,6 +3722,7 @@ def _dominio_instrumentos_elegiveis(
     poda_subtipo: bool = True,
     poda_cronograma_resgate: bool = True,
     poda_conta: bool = True,
+    politica_estrita_operacao: bool = True,
 ) -> Tuple[DataFrame, DataFrame]:
     fonte = (_dominio_num_if_produto(spark, config, profile, query_num_if_path)
              .select(COL_NUM_IF).dropDuplicates())
@@ -3576,6 +3762,12 @@ def _dominio_instrumentos_elegiveis(
             "conta participante inelegível (item 6)",
             _num_if_conta_nao_elegivel(spark, config, fonte),
         ))
+    if (politica_estrita_operacao
+            and profile.name in PRODUTOS_COM_POLITICA_ESTRITA_OPERACAO):
+        exclusoes.append((
+            "operação fora do registro válido (item 7)",
+            _num_if_operacao_nao_registro(spark, config, fonte),
+        ))
     if faltantes is not None:
         exclusoes.append(("chave inexistente no destino (Cat 3/4)",
                           _num_if_excluidos_por_faltantes(spark, config, spec,
@@ -3614,6 +3806,7 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
                            poda_subtipo: bool = True,
                            poda_cronograma_resgate: bool = True,
                            poda_conta: bool = True,
+                           politica_estrita_operacao: bool = True,
                            permitir_lote_menor: bool = False) -> List:
     """Select valid roots; only sampled nonempty deficits may return fewer."""
     if (num_ifs is None) == (n_instrumentos is None):
@@ -3633,6 +3826,7 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
         poda_subtipo=poda_subtipo,
         poda_cronograma_resgate=poda_cronograma_resgate,
         poda_conta=poda_conta,
+        politica_estrita_operacao=politica_estrita_operacao,
     )
 
     if num_ifs:
@@ -4086,6 +4280,7 @@ def seleciona_instrumentos_destino(
     poda_subtipo: bool = True,
     poda_cronograma_resgate: bool = True,
     poda_conta: bool = True,
+    politica_estrita_operacao: bool = True,
     somente_ativos: bool = True,
     nullify_columns: Optional[Mapping[str, Sequence[str]]] = None,
     permitir_lote_menor: bool = False,
@@ -4109,6 +4304,7 @@ def seleciona_instrumentos_destino(
             poda_subtipo=poda_subtipo,
             poda_cronograma_resgate=poda_cronograma_resgate,
             poda_conta=poda_conta,
+            politica_estrita_operacao=politica_estrita_operacao,
         )
     requested = len(num_ifs) if num_ifs is not None else int(n_instrumentos)
     if requested < 1:
@@ -4732,6 +4928,38 @@ def calcula_lotes(spark, config, spec: dict, planos: Dict[str, PlanoTabela],
     for provenance in proveniencias.values():
         provenance.unpersist(blocking=False)
     return lotes
+
+
+def _filtra_carteira_sem_saldo(produto: str,
+                               lotes: Dict[str, DataFrame]) -> None:
+    """Remove do lote as carteiras sem saldo (item 8). Muta `lotes` no lugar.
+
+    Réplica das entradas de CARTEIRA_* do FILTROS_FONTE antigo. Só roda para os
+    produtos de PRODUTOS_COM_FILTRO_CARTEIRA_SALDO; qualquer outro sai no
+    primeiro if sem tocar em nada.
+
+    Tolerante: tabela fora do fecho ou coluna ausente vira no-op com WARNING.
+    """
+    if produto not in PRODUTOS_COM_FILTRO_CARTEIRA_SALDO:
+        return
+    for tabela, coluna in FILTRO_CARTEIRA_SALDO_POR_TABELA.items():
+        lote = lotes.get(tabela)
+        if lote is None:
+            continue
+        if coluna not in lote.columns:
+            logger.warning("filtro de saldo de carteira: %s sem a coluna %s; "
+                           "filtro NÃO aplicado.", tabela, coluna)
+            continue
+        antes = lote.count()
+        filtrado = lote.where(
+            F.col(coluna).cast("double") > F.lit(0.0)
+        ).localCheckpoint(eager=True)
+        depois = filtrado.count()
+        lotes[tabela] = filtrado
+        lote.unpersist(blocking=False)
+        logger.info("filtro de saldo de carteira [%s]: %d linha(s) com %s <= 0 "
+                    "removida(s) (%d -> %d).",
+                    tabela, antes - depois, coluna, antes, depois)
 
 
 def _valida_lastro_obrigatorio(produto: str, lotes: Dict[str, DataFrame]) -> None:
@@ -6505,6 +6733,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                       poda_subtipo: bool = True,
                       poda_cronograma_resgate: bool = True,
                       poda_conta: bool = True,
+                      politica_estrita_operacao: bool = True,
                       ajusta_fator_k: bool = True,
                       anular_cols: Optional[Mapping[str, Sequence[str]]] = None,
                       oracle_code_batch_size: int = DEFAULT_ORACLE_CODE_BATCH_SIZE,
@@ -6672,6 +6901,12 @@ def executa_clonagem(spark, config, spec: dict, *,
         )
     if not poda_conta and produto in PRODUTOS_COM_PODA_CONTA:
         logger.warning("Poda de conta DESLIGADA (--sem-poda-conta).")
+    if (not politica_estrita_operacao
+            and produto in PRODUTOS_COM_POLITICA_ESTRITA_OPERACAO):
+        logger.warning("Política estrita de operação DESLIGADA "
+                       "(--sem-politica-estrita-operacao): o lote pode "
+                       "trazer operação fora do registro e inflar "
+                       "OPERACAO/DADO_OPERACAO/LANCAMENTO/ESPECIFICACAO.")
 
     if phase == "materialize":
         valores = [int(value) for value in planned_artifact["selected_num_ifs"]]
@@ -6726,6 +6961,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                 poda_subtipo=poda_subtipo,
                 poda_cronograma_resgate=poda_cronograma_resgate,
                 poda_conta=poda_conta,
+                politica_estrita_operacao=politica_estrita_operacao,
                 permitir_lote_menor=ajusta_fator_k,
             )
     else:
@@ -6760,6 +6996,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                 poda_subtipo=poda_subtipo,
                 poda_cronograma_resgate=poda_cronograma_resgate,
                 poda_conta=poda_conta,
+                politica_estrita_operacao=politica_estrita_operacao,
                 somente_ativos=somente_ativos,
                 nullify_columns=anular_cols,
                 permitir_lote_menor=ajusta_fator_k,
@@ -6807,6 +7044,7 @@ def executa_clonagem(spark, config, spec: dict, *,
             )
     # Invariante de lastro: conferido sobre o fecho (não sobre o domínio), então
     # vale para os três caminhos — dry-run, admissão FK live e lote de snapshot.
+    _filtra_carteira_sem_saldo(produto, lotes)
     _valida_lastro_obrigatorio(produto, lotes)
     if credentials is not None:
         _apply_oracle_pk_floors(spark._sc._jvm, credentials, planos)
@@ -7246,6 +7484,7 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
         "poda_subtipo",
         "poda_cronograma_resgate",
         "poda_conta",
+        "politica_estrita_operacao",
         "ajusta_fator_k",
         "dry_run",
         "somente_ativos",
@@ -7384,6 +7623,7 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
             poda_subtipo=job.poda_subtipo,
             poda_cronograma_resgate=job.poda_cronograma_resgate,
             poda_conta=job.poda_conta,
+            politica_estrita_operacao=job.politica_estrita_operacao,
             ajusta_fator_k=job.ajusta_fator_k,
             anular_cols=_merge_nullification_mappings(
                 profile.integrity.nullify_mapping(), anular_cols
@@ -7565,6 +7805,18 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                              "do domínio e repostos por outra amostra). Use só p/ "
                              "depurar — o sintético pode sair com dangling (Cat 1).")
     parser.add_argument(
+        "--sem-politica-estrita-operacao",
+        action="store_true",
+        help=(
+            "DESLIGA a política estrita de operação (item 7), que hoje vale "
+            "SOMENTE para cdb_simplificado. Por padrão, o instrumento sai do "
+            "domínio se QUALQUER operação dele não for registro válido "
+            "(objeto 44, código 1, identificação S e contas de ponta "
+            "elegíveis). Sem ela o lote traz operações extras e infla "
+            "OPERACAO/DADO_OPERACAO/LANCAMENTO/ESPECIFICACAO."
+        ),
+    )
+    parser.add_argument(
         "--sem-poda-conta",
         action="store_true",
         help="DESLIGA a poda de contas inelegíveis do domínio.",
@@ -7684,6 +7936,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         poda_subtipo=not args.sem_poda_subtipo,
         poda_cronograma_resgate=not args.sem_poda_cronograma_resgate,
         poda_conta=not args.sem_poda_conta,
+        politica_estrita_operacao=not args.sem_politica_estrita_operacao,
         ajusta_fator_k=not args.sem_ajuste_k,
         somente_ativos=not args.sem_filtro_ativos,
         anular_cols=(
