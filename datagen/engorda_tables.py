@@ -511,31 +511,38 @@ REFERENCIAS_CONTA: Tuple[Tuple[str, str], ...] = (
 # ESCOPO: o frozenset tem UM produto. Qualquer outro nem chama a função.
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
-# Filtro de saldo de carteira (item 8) — SOMENTE cdb_simplificado.
+# Itens 8 e 9 — SOMENTE cdb_simplificado, ambos no nível do INSTRUMENTO.
 #
-# Restaura as duas entradas de FILTROS_FONTE do
-# engorda_tables_old_cdb_simplificad0.py:
-#     "CARTEIRA_COMITENTE":    QTD_CARTEIRA_COMITENTE    > 0
-#     "CARTEIRA_PARTICIPANTE": QTD_CARTEIRA_PARTICIPANTE > 0
+# Princípio: nunca descartar LINHA de um instrumento que fica no lote. Se uma
+# linha viola a regra, quem sai é o instrumento INTEIRO — senão o sintético
+# nasce incompleto (instrumento sem carteira, com metade dos dados etc.), que é
+# pior para a validação humana do que não existir.
 #
-# ATENÇÃO — isto NÃO é predicado de domínio e por isso NÃO cabe na query.
-# O antigo aplicava em _read_source, ou seja, descartava a LINHA de carteira
-# sem saldo, mantendo o instrumento. A query de queries_produtos.sql devolve só
-# NUM_IF; ela decide QUAIS instrumentos entram, não QUAIS linhas de cada tabela
-# são clonadas. As CTEs COM_IF/CPA_IF da query original são COUNT() de
-# relatório e não aparecem no SELECT final — não filtram nada.
+# Item 8 — carteira sem saldo. O FILTROS_FONTE antigo descartava a LINHA de
+# CARTEIRA_* com QTD <= 0, o que podia deixar o instrumento sem carteira
+# nenhuma. Aqui a regra é elevada para o instrumento: se QUALQUER carteira dele
+# tiver saldo <= 0, o instrumento sai do domínio.
 #
-# Consequência herdada do antigo: um instrumento cuja única carteira tenha
-# saldo zero fica SEM linha de carteira no sintético. As duas tabelas são
-# FOLHA no spec (ninguém as referencia), então remover linha não orfana nada.
+# Item 9 — pares de DADO_OPERACAO. Regra de negócio: todo NUM_IF amostrado tem
+# de ter EXATAMENTE 2 linhas de DADO_OPERACAO (uma do CPF/CNPJ, outra da
+# pessoa). NENHUM dos dois códigos garantia isso — nem o antigo: lá o 2 era
+# consequência de só existirem operações de registro. Com o item 7 isso volta a
+# valer na prática, mas um instrumento com DUAS operações de registro válidas
+# daria 4 linhas e passaria. Este item torna a regra explícita.
 # ---------------------------------------------------------------------------
 PRODUTOS_COM_FILTRO_CARTEIRA_SALDO = frozenset({
     'cdb_simplificado',
 })
-FILTRO_CARTEIRA_SALDO_POR_TABELA: Dict[str, str] = {
+CARTEIRA_SALDO_POR_TABELA: Dict[str, str] = {
     "CARTEIRA_COMITENTE": "QTD_CARTEIRA_COMITENTE",
     "CARTEIRA_PARTICIPANTE": "QTD_CARTEIRA_PARTICIPANTE",
 }
+PRODUTOS_COM_PAR_DADO_OPERACAO = frozenset({
+    'cdb_simplificado',
+})
+DADO_OPERACAO_TABELA = "DADO_OPERACAO"
+COL_NUM_ID_OPERACAO = "NUM_ID_OPERACAO"
+DADO_OPERACAO_POR_INSTRUMENTO = 2
 
 PRODUTOS_COM_POLITICA_ESTRITA_OPERACAO = frozenset({
     'cdb_simplificado',
@@ -3412,6 +3419,98 @@ def _num_if_operacao_nao_registro(spark, config,
     )
 
 
+def _num_if_carteira_sem_saldo(spark, config,
+                               dominio: DataFrame) -> DataFrame:
+    """NUM_IF com ALGUMA carteira de saldo <= 0 (item 8, nível instrumento).
+
+    Tolerante: fonte ilegível ou coluna ausente vira no-op com WARNING.
+    """
+    vazio = dominio.select(COL_NUM_IF).limit(0)
+    alvo = dominio.select(
+        _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")
+    ).dropDuplicates()
+    ruins: Optional[DataFrame] = None
+    for tabela, coluna in CARTEIRA_SALDO_POR_TABELA.items():
+        try:
+            src = _read_source(spark, config, tabela)
+        except Exception as exc:
+            logger.warning("carteira sem saldo: não li a fonte de %s (%s); "
+                           "tabela ignorada.", tabela, exc)
+            continue
+        if COL_NUM_IF not in src.columns or coluna not in src.columns:
+            logger.warning("carteira sem saldo: %s sem %s/%s; ignorada.",
+                           tabela, COL_NUM_IF, coluna)
+            continue
+        parcial = src.select(
+            _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if"),
+            F.col(coluna).cast("double").alias("__qtd"),
+        ).join(alvo, on="__num_if", how="left_semi").where(
+            F.coalesce(F.col("__qtd"), F.lit(0.0)) <= F.lit(0.0)
+        ).select("__num_if").dropDuplicates()
+        ruins = parcial if ruins is None else ruins.unionByName(parcial)
+    if ruins is None:
+        logger.warning("carteira sem saldo: nenhuma fonte legível; poda IGNORADA.")
+        return vazio
+    ruins = ruins.dropDuplicates()
+    return (
+        _copia_independente(dominio.select(COL_NUM_IF))
+        .withColumn("__num_if", _norm_key_col(F.col(COL_NUM_IF)))
+        .join(ruins, on="__num_if", how="left_semi")
+        .select(COL_NUM_IF)
+        .dropDuplicates()
+    )
+
+
+def _num_if_dado_operacao_fora_do_par(spark, config,
+                                      dominio: DataFrame) -> DataFrame:
+    """NUM_IF que não tem EXATAMENTE 2 linhas de DADO_OPERACAO (item 9).
+
+    Conta as linhas de DADO_OPERACAO alcançáveis pelo instrumento via OPERACAO.
+    Instrumento com 0, 1, 3 ou mais sai do domínio.
+
+    Tolerante: fonte ilegível ou coluna ausente vira no-op com WARNING.
+    """
+    vazio = dominio.select(COL_NUM_IF).limit(0)
+    try:
+        ops = _read_source(spark, config, OPERACAO_TABELA)
+        dados = _read_source(spark, config, DADO_OPERACAO_TABELA)
+    except Exception as exc:
+        logger.warning("par de DADO_OPERACAO: não li as fontes (%s); poda "
+                       "IGNORADA.", exc)
+        return vazio
+    if (COL_NUM_IF not in ops.columns or COL_NUM_ID_OPERACAO not in ops.columns
+            or COL_NUM_ID_OPERACAO not in dados.columns):
+        logger.warning("par de DADO_OPERACAO: coluna(s) ausente(s) em %s/%s; "
+                       "poda IGNORADA.", OPERACAO_TABELA, DADO_OPERACAO_TABELA)
+        return vazio
+
+    alvo = dominio.select(
+        _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")
+    ).dropDuplicates()
+    op_keys = ops.select(
+        _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if"),
+        _norm_key_col(F.col(COL_NUM_ID_OPERACAO)).alias("__op"),
+    ).join(alvo, on="__num_if", how="left_semi")
+    dado_keys = dados.select(
+        _norm_key_col(F.col(COL_NUM_ID_OPERACAO)).alias("__op"),
+    )
+    contagem = op_keys.join(dado_keys, on="__op", how="inner").groupBy(
+        "__num_if"
+    ).count()
+    # Instrumento fora do par: contagem <> 2, OU sem nenhuma linha (não aparece
+    # na contagem) — este último é pego pelo left_anti contra as contagens boas.
+    boas = contagem.where(
+        F.col("count") == F.lit(DADO_OPERACAO_POR_INSTRUMENTO)
+    ).select("__num_if")
+    return (
+        _copia_independente(dominio.select(COL_NUM_IF))
+        .withColumn("__num_if", _norm_key_col(F.col(COL_NUM_IF)))
+        .join(boas, on="__num_if", how="left_anti")
+        .select(COL_NUM_IF)
+        .dropDuplicates()
+    )
+
+
 def _num_if_conta_nao_elegivel(spark, config, dominio: DataFrame) -> DataFrame:
     """Find roots with non-null blank or validator-ineligible account references."""
     vazio = dominio.select(COL_NUM_IF).limit(0)
@@ -3767,6 +3866,18 @@ def _dominio_instrumentos_elegiveis(
         exclusoes.append((
             "operação fora do registro válido (item 7)",
             _num_if_operacao_nao_registro(spark, config, fonte),
+        ))
+    if (politica_estrita_operacao
+            and profile.name in PRODUTOS_COM_FILTRO_CARTEIRA_SALDO):
+        exclusoes.append((
+            "carteira com saldo <= 0 (item 8)",
+            _num_if_carteira_sem_saldo(spark, config, fonte),
+        ))
+    if (politica_estrita_operacao
+            and profile.name in PRODUTOS_COM_PAR_DADO_OPERACAO):
+        exclusoes.append((
+            "DADO_OPERACAO fora do par (item 9)",
+            _num_if_dado_operacao_fora_do_par(spark, config, fonte),
         ))
     if faltantes is not None:
         exclusoes.append(("chave inexistente no destino (Cat 3/4)",
@@ -4928,38 +5039,6 @@ def calcula_lotes(spark, config, spec: dict, planos: Dict[str, PlanoTabela],
     for provenance in proveniencias.values():
         provenance.unpersist(blocking=False)
     return lotes
-
-
-def _filtra_carteira_sem_saldo(produto: str,
-                               lotes: Dict[str, DataFrame]) -> None:
-    """Remove do lote as carteiras sem saldo (item 8). Muta `lotes` no lugar.
-
-    Réplica das entradas de CARTEIRA_* do FILTROS_FONTE antigo. Só roda para os
-    produtos de PRODUTOS_COM_FILTRO_CARTEIRA_SALDO; qualquer outro sai no
-    primeiro if sem tocar em nada.
-
-    Tolerante: tabela fora do fecho ou coluna ausente vira no-op com WARNING.
-    """
-    if produto not in PRODUTOS_COM_FILTRO_CARTEIRA_SALDO:
-        return
-    for tabela, coluna in FILTRO_CARTEIRA_SALDO_POR_TABELA.items():
-        lote = lotes.get(tabela)
-        if lote is None:
-            continue
-        if coluna not in lote.columns:
-            logger.warning("filtro de saldo de carteira: %s sem a coluna %s; "
-                           "filtro NÃO aplicado.", tabela, coluna)
-            continue
-        antes = lote.count()
-        filtrado = lote.where(
-            F.col(coluna).cast("double") > F.lit(0.0)
-        ).localCheckpoint(eager=True)
-        depois = filtrado.count()
-        lotes[tabela] = filtrado
-        lote.unpersist(blocking=False)
-        logger.info("filtro de saldo de carteira [%s]: %d linha(s) com %s <= 0 "
-                    "removida(s) (%d -> %d).",
-                    tabela, antes - depois, coluna, antes, depois)
 
 
 def _valida_lastro_obrigatorio(produto: str, lotes: Dict[str, DataFrame]) -> None:
@@ -7044,7 +7123,6 @@ def executa_clonagem(spark, config, spec: dict, *,
             )
     # Invariante de lastro: conferido sobre o fecho (não sobre o domínio), então
     # vale para os três caminhos — dry-run, admissão FK live e lote de snapshot.
-    _filtra_carteira_sem_saldo(produto, lotes)
     _valida_lastro_obrigatorio(produto, lotes)
     if credentials is not None:
         _apply_oracle_pk_floors(spark._sc._jvm, credentials, planos)
