@@ -4853,6 +4853,7 @@ def _calcula_lotes_com_proveniencia(
     num_if_valores: List,
     max_passadas: int,
     somente_ativos: bool = True,
+    counts_out: Optional[Dict[str, int]] = None,
 ) -> Tuple[Dict[str, DataFrame], Dict[str, DataFrame]]:
     """Desce a árvore a partir da raiz pelas FKs de vínculo principal,
     pais-antes-de-filhos; repete a passada até estabilizar (ciclos), até
@@ -5033,13 +5034,17 @@ def _calcula_lotes_com_proveniencia(
                         contagens[CRONOGRAMA_TABELA])
     for t in ordem:
         logger.info("Lote %s: %d linha(s).", t, contagens[t])
+    if counts_out is not None:
+        counts_out.clear()
+        counts_out.update(contagens)
     return lotes, proveniencias
 
 
 def calcula_lotes(spark, config, spec: dict, planos: Dict[str, PlanoTabela],
                   ordem: List[str], num_if_valores: List,
                   max_passadas: int,
-                  somente_ativos: bool = True) -> Dict[str, DataFrame]:
+                  somente_ativos: bool = True,
+                  counts_out: Optional[Dict[str, int]] = None) -> Dict[str, DataFrame]:
     lotes, proveniencias = _calcula_lotes_com_proveniencia(
         spark,
         config,
@@ -5049,6 +5054,7 @@ def calcula_lotes(spark, config, spec: dict, planos: Dict[str, PlanoTabela],
         num_if_valores,
         max_passadas,
         somente_ativos=somente_ativos,
+        counts_out=counts_out,
     )
     for provenance in proveniencias.values():
         provenance.unpersist(blocking=False)
@@ -5664,7 +5670,9 @@ def _materialize_code_map(spark: SparkSession, slots: DataFrame, *, code_kind: s
         if offline:
             if out_path is None:
                 raise ValueError("destino é obrigatório para mapa de código offline")
-            mapping.write.mode("overwrite").parquet(out_path)
+            mapping.coalesce(_snapshot_partition_count(total)).write.mode(
+                "overwrite"
+            ).parquet(out_path)
             return spark.read.parquet(out_path)
         return mapping
     if out_path is None or credentials is None:
@@ -7068,6 +7076,7 @@ def executa_clonagem(spark, config, spec: dict, *,
     logger.info("Ordem de sintetização (%d tabela(s)): %s", len(ordem), ordem)
 
     selected_lotes: Optional[Dict[str, DataFrame]] = None
+    closure_lote_counts: Optional[Dict[str, int]] = None
     if phase == "materialize":
         selected_lotes = dict(snapshot_lotes)
         if set(selected_lotes) != set(planos):
@@ -7164,6 +7173,7 @@ def executa_clonagem(spark, config, spec: dict, *,
     if selected_lotes is not None:
         lotes = selected_lotes
     else:
+        closure_lote_counts = {}
         with _perf_timer("closure", product=product_profile.name, roots=len(valores)):
             lotes = calcula_lotes(
                 spark,
@@ -7174,6 +7184,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                 valores,
                 max_passadas,
                 somente_ativos=somente_ativos,
+                counts_out=closure_lote_counts,
             )
     # Invariante de lastro: conferido sobre o fecho (não sobre o domínio), então
     # vale para os três caminhos — dry-run, admissão FK live e lote de snapshot.
@@ -7187,6 +7198,8 @@ def executa_clonagem(spark, config, spec: dict, *,
         }
         if set(final_lote_counts) != set(lotes):
             raise ValueError("materialize: contagens do snapshot divergem do table_set")
+    elif closure_lote_counts is not None:
+        final_lote_counts = dict(closure_lote_counts)
     else:
         with _perf_timer("final_lote_counts", product=product_profile.name):
             final_lote_counts = _count_final_lotes(lotes)

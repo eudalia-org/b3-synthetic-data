@@ -437,6 +437,7 @@ class TestEngordaArtifacts:
 
         codes = [row.COD_IF_GERADO for row in mapping.orderBy("ORDINAL").collect()]
         assert codes == ["SYN10000001", "SYN10000002"]
+        assert len(list((tmp_path / "offline-codes").glob("part-*.parquet"))) == 1
 
     def test_materialize_offline_marker_records_load_prohibition(self, monkeypatch):
         captured = {}
@@ -600,6 +601,7 @@ class TestEngordaArtifacts:
             ),
         }
 
+        counts = {}
         lotes, provenances = engorda_tables._calcula_lotes_com_proveniencia(
             spark,
             {},
@@ -612,9 +614,14 @@ class TestEngordaArtifacts:
             [1],
             3,
             somente_ativos=True,
+            counts_out=counts,
         )
 
         assert lotes["CONDICAO_IF"].count() == 1
+        assert counts == {
+            engorda_tables.TABELA_RAIZ: 1,
+            "CONDICAO_IF": 1,
+        }
         for frame in [*lotes.values(), *provenances.values()]:
             frame.unpersist(blocking=False)
 
