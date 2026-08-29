@@ -532,6 +532,10 @@ REFERENCIAS_CONTA: Tuple[Tuple[str, str], ...] = (
 # ---------------------------------------------------------------------------
 PRODUTOS_COM_FILTRO_CARTEIRA_SALDO = frozenset({
     'cdb_simplificado',
+    'cdb_resgate',
+    'cdb_escalonamento',
+    'rdb_inclusao',
+    'rdb_resgate',
 })
 CARTEIRA_SALDO_POR_TABELA: Dict[str, str] = {
     "CARTEIRA_COMITENTE": "QTD_CARTEIRA_COMITENTE",
