@@ -1588,6 +1588,43 @@ def test_selected_lote_snapshot_rejects_root_ids_and_selective_pairs(spark, tmp_
         )
 
 
+def test_offline_snapshot_keeps_only_allowlisted_selective_missing(spark, tmp_path):
+    root = spark.createDataFrame([(10, 49)], "NUM_IF long, NUM_TIPO_IF long")
+    missing = spark.createDataFrame(
+        [
+            ("CHILD", "NULLABLE_FK", "900"),
+            ("CARTEIRA_COMITENTE", "NUM_ID_ENTIDADE", "901"),
+            ("ESPECIFICACAO_COMITENTE", "NUM_ID_ENTIDADE", "902"),
+        ],
+        "TABELA string, COLUNA string, VALOR string",
+    )
+    selective_keys = frozenset({("CHILD", "NULLABLE_FK")})
+    filtered = eng._faltantes_seletivos_para_snapshot(missing, selective_keys)
+    plan_uri = str(tmp_path / "plan.json")
+
+    descriptor = eng._create_selected_lote_snapshot(
+        spark,
+        plan_uri,
+        {eng.TABELA_RAIZ: root},
+        filtered,
+        selected_num_ifs=[10],
+        selective_keys=selective_keys,
+    )
+    _, loaded, _ = eng._load_selected_lote_snapshot(
+        spark,
+        plan_uri,
+        descriptor,
+        expected_tables={eng.TABELA_RAIZ},
+        selected_num_ifs=[10],
+        selective_keys=selective_keys,
+    )
+
+    assert [tuple(row) for row in loaded.collect()] == [
+        ("CHILD", "NULLABLE_FK", "900")
+    ]
+    assert eng._faltantes_seletivos_para_snapshot(missing, frozenset()) is None
+
+
 def test_selected_lote_snapshot_rejects_null_selective_value(spark, tmp_path):
     root = spark.createDataFrame([(10, 49)], "NUM_IF long, NUM_TIPO_IF long")
     missing = spark.createDataFrame(

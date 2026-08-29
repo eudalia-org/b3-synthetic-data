@@ -3035,6 +3035,18 @@ def _pred_faltante_seletivo(selective_keys: frozenset[Tuple[str, str]]):
     return pred
 
 
+def _faltantes_seletivos_para_snapshot(
+    faltantes: Optional[DataFrame],
+    selective_keys: frozenset[Tuple[str, str]],
+) -> Optional[DataFrame]:
+    """Keep only nullable allowlisted misses in the immutable selected-lote snapshot."""
+    if faltantes is None or not selective_keys:
+        return None
+    return faltantes.where(_pred_faltante_seletivo(selective_keys)).select(
+        "TABELA", "COLUNA", "VALOR"
+    )
+
+
 def _subtipos_clonaveis(spec: dict,
                         policy: SubtypePolicy) -> List[Tuple[str, str]]:
     """Pares (tipo, tabela-subtipo) que a sintetização realmente produz.
@@ -7183,11 +7195,14 @@ def executa_clonagem(spark, config, spec: dict, *,
     if phase == "plan":
         if not plan_uri:
             raise ValueError("phase plan exige plan_uri")
+        snapshot_faltantes_seletivos = _faltantes_seletivos_para_snapshot(
+            faltantes, product_profile.integrity.selective_missing_keys
+        )
         selected_lote_descriptor = _create_selected_lote_snapshot(
             spark,
             plan_uri,
             lotes,
-            faltantes,
+            snapshot_faltantes_seletivos,
             selected_num_ifs=valores,
             selective_keys=product_profile.integrity.selective_missing_keys,
             lote_counts=final_lote_counts,
