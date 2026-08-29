@@ -47,3 +47,19 @@ _Avoid_: Reservation, environment lease
 **Offline synthetic artifact**:
 A synthetic product aggregate generated without Oracle admission, PK-floor checks, or official business-key allocation. It may be inspected or validated but is never eligible for Oracle load.
 _Avoid_: Dry run, loadable synthetic artifact
+
+**Operation-party nature**:
+The mutually exclusive PF or PJ classification associated with an operation party. A valid party is one nature or the other, never a required PF-and-PJ pair.
+_Avoid_: PF/PJ pair
+
+**Redemption schedule entry**:
+One dated entry below a redemption condition. References to three or four resgates in manual validation mean multiple schedule entries under one redemption condition, not multiple independent redemptions.
+_Avoid_: Independent resgate, redemption parent
+
+**Registration operation**:
+The operation that registers the financial instrument, identified by its operation and service classification. Additional operations are assessed by their own classification and are not invalid merely because more than one operation exists for the instrument.
+_Avoid_: Only operation, extra operation error
+
+**CDB operation closure**:
+The mandatory per-operation CDB structure rooted at one operation: exactly two operation-data records and one launch. A CDB may have multiple operations, but each operation must independently satisfy this 1:2:1 closure.
+_Avoid_: Per-instrument operation ratio, aggregate 1:2:1 ratio

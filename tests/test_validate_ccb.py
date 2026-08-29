@@ -80,10 +80,12 @@ def ccb_tables(spark):
             "VAL_EVENTO double, VAL_PU_EVENTO double",
         ),
         "OPERACAO": spark.createDataFrame(
-            [(71, 1, 871, 6, "operation.0", 1, 2, 1.0)],
+            [(71, 1, 871, 6, "operation.0", 1, 2, 1.0,
+              "00001.00-1", "00002.40-2")],
             "NUM_ID_OPERACAO long, NUM_IF long, NUM_ID_TIPO_OPER_OBJETO_SERV long, "
             "NUM_ID_MODALIDADE_LIQUIDACAO long, COD_OPERACAO string, "
-            "COD_TIPO_DEBITO_P1 long, COD_TIPO_DEBITO_P2 long, QTD_OPERACAO double",
+            "COD_TIPO_DEBITO_P1 long, COD_TIPO_DEBITO_P2 long, QTD_OPERACAO double, "
+            "COD_CONTA_PARTE string, COD_CONTA_CONTRAPARTE string",
         ),
         "LANCAMENTO": spark.createDataFrame(
             [(81, 71)], "NUM_ID_LANCAMENTO long, NUM_ID_OPERACAO long"
@@ -136,6 +138,42 @@ def test_ccb_graph_accepts_observed_no_resgate_registration(spark):
     ))
 
     assert all(finding.passed for finding in findings.values()), findings
+
+
+def test_ccb_graph_rejects_comitente_branch_and_generic_events(spark):
+    tables = ccb_tables(spark)
+    tables["CARTEIRA_COMITENTE"] = spark.createDataFrame([(1,)], "NUM_IF long")
+    tables["ESPECIFICACAO"] = spark.createDataFrame(
+        [(91, 71)], "NUM_ID_ESPECIFICACAO long, NUM_ID_OPERACAO long"
+    )
+    tables["ESPECIFICACAO_COMITENTE"] = spark.createDataFrame(
+        [(91,)], "NUM_ID_ESPECIFICACAO long"
+    )
+    tables["EVENTO"] = spark.createDataFrame(
+        [(101, 1, None)], "NUM_EVENTO long, NUM_IF long, DAT_EXCLUSAO string"
+    )
+
+    findings = by_id(validator.check_ccb_graph(
+        tables, 5, validator.VALIDATION_PROFILES["ccb"]
+    ))
+
+    assert findings["2h.no_comitente_branch"].severity == validator.SEV_ERROR
+    assert findings["2h.no_comitente_branch"].count == 1
+    assert findings["2h.generic_event_for_ccb"].severity == validator.SEV_ERROR
+    assert findings["2h.generic_event_for_ccb"].count == 1
+
+
+def test_ccb_graph_ignores_empty_optional_contamination_tables(spark):
+    tables = ccb_tables(spark)
+    tables["CARTEIRA_COMITENTE"] = spark.createDataFrame([], "UNRELATED long")
+    tables["EVENTO"] = spark.createDataFrame([], "UNRELATED long")
+
+    findings = by_id(validator.check_ccb_graph(
+        tables, 5, validator.VALIDATION_PROFILES["ccb"]
+    ))
+
+    assert findings["2h.no_comitente_branch"].passed
+    assert findings["2h.generic_event_for_ccb"].passed
 
 
 def test_ccb_metadata_is_partial_without_oracle_and_requires_union_metadata():
@@ -430,13 +468,46 @@ def test_ccb_target_check_ignores_historical_nonregistration_operation(spark):
     tables["OPERACAO"] = tables["OPERACAO"].union(historical)
     frames = target_frames(spark)
     frames["CCB_ROUTES"] = frames["CCB_ROUTES"].union(
-        spark.createDataFrame([(999, 999, "599", "N")], frames["CCB_ROUTES"].schema)
+        spark.createDataFrame([(999, 999, "1", "N")], frames["CCB_ROUTES"].schema)
     )
 
     finding = by_id(validator.check_ccb_target_frames(
         tables, frames, 5, validator.VALIDATION_PROFILES["ccb"]
     ))["6h.lookup.registration_route"]
     assert finding.passed
+
+
+def test_ccb_registration_account_columns_are_required(spark):
+    tables = ccb_tables(spark)
+    tables["OPERACAO"] = tables["OPERACAO"].drop(
+        "COD_CONTA_PARTE", "COD_CONTA_CONTRAPARTE"
+    )
+
+    finding = by_id(validator.check_ccb_target_frames(
+        tables, target_frames(spark), 5, validator.VALIDATION_PROFILES["ccb"]
+    ))["6h.registration_account_roles"]
+
+    assert finding.severity == validator.SEV_ERROR
+
+
+def test_ccb_registration_account_roles_are_strict_but_tos_871_is_advisory(spark):
+    tables = ccb_tables(spark)
+    tables["OPERACAO"] = (
+        tables["OPERACAO"]
+        .withColumn("NUM_ID_TIPO_OPER_OBJETO_SERV", validator.F.lit(872))
+        .withColumn("COD_CONTA_PARTE", validator.F.lit("00001.10-1"))
+    )
+    frames = target_frames(spark)
+    frames["CCB_ROUTES"] = spark.createDataFrame(
+        [(872, 47, "1", "S")], frames["CCB_ROUTES"].schema
+    )
+
+    findings = by_id(validator.check_ccb_target_frames(
+        tables, frames, 5, validator.VALIDATION_PROFILES["ccb"]
+    ))
+
+    assert findings["6h.registration_account_roles"].severity == validator.SEV_ERROR
+    assert findings["6h.profile.registration_tos"].severity == validator.SEV_WARN
 
 
 def test_ccb_target_loader_respects_skip_prefix(spark, monkeypatch):

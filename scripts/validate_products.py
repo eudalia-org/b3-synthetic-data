@@ -214,6 +214,16 @@ ACCOUNT_REFERENCES: Tuple[Tuple[str, str], ...] = (
     ("OPERACAO", "NUM_CONTA_PARTICIPANTE_P1"),
     ("OPERACAO", "NUM_CONTA_PARTICIPANTE_P2"),
 )
+ACCOUNT_ROLE_GROUPS = {
+    ("TITULO", "NUM_CONTA_PARTICIPANTE"): "40",
+    ("DEPOSITO_AUTOMATICO_IF", "NUM_CONTA_PARTICIPANTE"): "10",
+    ("OPERACAO", "NUM_CONTA_PARTICIPANTE_P1"): "10",
+    ("OPERACAO", "NUM_CONTA_PARTICIPANTE_P2"): "40",
+}
+OPERATION_ACCOUNT_CODES = {
+    "NUM_CONTA_PARTICIPANTE_P1": "COD_CONTA_PARTE",
+    "NUM_CONTA_PARTICIPANTE_P2": "COD_CONTA_CONTRAPARTE",
+}
 CDB_TIPO_IF = 49
 CDB_OBJETO_SERVICO = 44
 SEM_MODALIDADE_IDS = (6, 16)
@@ -313,9 +323,9 @@ class ValidationProfile:
 
 # CDB simplificado — the known-good product; every capability is supported.
 _SIMPLIFICADO_REQUIRED = ALL_CAPABILITIES
-# Full CDB — strict structural + domain + lookup; simplificado-only shape/registration
-# rules are intentionally NOT required (they must not fail a valid escalonado/multi-resgate
-# CDB). CDB object service 44 and the CDB code prefix are evidence-backed.
+# Full CDB — strict structural + domain + lookup. Distribution and exact registration
+# profiles remain simplificado-only, while one RESGATE parent with a variable child schedule
+# applies to every CDB. CDB object service 44 and the CDB code prefix are evidence-backed.
 _CDB_REQUIRED = (
     CAP_IDENTITY, CAP_DOMAIN, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
     CAP_CAPACITY, CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_LOOKUP_TOS,
@@ -325,8 +335,8 @@ _CDB_REQUIRED = (
 _CDB_SUPPORTED = tuple(
     capability for capability in _CDB_REQUIRED if capability != CAP_POLYMORPHISM
 )
-# RDB — strict structural mode only. Product-specific lookup, subtype allow-list,
-# shape, and registration semantics remain BLOCKED until target evidence is captured.
+# RDB — structural mode plus evidence-backed registration accounts and quantity graph.
+# Broad lookup combinations, subtype allow-list, shape, and registration profile remain blocked.
 _RDB_REQUIRED = (
     CAP_IDENTITY, CAP_DOMAIN, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
     CAP_CAPACITY, CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_LOOKUP_TOS,
@@ -338,7 +348,7 @@ _RDB_REQUIRED = (
 _RDB_SUPPORTED = (
     CAP_IDENTITY, CAP_DOMAIN, CAP_REFERENTIAL, CAP_NOT_NULL, CAP_CAPACITY,
     CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_COD_OPERACAO_FORMAT,
-    CAP_MEU_NUMERO,
+    CAP_MEU_NUMERO, CAP_ACCOUNT,
 )
 _CREDITO_SCR_REQUIRED = (
     CAP_IDENTITY, CAP_REFERENTIAL, CAP_NOT_NULL, CAP_CAPACITY, CAP_DATES,
@@ -405,7 +415,7 @@ VALIDATION_PROFILES: Dict[str, ValidationProfile] = {
         platform_check_enabled=True,
         account_check_enabled=True,
         sem_modalidade_ids=(6, 16),
-        hard_shape_rules=(SHAPE_RULE_OP_RATIO,),
+        hard_shape_rules=(SHAPE_RULE_OP_RATIO, SHAPE_RULE_RESGATE_MAX),
         registration_constants=None,
         required_capabilities=_CDB_REQUIRED,
         # Full-product polymorphism remains partial until every application type code has a
@@ -425,7 +435,7 @@ VALIDATION_PROFILES: Dict[str, ValidationProfile] = {
         cod_if_pattern=r"^[A-Z0-9 -]{1,14}$",
         sic_enabled=False,  # (50,45) SIC mapping unverified — Task 8
         platform_check_enabled=False,
-        account_check_enabled=False,
+        account_check_enabled=True,
         sem_modalidade_ids=None,  # UNKNOWN for tipo 50
         hard_shape_rules=(),  # no type-50 baseline yet
         registration_constants=None,
@@ -4742,6 +4752,102 @@ def check_ccb_graph(
         F.trim(F.col(root_cols["COD_IF"]).cast("string")).alias("business_code"),
     )
     out: List[Finding] = []
+
+    comitente_roots = []
+    comitente_missing = []
+    holder_wallet = tables.get("CARTEIRA_COMITENTE")
+    if holder_wallet is not None and _ccb_active(holder_wallet).limit(1).count():
+        holder_wallet_if = resolve(holder_wallet, "NUM_IF")
+        if holder_wallet_if is None:
+            comitente_missing.append("CARTEIRA_COMITENTE.NUM_IF")
+        else:
+            comitente_roots.append(_ccb_active(holder_wallet).select(
+                _canon_key_col(F.col(holder_wallet_if)).alias("parent_id")
+            ).join(roots.select("parent_id"), "parent_id", "inner"))
+    holder_specification = tables.get("ESPECIFICACAO_COMITENTE")
+    specification = tables.get("ESPECIFICACAO")
+    if (holder_specification is not None
+            and _ccb_active(holder_specification).limit(1).count()):
+        holder_specification_id = resolve(
+            holder_specification, "NUM_ID_ESPECIFICACAO"
+        ) if holder_specification is not None else None
+        specification_id = resolve(
+            specification, "NUM_ID_ESPECIFICACAO"
+        ) if specification is not None else None
+        specification_operation = resolve(
+            specification, "NUM_ID_OPERACAO"
+        ) if specification is not None else None
+        if not all((holder_specification_id, specification_id, specification_operation)):
+            comitente_missing.append(
+                "ESPECIFICACAO_COMITENTE->ESPECIFICACAO.NUM_ID_OPERACAO"
+            )
+        else:
+            operation_roots = _ccb_active(tables["OPERACAO"]).select(
+                _canon_key_col(F.col(columns["OPERACAO"]["NUM_ID_OPERACAO"]))
+                .alias("operation_id"),
+                _canon_key_col(F.col(columns["OPERACAO"]["NUM_IF"])).alias("parent_id"),
+            )
+            comitente_roots.append(
+                _ccb_active(holder_specification).select(
+                    _canon_key_col(F.col(holder_specification_id)).alias("specification_id")
+                ).join(
+                    _ccb_active(specification).select(
+                        _canon_key_col(F.col(specification_id)).alias("specification_id"),
+                        _canon_key_col(F.col(specification_operation)).alias("operation_id"),
+                    ),
+                    "specification_id",
+                    "inner",
+                ).join(operation_roots, "operation_id", "inner").select("parent_id")
+            )
+    if comitente_missing:
+        out.append(_ccb_unavailable(
+            "2h.no_comitente_branch", comitente_missing, SEV_ERROR
+        ))
+    else:
+        contaminated = (
+            reduce(lambda left, right: left.unionByName(right), comitente_roots)
+            if comitente_roots else roots.limit(0).select("parent_id")
+        ).dropDuplicates()
+        contaminated_count = contaminated.count()
+        out.append(Finding(
+            "2h.no_comitente_branch", "CCB graph",
+            SEV_ERROR if contaminated_count else SEV_INFO,
+            "CARTEIRA_COMITENTE,ESPECIFICACAO_COMITENTE",
+            contaminated_count == 0, count=contaminated_count,
+            sample=_sample_keys(contaminated, ["parent_id"], sample),
+            hint="Remove the CDB/RDB comitente branch from CCB aggregates."
+                 if contaminated_count else "",
+            message="Active CCB roots must not have holder-wallet or holder-specification rows.",
+        ))
+
+    generic_event = tables.get("EVENTO")
+    generic_event_if = resolve(generic_event, "NUM_IF") if generic_event is not None else None
+    has_generic_events = (
+        bool(_ccb_active(generic_event).limit(1).count())
+        if generic_event is not None else False
+    )
+    if has_generic_events and generic_event_if is None:
+        out.append(_ccb_unavailable(
+            "2h.generic_event_for_ccb", ["EVENTO.NUM_IF"], SEV_ERROR
+        ))
+    else:
+        generic_events = (
+            _ccb_active(generic_event).select(
+                _canon_key_col(F.col(generic_event_if)).alias("parent_id")
+            ).join(roots.select("parent_id"), "parent_id", "inner")
+            if has_generic_events else roots.limit(0).select("parent_id")
+        )
+        generic_event_count = generic_events.count()
+        out.append(Finding(
+            "2h.generic_event_for_ccb", "CCB graph",
+            SEV_ERROR if generic_event_count else SEV_INFO,
+            "EVENTO", generic_event_count == 0, count=generic_event_count,
+            sample=_sample_keys(generic_events, ["parent_id"], sample),
+            hint="Use TCTPCRONOGRAMA_CCB for CCB schedules; remove generic EVENTO rows."
+                 if generic_event_count else "",
+            message="Active CCB roots must use their dedicated schedule instead of EVENTO.",
+        ))
+
     for name, table, child_column in (
         ("title", "TITULO", None),
         ("credit", "CREDITO", None),
@@ -5525,7 +5631,8 @@ def check_ccb_target_frames(
     requirements = {
         "INSTRUMENTO_FINANCEIRO": ("NUM_IF", "NUM_TIPO_IF"),
         "OPERACAO": (
-            "NUM_IF", "NUM_ID_TIPO_OPER_OBJETO_SERV", "NUM_ID_MODALIDADE_LIQUIDACAO",
+            "NUM_ID_OPERACAO", "NUM_IF", "NUM_ID_TIPO_OPER_OBJETO_SERV",
+            "NUM_ID_MODALIDADE_LIQUIDACAO",
         ),
     }
     columns, missing = _credito_scr_columns(tables, requirements)
@@ -5546,11 +5653,22 @@ def check_ccb_target_frames(
         _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if)
     ).select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id")).dropDuplicates()
     operation_cols = columns["OPERACAO"]
+    party_account_col = resolve(tables["OPERACAO"], "COD_CONTA_PARTE")
+    counterparty_account_col = resolve(tables["OPERACAO"], "COD_CONTA_CONTRAPARTE")
     operations = _ccb_active(tables["OPERACAO"]).select(
+        _canon_key_col(F.col(operation_cols["NUM_ID_OPERACAO"])).alias("operation_id"),
         _canon_key_col(F.col(operation_cols["NUM_IF"])).alias("root_id"),
         _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias("route_id"),
         _canon_key_col(F.col(operation_cols["NUM_ID_MODALIDADE_LIQUIDACAO"])).alias("modality"),
-    )
+        (
+            F.trim(F.col(party_account_col).cast("string"))
+            if party_account_col else F.lit(None).cast("string")
+        ).alias("party_account"),
+        (
+            F.trim(F.col(counterparty_account_col).cast("string"))
+            if counterparty_account_col else F.lit(None).cast("string")
+        ).alias("counterparty_account"),
+    ).join(roots, "root_id", "inner")
     route_semantics = routes.select(
         _canon_key_col(F.col(route_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias("route_id"),
         _canon_key_col(F.col(route_cols["NUM_ID_OBJETO_SERVICO"])).alias("object_id"),
@@ -5559,15 +5677,16 @@ def check_ccb_target_frames(
                        .cast("string"))).alias("identification"),
     ).dropDuplicates(["route_id"])
     classified = operations.join(F.broadcast(route_semantics), "route_id", "left")
-    registration = classified.where(F.col("operation_type") == "1")
+    registration = classified.where(
+        (F.col("operation_type") == "1")
+        & (F.col("object_id") == str(profile.object_service_id))
+    )
     valid = registration.where(
-        (F.col("object_id") == str(profile.object_service_id))
-        & (F.col("identification") == "S")
+        F.col("identification") == "S"
     )
     valid_roots = valid.select("root_id").dropDuplicates()
     invalid = registration.where(
-        (F.coalesce(F.col("object_id"), F.lit("")) != str(profile.object_service_id))
-        | (F.coalesce(F.col("identification"), F.lit("")) != "S")
+        F.coalesce(F.col("identification"), F.lit("")) != "S"
     ).select("root_id").unionByName(
         roots.join(valid_roots, "root_id", "left_anti")
     ).dropDuplicates()
@@ -5580,6 +5699,48 @@ def check_ccb_target_frames(
         hint="Give every active CCB an approved operation-type-1 route on object 47."
              if count else "",
         message="Every active CCB has an approved registration route; historical routes ignored.",
+    ))
+    if not party_account_col or not counterparty_account_col:
+        missing_accounts = [
+            name for name, actual in (
+                ("OPERACAO.COD_CONTA_PARTE", party_account_col),
+                ("OPERACAO.COD_CONTA_CONTRAPARTE", counterparty_account_col),
+            ) if not actual
+        ]
+        out.append(_ccb_unavailable(
+            "6h.registration_account_roles", missing_accounts, SEV_ERROR
+        ))
+    else:
+        account_bad = valid.where(
+            ~F.coalesce(F.col("party_account"), F.lit(""))
+            .rlike(r"^[0-9]{5}\.00-[0-9]$")
+            | ~F.coalesce(F.col("counterparty_account"), F.lit(""))
+            .rlike(r"^[0-9]{5}\.40-[0-9]$")
+        )
+        account_count = account_bad.count()
+        out.append(Finding(
+            "6h.registration_account_roles", "CCB target eligibility",
+            SEV_ERROR if account_count else SEV_INFO, "OPERACAO", account_count == 0,
+            count=account_count, column="COD_CONTA_PARTE,COD_CONTA_CONTRAPARTE",
+            sample=_sample_keys(
+                account_bad,
+                ["root_id", "operation_id", "party_account", "counterparty_account"],
+                sample,
+            ),
+            hint="Persist registration P1/party as .00 and P2/counterparty as .40."
+                 if account_count else "",
+            message="CCB registration operations must preserve observed .00/.40 account roles.",
+        ))
+    tos_bad = valid.where(F.col("route_id") != "871")
+    tos_count = tos_bad.count()
+    out.append(Finding(
+        "6h.profile.registration_tos", "CCB observed registration profile",
+        SEV_WARN if tos_count else SEV_INFO, "OPERACAO", tos_count == 0,
+        count=tos_count, column="NUM_ID_TIPO_OPER_OBJETO_SERV",
+        sample=_sample_keys(tos_bad, ["root_id", "operation_id", "route_id"], sample),
+        hint="Capture a successful registration trace before promoting a non-871 CCB TOS."
+             if tos_count else "",
+        message="CCB registration operations outside the observed TOS 871 profile.",
     ))
     modality_bad = valid.where(F.col("modality") != "6")
     modality_count = modality_bad.count()
@@ -8510,6 +8671,173 @@ def check_dates(tables: Dict[str, DataFrame], meta: Metadata, sample: int) -> Li
 # ---------------------------------------------------------------------------
 # Category 6 - Lookup combinations (SEM MODALIDADE)
 # ---------------------------------------------------------------------------
+def check_registration_quantity_reconciliation(
+    tables: Dict[str, DataFrame],
+    registration_tos: Optional[DataFrame],
+    sample: int,
+    product: str,
+) -> Finding:
+    """Reconcile the final quantity chain for each registration operation."""
+    cat = "Quantity reconciliation"
+    check_id = f"6.required.{product}_quantity"
+    product_label = product.upper()
+    requirements = {
+        "TITULO": ("NUM_IF", "QTD_DEPOSITADA"),
+        "OPERACAO": (
+            "NUM_ID_OPERACAO", "NUM_IF", "NUM_ID_TIPO_OPER_OBJETO_SERV",
+            "NUM_CONTA_PARTICIPANTE_P1", "QTD_OPERACAO",
+        ),
+        "ESPECIFICACAO": (
+            "NUM_ID_ESPECIFICACAO", "NUM_ID_OPERACAO", "QTD_ESPECIFICAR",
+        ),
+        "ESPECIFICACAO_COMITENTE": (
+            "NUM_ID_ESPECIFICACAO", "NUM_ID_ENTIDADE", "QTD_ESPECIFICADA",
+        ),
+        "CARTEIRA_PARTICIPANTE": (
+            "NUM_IF", "NUM_CONTA_PARTICIPANTE", "QTD_CARTEIRA_PARTICIPANTE",
+        ),
+        "CARTEIRA_COMITENTE": (
+            "NUM_IF", "NUM_CONTA_PARTICIPANTE", "NUM_ID_ENTIDADE",
+            "QTD_CARTEIRA_COMITENTE",
+        ),
+    }
+    resolved: Dict[str, Dict[str, str]] = {}
+    missing = []
+    for table, columns in requirements.items():
+        frame = tables.get(table)
+        if frame is None:
+            missing.append(table)
+            continue
+        resolved[table] = {}
+        for column in columns:
+            actual = resolve(frame, column)
+            if actual is None:
+                missing.append(f"{table}.{column}")
+            else:
+                resolved[table][column] = actual
+    if registration_tos is None:
+        missing.append("registration-operation TOS classification")
+    if missing:
+        return Finding(
+            check_id, cat, SEV_ERROR, "OPERACAO", False,
+            count=len(missing), column=",".join(missing), sample=missing[:sample],
+            hint=f"Export the complete final {product_label} registration quantity graph "
+                 "and load its operation-type lookup.",
+            message=f"{product_label} registration quantity reconciliation unavailable.",
+        )
+
+    operation = _active(tables["OPERACAO"])
+    operation_cols = resolved["OPERACAO"]
+    operations = (
+        operation.select(
+            _canon_key_col(F.col(operation_cols["NUM_ID_OPERACAO"]))
+            .alias("operation_id"),
+            _canon_key_col(F.col(operation_cols["NUM_IF"])).alias("root_id"),
+            _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
+            .alias("registration_tos_id"),
+            _canon_key_col(F.col(operation_cols["NUM_CONTA_PARTICIPANTE_P1"]))
+            .alias("p1_account"),
+            F.col(operation_cols["QTD_OPERACAO"]).cast("decimal(38,10)")
+            .alias("operation_quantity"),
+        )
+        .join(F.broadcast(registration_tos), "registration_tos_id", "leftsemi")
+    )
+
+    title_cols = resolved["TITULO"]
+    title_quantities = _active(tables["TITULO"]).select(
+        _canon_key_col(F.col(title_cols["NUM_IF"])).alias("root_id"),
+        F.col(title_cols["QTD_DEPOSITADA"]).cast("decimal(38,10)").alias("quantity"),
+    ).groupBy("root_id").agg(F.sum("quantity").alias("title_quantity"))
+
+    specification_cols = resolved["ESPECIFICACAO"]
+    specifications = _active(tables["ESPECIFICACAO"]).select(
+        _canon_key_col(F.col(specification_cols["NUM_ID_ESPECIFICACAO"]))
+        .alias("specification_id"),
+        _canon_key_col(F.col(specification_cols["NUM_ID_OPERACAO"]))
+        .alias("operation_id"),
+        F.col(specification_cols["QTD_ESPECIFICAR"]).cast("decimal(38,10)")
+        .alias("quantity"),
+    )
+    specification_quantities = specifications.groupBy("operation_id").agg(
+        F.sum("quantity").alias("specification_quantity")
+    )
+
+    holder_cols = resolved["ESPECIFICACAO_COMITENTE"]
+    holders = _active(tables["ESPECIFICACAO_COMITENTE"]).select(
+        _canon_key_col(F.col(holder_cols["NUM_ID_ESPECIFICACAO"]))
+        .alias("specification_id"),
+        _canon_key_col(F.col(holder_cols["NUM_ID_ENTIDADE"])).alias("holder_entity"),
+        F.col(holder_cols["QTD_ESPECIFICADA"]).cast("decimal(38,10)")
+        .alias("quantity"),
+    ).join(specifications.select("specification_id", "operation_id"),
+           "specification_id", "inner")
+    holder_quantities = holders.groupBy("operation_id").agg(
+        F.sum("quantity").alias("holder_quantity")
+    )
+
+    participant_cols = resolved["CARTEIRA_PARTICIPANTE"]
+    participant_quantities = _active(tables["CARTEIRA_PARTICIPANTE"]).select(
+        _canon_key_col(F.col(participant_cols["NUM_IF"])).alias("root_id"),
+        _canon_key_col(F.col(participant_cols["NUM_CONTA_PARTICIPANTE"]))
+        .alias("p1_account"),
+        F.col(participant_cols["QTD_CARTEIRA_PARTICIPANTE"])
+        .cast("decimal(38,10)").alias("quantity"),
+    ).groupBy("root_id", "p1_account").agg(
+        F.sum("quantity").alias("participant_wallet_quantity")
+    )
+
+    holder_wallet_cols = resolved["CARTEIRA_COMITENTE"]
+    holder_wallets = _active(tables["CARTEIRA_COMITENTE"]).select(
+        _canon_key_col(F.col(holder_wallet_cols["NUM_IF"])).alias("root_id"),
+        _canon_key_col(F.col(holder_wallet_cols["NUM_CONTA_PARTICIPANTE"]))
+        .alias("p1_account"),
+        _canon_key_col(F.col(holder_wallet_cols["NUM_ID_ENTIDADE"]))
+        .alias("holder_entity"),
+        F.col(holder_wallet_cols["QTD_CARTEIRA_COMITENTE"])
+        .cast("decimal(38,10)").alias("quantity"),
+    )
+    holder_scopes = holders.select("operation_id", "holder_entity").join(
+        operations.select("operation_id", "root_id", "p1_account"),
+        "operation_id", "inner",
+    ).dropDuplicates(["operation_id", "root_id", "p1_account", "holder_entity"])
+    holder_wallet_quantities = holder_scopes.join(
+        holder_wallets, ["root_id", "p1_account", "holder_entity"], "inner"
+    ).groupBy("operation_id").agg(
+        F.sum("quantity").alias("holder_wallet_quantity")
+    )
+
+    compared = (
+        operations.join(title_quantities, "root_id", "left")
+        .join(specification_quantities, "operation_id", "left")
+        .join(holder_quantities, "operation_id", "left")
+        .join(participant_quantities, ["root_id", "p1_account"], "left")
+        .join(holder_wallet_quantities, "operation_id", "left")
+    )
+    compared_quantities = (
+        "title_quantity", "specification_quantity", "holder_quantity",
+        "participant_wallet_quantity", "holder_wallet_quantity",
+    )
+    bad = compared.where(reduce(
+        lambda left, right: left | right,
+        [
+            ~F.col(column).eqNullSafe(F.col("operation_quantity"))
+            for column in compared_quantities
+        ],
+    ))
+    count = bad.count()
+    return Finding(
+        check_id, cat, SEV_ERROR if count else SEV_INFO,
+        "OPERACAO", count == 0, count=count,
+        column="QTD_DEPOSITADA,QTD_OPERACAO,QTD_ESPECIFICAR,QTD_ESPECIFICADA,"
+               "QTD_CARTEIRA_PARTICIPANTE,QTD_CARTEIRA_COMITENTE",
+        sample=_sample_keys(bad, ["root_id", "operation_id"], sample),
+        hint="Rebuild the final registration cluster from one quantity anchor; do not compare "
+             "historical operations or blank insertion-time QTD_EMITIDA fields.",
+        message=f"{product_label} registration operations whose final title, specification, "
+                "and wallet quantities do not reconcile.",
+    )
+
+
 def check_required_lookup_frames(
     tables: Dict[str, DataFrame],
     account_df: Optional[DataFrame],
@@ -8534,6 +8862,10 @@ def check_required_lookup_frames(
     run_account = not _check_is_skipped("6.required.active_account", skip_prefixes)
     run_operation = not _check_is_skipped("6.required.operation_tos", skip_prefixes)
     run_platform = not _check_is_skipped("6.required.cdb_platform", skip_prefixes)
+    quantity_product = "rdb" if profile.name == "rdb" else "cdb"
+    run_quantity = not _check_is_skipped(
+        f"6.required.{quantity_product}_quantity", skip_prefixes
+    )
     cat = "Required lookup combinations"
     errors = dict(lookup_errors or {})
     lookup_hint = (
@@ -8554,6 +8886,68 @@ def check_required_lookup_frames(
             return None
         return {name: actual for name, actual in resolved.items() if actual}
 
+    tos_semantics_supported = (
+        CAP_LOOKUP_TOS in profile.supported_capabilities or profile.name == "rdb"
+    )
+    registration_account_contract = profile.name in ("cdb", "cdb_simplificado", "rdb")
+    registration_account_tos = None
+    account_scope_error = None
+    if ((run_account or run_quantity)
+            and profile.account_check_enabled and registration_account_contract):
+        account_tos_cols = target_columns(
+            tos_df,
+            TIPO_OPER_OBJETO_SERV_TABLE,
+            [
+                "NUM_ID_TIPO_OPER_OBJETO_SERV",
+                "NUM_ID_TIPO_OPERACAO",
+                "NUM_ID_OBJETO_SERVICO",
+                "IND_DISPONIVEL_IDENTIFICACAO",
+            ],
+        )
+        account_tipo_cols = target_columns(
+            tipo_df,
+            TIPO_OPERACAO_TABLE,
+            ["NUM_ID_TIPO_OPERACAO", "COD_TIPO_OPERACAO"],
+        )
+        if account_tos_cols is None or account_tipo_cols is None:
+            account_scope_error = "registration-operation TOS classification unavailable"
+        else:
+            registration_account_tos = (
+                tos_df.select(
+                    _canon_key_col(F.col(
+                        account_tos_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]
+                    )).alias("registration_tos_id"),
+                    _canon_key_col(F.col(
+                        account_tos_cols["NUM_ID_TIPO_OPERACAO"]
+                    )).alias("tipo_operacao_id"),
+                    _canon_key_col(F.col(
+                        account_tos_cols["NUM_ID_OBJETO_SERVICO"]
+                    )).alias("objeto_servico_id"),
+                    F.trim(F.col(
+                        account_tos_cols["IND_DISPONIVEL_IDENTIFICACAO"]
+                    ).cast("string")).alias("identification_flag"),
+                )
+                .join(
+                    tipo_df.select(
+                        _canon_key_col(F.col(
+                            account_tipo_cols["NUM_ID_TIPO_OPERACAO"]
+                        )).alias("tipo_operacao_id"),
+                        F.trim(F.col(
+                            account_tipo_cols["COD_TIPO_OPERACAO"]
+                        ).cast("string")).alias("operation_type_code"),
+                    ),
+                    "tipo_operacao_id",
+                    "inner",
+                )
+                .where(
+                    (F.col("operation_type_code") == "1")
+                    & (F.col("objeto_servico_id") == str(profile.object_service_id))
+                    & (F.col("identification_flag") == "S")
+                )
+                .select("registration_tos_id")
+                .dropDuplicates()
+            )
+
     missing_refs = []
     account_parts = []
     for table, column in ACCOUNT_REFERENCES:
@@ -8562,12 +8956,39 @@ def check_required_lookup_frames(
         if source is None or actual is None:
             missing_refs.append(f"{table}.{column}")
             continue
+        source_code = None
+        if registration_account_contract and table == OPERACAO_TABLE:
+            operation_tos = resolve(source, "NUM_ID_TIPO_OPER_OBJETO_SERV")
+            source_code = resolve(source, OPERATION_ACCOUNT_CODES[column])
+            if operation_tos is None:
+                missing_refs.append(f"{table}.NUM_ID_TIPO_OPER_OBJETO_SERV")
+                continue
+            if source_code is None:
+                missing_refs.append(f"{table}.{OPERATION_ACCOUNT_CODES[column]}")
+                continue
+            if registration_account_tos is not None:
+                source = source.withColumn(
+                    "registration_tos_id",
+                    _canon_key_col(F.col(operation_tos)),
+                ).join(
+                    F.broadcast(registration_account_tos),
+                    "registration_tos_id",
+                    "leftsemi",
+                )
         account_parts.append(
             source.select(
                 F.lit(table).alias("source_table"),
                 F.lit(column).alias("source_column"),
                 F.col(actual).cast("string").alias("raw_account"),
                 _canon_key_col(F.col(actual)).alias("account_id"),
+                F.lit(
+                    ACCOUNT_ROLE_GROUPS.get((table, column))
+                    if registration_account_contract else None
+                ).alias("expected_group"),
+                (
+                    F.trim(F.col(source_code).cast("string"))
+                    if source_code else F.lit(None).cast("string")
+                ).alias("source_account_code"),
             )
         )
 
@@ -8581,6 +9002,23 @@ def check_required_lookup_frames(
                  "substitute or broaden the check to other account columns.",
             message="Required synthetic account source table/column(s) are missing: "
                     f"{', '.join(missing_refs)}.",
+        )
+    elif account_scope_error:
+        accounts = reduce(lambda left, right: left.unionByName(right), account_parts)
+        has_account_references = accounts.where(
+            F.col("raw_account").isNotNull() & (F.trim(F.col("raw_account")) != "")
+        ).limit(1).count()
+        account_finding = Finding(
+            "6.required.active_account", cat,
+            SEV_ERROR if has_account_references else SEV_INFO,
+            CONTA_PARTICIPANTE_TABLE, not has_account_references,
+            hint=lookup_hint if has_account_references else "",
+            message=(
+                f"Required {profile.name.upper()} account-role check unavailable: "
+                f"{account_scope_error}."
+                if has_account_references else
+                "No nonblank synthetic account references require target validation."
+            ),
         )
     else:
         accounts = reduce(lambda left, right: left.unionByName(right), account_parts)
@@ -8639,21 +9077,45 @@ def check_required_lookup_frames(
                     .alias("access_type"),
                 )
                 .where(
-                    (F.col("situation_id") == "1")
+                    F.col("situation_id").isin(*(
+                        ("1", "2") if profile.name == "rdb" else ("1",)
+                    ))
                     & F.col("account_code").rlike(r"^[0-9]{5}\.(40|10)-[0-9]$")
                     & (F.col("area_id") == "1")
                     & (F.col("access_type") == "L")
                 )
-                .select("account_id")
+                .select(
+                    "account_id",
+                    F.col("account_code").alias("target_account_code"),
+                    F.regexp_extract(F.col("account_code"), r"\.([0-9]{2})-", 1)
+                    .alias("target_group"),
+                )
                 .where(F.col("account_id").isNotNull())
-                .dropDuplicates()
+                .dropDuplicates(["account_id"])
+            )
+            checked_accounts = nonblank_accounts.join(
+                F.broadcast(eligible_accounts), "account_id", "left"
+            )
+            invalid_nonblank = checked_accounts.where(
+                F.col("target_account_code").isNull()
+                | (
+                    F.col("expected_group").isNotNull()
+                    & (F.col("target_group") != F.col("expected_group"))
+                )
+                | (
+                    F.lit(registration_account_contract)
+                    & (F.col("source_table") == OPERACAO_TABLE)
+                    & ~F.col("source_account_code").eqNullSafe(F.col("target_account_code"))
+                )
             )
             invalid_accounts = blank_accounts.select(
-                "source_table", "source_column", "account_id"
+                "source_table", "source_column", "account_id",
+                "expected_group", "source_account_code",
             ).unionByName(
-                nonblank_accounts.join(
-                    F.broadcast(eligible_accounts), "account_id", "left_anti"
-                ).select("source_table", "source_column", "account_id")
+                invalid_nonblank.select(
+                    "source_table", "source_column", "account_id",
+                    "expected_group", "source_account_code",
+                )
             )
             invalid_account_count = invalid_accounts.count()
             account_finding = Finding(
@@ -8664,22 +9126,37 @@ def check_required_lookup_frames(
                 column=",".join(f"{table}.{column}" for table, column in ACCOUNT_REFERENCES),
                 sample=_sample_keys(
                     invalid_accounts,
-                    ["source_table", "source_column", "account_id"],
+                    ["source_table", "source_column", "account_id", "expected_group"],
                     sample,
                 ),
                 hint=(
                     "Use a nonblank target CONTA_PARTICIPANTE with "
-                    "NUM_ID_SITUACAO_CONTA=1 whose COD_CONTA_PARTICIPANTE has a "
+                    + (
+                        "NUM_ID_SITUACAO_CONTA in (1,2) "
+                        if profile.name == "rdb" else "NUM_ID_SITUACAO_CONTA=1 "
+                    )
+                    + "whose COD_CONTA_PARTICIPANTE has a "
                     "V_FAMILIA_CONTAS row with NUM_ID_AREA_ATUACAO=1 and COD_TIPO_ACESSO='L'. "
+                    + (
+                        "TITULO/P2 must use .40 and DEPOSITO/P1 must use .10. Persisted "
+                        "COD_CONTA_PARTE/CONTRAPARTE must match the referenced target account. "
+                        if registration_account_contract else ""
+                    )
+                    +
                     "The trimmed account code must match ^[0-9]{5}\\.(40|10)-[0-9]$; "
-                    "situation 2 is not eligible."
+                    + ("" if profile.name == "rdb" else "situation 2 is not eligible.")
                     if invalid_account_count else ""
                 ),
-                message="Synthetic account references must resolve to an active local-access "
-                        "target account whose trimmed code has the required .40/.10 shape.",
+                message=(
+                    f"Synthetic {profile.name.upper()} registration-account references must "
+                    "resolve to the "
+                    "required active/local .10/.40 role and match persisted account codes."
+                    if registration_account_contract else
+                    "Synthetic account references must resolve to an active local-access "
+                    "target account whose trimmed code has the required .40/.10 shape."
+                ),
             )
 
-    tos_semantics_supported = CAP_LOOKUP_TOS in profile.supported_capabilities
     # Do not evaluate RDB rows with CDB's identification='S'/operation-type='1' literals.
     op_df = tables.get(OPERACAO_TABLE) if tos_semantics_supported else None
     op_tos_col = resolve(op_df, "NUM_ID_TIPO_OPER_OBJETO_SERV") if op_df is not None else None
@@ -8911,8 +9388,16 @@ def check_required_lookup_frames(
             message=f"Object-service platform not validated for product {profile.name} "
                     "(unresolved COD_OBJETO_SERVICO/IND_PLATAFORMA_BAIXA).",
         )
+    quantity_finding = (
+        check_registration_quantity_reconciliation(
+            tables, registration_account_tos, sample, quantity_product
+        )
+        if run_quantity and registration_account_contract else None
+    )
     return [
-        finding for finding in (account_finding, operation_finding, platform_finding)
+        finding for finding in (
+            account_finding, operation_finding, platform_finding, quantity_finding,
+        )
         if finding is not None
     ]
 
@@ -9193,6 +9678,10 @@ def check_lookup_combos(
     run_required_platform = run_required and not _check_is_skipped(
         "6.required.cdb_platform", skip_prefixes
     )
+    quantity_product = "rdb" if profile.name == "rdb" else "cdb"
+    run_required_quantity = run_required and not _check_is_skipped(
+        f"6.required.{quantity_product}_quantity", skip_prefixes
+    )
     if not (run_combo or run_required):
         return []
     op_df = tables.get(OPERACAO_TABLE)
@@ -9215,8 +9704,11 @@ def check_lookup_combos(
         existing = []
 
     lookup_tos_supported = CAP_LOOKUP_TOS in profile.supported_capabilities
+    registration_lookup_supported = lookup_tos_supported or profile.name == "rdb"
     queries = {}
-    if lookup_tos_supported and (run_combo or run_required_operation):
+    if registration_lookup_supported and (
+        run_combo or run_required_operation or run_required_account or run_required_quantity
+    ):
         queries.update({
             TIPO_OPER_OBJETO_SERV_TABLE: (
                 "SELECT NUM_ID_TIPO_OPER_OBJETO_SERV, NUM_ID_TIPO_OPERACAO, "
@@ -9262,12 +9754,61 @@ def check_lookup_combos(
     )
     account_keys: List[str] = []
     if account_sources_available:
-        key_frames = [
-            tables[table].select(
-                _canon_key_col(F.col(resolve(tables[table], column))).alias("key")
+        registration_tos_ids = None
+        tos_lookup = lookups.get(TIPO_OPER_OBJETO_SERV_TABLE)
+        tipo_lookup = lookups.get(TIPO_OPERACAO_TABLE)
+        if (
+            profile.name in ("cdb", "cdb_simplificado", "rdb")
+            and tos_lookup is not None
+            and tipo_lookup is not None
+        ):
+            registration_tos_ids = (
+                tos_lookup.select(
+                    _canon_key_col(F.col("NUM_ID_TIPO_OPER_OBJETO_SERV"))
+                    .alias("registration_tos_id"),
+                    _canon_key_col(F.col("NUM_ID_TIPO_OPERACAO")).alias("tipo_operacao_id"),
+                    _canon_key_col(F.col("NUM_ID_OBJETO_SERVICO"))
+                    .alias("objeto_servico_id"),
+                    F.trim(F.col("IND_DISPONIVEL_IDENTIFICACAO").cast("string"))
+                    .alias("identification_flag"),
+                )
+                .join(
+                    tipo_lookup.select(
+                        _canon_key_col(F.col("NUM_ID_TIPO_OPERACAO"))
+                        .alias("tipo_operacao_id"),
+                        F.trim(F.col("COD_TIPO_OPERACAO").cast("string"))
+                        .alias("operation_type_code"),
+                    ),
+                    "tipo_operacao_id",
+                    "inner",
+                )
+                .where(
+                    (F.col("operation_type_code") == "1")
+                    & (F.col("objeto_servico_id") == str(profile.object_service_id))
+                    & (F.col("identification_flag") == "S")
+                )
+                .select("registration_tos_id")
+                .dropDuplicates()
             )
-            for table, column in ACCOUNT_REFERENCES
-        ]
+        key_frames = []
+        for table, column in ACCOUNT_REFERENCES:
+            source = tables[table]
+            if table == OPERACAO_TABLE and profile.name in (
+                "cdb", "cdb_simplificado", "rdb"
+            ):
+                operation_tos = resolve(source, "NUM_ID_TIPO_OPER_OBJETO_SERV")
+                if registration_tos_ids is None or operation_tos is None:
+                    continue
+                source = source.withColumn(
+                    "registration_tos_id", _canon_key_col(F.col(operation_tos))
+                ).join(
+                    F.broadcast(registration_tos_ids),
+                    "registration_tos_id",
+                    "leftsemi",
+                )
+            key_frames.append(source.select(
+                _canon_key_col(F.col(resolve(source, column))).alias("key")
+            ))
         distinct_keys = reduce(lambda left, right: left.unionByName(right), key_frames).where(
             F.col("key").isNotNull() & (F.trim(F.col("key")) != "")
         ).dropDuplicates()
@@ -10640,17 +11181,63 @@ def check_shapes(
                                    "output."))
         return out
 
-    # 7c - operation ratio invariant: DADO_OPERACAO = 2*OPERACAO, LANCAMENTO = OPERACAO.
-    # Holds for ~99% of production IFs that have operations; a synthetic output that
-    # binds these tables independently violates it almost everywhere.
+    # 7c - CDB operation closure: each operation owns exactly two data rows and one launch.
     if (run_op_ratio
-            and all(name in metric_names for name in ("OPERACAO", "DADO_OPERACAO", "LANCAMENTO"))):
-        with_ops = counts.where(F.col("OPERACAO") > 0)
-        n_ops = with_ops.count()
+            and all(name in metric_names for name in ("OPERACAO", "DADO_OPERACAO", "LANCAMENTO"))
+            and not any(name in skipped for name in (
+                "OPERACAO", "DADO_OPERACAO", "LANCAMENTO"
+            ))):
+        operation = _shape_active(tables["OPERACAO"])
+        operation_id = resolve(operation, OPERACAO_KEY_COL)
+        operation_root = resolve(operation, SHAPE_ROOT_KEY)
+        data = _shape_active(tables["DADO_OPERACAO"])
+        data_operation = resolve(data, OPERACAO_KEY_COL)
+        data_type = resolve(data, "NUM_ID_TIPO_DADO_OPERACAO")
+        data_value = resolve(data, "VAL_DADO_ATUAL")
+        launch = _shape_active(tables["LANCAMENTO"])
+        launch_operation = resolve(launch, OPERACAO_KEY_COL)
+
+        operations = operation.select(
+            _canon_key_col(F.col(operation_id)).alias("operation_id"),
+            F.col(operation_root).cast("long").alias(SHAPE_ROOT_KEY),
+        ).join(universe, SHAPE_ROOT_KEY, "leftsemi")
+
+        data_rows = data.select(
+            _canon_key_col(F.col(data_operation)).alias("operation_id"),
+            *(
+                [
+                    _norm_code(F.col(data_type)).alias("data_type"),
+                    F.upper(F.trim(F.col(data_value).cast("string"))).alias("data_value"),
+                ]
+                if data_type and data_value else []
+            ),
+        ).join(operations.select("operation_id"), "operation_id", "leftsemi")
+        if data_type and data_value:
+            data_counts = data_rows.groupBy("operation_id").agg(
+                F.count(F.lit(1)).alias("operation_data"),
+                F.sum(F.when(F.col("data_type") == "502", 1).otherwise(0)).alias("data_502"),
+                F.sum(F.when(F.col("data_type") == "503", 1).otherwise(0)).alias("data_503"),
+                F.sum(F.when(
+                    (F.col("data_type") == "503") & (F.col("data_value") == "PF"),
+                    1,
+                ).otherwise(0)).alias("nature_pf"),
+            )
+        else:
+            data_counts = data_rows.groupBy("operation_id").count().withColumnRenamed(
+                "count", "operation_data"
+            )
+        launch_counts = launch.select(
+            _canon_key_col(F.col(launch_operation)).alias("operation_id")
+        ).join(
+            operations.select("operation_id"), "operation_id", "leftsemi"
+        ).groupBy("operation_id").count().withColumnRenamed("count", "launches")
+        closure = operations.join(data_counts, "operation_id", "left").join(
+            launch_counts, "operation_id", "left"
+        ).fillna(0, ["operation_data", "launches"])
+        n_ops = closure.count()
         if n_ops:
-            bad = with_ops.where(
-                (F.col("DADO_OPERACAO") != 2 * F.col("OPERACAO"))
-                | (F.col("LANCAMENTO") != F.col("OPERACAO"))
+            bad = closure.where(
+                (F.col("operation_data") != 2) | (F.col("launches") != 1)
             )
             c = bad.count()
             pct = 100.0 * c / n_ops
@@ -10658,14 +11245,63 @@ def check_shapes(
                 "7c.op_ratio", cat,
                 SEV_ERROR if pct > op_ratio_tol_pct else SEV_INFO,
                 "OPERACAO", pct <= op_ratio_tol_pct, count=c,
-                column="OPERACAO,DADO_OPERACAO,LANCAMENTO",
-                sample=_sample_keys(bad.select(SHAPE_ROOT_KEY), [SHAPE_ROOT_KEY], sample),
-                hint="Every production operação carries exactly 2 DADO_OPERACAO and "
+                column="NUM_ID_OPERACAO,DADO_OPERACAO,LANCAMENTO",
+                sample=_sample_keys(bad, [SHAPE_ROOT_KEY, "operation_id"], sample),
+                hint="Every CDB operação carries exactly 2 DADO_OPERACAO and "
                      "1 LANCAMENTO. Generate/bind the three tables as one unit per operação.",
-                message=f"IFs violating OPERACAO:DADO_OPERACAO:LANCAMENTO = 1:2:1 "
-                        f"({pct:.1f}% of {n_ops} IFs with operações; tolerance "
+                message=f"CDB operations violating "
+                        f"OPERACAO:DADO_OPERACAO:LANCAMENTO = 1:2:1 "
+                        f"({pct:.1f}% of {n_ops} operations; tolerance "
                         f"{op_ratio_tol_pct}%).",
             ))
+
+            if data_type and data_value:
+                pf_operations = closure.where(F.col("nature_pf") > 0)
+                bad_pf = pf_operations.where(
+                    (F.col("data_502") != 1)
+                    | (F.col("data_503") != 1)
+                    | (F.col("nature_pf") != 1)
+                )
+                bad_pf_count = bad_pf.count()
+                out.append(Finding(
+                    "7c.op_data_profile", cat,
+                    SEV_ERROR if bad_pf_count else SEV_INFO,
+                    "DADO_OPERACAO", bad_pf_count == 0, count=bad_pf_count,
+                    column="NUM_ID_TIPO_DADO_OPERACAO,VAL_DADO_ATUAL",
+                    sample=_sample_keys(
+                        bad_pf, [SHAPE_ROOT_KEY, "operation_id"], sample
+                    ),
+                    hint="For the observed PF profile, generate one type 502 document row "
+                         "and one type 503 row whose value is PF.",
+                    message="CDB operations differing from the observed 502=document and "
+                            "503=PF operation-data profile.",
+                ))
+
+                unvalidated = closure.where(
+                    (F.col("operation_data") == 2) & (F.col("nature_pf") == 0)
+                )
+                unvalidated_count = unvalidated.count()
+                out.append(Finding(
+                    "7c.op_data_nature_unvalidated", cat,
+                    SEV_WARN if unvalidated_count else SEV_INFO,
+                    "DADO_OPERACAO", unvalidated_count == 0, count=unvalidated_count,
+                    column="VAL_DADO_ATUAL",
+                    sample=_sample_keys(
+                        unvalidated, [SHAPE_ROOT_KEY, "operation_id"], sample
+                    ),
+                    hint="Capture a successful inclusion log before validating another "
+                         "operation-party nature.",
+                    message="CDB operation-data profiles whose nature is not validated; "
+                            "only PF is currently evidence-backed.",
+                ))
+            else:
+                out.append(Finding(
+                    "7c.op_data_profile_unavailable", cat, SEV_WARN,
+                    "DADO_OPERACAO", False,
+                    column="NUM_ID_TIPO_DADO_OPERACAO,VAL_DADO_ATUAL",
+                    hint="Include operation-data type and current-value columns.",
+                    message="CDB PF operation-data profile validation unavailable.",
+                ))
 
     # 7d - CDB simplificado RESGATE multiplicity: schedule rows belong below one parent.
     if run_resgate_max and "RESGATE" in metric_names:
@@ -10675,7 +11311,7 @@ def check_shapes(
             "7d.resgate_multiplicity", cat,
             SEV_ERROR if c else SEV_INFO, "RESGATE", c == 0, count=c, column="RESGATE",
             sample=_sample_keys(multi.select(SHAPE_ROOT_KEY), [SHAPE_ROOT_KEY], sample),
-            hint="CDB simplificado expects at most one RESGATE condition per IF.",
+        hint="Every CDB expects at most one RESGATE parent condition per IF.",
             message="IFs with more than one RESGATE row.",
         ))
 
@@ -10912,6 +11548,116 @@ def _cat8_type_mix(
     )
 
 
+def check_event_condition_families(
+    tables: Dict[str, DataFrame], sample: int, profile: "ValidationProfile"
+) -> List[Finding]:
+    """Require observed event families to coexist with their physical condition family."""
+    if profile.name not in ("cdb", "cdb_simplificado", "rdb"):
+        return []
+    check_id = "8a.event_condition_family"
+    cat = "Log-derived invariants"
+    event = tables.get("EVENTO")
+    event_required = ("NUM_EVENTO", "NUM_IF", "NUM_TIPO_EVENTO_LEGADO")
+    event_cols = {
+        column: resolve(event, column) if event is not None else None
+        for column in event_required
+    }
+    event_missing = [
+        f"EVENTO.{column}" for column, actual in event_cols.items() if actual is None
+    ]
+    if event_missing:
+        return [_cat8_unavailable(check_id, "EVENTO", event_missing)]
+    events = _active(event).select(
+        _canon_key_col(F.col(event_cols["NUM_EVENTO"])).alias("event_id"),
+        _canon_key_col(F.col(event_cols["NUM_IF"])).alias("root_id"),
+        _norm_code(F.col(event_cols["NUM_TIPO_EVENTO_LEGADO"])).alias("event_type"),
+    ).where(F.col("event_type").isin("83", "85"))
+    present_event_types = {
+        row["event_type"] for row in events.select("event_type").dropDuplicates().collect()
+    }
+    if not present_event_types:
+        return [Finding(
+            check_id, cat, SEV_INFO, "EVENTO", True,
+            column="NUM_IF,NUM_TIPO_EVENTO_LEGADO",
+            message="No active event 83/85 rows require condition-family validation.",
+        )]
+
+    requirements = {
+        "CONDICAO_IF": ("NUM_CONDICAO_IF", "NUM_IF", "COD_TIPO_CONDICAO_IF"),
+    }
+    if "83" in present_event_types:
+        requirements["JUROS_FLUTUANTE"] = ("NUM_CONDICAO_IF",)
+    if "85" in present_event_types:
+        requirements["RESGATE"] = ("NUM_CONDICAO_IF",)
+    resolved: Dict[str, Dict[str, str]] = {}
+    missing = []
+    for table, columns in requirements.items():
+        frame = tables.get(table)
+        if frame is None:
+            missing.append(table)
+            continue
+        resolved[table] = {}
+        for column in columns:
+            actual = resolve(frame, column)
+            if actual is None:
+                missing.append(f"{table}.{column}")
+            else:
+                resolved[table][column] = actual
+    if missing:
+        return [Finding(
+            check_id, cat, SEV_ERROR, "EVENTO", False,
+            count=events.count(), column=",".join(missing), sample=missing[:sample],
+            hint="Include the condition/subtype graph required by the present event types.",
+            message="Event-family validation unavailable while relevant events exist: "
+                    f"{', '.join(missing)}.",
+        )]
+
+    condition_cols = resolved["CONDICAO_IF"]
+    conditions = _active(tables["CONDICAO_IF"]).select(
+        _canon_key_col(F.col(condition_cols["NUM_CONDICAO_IF"]))
+        .alias("condition_id"),
+        _canon_key_col(F.col(condition_cols["NUM_IF"])).alias("root_id"),
+        _norm_code(F.col(condition_cols["COD_TIPO_CONDICAO_IF"]))
+        .alias("condition_type"),
+    )
+
+    family_roots = []
+    for event_type, condition_type, table in (
+        ("83", "3", "JUROS_FLUTUANTE"),
+        ("85", "20", "RESGATE"),
+    ):
+        if event_type not in present_event_types:
+            continue
+        subtype_key = resolved[table]["NUM_CONDICAO_IF"]
+        family_roots.append(
+            _active(tables[table]).select(
+                _canon_key_col(F.col(subtype_key)).alias("condition_id")
+            ).join(
+                conditions.where(F.col("condition_type") == condition_type),
+                "condition_id",
+                "inner",
+            ).select(
+                "root_id", F.lit(event_type).alias("event_type")
+            ).dropDuplicates()
+        )
+    valid_families = reduce(
+        lambda left, right: left.unionByName(right), family_roots
+    ).dropDuplicates()
+    bad = events.join(valid_families, ["root_id", "event_type"], "leftanti")
+    count = bad.count()
+    product_label = profile.name.upper()
+    return [Finding(
+        check_id, cat, SEV_ERROR if count else SEV_INFO,
+        "EVENTO", count == 0, count=count,
+        column="NUM_IF,NUM_TIPO_EVENTO_LEGADO",
+        sample=_sample_keys(bad, ["event_id", "root_id", "event_type"], sample),
+        hint=f"For {product_label}, event 83 requires a type-3/JUROS_FLUTUANTE condition "
+             "on the same NUM_IF; event 85 requires type-20/RESGATE.",
+        message=f"{product_label} juros/resgate events without their observed condition "
+                "family on the same IF.",
+    )]
+
+
 def check_log_invariants(
     tables: Dict[str, DataFrame], sample: int, registration_profile: bool = False,
     profile: Optional["ValidationProfile"] = None,
@@ -11141,6 +11887,8 @@ def check_log_invariants(
                     "P1/P2 projections participating in duplicate f_testa_meunumero tuples.",
                 )
             )
+
+    out.extend(check_event_condition_families(tables, sample, profile))
 
     if not registration_profile:
         return out
@@ -11420,9 +12168,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--shape-drift-tol", type=float, default=0.15,
                    help="Cat 7b: max total variation distance between synthetic and "
                         "baseline shape distributions, 0-1 (default 0.15).")
-    p.add_argument("--shape-op-ratio-tol", type=float, default=5.0,
-                   help="Cat 7c: max %% of operation-bearing IFs violating "
-                        "OPERACAO:DADO_OPERACAO:LANCAMENTO = 1:2:1 (default 5.0).")
+    p.add_argument("--shape-op-ratio-tol", type=float, default=0.0,
+                   help="Cat 7c: max %% of CDB operations violating "
+                        "OPERACAO:DADO_OPERACAO:LANCAMENTO = 1:2:1 (default 0.0).")
     p.add_argument("--fail-severity", default="error", choices=["error", "warn"],
                    help="Minimum severity that makes the run exit non-zero.")
     p.add_argument("--allow-partial", action="store_true",

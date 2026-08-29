@@ -47,6 +47,10 @@ def baseline_identity(**overrides):
 
 
 def operation_shape_tables(spark, num_tipo_if=49, dado_rows=2, lancamento_rows=1):
+    operation_data = [
+        (101, 502, "380.485.158-49"),
+        (101, 503, "PF"),
+    ][:dado_rows]
     return {
         "INSTRUMENTO_FINANCEIRO": spark.createDataFrame(
             [(1, num_tipo_if, None)],
@@ -56,7 +60,8 @@ def operation_shape_tables(spark, num_tipo_if=49, dado_rows=2, lancamento_rows=1
             [(101, 1)], "NUM_ID_OPERACAO long, NUM_IF long"
         ),
         "DADO_OPERACAO": spark.createDataFrame(
-            [(101,)] * dado_rows, "NUM_ID_OPERACAO long"
+            operation_data,
+            "NUM_ID_OPERACAO long, NUM_ID_TIPO_DADO_OPERACAO long, VAL_DADO_ATUAL string",
         ),
         "LANCAMENTO": spark.createDataFrame(
             [(101,)] * lancamento_rows, "NUM_ID_OPERACAO long"
@@ -179,7 +184,7 @@ def test_rdb_without_shape_evidence_skips_before_touching_spark():
 
 
 @pytest.mark.parametrize(("dado_rows", "expected_pass"), [(2, True), (1, False)])
-def test_full_cdb_enforces_only_operation_cluster_ratio(
+def test_full_cdb_enforces_operation_closure_and_single_resgate_parent(
     spark, dado_rows, expected_pass
 ):
     findings = by_id(validator.check_shapes(
@@ -194,11 +199,99 @@ def test_full_cdb_enforces_only_operation_cluster_ratio(
     ))
 
     assert findings["7c.op_ratio"].passed is expected_pass
-    assert "7d.resgate_multiplicity" not in findings
+    assert findings["7d.resgate_multiplicity"].passed
     assert "7.baseline" not in findings
 
 
-def test_full_cdb_allows_multiple_resgate_conditions(spark):
+def test_cdb_operation_closure_rejects_children_compensated_between_operations(spark):
+    tables = operation_shape_tables(spark)
+    tables["OPERACAO"] = spark.createDataFrame(
+        [(101, 1), (102, 1)], "NUM_ID_OPERACAO long, NUM_IF long"
+    )
+    tables["DADO_OPERACAO"] = spark.createDataFrame(
+        [
+            (101, 502, "380.485.158-49"),
+            (101, 503, "PF"),
+            (101, 502, "380.485.158-49"),
+            (101, 503, "PF"),
+        ],
+        "NUM_ID_OPERACAO long, NUM_ID_TIPO_DADO_OPERACAO long, VAL_DADO_ATUAL string",
+    )
+    tables["LANCAMENTO"] = spark.createDataFrame(
+        [(101,), (102,)], "NUM_ID_OPERACAO long"
+    )
+
+    findings = by_id(validator.check_shapes(
+        spark, tables, None, 5, 1.0, 0.15, 5.0,
+        validator.VALIDATION_PROFILES["cdb"],
+    ))
+
+    assert not findings["7c.op_ratio"].passed
+    assert findings["7c.op_ratio"].count == 2
+
+
+def test_cdb_operation_closure_accepts_multiple_complete_operations(spark):
+    tables = operation_shape_tables(spark)
+    tables["OPERACAO"] = spark.createDataFrame(
+        [(101, 1), (102, 1)], "NUM_ID_OPERACAO long, NUM_IF long"
+    )
+    tables["DADO_OPERACAO"] = spark.createDataFrame(
+        [
+            (101, 502, "380.485.158-49"),
+            (101, 503, "PF"),
+            (102, 502, "158.521.262-84"),
+            (102, 503, "PF"),
+        ],
+        "NUM_ID_OPERACAO long, NUM_ID_TIPO_DADO_OPERACAO long, VAL_DADO_ATUAL string",
+    )
+    tables["LANCAMENTO"] = spark.createDataFrame(
+        [(101,), (102,)], "NUM_ID_OPERACAO long"
+    )
+
+    findings = by_id(validator.check_shapes(
+        spark, tables, None, 5, 1.0, 0.15, 5.0,
+        validator.VALIDATION_PROFILES["cdb"],
+    ))
+
+    assert findings["7c.op_ratio"].passed
+    assert findings["7c.op_ratio"].count == 0
+
+
+def test_cdb_operation_data_rejects_invalid_observed_pf_profile(spark):
+    tables = operation_shape_tables(spark)
+    tables["DADO_OPERACAO"] = spark.createDataFrame(
+        [(101, 501, "380.485.158-49"), (101, 503, "PF")],
+        "NUM_ID_OPERACAO long, NUM_ID_TIPO_DADO_OPERACAO long, VAL_DADO_ATUAL string",
+    )
+
+    findings = by_id(validator.check_shapes(
+        spark, tables, None, 5, 1.0, 0.15, 5.0,
+        validator.VALIDATION_PROFILES["cdb"],
+    ))
+
+    assert findings["7c.op_ratio"].passed
+    assert not findings["7c.op_data_profile"].passed
+    assert findings["7c.op_data_profile"].count == 1
+
+
+def test_cdb_operation_data_leaves_pj_profile_unvalidated(spark):
+    tables = operation_shape_tables(spark)
+    tables["DADO_OPERACAO"] = spark.createDataFrame(
+        [(101, 502, "12.345.678/0001-90"), (101, 503, "PJ")],
+        "NUM_ID_OPERACAO long, NUM_ID_TIPO_DADO_OPERACAO long, VAL_DADO_ATUAL string",
+    )
+
+    findings = by_id(validator.check_shapes(
+        spark, tables, None, 5, 1.0, 0.15, 5.0,
+        validator.VALIDATION_PROFILES["cdb"],
+    ))
+
+    assert findings["7c.op_ratio"].passed
+    assert findings["7c.op_data_nature_unvalidated"].severity == validator.SEV_WARN
+    assert findings["7c.op_data_nature_unvalidated"].count == 1
+
+
+def test_full_cdb_rejects_multiple_resgate_parents(spark):
     tables = {
         "INSTRUMENTO_FINANCEIRO": spark.createDataFrame(
             [(1, 49, None)], "NUM_IF long, NUM_TIPO_IF long, DAT_EXCLUSAO string"
@@ -216,7 +309,8 @@ def test_full_cdb_allows_multiple_resgate_conditions(spark):
         validator.VALIDATION_PROFILES["cdb"],
     ))
 
-    assert "7d.resgate_multiplicity" not in findings
+    assert findings["7d.resgate_multiplicity"].severity == validator.SEV_ERROR
+    assert findings["7d.resgate_multiplicity"].count == 1
 
 
 def test_simplificado_enforces_resgate_multiplicity_and_requires_baseline(spark):

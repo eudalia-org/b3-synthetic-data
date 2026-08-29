@@ -54,7 +54,11 @@ def valid_resgate_tables(spark, mode="COM TABELA"):
             "NUM_CONDICAO_IF long, COD_COND_RESGATE string, DAT_RESGATE string",
         ),
         "CONDICAO_RESGATE": spark.createDataFrame(
-            [(101, 12, None, "2026-08-16", 0.05)],
+            [
+                (101, 12, None, "2026-08-16", 0.05),
+                (102, 12, None, "2027-08-16", 0.30),
+                (103, 12, None, "2028-06-16", 1.00),
+            ],
             "NUM_ID_CONDICAO_RESGATE long, NUM_CONDICAO_IF long, IND_EXCLUIDO string, "
             "DAT_RESGATE string, VAL_PERCENTUAL double",
         ),

@@ -177,6 +177,7 @@ def test_operation_cod_if_mismatch_is_error_and_samples_cross_table_values(
 
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 1
+
     assert finding.sample == [[1001, operation_num_if, expected_root, operation_cod_if.strip()
                                if operation_cod_if is not None else None]]
 
@@ -192,6 +193,99 @@ def test_duplicate_cod_operacao_is_error_and_samples_operations(spark):
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 2
     assert {row[0] for row in finding.sample} == {1001, 1002}
+
+
+@pytest.mark.parametrize(
+    ("event_type", "condition_type", "subtype_table"),
+    [(83, 3, "JUROS_FLUTUANTE"), (85, 20, "RESGATE")],
+)
+def test_cdb_event_requires_observed_condition_family(
+    spark, event_type, condition_type, subtype_table
+):
+    tables = valid_tables(spark)
+    tables["CONDICAO_IF"] = tables["CONDICAO_IF"].where(
+        ~(
+            (pyspark.sql.functions.col("NUM_IF") == 1)
+            & (pyspark.sql.functions.col("COD_TIPO_CONDICAO_IF") == condition_type)
+        )
+    )
+    tables[subtype_table] = tables[subtype_table].where(
+        pyspark.sql.functions.col("NUM_CONDICAO_IF") >= 20
+    )
+
+    finding = by_id(validator.check_log_invariants(tables, sample=5))[
+        "8a.event_condition_family"
+    ]
+
+    assert finding.severity == validator.SEV_ERROR
+    assert finding.count == 1
+    assert finding.sample[0][1:] == ["1", str(event_type)]
+
+
+def test_cdb_event_family_check_ignores_other_event_types_and_cardinality(spark):
+    tables = valid_tables(spark)
+    tables["EVENTO"] = tables["EVENTO"].unionByName(
+        spark.createDataFrame(
+            [(103, 1, 83, None, 1, "N"), (104, 1, 84, None, 1, "N")],
+            tables["EVENTO"].schema,
+        )
+    )
+
+    finding = by_id(validator.check_log_invariants(tables, sample=5))[
+        "8a.event_condition_family"
+    ]
+
+    assert finding.passed
+
+
+def test_rdb_event_requires_observed_resgate_family(spark):
+    tables = valid_tables(spark)
+    tables["INSTRUMENTO_FINANCEIRO"] = tables["INSTRUMENTO_FINANCEIRO"].withColumn(
+        "NUM_TIPO_IF", pyspark.sql.functions.lit(50)
+    )
+    tables["RESGATE"] = tables["RESGATE"].where(
+        pyspark.sql.functions.col("NUM_CONDICAO_IF") != 12
+    )
+
+    finding = by_id(validator.check_log_invariants(
+        tables,
+        sample=5,
+        profile=validator.VALIDATION_PROFILES["rdb"],
+    ))["8a.event_condition_family"]
+
+    assert finding.severity == validator.SEV_ERROR
+    assert finding.count == 1
+
+    missing_subtype = valid_tables(spark)
+    missing_subtype["INSTRUMENTO_FINANCEIRO"] = missing_subtype[
+        "INSTRUMENTO_FINANCEIRO"
+    ].withColumn("NUM_TIPO_IF", pyspark.sql.functions.lit(50))
+    missing_subtype.pop("RESGATE")
+    unavailable = by_id(validator.check_log_invariants(
+        missing_subtype,
+        sample=5,
+        profile=validator.VALIDATION_PROFILES["rdb"],
+    ))["8a.event_condition_family"]
+    assert unavailable.severity == validator.SEV_ERROR
+
+
+def test_rdb_juros_event_does_not_require_unrelated_resgate_table(spark):
+    tables = valid_tables(spark)
+    tables["INSTRUMENTO_FINANCEIRO"] = tables["INSTRUMENTO_FINANCEIRO"].withColumn(
+        "NUM_TIPO_IF", pyspark.sql.functions.lit(50)
+    )
+    tables["EVENTO"] = tables["EVENTO"].where(
+        pyspark.sql.functions.col("NUM_TIPO_EVENTO_LEGADO") == 83
+    )
+    tables.pop("RESGATE")
+
+    finding = by_id(validator.check_log_invariants(
+        tables,
+        sample=5,
+        profile=validator.VALIDATION_PROFILES["rdb"],
+    ))["8a.event_condition_family"]
+
+    assert finding.passed
 
 
 def test_operation_cod_if_duplicate_root_key_is_one_error_per_operation(spark):
@@ -314,6 +408,7 @@ def test_registration_profile_disabled_skips_formats_constants_and_type_mixes(sp
         "8a.operacao_cod_if_match",
         "8a.cod_operacao_unique",
         "8a.meu_numero_unique",
+        "8a.event_condition_family",
     }
     assert all(finding.passed for finding in findings)
 

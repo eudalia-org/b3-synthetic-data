@@ -76,12 +76,12 @@ def test_profiles_are_explicit_and_rdb_does_not_inherit_cdb_defaults():
     assert rdb.object_service_code is None
     assert rdb.cod_if_pattern == r"^[A-Z0-9 -]{1,14}$"
     assert rdb.sem_modalidade_ids is None
+    assert rdb.account_check_enabled is True
     assert cdb.unsupported_required() == (validator.CAP_POLYMORPHISM,)
     assert set(rdb.unsupported_required()) == {
         validator.CAP_POLYMORPHISM,
         validator.CAP_LOOKUP_TOS,
         validator.CAP_PLATFORM,
-        validator.CAP_ACCOUNT,
         validator.CAP_MODALIDADE,
         validator.CAP_COD_IF_FORMAT,
         validator.CAP_SHAPE,
