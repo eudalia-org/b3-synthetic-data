@@ -12039,7 +12039,8 @@ def emit_report(spark: SparkSession, findings: List[Finding],
                  table_inventory: List[str], partial_reasons: List[str],
                  baseline_identity: Optional[dict] = None,
                  runtime_identity: Optional[dict] = None,
-                 allow_partial: bool = False) -> int:
+                 allow_partial: bool = False,
+                 no_oracle: bool = False) -> int:
     fail_level = _SEV_ORDER[fail_severity.upper()]
     failing = [f for f in findings if (not f.passed) and _SEV_ORDER[f.severity] >= fail_level]
 
@@ -12113,6 +12114,8 @@ def emit_report(spark: SparkSession, findings: List[Finding],
             "num_tipo_if": profile.num_tipo_if,
             "evidence_version": profile.evidence_version,
             "resolved_input": resolved_input,
+            "oracle_access": "disabled" if no_oracle else "live",
+            "load_eligible": not no_oracle,
             "table_inventory": sorted(table_inventory),
             "baseline_identity": baseline_identity,
             "spark_version": (runtime_identity or {}).get("spark_version"),
@@ -12713,7 +12716,7 @@ def main() -> None:
         lambda: emit_report(
             spark, findings, args.report_path, args.fail_severity, profile,
             cfg.synthetic_base, list(tables), partial_reasons,
-            baseline_identity, runtime_identity, args.allow_partial,
+            baseline_identity, runtime_identity, args.allow_partial, args.no_oracle,
         ),
     )
     logger.info("[PERF] complete run elapsed=%.1fs", perf_counter() - run_started)

@@ -40,7 +40,7 @@ OVERRIDE_KEYS = {
     },
     "validate": {
         "fail_severity", "validate_against", "shape_baseline",
-        "application_capacity_contract",
+        "application_capacity_contract", "no_oracle",
     },
     "load": {"specs", "num_partitions", "batch_size"},
 }
@@ -1975,6 +1975,11 @@ def build_validator_argv(
     ):
         if options.get(key) is not None:
             argv += [flag, str(options[key])]
+    if options.get("no_oracle") is not None:
+        if type(options["no_oracle"]) is not bool:
+            raise PipelineError("validate.no_oracle must be boolean")
+        if options["no_oracle"]:
+            argv.append("--no-oracle")
     return argv
 
 
@@ -2060,8 +2065,12 @@ def build_pipeline_plan(
             + ", ".join(unavailable_inputs)
         )
     stages = selected_stages(args.from_stage, args.to_stage)
-    if getattr(args, "no_oracle", False) and "engorda" not in stages:
-        raise PipelineError("--no-oracle requires an interval containing engorda")
+    if getattr(args, "no_oracle", False) and not {"engorda", "validate"}.intersection(
+        stages
+    ):
+        raise PipelineError(
+            "--no-oracle requires an interval containing engorda or validate"
+        )
     for product in products:
         capabilities = config["products"][product]["capabilities"]
         unavailable = [stage for stage in stages if stage not in capabilities]
@@ -2081,8 +2090,12 @@ def build_pipeline_plan(
         value = getattr(args, name, None)
         if value is not None:
             base_engorda_options[name] = value
-    if getattr(args, "no_oracle", False):
-        base_engorda_options["no_oracle"] = True
+    global_no_oracle = bool(getattr(args, "no_oracle", False))
+    if global_no_oracle:
+        if "engorda" in stages:
+            base_engorda_options["no_oracle"] = True
+        if "validate" in stages:
+            base_validate_options["no_oracle"] = True
     overrides = parse_stage_overrides(args.set_values)
     resume_manifests = parse_resume_load_manifests(
         getattr(args, "resume_load_manifest", ())
@@ -2116,6 +2129,22 @@ def build_pipeline_plan(
             **config["products"][product].get("validate", {}),
             **overrides.get(product, {}).get("validate", {}),
         }
+        if global_no_oracle:
+            if "engorda" in stages:
+                engorda_options["no_oracle"] = True
+            if "validate" in stages:
+                validate_options["no_oracle"] = True
+        upstream_synthetic_descriptor: dict[str, Any] | None = None
+        if "validate" in stages and "engorda" not in stages:
+            upstream_synthetic_descriptor = _artifact_descriptor(
+                upstream, "synthetic", product
+            )
+            upstream_synthetic_descriptor["producer"] = "upstream"
+            if (
+                upstream_synthetic_descriptor.get("load_eligible") is False
+                or upstream_synthetic_descriptor.get("oracle_access") == "disabled"
+            ):
+                validate_options["no_oracle"] = True
         load_options = {
             **base_load_options,
             **config["products"][product].get("load", {}),
@@ -2123,21 +2152,30 @@ def build_pipeline_plan(
         }
         if "specs" not in load_options and engorda_options.get("specs") is not None:
             load_options["specs"] = engorda_options["specs"]
+        engorda_no_oracle = engorda_options.get("no_oracle", False)
+        if type(engorda_no_oracle) is not bool:
+            raise PipelineError(f"product {product} engorda.no_oracle must be boolean")
+        if "engorda" in stages and engorda_no_oracle and "validate" in stages:
+            validate_options["no_oracle"] = True
+        validate_no_oracle = validate_options.get("no_oracle", False)
+        if type(validate_no_oracle) is not bool:
+            raise PipelineError(f"product {product} validate.no_oracle must be boolean")
+        if "load" in stages and (
+            ("engorda" in stages and engorda_no_oracle)
+            or ("validate" in stages and validate_no_oracle)
+        ):
+            raise PipelineError(
+                f"product {product} uses no_oracle and is not eligible for load"
+            )
         paths = _product_paths(run_root, product)
         product_artifacts: dict[str, Any] = {}
         artifacts["products"][product] = product_artifacts
         dependency: str | None = None
         synthetic_uri: str | None = None
-        synthetic_descriptor: dict[str, Any] | None = None
+        synthetic_descriptor = upstream_synthetic_descriptor
+        validation_descriptor: dict[str, Any] | None = None
         validation_report_uri: str | None = None
         if "engorda" in stages:
-            no_oracle = engorda_options.get("no_oracle", False)
-            if type(no_oracle) is not bool:
-                raise PipelineError(f"product {product} engorda.no_oracle must be boolean")
-            if no_oracle and "load" in stages:
-                raise PipelineError(
-                    f"product {product} uses no_oracle and is not eligible for load"
-                )
             query_num_if_sql = engorda_options.get("query_num_if_sql")
             if not isinstance(query_num_if_sql, str) or not query_num_if_sql.startswith(
                 "oci://"
@@ -2153,8 +2191,8 @@ def build_pipeline_plan(
                 }
             synthetic_descriptor = product_artifacts["synthetic"]
             synthetic_descriptor.update({
-                "oracle_access": "disabled" if no_oracle else "live",
-                "load_eligible": not no_oracle,
+                "oracle_access": "disabled" if engorda_no_oracle else "live",
+                "load_eligible": not engorda_no_oracle,
             })
             plan_id = f"{product}.engorda.plan"
             reserve_id = f"{product}.engorda.reserve"
@@ -2210,10 +2248,13 @@ def build_pipeline_plan(
                 synthetic_descriptor["producer"] = "upstream"
             synthetic_uri = synthetic_descriptor["uri"]
             product_artifacts["synthetic"] = dict(synthetic_descriptor)
-            product_artifacts["validation_report"] = {
+            validation_descriptor = {
                 "uri": paths["validation_report"],
                 "producer": "current_run",
+                "oracle_access": "disabled" if validate_no_oracle else "live",
+                "load_eligible": not validate_no_oracle,
             }
+            product_artifacts["validation_report"] = validation_descriptor
             validate_id = f"{product}.validate"
             nodes[validate_id] = {
                 "id": validate_id,
@@ -2247,13 +2288,19 @@ def build_pipeline_plan(
                     f"product {product} synthetic artifact is offline and not eligible for load"
                 )
             if validation_report_uri is None:
-                validation_report_uri = _artifact_uri(
+                validation_descriptor = _artifact_descriptor(
                     upstream, "validation_report", product
                 )
-                product_artifacts["validation_report"] = {
-                    "uri": validation_report_uri,
-                    "producer": "upstream",
-                }
+                validation_descriptor["producer"] = "upstream"
+                validation_report_uri = validation_descriptor["uri"]
+                product_artifacts["validation_report"] = dict(validation_descriptor)
+            if validation_descriptor is not None and (
+                validation_descriptor.get("load_eligible") is False
+                or validation_descriptor.get("oracle_access") == "disabled"
+            ):
+                raise PipelineError(
+                    f"product {product} validation report is offline and not eligible for load"
+                )
             product_artifacts["load_manifest"] = {
                 "uri": paths["load_manifest"],
                 "producer": "current_run",
@@ -2561,6 +2608,8 @@ def _prepare_load_attempt(
         and isinstance(exact_error_count, int)
         and not isinstance(exact_error_count, bool)
         and exact_error_count == 0
+        and report.get("oracle_access") != "disabled"
+        and report.get("load_eligible") is not False
     )
     normalized_inventory = (
         [table.strip().rsplit(".", 1)[-1].upper() for table in inventory]
@@ -3424,7 +3473,7 @@ def cli(context: click.Context) -> None:
 @click.option(
     "--no-oracle",
     is_flag=True,
-    help="Generate an offline synthetic artifact that is forbidden from load.",
+    help="Disable Oracle access in engorda/validate and forbid downstream load.",
 )
 @click.option(
     "--set",

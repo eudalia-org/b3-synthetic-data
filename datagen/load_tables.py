@@ -717,6 +717,11 @@ def validation_table_inventory(
         raise ValueError("validation report counts.error must be an integer")
     if error_count != 0:
         raise ValueError("validation report contains ERROR findings")
+    if (
+        report.get("oracle_access") == "disabled"
+        or report.get("load_eligible") is False
+    ):
+        raise ValueError("validation report was produced without Oracle and is not loadable")
     if report.get("product") != expected_product:
         raise ValueError("validation report product does not match --validation-product")
     resolved_input = report.get("resolved_input")

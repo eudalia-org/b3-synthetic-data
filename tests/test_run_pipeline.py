@@ -1058,9 +1058,88 @@ def test_no_oracle_propagates_to_both_engorda_phases_and_marks_artifact(
     assert "--no-oracle" in plan["nodes"][
         "cdb_simplificado.engorda.materialize"
     ]["arguments"]
+    assert "--no-oracle" in plan["nodes"][
+        "cdb_simplificado.validate"
+    ]["arguments"]
     synthetic = plan["artifacts"]["products"]["cdb_simplificado"]["synthetic"]
     assert synthetic["oracle_access"] == "disabled"
     assert synthetic["load_eligible"] is False
+    report = plan["artifacts"]["products"]["cdb_simplificado"][
+        "validation_report"
+    ]
+    assert report["oracle_access"] == "disabled"
+    assert report["load_eligible"] is False
+
+
+def test_validate_only_no_oracle_propagates_without_engorda(tmp_path, capsys):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+    args = run_args(tmp_path, config, upstream, "--dry-run", "--no-oracle")
+    args[args.index("--from") + 1] = "validate"
+    args[args.index("--to") + 1] = "validate"
+
+    assert P.main(args, adapter=NoCallsAdapter()) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert set(plan["nodes"]) == {"cdb_simplificado.validate"}
+    assert "--no-oracle" in plan["nodes"]["cdb_simplificado.validate"][
+        "arguments"
+    ]
+
+
+def test_global_no_oracle_cannot_be_disabled_by_product_config_or_set(tmp_path, capsys):
+    config = write_config(tmp_path)
+    payload = json.loads(config.read_text())
+    payload["products"]["cdb_simplificado"].update({
+        "engorda": {"no_oracle": False},
+        "validate": {"no_oracle": False},
+    })
+    config.write_text(json.dumps(payload))
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+    args = run_args(
+        tmp_path,
+        config,
+        upstream,
+        "--set",
+        "cdb_simplificado.engorda.no_oracle=false",
+        "--set",
+        "cdb_simplificado.validate.no_oracle=false",
+        "--dry-run",
+        "--no-oracle",
+    )
+
+    assert P.main(args, adapter=NoCallsAdapter()) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert "--no-oracle" in plan["nodes"][
+        "cdb_simplificado.engorda.plan"
+    ]["arguments"]
+    assert "--no-oracle" in plan["nodes"]["cdb_simplificado.validate"][
+        "arguments"
+    ]
+
+
+def test_validate_only_inherits_no_oracle_from_upstream_synthetic(tmp_path, capsys):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+    payload = json.loads(upstream.read_text())
+    payload["artifacts"]["products"]["cdb_simplificado"]["synthetic"].update({
+        "oracle_access": "disabled",
+        "load_eligible": False,
+    })
+    upstream.write_text(json.dumps(payload))
+    args = run_args(tmp_path, config, upstream, "--dry-run")
+    args[args.index("--from") + 1] = "validate"
+    args[args.index("--to") + 1] = "validate"
+
+    assert P.main(args, adapter=NoCallsAdapter()) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert "--no-oracle" in plan["nodes"]["cdb_simplificado.validate"][
+        "arguments"
+    ]
+    report = plan["artifacts"]["products"]["cdb_simplificado"][
+        "validation_report"
+    ]
+    assert report["oracle_access"] == "disabled"
+    assert report["load_eligible"] is False
 
 
 def test_no_oracle_interval_cannot_include_load(tmp_path, capsys):
@@ -1095,6 +1174,8 @@ def test_per_product_no_oracle_override_only_changes_target_branch(tmp_path, cap
         "cdb_simplificado.engorda.plan"
     ]["arguments"]
     assert "--no-oracle" not in plan["nodes"]["lci.engorda.plan"]["arguments"]
+    assert "--no-oracle" in plan["nodes"]["cdb_simplificado.validate"]["arguments"]
+    assert "--no-oracle" not in plan["nodes"]["lci.validate"]["arguments"]
     assert plan["artifacts"]["products"]["cdb_simplificado"]["synthetic"][
         "load_eligible"
     ] is False
@@ -1124,6 +1205,24 @@ def test_mixed_product_load_rejects_one_offline_override(tmp_path, capsys):
     assert "cdb_simplificado uses no_oracle" in capsys.readouterr().err
 
 
+def test_validate_no_oracle_override_cannot_continue_to_load(tmp_path, capsys):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+    args = run_args(
+        tmp_path,
+        config,
+        upstream,
+        "--set",
+        "cdb_simplificado.validate.no_oracle=true",
+        "--dry-run",
+    )
+    args[args.index("--from") + 1] = "validate"
+    args[args.index("--to") + 1] = "load"
+
+    assert P.main(args, adapter=NoCallsAdapter()) == 2
+    assert "uses no_oracle and is not eligible for load" in capsys.readouterr().err
+
+
 def test_load_only_rejects_offline_upstream_metadata(tmp_path, capsys):
     config = write_config(tmp_path)
     upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
@@ -1139,6 +1238,25 @@ def test_load_only_rejects_offline_upstream_metadata(tmp_path, capsys):
 
     assert P.main(args, adapter=NoCallsAdapter()) == 2
     assert "offline and not eligible for load" in capsys.readouterr().err
+
+
+def test_load_only_rejects_offline_validation_report_metadata(tmp_path, capsys):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+    payload = json.loads(upstream.read_text())
+    payload["artifacts"]["products"]["cdb_simplificado"][
+        "validation_report"
+    ].update({
+        "oracle_access": "disabled",
+        "load_eligible": False,
+    })
+    upstream.write_text(json.dumps(payload))
+    args = run_args(tmp_path, config, upstream, "--dry-run")
+    args[args.index("--from") + 1] = "load"
+    args[args.index("--to") + 1] = "load"
+
+    assert P.main(args, adapter=NoCallsAdapter()) == 2
+    assert "validation report is offline" in capsys.readouterr().err
 
 
 def test_reused_synthetic_descriptor_becomes_upstream_producer(tmp_path, capsys):
@@ -1704,6 +1822,27 @@ def test_load_rejects_noncanonical_report_before_creating_claim(tmp_path):
             }
         }
     )
+
+    assert P.main(args, adapter=adapter) == 1
+    assert not [
+        payload for payload in adapter.objects.values()
+        if payload.get("kind") == "load-claim"
+    ]
+    assert not adapter.created
+
+
+def test_load_rejects_no_oracle_report_before_creating_claim(tmp_path):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+    args = run_args(tmp_path, config, upstream, "--approve-load")
+    args[args.index("--from") + 1] = "load"
+    args[args.index("--to") + 1] = "load"
+    adapter = FakeAdapter(reports={"cdb_simplificado": {
+        "verdict": "PARTIAL",
+        "counts": {"error": 0},
+        "oracle_access": "disabled",
+        "load_eligible": False,
+    }})
 
     assert P.main(args, adapter=adapter) == 1
     assert not [

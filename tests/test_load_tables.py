@@ -565,6 +565,8 @@ class TestValidationReportGate:
             ({"resolved_input": "oci://wrong"}, "resolved_input"),
             ({"table_inventory": []}, "nonempty"),
             ({"table_inventory": ["A", "a"]}, "unique"),
+            ({"oracle_access": "disabled"}, "without Oracle"),
+            ({"load_eligible": False}, "without Oracle"),
         ],
     )
     def test_rejects_invalid_report_contract(self, replacement, message):

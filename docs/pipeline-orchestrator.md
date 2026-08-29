@@ -189,7 +189,10 @@ uv run --no-project .\run_pipeline.py run `
   --no-oracle
 ```
 
-`--to engorda` is fully offline. Extending the interval to `validate` still allows the
-validator application to query Oracle; only engorda receives `--no-oracle`. An interval
-containing load is rejected. For one product in a multi-product run, use
-`--set cdb_resgate.engorda.no_oracle=true`.
+`--to validate` propagates `--no-oracle` to both applications, so the validator skips
+Oracle metadata/residual checks and emits a PARTIAL report with
+`oracle_access=disabled` and `load_eligible=false`. An interval containing load is
+rejected. For one product in a multi-product run, use
+`--set cdb_resgate.engorda.no_oracle=true`; it automatically propagates downstream.
+For validate-only runs, use `--no-oracle` or
+`--set cdb_resgate.validate.no_oracle=true`.

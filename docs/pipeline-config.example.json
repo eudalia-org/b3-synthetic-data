@@ -54,7 +54,8 @@
     },
     "validate": {
       "fail_severity": "error",
-      "validate_against": "union"
+      "validate_against": "union",
+      "no_oracle": false
     },
     "load": {
       "num_partitions": 256,

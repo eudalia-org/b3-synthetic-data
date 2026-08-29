@@ -285,12 +285,23 @@ def test_report_exit_codes_distinguish_pass_partial_and_fail(capsys, tmp_path):
     assert validator.emit_report(None, [], None, "error", rdb, "/input", [], []) == 1
     report_path = tmp_path / "partial.json"
     assert validator.emit_report(
-        None, [], str(report_path), "error", rdb, "/input", [], [], allow_partial=True
+        None,
+        [],
+        str(report_path),
+        "error",
+        rdb,
+        "/input",
+        [],
+        [],
+        allow_partial=True,
+        no_oracle=True,
     ) == 0
     report = json.loads(report_path.read_text())
     assert report["schema_version"] == 2
     assert report["verdict"] == "PARTIAL"
     assert report["failed"] is False
+    assert report["oracle_access"] == "disabled"
+    assert report["load_eligible"] is False
     assert validator.emit_report(
         None, [unavailable], None, "error", simplificado, "/input", [], []
     ) == 1
