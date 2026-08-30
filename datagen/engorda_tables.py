@@ -390,6 +390,43 @@ TABELAS_SEMEADAS_LATERALMENTE = frozenset(
     + [h for pares in HISTORICO_LATERAL_POR_PRODUTO.values() for h, _ in pares]
 )
 
+# ---------------------------------------------------------------------------
+# Poda de familia de evento (check 8a.event_condition_family) — SOMENTE RDB.
+#
+# REGRA DO VALIDADOR: todo EVENTO ativo com NUM_TIPO_EVENTO_LEGADO 83 ou 85
+# precisa, NO MESMO NUM_IF, da familia de condicao correspondente:
+#     evento 83 -> CONDICAO_IF de COD_TIPO_CONDICAO_IF = 3  + linha em JUROS_FLUTUANTE
+#     evento 85 -> CONDICAO_IF de COD_TIPO_CONDICAO_IF = 20 + linha em RESGATE
+#
+# POR QUE ACONTECE: EVENTO desce da raiz INSTRUMENTO_FINANCEIRO diretamente, e
+# nao apenas de CONDICAO_IF. Entao o evento entra no fecho mesmo quando a
+# condicao correspondente nao entra — seja porque esta logicamente excluida na
+# origem (o fecho filtra CONDICAO_IF por DAT_EXCLUSAO), seja porque o
+# instrumento simplesmente nao tem condicao daquele tipo.
+#
+# POR QUE UMA PODA E NAO O ITEM 1: a poda de subtipo cobre "CONDICAO_IF ativa
+# sem a linha do seu subtipo". Isso pega metade do caso — nao pega "o
+# instrumento nao tem condicao tipo 3 nenhuma", que tambem reprova no 8a. Esta
+# poda espelha o check inteiro.
+#
+# ESCOPO: rdb_inclusao e rdb_resgate. O 8a tambem roda para cdb/cdb_simplificado,
+# mas esses passam hoje — nao mexo no dominio de produto que esta funcionando.
+#
+# FIDELIDADE: usa _norm_code_validador e _canon_key_validador para normalizar
+# exatamente como o validador, e a nocao de ativo dele (nulo OU string vazia).
+# ---------------------------------------------------------------------------
+PRODUTOS_COM_PODA_FAMILIA_EVENTO = frozenset({
+    'rdb_inclusao',
+    'rdb_resgate',
+})
+EVENTO_TABELA = "EVENTO"
+COL_NUM_TIPO_EVENTO_LEGADO = "NUM_TIPO_EVENTO_LEGADO"
+# (tipo do evento, tipo da condicao, tabela-subtipo exigida)
+FAMILIA_EVENTO_CONDICAO: Tuple[Tuple[str, str, str], ...] = (
+    ("83", "3", "JUROS_FLUTUANTE"),
+    ("85", "20", "RESGATE"),
+)
+
 PRODUTOS_COM_PODA_CRONOGRAMA_RESGATE = frozenset({
     'cdb_resgate',
     'rdb_resgate',
@@ -3657,6 +3694,97 @@ def _num_if_dado_operacao_fora_do_par(spark, config,
     )
 
 
+def _ativo_validador(df: DataFrame) -> DataFrame:
+    """Linhas ativas na acepcao do validador: DAT_EXCLUSAO nula OU vazia.
+
+    Replica _active/_oracle_null_equivalent do validate_products.py. Tabela sem
+    a coluna passa inteira, como la."""
+    if COL_DAT_EXCLUSAO not in df.columns:
+        return df
+    col = F.col(COL_DAT_EXCLUSAO)
+    return df.where(col.isNull() | (F.trim(col.cast("string")) == F.lit("")))
+
+
+def _num_if_evento_sem_familia(spark, config, dominio: DataFrame) -> DataFrame:
+    """NUM_IF com evento 83/85 sem a familia de condicao correspondente (8a).
+
+    Espelha check_event_condition_families do validador, invertido: o que la e
+    `bad`, aqui e o conjunto a REMOVER do dominio antes da amostragem — cada
+    instrumento podado e reposto por outro valido e a contagem final segue N.
+
+    Tolerante como as demais podas: fonte ilegivel ou coluna ausente vira no-op
+    com WARNING."""
+    vazio = dominio.select(COL_NUM_IF).limit(0)
+    fontes: Dict[str, DataFrame] = {}
+    necessarias = {
+        EVENTO_TABELA: (COL_NUM_IF, COL_NUM_TIPO_EVENTO_LEGADO),
+        CONDICAO_IF_TABLE: (COL_NUM_IF, CONDICAO_IF_PK, CONDICAO_IF_TIPO_COL),
+    }
+    for _tipo_evento, _tipo_cond, tabela in FAMILIA_EVENTO_CONDICAO:
+        necessarias[tabela] = (CONDICAO_IF_PK,)
+    for tabela, colunas in necessarias.items():
+        try:
+            fontes[tabela] = _read_source(spark, config, tabela)
+        except Exception as exc:
+            logger.warning("poda de familia de evento: nao li %s (%s); poda "
+                           "IGNORADA.", tabela, exc)
+            return vazio
+        ausentes = [c for c in colunas if c not in fontes[tabela].columns]
+        if ausentes:
+            logger.warning("poda de familia de evento: %s sem %s; poda IGNORADA.",
+                           tabela, ausentes)
+            return vazio
+
+    alvo = dominio.select(
+        _canon_key_validador(F.col(COL_NUM_IF)).alias("root_id")).dropDuplicates()
+    tipos_evento = [t for t, _c, _tab in FAMILIA_EVENTO_CONDICAO]
+    eventos = (
+        _ativo_validador(fontes[EVENTO_TABELA])
+        .select(
+            _canon_key_validador(F.col(COL_NUM_IF)).alias("root_id"),
+            _norm_code_validador(
+                F.col(COL_NUM_TIPO_EVENTO_LEGADO)).alias("event_type"),
+        )
+        .where(F.col("event_type").isin(*tipos_evento))
+        .join(alvo, on="root_id", how="left_semi")
+        .dropDuplicates()
+    )
+
+    condicoes = _ativo_validador(fontes[CONDICAO_IF_TABLE]).select(
+        _canon_key_validador(F.col(CONDICAO_IF_PK)).alias("condition_id"),
+        _canon_key_validador(F.col(COL_NUM_IF)).alias("root_id"),
+        _norm_code_validador(F.col(CONDICAO_IF_TIPO_COL)).alias("condition_type"),
+    )
+
+    familias: Optional[DataFrame] = None
+    for tipo_evento, tipo_cond, tabela in FAMILIA_EVENTO_CONDICAO:
+        parcial = (
+            _ativo_validador(fontes[tabela])
+            .select(_canon_key_validador(
+                F.col(CONDICAO_IF_PK)).alias("condition_id"))
+            .join(
+                condicoes.where(F.col("condition_type") == F.lit(tipo_cond)),
+                on="condition_id", how="inner")
+            .select("root_id", F.lit(tipo_evento).alias("event_type"))
+            .dropDuplicates()
+        )
+        familias = parcial if familias is None else familias.unionByName(parcial)
+    if familias is None:
+        return vazio
+
+    ruins = eventos.join(
+        familias, on=["root_id", "event_type"], how="left_anti"
+    ).select("root_id").dropDuplicates()
+
+    return (
+        _copia_independente(dominio.select(COL_NUM_IF))
+        .withColumn("root_id", _canon_key_validador(F.col(COL_NUM_IF)))
+        .join(ruins, on="root_id", how="left_semi")
+        .select(COL_NUM_IF)
+        .dropDuplicates()
+    )
+
+
 def _num_if_lote_sem_lastro(spark, config, produto: Optional[str],
                             dominio: DataFrame) -> DataFrame:
     """NUM_IF cujo NUM_ID_LOTE nao tem lastro ativo (poda de lastro).
@@ -4084,6 +4212,11 @@ def _dominio_instrumentos_elegiveis(
         exclusoes.append((
             "conta participante inelegível (item 6)",
             _num_if_conta_nao_elegivel(spark, config, fonte),
+        ))
+    if profile.name in PRODUTOS_COM_PODA_FAMILIA_EVENTO:
+        exclusoes.append((
+            "evento 83/85 sem família de condição (8a)",
+            _num_if_evento_sem_familia(spark, config, fonte),
         ))
     if profile.name in SEMENTE_LATERAL_POR_PRODUTO:
         exclusoes.append((
