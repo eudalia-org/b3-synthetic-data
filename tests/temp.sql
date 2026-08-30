@@ -1,3 +1,16 @@
+-- Formato do código do crédito
+SELECT MIN(LENGTH(COD_CREDITO_SCR)) AS MIN_LEN,
+       MAX(LENGTH(COD_CREDITO_SCR)) AS MAX_LEN,
+       COUNT(DISTINCT LENGTH(COD_CREDITO_SCR)) AS QTD_TAMANHOS
+FROM CREDITO_SCR;
+
+-- Amostra (para eu ver se é numérico puro, alfanumérico, tem separador...)
+SELECT COD_CREDITO_SCR FROM CREDITO_SCR WHERE ROWNUM <= 10;
+
+-- E a mesma pergunta do lado DC, que ainda não medimos
+SELECT COUNT(*) AS TOTAL, COUNT(DISTINCT COD_CREDITO_DC) AS DISTINTOS
+FROM CREDITO_DC
+
 -- No DESTINO: o código do crédito é único?
 SELECT COUNT(*) AS TOTAL, COUNT(DISTINCT COD_CREDITO_SCR) AS DISTINTOS
 FROM CREDITO_SCR;
