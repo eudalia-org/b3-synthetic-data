@@ -272,6 +272,124 @@ PRODUTOS_COM_PODA_SUBTIPO = frozenset({
 # passa a valer de novo sem nenhuma outra mudança.
 LASTRO_OBRIGATORIO_POR_PRODUTO: Dict[str, str] = {}
 
+# ---------------------------------------------------------------------------
+# SEMENTE LATERAL DE LASTRO (lci / lca) — Etapa 1.
+#
+# PROBLEMA. O vinculo entre LCI/LCA e o seu lastro nao e pai->filho: os dois sao
+# FILHOS de LOTE, ligados por NUM_ID_LOTE.
+#
+#                        LOTE  (PK = NUM_ID_LOTE)
+#                       /                        \
+#          INSTRUMENTO_FINANCEIRO            CREDITO_SCR / CREDITO_DC
+#
+# O fecho desce ESTRITAMENTE pai->filho a partir da raiz INSTRUMENTO_FINANCEIRO,
+# entao nunca sobe ate LOTE e nunca chega no credito. Dai a semente LATERAL:
+# semeia o credito pelos NUM_ID_LOTE dos instrumentos ja amostrados.
+#
+# POR QUE LOTE FICA FORA DAS LISTAS. Pai static => a FK mantem o valor original
+# (ver _fks_remap). Com LOTE static nos dois lados, a IF sintetica e o credito
+# sintetico PRESERVAM o mesmo NUM_ID_LOTE e se encontram por construcao. Se LOTE
+# entrasse na lista viraria OFFSET_PROPRIO, ganharia id novo, e o credito iria
+# parar num lote que a LCI nao conhece. NAO adicione LOTE aqui.
+#
+# TETO OBRIGATORIO. Medido no QAB: mediana 35 creditos por lote, media 4.237 e
+# MAXIMO 1.472.163 num unico lote (59,6% de toda a CREDITO_SCR). Sem teto, uma
+# amostra de 100 LCIs que toque esse lote arrasta 1,47M de linhas. Como o
+# vinculo exige apenas >= 1 credito no lote, o teto e barato.
+#
+# COD_CREDITO_* SINTETICO. Medido: COD_CREDITO_SCR e COD_CREDITO_DC sao UNICOS
+# no destino (2.498.157 e 2.442.046 linhas, zero repeticao) e tem largura fixa
+# de 11 caracteres. Copiar o codigo original faria o sintetico colidir com o
+# real. Geramos SYN + 8 digitos = 11 caracteres exatos; o espaco 'SYN%' foi
+# medido LIVRE nas duas tabelas do destino.
+#
+# A troca do codigo e feita AQUI, sobre o lote, e nao na sintetizacao. E seguro
+# porque COD_CREDITO_* nao e PK (a PK e NUM_ID_CREDITO_*), nao e FK de nada e
+# nao participa do fecho — o unico consumidor e a gravacao. Se algum dia virar
+# chave de join, mova para a fase de sintetizacao.
+#
+# UNICIDADE ENTRE RUNS: AUTOMATICA, sem parametro e sem ajuste manual.
+#
+# O codigo e derivado do plano.pk_start FINAL da propria tabela de credito.
+# Esse pk_start ja e coordenado pelo motor: _apply_oracle_pk_floors consulta
+# SELECT MAX(pk) FROM CETIP.<tabela> no DESTINO e eleva o inicio acima do que
+# ja existe la. Como cada run ocupa a faixa [pk_start, pk_start + n), e o run
+# seguinte ve as linhas do anterior no destino, as faixas nunca se sobrepoem.
+#
+# Consequencia: o codigo herda EXATAMENTE a garantia de unicidade da PK — nem
+# melhor, nem pior. Nao ha nova consulta ao Oracle (a do MAX ja e feita para a
+# PK) e nao ha nada a passar entre execucoes.
+#
+# Por isso a geracao acontece DEPOIS de _apply_oracle_pk_floors, e nao na
+# semente: no momento da semente o pk_start ainda e o do Parquet, sem o piso
+# do destino.
+# ---------------------------------------------------------------------------
+SEMENTE_LATERAL_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
+    'lci': ('CREDITO_SCR',),
+    'lca': ('CREDITO_DC',),
+}
+COL_NUM_ID_LOTE = "NUM_ID_LOTE"
+COD_CREDITO_POR_TABELA: Dict[str, str] = {
+    "CREDITO_SCR": "COD_CREDITO_SCR",
+    "CREDITO_DC": "COD_CREDITO_DC",
+}
+COD_CREDITO_PREFIXO_SINTETICO = "SYN"
+# 8 caracteres em BASE 36 (0-9A-Z): 2.821.109.907.455 valores, o que cobre
+# qualquer pk_start realista. Em base 10 nao caberia.
+COD_CREDITO_DIGITOS = 8
+COD_CREDITO_BASE = 36
+LASTROS_POR_LOTE_PADRAO = 10
+
+# ---------------------------------------------------------------------------
+# HISTORICO DO LASTRO (Etapa 2) — dois caminhos, porque o modelo e assimetrico.
+#
+# SCR: HISTORICO_CREDITO_SCR.NUM_ID_CREDITO_SCR aponta para a PK de CREDITO_SCR
+# e tem o MESMO nome — e portanto vinculo PRINCIPAL. O spec so nao declara essa
+# FK (o validador, esse sim, compara as duas colunas). Injetamos a FK EM
+# MEMORIA no startup, e a partir dai o fecho desce CREDITO_SCR ->
+# HISTORICO_CREDITO_SCR sozinho e a FK e remapeada para a PK nova do credito.
+# O spec_config em disco NAO e tocado.
+#
+# DC: HISTORICO_CREDITO_DC nao tem coluna de id do credito — o validador exige
+# COD_CREDITO_DC. Ligar por codigo de negocio nao serve como FK aqui, porque o
+# motor exige que a FK aponte para a PK do pai (ver _fks_remap). Entao esse
+# historico e semeado LATERALMENTE, pelos codigos dos creditos ja semeados —
+# nunca pelo lote direto, senao viriam historicos de creditos que o teto deixou
+# de fora, orfaos por construcao.
+#
+# PROPAGACAO DO CODIGO. Os dois historicos carregam COD_CREDITO_*, e o
+# 2d.inclusion_identity compara credito x historico. Como o credito sintetico
+# recebe COD novo (SYN+8), o historico PRECISA receber o mesmo valor. O mapa
+# antigo->novo nasce na semente do credito e e aplicado:
+#   - no DC, dentro da propria semente lateral;
+#   - nos dois casos por _aplica_cod_credito_sintetico, que roda depois do
+#     piso de PK do destino (ver o cabecalho de UNICIDADE ENTRE RUNS).
+# ---------------------------------------------------------------------------
+FK_COMPLEMENTAR_POR_PRODUTO: Dict[str, Tuple[Tuple[str, Dict[str, Any]], ...]] = {
+    'lci': ((
+        "HISTORICO_CREDITO_SCR",
+        {"columns": ["NUM_ID_CREDITO_SCR"],
+         "parent_table": "CREDITO_SCR",
+         "parent_columns": ["NUM_ID_CREDITO_SCR"]},
+    ),),
+}
+HISTORICO_LATERAL_POR_PRODUTO: Dict[str, Tuple[Tuple[str, str], ...]] = {
+    'lca': (("HISTORICO_CREDITO_DC", "CREDITO_DC"),),
+}
+# Historicos que carregam o COD do credito e precisam receber o mesmo valor
+# sintetico (o 2d.inclusion_identity compara os dois).
+HISTORICOS_DO_CREDITO_POR_PRODUTO: Dict[str, Dict[str, Tuple[str, ...]]] = {
+    'lci': {"CREDITO_SCR": ("HISTORICO_CREDITO_SCR",)},
+    'lca': {"CREDITO_DC": ("HISTORICO_CREDITO_DC",)},
+}
+# Isentas da trava de vinculo principal em monta_plano: entram pela semente
+# lateral, nao pelo fecho. Sem isso o job aborta em HISTORICO_CREDITO_DC, cujas
+# unicas FKs (LOTE e TIPO_ACAO_HIST_CREDITO) sao para tabelas static.
+TABELAS_SEMEADAS_LATERALMENTE = frozenset(
+    [t for tabelas in SEMENTE_LATERAL_POR_PRODUTO.values() for t in tabelas]
+    + [h for pares in HISTORICO_LATERAL_POR_PRODUTO.values() for h, _ in pares]
+)
+
 PRODUTOS_COM_PODA_CRONOGRAMA_RESGATE = frozenset({
     'cdb_resgate',
     'rdb_resgate',
@@ -736,6 +854,7 @@ class EngordaJob:
     somente_ativos: bool = True
     anular_cols: Optional[Mapping[str, Sequence[str]]] = None
     oracle_code_batch_size: int = DEFAULT_ORACLE_CODE_BATCH_SIZE
+    lastros_por_lote: int = LASTROS_POR_LOTE_PADRAO
     dry_run: bool = False
     no_oracle: bool = False
     specs_uri: Optional[str] = None
@@ -909,6 +1028,10 @@ TABELAS_ENGORDA_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
         "ESPECIFICACAO_COMITENTE",
         "CARTEIRA_COMITENTE",
         "CARTEIRA_PARTICIPANTE",
+        # Lastro. LOTE fica DE FORA de proposito: static preserva
+        # NUM_ID_LOTE e e isso que amarra LCI <-> lastro.
+        "CREDITO_SCR",
+        "HISTORICO_CREDITO_SCR",
     ),
     "lca": (
         "INSTRUMENTO_FINANCEIRO",
@@ -930,6 +1053,9 @@ TABELAS_ENGORDA_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
         "ESPECIFICACAO_COMITENTE",
         "CARTEIRA_COMITENTE",
         "CARTEIRA_PARTICIPANTE",
+        # Lastro. Ver comentario no bloco do lci.
+        "CREDITO_DC",
+        "HISTORICO_CREDITO_DC",
     ),
     # HISTORICO_IF_TITULO REMOVIDA das 5 listas CCB em 2026-08-22.
     # Ela nao tem coluna NUM_IF; a unica FK declarada para o instrumento e
@@ -2814,7 +2940,9 @@ def monta_plano(spark, config, spec: dict, estaticas_extra: Set[str],
 
         # Vínculo principal para o pertencimento: exigido de toda tabela
         # sintetizável exceto a raiz.
-        if t != TABELA_RAIZ and not any(fk.principal for fk in fks):
+        if (t != TABELA_RAIZ
+                and t not in TABELAS_SEMEADAS_LATERALMENTE
+                and not any(fk.principal for fk in fks)):
             problemas.append(
                 f"{t}: nenhuma FK de VÍNCULO PRINCIPAL (colunas com mesmo nome "
                 "da PK de um pai sintetizado) — não sei ligar as linhas ao "
@@ -3529,6 +3657,84 @@ def _num_if_dado_operacao_fora_do_par(spark, config,
     )
 
 
+def _num_if_lote_sem_lastro(spark, config, produto: Optional[str],
+                            dominio: DataFrame) -> DataFrame:
+    """NUM_IF cujo NUM_ID_LOTE nao tem lastro ativo (poda de lastro).
+
+    Mesma mecanica das demais podas de dominio: devolve os NUM_IF a REMOVER
+    ANTES da amostragem, entao cada instrumento podado e reposto por outro
+    valido e a contagem final continua N. Nao aborta e nao deixa passar.
+
+    Espelha no motor o CTE LOTE_COM_LASTRO / LOTE_COM_DC da query. Ter os dois
+    e proposital: filtro de query e FILTRO, some se alguem editar o SQL; a poda
+    aqui e a garantia que sobrevive a isso.
+
+    Tolerante como as outras podas: fonte ilegivel ou coluna ausente vira no-op
+    com WARNING — quem tranca de verdade e a semente lateral, que aborta se o
+    lote vier sem credito."""
+    vazio = dominio.select(COL_NUM_IF).limit(0)
+    tabelas = SEMENTE_LATERAL_POR_PRODUTO.get(produto or "") or ()
+    if not tabelas:
+        return vazio
+    try:
+        raiz = _read_source(spark, config, TABELA_RAIZ)
+    except Exception as exc:
+        logger.warning("poda de lastro: nao li %s (%s); poda IGNORADA.",
+                       TABELA_RAIZ, exc)
+        return vazio
+    if COL_NUM_ID_LOTE not in raiz.columns:
+        logger.warning("poda de lastro: %s sem %s; poda IGNORADA.",
+                       TABELA_RAIZ, COL_NUM_ID_LOTE)
+        return vazio
+
+    alvo = dominio.select(
+        _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")).dropDuplicates()
+    por_instrumento = raiz.select(
+        _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if"),
+        _norm_key_col(F.col(COL_NUM_ID_LOTE)).alias("__lote"),
+    ).join(alvo, on="__num_if", how="left_semi")
+
+    lotes_com_lastro: Optional[DataFrame] = None
+    for tabela in tabelas:
+        try:
+            src = _read_source(spark, config, tabela)
+        except Exception as exc:
+            logger.warning("poda de lastro: nao li %s (%s); poda IGNORADA.",
+                           tabela, exc)
+            return vazio
+        if COL_NUM_ID_LOTE not in src.columns:
+            logger.warning("poda de lastro: %s sem %s; poda IGNORADA.",
+                           tabela, COL_NUM_ID_LOTE)
+            return vazio
+        ativos = src
+        if COL_DAT_EXCLUSAO in src.columns:
+            ativos = ativos.where(F.col(COL_DAT_EXCLUSAO).isNull())
+        parcial = ativos.select(
+            _norm_key_col(F.col(COL_NUM_ID_LOTE)).alias("__lote")
+        ).where(F.col("__lote").isNotNull()).dropDuplicates()
+        lotes_com_lastro = (parcial if lotes_com_lastro is None
+                            else lotes_com_lastro.intersect(parcial))
+    if lotes_com_lastro is None:
+        return vazio
+
+    # Sai do dominio quem tem lote nulo OU lote sem lastro.
+    sem = por_instrumento.where(
+        F.col("__lote").isNull() | (F.col("__lote") == F.lit(""))
+    ).select("__num_if")
+    fora = por_instrumento.where(
+        F.col("__lote").isNotNull() & (F.col("__lote") != F.lit(""))
+    ).join(lotes_com_lastro, on="__lote", how="left_anti").select("__num_if")
+    ruins = sem.unionByName(fora).dropDuplicates()
+
+    return (
+        _copia_independente(dominio.select(COL_NUM_IF))
+        .withColumn("__num_if", _norm_key_col(F.col(COL_NUM_IF)))
+        .join(ruins, on="__num_if", how="left_semi")
+        .select(COL_NUM_IF)
+        .dropDuplicates()
+    )
+
+
 def _num_if_conta_nao_elegivel(spark, config, dominio: DataFrame) -> DataFrame:
     """Find roots with non-null blank or validator-ineligible account references."""
     vazio = dominio.select(COL_NUM_IF).limit(0)
@@ -3878,6 +4084,11 @@ def _dominio_instrumentos_elegiveis(
         exclusoes.append((
             "conta participante inelegível (item 6)",
             _num_if_conta_nao_elegivel(spark, config, fonte),
+        ))
+    if profile.name in SEMENTE_LATERAL_POR_PRODUTO:
+        exclusoes.append((
+            "lote sem lastro",
+            _num_if_lote_sem_lastro(spark, config, profile.name, fonte),
         ))
     if (politica_estrita_operacao
             and profile.name in PRODUTOS_COM_POLITICA_ESTRITA_OPERACAO):
@@ -4848,6 +5059,350 @@ def _durable_materialize(frame: DataFrame) -> DataFrame:
     return frame.persist(StorageLevel.MEMORY_AND_DISK_2)
 
 
+def _semente_lateral_por_lote(spark, config, produto: Optional[str],
+                              planos: Dict[str, PlanoTabela],
+                              lotes: Dict[str, DataFrame],
+                              proveniencias: Dict[str, DataFrame],
+                              contagens: Dict[str, int],
+                              lastros_por_lote: int) -> frozenset:
+    """Semeia as tabelas de lastro pelo NUM_ID_LOTE dos instrumentos da raiz.
+
+    Ver o cabecalho de SEMENTE_LATERAL_POR_PRODUTO para o porque. Muta `lotes`,
+    `proveniencias` e `contagens` no lugar e devolve o conjunto de tabelas
+    semeadas, que o laco do fecho deve PULAR — senao ele as sobrescreve com o
+    join por NUM_IF, que e nulo no tipo dominante do credito.
+
+    Produto sem semente declarada devolve conjunto vazio sem tocar em nada.
+    Diferente das podas, aqui NAO ha modo tolerante: se a fonte ou uma coluna
+    faltar, o job ABORTA — lastro e requisito de negocio, e nascer sem ele em
+    silencio e pior do que falhar alto."""
+    tabelas = SEMENTE_LATERAL_POR_PRODUTO.get(produto or "") or ()
+    if not tabelas:
+        return frozenset()
+    if lastros_por_lote < 1:
+        raise ValueError(
+            "LASTROS_POR_LOTE_PADRAO deve ser >= 1 (recebi %r)."
+            % (lastros_por_lote,))
+
+    raiz = lotes.get(TABELA_RAIZ)
+    if raiz is None:
+        raise ValueError(
+            "Produto %s: semente lateral exige o lote da raiz %s ja calculado."
+            % (produto, TABELA_RAIZ))
+    if COL_NUM_ID_LOTE not in raiz.columns:
+        raise ValueError(
+            "Produto %s: %s nao expoe %s; sem isso nao ha vinculo com o lastro."
+            % (produto, TABELA_RAIZ, COL_NUM_ID_LOTE))
+
+    chaves = (
+        raiz.select(
+            _norm_key_col(F.col(COL_NUM_ID_LOTE)).alias("__lote"),
+            F.col(COL_NUM_IF).alias(ROOT_PROVENANCE_COL),
+        )
+        .where(F.col("__lote").isNotNull() & (F.col("__lote") != F.lit("")))
+        .dropDuplicates()
+        .transform(_durable_materialize)
+    )
+    lotes_alvo = chaves.select("__lote").dropDuplicates()
+    n_lotes = lotes_alvo.count()
+    if n_lotes == 0:
+        raise ValueError(
+            "Produto %s: nenhum instrumento do lote tem %s preenchido — nao ha "
+            "como semear o lastro. Confira o CTE de lastro na query."
+            % (produto, COL_NUM_ID_LOTE))
+    logger.info("Semente lateral [%s]: %d lote(s) distinto(s) na raiz; teto de "
+                "%d linha(s) por lote.", produto, n_lotes, lastros_por_lote)
+
+    semeadas = set()
+    for tabela in tabelas:
+        plano = planos.get(tabela)
+        if plano is None:
+            raise ValueError(
+                "Produto %s: %s esta em SEMENTE_LATERAL_POR_PRODUTO mas nao no "
+                "plano — inclua em TABELAS_ENGORDA_POR_PRODUTO."
+                % (produto, tabela))
+        src = _read_source(spark, config, tabela)
+        obrigatorias = (COL_NUM_ID_LOTE,) + tuple(plano.pk_cols)
+        faltando = [c for c in obrigatorias if c not in src.columns]
+        if faltando:
+            raise ValueError(
+                "Produto %s: %s nao expoe %s." % (produto, tabela, faltando))
+
+        cand = src.withColumn("__lote", _norm_key_col(F.col(COL_NUM_ID_LOTE)))
+        if COL_DAT_EXCLUSAO in src.columns:
+            cand = cand.where(F.col(COL_DAT_EXCLUSAO).isNull())
+        cand = cand.join(F.broadcast(lotes_alvo), on="__lote", how="left_semi")
+
+        # Teto por lote. Ordenacao pela PK => deterministico entre execucoes.
+        ordem_pk = [F.col(c).asc() for c in plano.pk_cols]
+        cand = (
+            cand.withColumn(
+                "__rn",
+                F.row_number().over(
+                    Window.partitionBy("__lote").orderBy(*ordem_pk)))
+            .where(F.col("__rn") <= F.lit(lastros_por_lote))
+            .drop("__rn")
+        )
+
+        # COD_CREDITO_* sintetico: SYN + 8 digitos. Ver cabecalho das constantes.
+        # O COD_CREDITO_* sintetico NAO e gerado aqui: depende do pk_start
+        # FINAL, que so existe depois de _apply_oracle_pk_floors. Ver
+        # _aplica_cod_credito_sintetico.
+        col_cod = COD_CREDITO_POR_TABELA.get(tabela)
+        if col_cod and col_cod not in src.columns:
+            raise ValueError(
+                "Produto %s: %s nao expoe %s; sem isso o credito sintetico "
+                "colide com o real (o codigo e UNICO no destino)."
+                % (produto, tabela, col_cod))
+
+        lote_t = _durable_materialize(cand.select(*src.columns))
+        n = lote_t.count()
+        if n == 0:
+            raise ValueError(
+                "Produto %s: semente lateral de %s vazia — nenhum dos %d lote(s) "
+                "da raiz tem linha ativa. O CTE de lastro da query deveria ter "
+                "impedido isso." % (produto, tabela, n_lotes))
+        prov = (
+            cand.select(*plano.pk_cols, "__lote")
+            .join(F.broadcast(chaves), on="__lote", how="inner")
+            .select(*plano.pk_cols, ROOT_PROVENANCE_COL)
+            .dropDuplicates()
+            .transform(_durable_materialize)
+        )
+        lotes[tabela] = lote_t
+        proveniencias[tabela] = prov
+        contagens[tabela] = n
+        semeadas.add(tabela)
+        logger.info("Semente lateral [%s]: %d linha(s).", tabela, n)
+
+        # Historico que NAO tem FK possivel para o credito (caso DC): semeado
+        # pelos CODIGOS dos creditos que acabaram de entrar — nunca pelo lote
+        # direto, senao viriam historicos de creditos que o teto deixou de fora.
+        for hist, credito_pai in HISTORICO_LATERAL_POR_PRODUTO.get(produto or "", ()):
+            if credito_pai != tabela:
+                continue
+            if not col_cod:
+                raise ValueError(
+                    "Produto %s: %s se liga a %s pelo codigo, mas a coluna de "
+                    "codigo nao esta declarada." % (produto, hist, tabela))
+            plano_h = planos.get(hist)
+            if plano_h is None:
+                raise ValueError(
+                    "Produto %s: %s nao esta no plano — inclua em "
+                    "TABELAS_ENGORDA_POR_PRODUTO." % (produto, hist))
+            src_h = _read_source(spark, config, hist)
+            faltando_h = [c for c in (col_cod, COL_NUM_ID_LOTE, *plano_h.pk_cols)
+                          if c not in src_h.columns]
+            if faltando_h:
+                raise ValueError(
+                    "Produto %s: %s nao expoe %s." % (produto, hist, faltando_h))
+            # Casa pelo codigo ORIGINAL do credito — ainda intacto nesta
+            # fase. A troca pelo sintetico acontece depois, nos dois lados de
+            # uma vez, em _aplica_cod_credito_sintetico.
+            codigos = lote_t.select(
+                F.trim(F.col(col_cod).cast("string")).alias("__cod_ant")
+            ).dropDuplicates()
+            hcand = (
+                src_h
+                .withColumn("__cod_ant", F.trim(F.col(col_cod).cast("string")))
+                .withColumn("__lote", _norm_key_col(F.col(COL_NUM_ID_LOTE)))
+                .join(F.broadcast(codigos), on="__cod_ant", how="left_semi")
+                .withColumn("__lote", _norm_key_col(F.col(COL_NUM_ID_LOTE)))
+            )
+            lote_h = _durable_materialize(hcand.select(*src_h.columns))
+            nh = lote_h.count()
+            prov_h = (
+                hcand.select(*plano_h.pk_cols, "__lote")
+                .join(F.broadcast(chaves), on="__lote", how="inner")
+                .select(*plano_h.pk_cols, ROOT_PROVENANCE_COL)
+                .dropDuplicates()
+                .transform(_durable_materialize)
+            )
+            lotes[hist] = lote_h
+            proveniencias[hist] = prov_h
+            contagens[hist] = nh
+            semeadas.add(hist)
+            logger.info(
+                "Semente lateral [%s]: %d linha(s) de historico, casadas por %s "
+                "com os %d credito(s) de %s.", hist, nh, col_cod, n, tabela)
+    chaves.unpersist(blocking=False)
+    return frozenset(semeadas)
+
+
+def _aplica_cod_credito_sintetico(produto: Optional[str],
+                                  planos: Dict[str, PlanoTabela],
+                                  lotes: Dict[str, DataFrame]) -> None:
+    """Gera o COD_CREDITO_* sintetico e aplica no credito E nos seus historicos.
+
+    Roda DEPOIS de _apply_oracle_pk_floors, quando plano.pk_start ja e o valor
+    final coordenado com o destino. O codigo e SYN + 8 caracteres em base 36 do
+    ordinal `pk_start + i`, logo herda a mesma garantia de unicidade entre runs
+    que a PK — sem parametro, sem ajuste manual e sem consulta nova ao Oracle.
+
+    Aborta se algum historico tiver codigo que nao casa com credito nenhum do
+    lote: isso seria historico orfao por construcao.
+
+    Produto sem semente lateral declarada e no-op."""
+    tabelas = SEMENTE_LATERAL_POR_PRODUTO.get(produto or "") or ()
+    if not tabelas:
+        return
+    historicos = HISTORICOS_DO_CREDITO_POR_PRODUTO.get(produto or "", {})
+    teto = COD_CREDITO_BASE ** COD_CREDITO_DIGITOS - 1
+    for tabela in tabelas:
+        col_cod = COD_CREDITO_POR_TABELA.get(tabela)
+        lote_c = lotes.get(tabela)
+        if not col_cod or lote_c is None:
+            continue
+        plano = planos.get(tabela)
+        if plano is None or plano.pk_start is None:
+            raise ValueError(
+                "Produto %s: %s sem pk_start — nao da para derivar %s de forma "
+                "coordenada com o destino." % (produto, tabela, col_cod))
+        base = int(plano.pk_start)
+        ordem_pk = [F.col(c).asc() for c in plano.pk_cols]
+        mapa = (
+            lote_c.select(
+                F.trim(F.col(col_cod).cast("string")).alias("__cod_ant"))
+            .dropDuplicates()
+            .withColumn(
+                "__ord",
+                F.lit(base) + F.row_number().over(
+                    Window.orderBy(F.col("__cod_ant").asc())) - F.lit(1))
+        )
+        if mapa.where(F.col("__ord") > F.lit(teto)).limit(1).count():
+            raise ValueError(
+                "Produto %s: ordinal de %s passou de %d — nao cabe em %d "
+                "caracteres base %d. pk_start=%d."
+                % (produto, col_cod, teto, COD_CREDITO_DIGITOS,
+                   COD_CREDITO_BASE, base))
+        mapa = (
+            mapa.withColumn(
+                "__cod_novo",
+                F.concat(
+                    F.lit(COD_CREDITO_PREFIXO_SINTETICO),
+                    F.lpad(F.conv(F.col("__ord").cast("string"), 10,
+                                  COD_CREDITO_BASE),
+                           COD_CREDITO_DIGITOS, "0"),
+                ),
+            )
+            .select("__cod_ant", "__cod_novo")
+            .transform(_durable_materialize)
+        )
+        n_cod = mapa.count()
+
+        alvos = [tabela] + [h for h in historicos.get(tabela, ()) if h in lotes]
+        for alvo in alvos:
+            lote = lotes[alvo]
+            if col_cod not in lote.columns:
+                raise ValueError(
+                    "Produto %s: %s nao expoe %s." % (produto, alvo, col_cod))
+            marcado = lote.withColumn(
+                "__cod_ant", F.trim(F.col(col_cod).cast("string")))
+            juntado = marcado.join(F.broadcast(mapa), on="__cod_ant", how="left")
+            if juntado.where(F.col("__cod_novo").isNull()).limit(1).count():
+                raise ValueError(
+                    "Produto %s: ha linha(s) em %s cujo %s nao casa com nenhum "
+                    "credito do lote — orfao por construcao."
+                    % (produto, alvo, col_cod))
+            novo = (
+                juntado.withColumn(col_cod, F.col("__cod_novo"))
+                .select(*lote.columns)
+                .transform(_durable_materialize)
+            )
+            n = novo.count()
+            lotes[alvo] = novo
+            lote.unpersist(blocking=False)
+            logger.info("Codigo sintetico [%s]: %s aplicado em %d linha(s).",
+                        alvo, col_cod, n)
+        primeiro = COD_CREDITO_PREFIXO_SINTETICO + _base36(base, COD_CREDITO_DIGITOS)
+        ultimo = COD_CREDITO_PREFIXO_SINTETICO + _base36(
+            base + n_cod - 1, COD_CREDITO_DIGITOS)
+        logger.info(
+            "Codigo sintetico [%s]: %d codigo(s) distintos, de %s a %s "
+            "(base pk_start=%d, ja coordenado com o destino).",
+            tabela, n_cod, primeiro, ultimo, base)
+        mapa.unpersist(blocking=False)
+
+
+def _base36(valor: int, largura: int) -> str:
+    """Base 36 em maiuscula, zero-padded — espelha o F.conv usado no Spark."""
+    digitos = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    if valor == 0:
+        texto = "0"
+    else:
+        texto = ""
+        n = int(valor)
+        while n:
+            n, r = divmod(n, 36)
+            texto = digitos[r] + texto
+    return texto.rjust(largura, "0")
+
+
+def _diagnostico_lastro(produto: Optional[str],
+                        lotes: Dict[str, DataFrame]) -> None:
+    """Bloco de log que PROVA o vinculo LCI/LCA <-> lastro no lote gerado.
+
+    Puramente observacional: nao altera nada. So roda para os produtos com
+    semente lateral declarada; qualquer outro sai na primeira linha."""
+    tabelas = SEMENTE_LATERAL_POR_PRODUTO.get(produto or "") or ()
+    if not tabelas:
+        return
+    raiz = lotes.get(TABELA_RAIZ)
+    if raiz is None or COL_NUM_ID_LOTE not in raiz.columns:
+        return
+    lotes_raiz = raiz.select(
+        _norm_key_col(F.col(COL_NUM_ID_LOTE)).alias("__lote")).dropDuplicates()
+    n_raiz = raiz.count()
+    n_lotes_raiz = lotes_raiz.count()
+    logger.info("=" * 70)
+    logger.info("DIAGNOSTICO DE LASTRO [%s]", produto)
+    logger.info("=" * 70)
+    logger.info("  %-38s %d", "instrumentos no lote:", n_raiz)
+    logger.info("  %-38s %d", "lotes (NUM_ID_LOTE) distintos:", n_lotes_raiz)
+    for tabela in tabelas:
+        lote_c = lotes.get(tabela)
+        if lote_c is None:
+            logger.warning("  %-38s AUSENTE DO FECHO", tabela + ":")
+            continue
+        lotes_cred = lote_c.select(
+            _norm_key_col(F.col(COL_NUM_ID_LOTE)).alias("__lote")
+        ).dropDuplicates()
+        n_c = lote_c.count()
+        n_lc = lotes_cred.count()
+        sem_lastro = lotes_raiz.join(lotes_cred, on="__lote", how="left_anti").count()
+        logger.info("  %-38s %d", tabela + " (linhas):", n_c)
+        logger.info("  %-38s %d", tabela + " (lotes cobertos):", n_lc)
+        logger.info("  %-38s %d   <<< TEM QUE SER 0",
+                    "lotes da raiz SEM lastro:", sem_lastro)
+        if sem_lastro:
+            # Nao aborta de proposito: a poda de dominio "lote sem lastro"
+            # ja deveria ter tirado esses instrumentos ANTES da amostragem.
+            # Chegar aqui com valor > 0 significa que a poda foi ignorada
+            # (fonte ilegivel) ou que a premissa mudou — e sinal para
+            # investigar, nao para descartar o run inteiro.
+            logger.warning(
+                "  ATENCAO: %d lote(s) de instrumento sem linha em %s. A poda "
+                "de dominio deveria ter evitado isso; verifique se ela foi "
+                "ignorada por fonte ilegivel.", sem_lastro, tabela)
+        col_cod = COD_CREDITO_POR_TABELA.get(tabela)
+        if col_cod and col_cod in lote_c.columns:
+            fora = lote_c.where(
+                ~F.col(col_cod).startswith(COD_CREDITO_PREFIXO_SINTETICO)
+            ).count()
+            logger.info("  %-38s %d   <<< TEM QUE SER 0",
+                        col_cod + " sem prefixo " + COD_CREDITO_PREFIXO_SINTETICO + ":",
+                        fora)
+    for hist, _cred in (
+            tuple(HISTORICO_LATERAL_POR_PRODUTO.get(produto or "", ()))
+            + tuple(COD_PROPAGACAO_FECHO_POR_PRODUTO.get(produto or "", ()))):
+        lote_h = lotes.get(hist)
+        if lote_h is None:
+            logger.info("  %-38s ausente (nao faz parte deste produto)", hist + ":")
+            continue
+        logger.info("  %-38s %d", hist + " (linhas):", lote_h.count())
+    logger.info("=" * 70)
+
+
 def _calcula_lotes_com_proveniencia(
     spark,
     config,
@@ -4858,6 +5413,8 @@ def _calcula_lotes_com_proveniencia(
     max_passadas: int,
     somente_ativos: bool = True,
     counts_out: Optional[Dict[str, int]] = None,
+    produto: Optional[str] = None,
+    lastros_por_lote: int = LASTROS_POR_LOTE_PADRAO,
 ) -> Tuple[Dict[str, DataFrame], Dict[str, DataFrame]]:
     """Desce a árvore a partir da raiz pelas FKs de vínculo principal,
     pais-antes-de-filhos; repete a passada até estabilizar (ciclos), até
@@ -4911,10 +5468,19 @@ def _calcula_lotes_com_proveniencia(
     )
     contagens_proveniencia[TABELA_RAIZ] = contagens[TABELA_RAIZ]
 
+    # Semente lateral do lastro (lci/lca). Devolve conjunto VAZIO para todo
+    # o resto, e ai o laco abaixo se comporta exatamente como antes.
+    semeadas_lateralmente = _semente_lateral_por_lote(
+        spark, config, produto, planos, lotes, proveniencias, contagens,
+        lastros_por_lote,
+    )
+    for _tab in semeadas_lateralmente:
+        contagens_proveniencia[_tab] = proveniencias[_tab].count()
+
     for passada in range(1, max_passadas + 1):
         cresceu = False
         for t in ordem:
-            if t == TABELA_RAIZ:
+            if t == TABELA_RAIZ or t in semeadas_lateralmente:
                 continue
             plano = planos[t]
             fks_uteis = [fk for fk in plano.fks_remap
@@ -5048,7 +5614,10 @@ def calcula_lotes(spark, config, spec: dict, planos: Dict[str, PlanoTabela],
                   ordem: List[str], num_if_valores: List,
                   max_passadas: int,
                   somente_ativos: bool = True,
-                  counts_out: Optional[Dict[str, int]] = None) -> Dict[str, DataFrame]:
+                  counts_out: Optional[Dict[str, int]] = None,
+                  produto: Optional[str] = None,
+                  lastros_por_lote: int = LASTROS_POR_LOTE_PADRAO,
+                  ) -> Dict[str, DataFrame]:
     lotes, proveniencias = _calcula_lotes_com_proveniencia(
         spark,
         config,
@@ -5059,6 +5628,8 @@ def calcula_lotes(spark, config, spec: dict, planos: Dict[str, PlanoTabela],
         max_passadas,
         somente_ativos=somente_ativos,
         counts_out=counts_out,
+        produto=produto,
+        lastros_por_lote=lastros_por_lote,
     )
     for provenance in proveniencias.values():
         provenance.unpersist(blocking=False)
@@ -6873,6 +7444,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                       poda_cronograma_resgate: bool = True,
                       poda_conta: bool = True,
                       politica_estrita_operacao: bool = True,
+                      lastros_por_lote: int = LASTROS_POR_LOTE_PADRAO,
                       ajusta_fator_k: bool = True,
                       anular_cols: Optional[Mapping[str, Sequence[str]]] = None,
                       oracle_code_batch_size: int = DEFAULT_ORACLE_CODE_BATCH_SIZE,
@@ -7006,6 +7578,29 @@ def executa_clonagem(spark, config, spec: dict, *,
         )
     for table in tabelas_produto:
         spec[table]["static"] = False
+    # FK que o spec em disco nao declara, injetada SO em memoria e SO
+    # para os produtos que a exigem. Ver FK_COMPLEMENTAR_POR_PRODUTO.
+    for tabela_fk, fk_nova in FK_COMPLEMENTAR_POR_PRODUTO.get(produto, ()):
+        if tabela_fk not in tabelas_produto:
+            continue
+        cfg_fk = spec[tabela_fk]
+        existentes = cfg_fk.get("foreign_keys")
+        if not isinstance(existentes, list):
+            existentes = list(_fk_list(cfg_fk))
+            cfg_fk["foreign_keys"] = existentes
+        ja_tem = any(
+            list(fk.get("columns") or []) == list(fk_nova["columns"])
+            and fk.get("parent_table") == fk_nova["parent_table"]
+            for fk in existentes
+        )
+        if ja_tem:
+            continue
+        existentes.append(copy.deepcopy(fk_nova))
+        logger.info(
+            "FK complementar injetada EM MEMORIA para %s: %s.%s -> %s.%s "
+            "(spec em disco intacto).", produto, tabela_fk,
+            fk_nova["columns"], fk_nova["parent_table"],
+            fk_nova["parent_columns"])
     if tabelas_produto:
         logger.info("Tabelas engordáveis do produto %s: %s",
                     produto, sorted(tabelas_produto))
@@ -7189,12 +7784,20 @@ def executa_clonagem(spark, config, spec: dict, *,
                 max_passadas,
                 somente_ativos=somente_ativos,
                 counts_out=closure_lote_counts,
+                produto=produto,
+                lastros_por_lote=lastros_por_lote,
             )
     # Invariante de lastro: conferido sobre o fecho (não sobre o domínio), então
     # vale para os três caminhos — dry-run, admissão FK live e lote de snapshot.
     _valida_lastro_obrigatorio(produto, lotes)
     if credentials is not None:
         _apply_oracle_pk_floors(spark._sc._jvm, credentials, planos)
+    # A PARTIR DAQUI plano.pk_start e final (ja com o piso do destino).
+    # So agora da para derivar o COD_CREDITO_* de forma que nao colida
+    # com runs anteriores. O diagnostico vem depois para ja enxergar o
+    # codigo sintetico aplicado.
+    _aplica_cod_credito_sintetico(produto, planos, lotes)
+    _diagnostico_lastro(produto, lotes)
 
     if phase == "materialize":
         final_lote_counts = {
@@ -7661,6 +8264,10 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
     ):
         if type(getattr(job, field_name)) is not bool:
             raise ValueError(f"{field_name} precisa ser booleano")
+    for field_name in ("lastros_por_lote",):
+        valor = getattr(job, field_name)
+        if type(valor) is not int or valor < 1:
+            raise ValueError(f"{field_name} precisa ser inteiro >= 1")
     if job.anular_cols is not None:
         _merge_nullification_mappings(
             profile.integrity.nullify_mapping(), job.anular_cols
@@ -7802,6 +8409,7 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
             poda_cronograma_resgate=job.poda_cronograma_resgate,
             poda_conta=job.poda_conta,
             politica_estrita_operacao=job.politica_estrita_operacao,
+            lastros_por_lote=job.lastros_por_lote,
             ajusta_fator_k=job.ajusta_fator_k,
             anular_cols=_merge_nullification_mappings(
                 profile.integrity.nullify_mapping(), anular_cols

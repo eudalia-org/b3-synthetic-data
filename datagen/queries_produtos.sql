@@ -422,6 +422,18 @@ LOTE_ELEGIVEL AS (
     WHERE L.NUM_ID_TIPO_LOTE = 1
         AND L.NUM_CONTA_PARTICIPANTE IS NOT NULL
 ),
+LOTE_COM_LASTRO AS (
+    -- VINCULO DE LASTRO. O LCI sintetico preserva o NUM_ID_LOTE
+    -- original (LOTE e static no fecho deste produto), entao so pode
+    -- entrar instrumento cujo lote tenha CREDITO_SCR ativo para semear.
+    -- Sem isso a semente lateral nao tem de onde tirar linha e o
+    -- sintetico nasceria sem lastro.
+    -- MEDIDO no QAB: custa 106 de 5.421.677 LCIs (0,002%).
+    SELECT DISTINCT S.NUM_ID_LOTE
+    FROM {{RAW_CREDITO_SCR}} S
+    WHERE S.DAT_EXCLUSAO IS NULL
+        AND S.NUM_ID_LOTE IS NOT NULL
+),
 CARTEIRA_DUPLICADA AS (
     -- 6e.wallet.*.local: a chave natural da carteira precisa ser única por
     -- instrumento. Quando a origem já tem duas linhas com a mesma chave, o
@@ -495,6 +507,8 @@ FROM FLAGS_IF F
         ON IFL.NUM_IF = F.NUM_IF
     INNER JOIN LOTE_ELEGIVEL LE
         ON LE.NUM_ID_LOTE = IFL.NUM_ID_LOTE
+    INNER JOIN LOTE_COM_LASTRO LCL
+        ON LCL.NUM_ID_LOTE = IFL.NUM_ID_LOTE
     LEFT ANTI JOIN ROTA_INVALIDA RI
         ON RI.NUM_IF = F.NUM_IF
     LEFT ANTI JOIN CARTEIRA_DUPLICADA CD
@@ -576,6 +590,18 @@ LOTE_ELEGIVEL AS (
     WHERE L.NUM_ID_TIPO_LOTE = 2
         AND L.NUM_CONTA_PARTICIPANTE IS NOT NULL
 ),
+LOTE_COM_DC AS (
+    -- VINCULO DE LASTRO. O LCA sintetico preserva o NUM_ID_LOTE
+    -- original (LOTE e static no fecho deste produto), entao so pode
+    -- entrar instrumento cujo lote tenha CREDITO_DC ativo para semear.
+    -- Sem isso a semente lateral nao tem de onde tirar linha e o
+    -- sintetico nasceria sem lastro.
+    -- MEDIDO no QAB: custa 3.317 de 3.763.843 LCAs (0,09%).
+    SELECT DISTINCT S.NUM_ID_LOTE
+    FROM {{RAW_CREDITO_DC}} S
+    WHERE S.DAT_EXCLUSAO IS NULL
+        AND S.NUM_ID_LOTE IS NOT NULL
+),
 CARTEIRA_DUPLICADA AS (
     -- 6g.wallet.*.local: a chave natural da carteira precisa ser única por
     -- instrumento. Quando a origem já tem duas linhas com a mesma chave, o
@@ -638,6 +664,8 @@ FROM FLAGS_IF F
         ON IFL.NUM_IF = F.NUM_IF
     INNER JOIN LOTE_ELEGIVEL LE
         ON LE.NUM_ID_LOTE = IFL.NUM_ID_LOTE
+    INNER JOIN LOTE_COM_DC LCD
+        ON LCD.NUM_ID_LOTE = IFL.NUM_ID_LOTE
     LEFT ANTI JOIN ROTA_INVALIDA RI
         ON RI.NUM_IF = F.NUM_IF
     LEFT ANTI JOIN CARTEIRA_DUPLICADA CD
