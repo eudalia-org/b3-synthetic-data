@@ -5392,9 +5392,11 @@ def _diagnostico_lastro(produto: Optional[str],
             logger.info("  %-38s %d   <<< TEM QUE SER 0",
                         col_cod + " sem prefixo " + COD_CREDITO_PREFIXO_SINTETICO + ":",
                         fora)
-    for hist, _cred in (
-            tuple(HISTORICO_LATERAL_POR_PRODUTO.get(produto or "", ()))
-            + tuple(COD_PROPAGACAO_FECHO_POR_PRODUTO.get(produto or "", ()))):
+    nomes_hist = []
+    for _cred, hists in HISTORICOS_DO_CREDITO_POR_PRODUTO.get(
+            produto or "", {}).items():
+        nomes_hist.extend(hists)
+    for hist in dict.fromkeys(nomes_hist):
         lote_h = lotes.get(hist)
         if lote_h is None:
             logger.info("  %-38s ausente (nao faz parte deste produto)", hist + ":")
