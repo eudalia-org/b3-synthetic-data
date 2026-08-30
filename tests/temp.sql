@@ -1,3 +1,31 @@
+-- 1) No DESTINO: prova que o espaço 'SYN' está livre nos dois códigos.
+--    Esperado: 0 e 0. Se vier > 0, escolho outro prefixo.
+SELECT 'CREDITO_SCR' AS TABELA, COUNT(*) AS COLIDE
+  FROM CREDITO_SCR WHERE COD_CREDITO_SCR LIKE 'SYN%'
+UNION ALL
+SELECT 'CREDITO_DC', COUNT(*)
+  FROM CREDITO_DC  WHERE COD_CREDITO_DC LIKE 'SYN%';
+
+-- 2) O código do DC tem a mesma largura fixa? (só medimos o do SCR)
+SELECT MIN(LENGTH(COD_CREDITO_DC)) AS MIN_LEN,
+       MAX(LENGTH(COD_CREDITO_DC)) AS MAX_LEN,
+       COUNT(DISTINCT LENGTH(COD_CREDITO_DC)) AS QTD_TAMANHOS
+FROM CREDITO_DC;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 -- Formato do código do crédito
 SELECT MIN(LENGTH(COD_CREDITO_SCR)) AS MIN_LEN,
        MAX(LENGTH(COD_CREDITO_SCR)) AS MAX_LEN,
