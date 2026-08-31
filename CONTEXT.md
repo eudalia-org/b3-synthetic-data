@@ -48,6 +48,14 @@ _Avoid_: Reservation, environment lease
 A synthetic product aggregate generated without Oracle admission, PK-floor checks, or official business-key allocation. It may be inspected or validated but is never eligible for Oracle load.
 _Avoid_: Dry run, loadable synthetic artifact
 
+**RDB inclusion**:
+A newly registered RDB with one type-20 RESGATE in `SEM TABELA` mode, no active CONDICAO_RESGATE schedule, and zero redeemed quantity on TITULO.
+_Avoid_: RDB without RESGATE, RDB resgate
+
+**RDB resgate**:
+An RDB with one type-20 RESGATE in `COM TABELA` mode and at least one active CONDICAO_RESGATE schedule row.
+_Avoid_: RDB inclusion, redemption row
+
 **Operation-party nature**:
 The mutually exclusive PF or PJ classification associated with an operation party. A valid party is one nature or the other, never a required PF-and-PJ pair.
 _Avoid_: PF/PJ pair

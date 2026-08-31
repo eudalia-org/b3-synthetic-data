@@ -442,6 +442,7 @@ VALIDATION_PROFILES: Dict[str, ValidationProfile] = {
         required_capabilities=_RDB_REQUIRED,
         supported_capabilities=_RDB_SUPPORTED,
         evidence_version=1,
+        pipeline="rdb",
     ),
     "lci": ValidationProfile(
         name="lci",
@@ -561,6 +562,23 @@ VALIDATION_PROFILES: Dict[str, ValidationProfile] = {
         pipeline="dicre",
     ),
 }
+
+VALIDATION_PROFILES["rdb_inclusao"] = replace(
+    VALIDATION_PROFILES["rdb"],
+    name="rdb_inclusao",
+    default_clone_prefix="sintetizacao_multiproduto/rdb_inclusao",
+    evidence_version=2,
+)
+VALIDATION_PROFILES["rdb_resgate"] = replace(
+    VALIDATION_PROFILES["rdb"],
+    name="rdb_resgate",
+    default_clone_prefix="sintetizacao_multiproduto/rdb_resgate",
+    evidence_version=2,
+)
+
+
+def _is_rdb_profile(profile: ValidationProfile) -> bool:
+    return profile.pipeline == "rdb"
 
 
 def get_validation_profile(name: str) -> ValidationProfile:
@@ -2453,11 +2471,12 @@ def check_rdb_resgate_schedule_rules(
     tables: Dict[str, DataFrame], sample: int, profile: ValidationProfile
 ) -> List[Finding]:
     """Validate the observed SEM TABELA/COM TABELA RDB schedule contract."""
-    if profile.name != "rdb":
+    if not _is_rdb_profile(profile):
         return []
 
     cat = "RDB resgate schedule conformance"
     out: List[Finding] = []
+    strict_variant = profile.name in {"rdb_inclusao", "rdb_resgate"}
 
     def record(
         check_id: str,
@@ -2493,7 +2512,8 @@ def check_rdb_resgate_schedule_rules(
     ]
     if missing_tables:
         return [Finding(
-            "2c.rdb_resgate_schedule_availability", cat, SEV_WARN,
+            "2c.rdb_resgate_schedule_availability", cat,
+            SEV_ERROR if strict_variant else SEV_WARN,
             ",".join(missing_tables), False,
             hint="Include the RDB root, condition, and resgate tables.",
             message=f"RDB schedule checks unavailable; missing: {missing_tables}.",
@@ -2519,7 +2539,8 @@ def check_rdb_resgate_schedule_rules(
     missing_columns = [name for name, value in required.items() if not value]
     if missing_columns:
         return [Finding(
-            "2c.rdb_resgate_schedule_availability", cat, SEV_WARN,
+            "2c.rdb_resgate_schedule_availability", cat,
+            SEV_ERROR if strict_variant else SEV_WARN,
             ",".join(missing_columns), False,
             hint="Include the columns required to resolve RDB schedule ownership and dates.",
             message=f"RDB schedule checks unavailable; missing: {missing_columns}.",
@@ -2537,15 +2558,82 @@ def check_rdb_resgate_schedule_rules(
         F.col(cond_cols["NUM_IF"]).cast("long").alias("NUM_IF"),
         _norm_code(F.col(cond_cols["COD_TIPO_CONDICAO_IF"])).alias("condition_type"),
     ).join(roots.select("NUM_IF"), "NUM_IF", "inner")
-    parents = conditions.where(F.col("condition_type") == "20").join(
-        _active(resgate).select(
+    type_20_conditions = conditions.where(F.col("condition_type") == "20")
+    resgate_rows = _active(resgate).select(
             F.col(res_cols["NUM_CONDICAO_IF"]).cast("long").alias("condition_key"),
             _norm_code(F.col(res_cols["COD_COND_RESGATE"])).alias("resgate_mode"),
             try_cast(res_cols["DAT_RESGATE"], "date").alias("resgate_date"),
-        ),
-        "condition_key", "inner",
     )
+    parents = type_20_conditions.join(resgate_rows, "condition_key", "inner")
     com_tabela = parents.where(F.col("resgate_mode") == "COM TABELA")
+
+    expected_mode = {
+        "rdb_inclusao": "SEM TABELA",
+        "rdb_resgate": "COM TABELA",
+    }.get(profile.name)
+    if expected_mode is not None:
+        variant_summary = roots.select("NUM_IF").join(
+            type_20_conditions.select("NUM_IF", "condition_key"),
+            "NUM_IF",
+            "left",
+        ).join(resgate_rows, "condition_key", "left").groupBy("NUM_IF").agg(
+            F.count("condition_key").alias("resgate_count"),
+            F.sum(
+                F.when(F.col("resgate_mode") == expected_mode, 1).otherwise(0)
+            ).alias("expected_mode_count"),
+            F.collect_set("resgate_mode").alias("resgate_modes"),
+        )
+        record(
+            "2c.rdb_variant_resgate_mode",
+            "RESGATE",
+            "COD_COND_RESGATE",
+            variant_summary.where(
+                (F.col("resgate_count") != 1)
+                | (F.col("expected_mode_count") != 1)
+            ),
+            ["NUM_IF", "resgate_count", "resgate_modes"],
+            SEV_ERROR,
+            f"Generate exactly the {expected_mode} RDB variant selected by the profile.",
+            f"{profile.name} roots without a type-20 {expected_mode} RESGATE row.",
+        )
+
+    if profile.name == "rdb_inclusao":
+        titulo = tables.get("TITULO")
+        titulo_num_if = resolve(titulo, "NUM_IF") if titulo is not None else None
+        qtd_resgatada = (
+            resolve(titulo, "QTD_RESGATADA") if titulo is not None else None
+        )
+        if titulo is None or not titulo_num_if or not qtd_resgatada:
+            out.append(Finding(
+                "2c.rdb_inclusao_redeemed_quantity",
+                cat,
+                SEV_ERROR,
+                "TITULO",
+                False,
+                column="QTD_RESGATADA",
+                hint="Include TITULO.NUM_IF and QTD_RESGATADA in the validation input.",
+                message="RDB inclusion redeemed-quantity check is unavailable.",
+            ))
+        else:
+            titulo_quantities = _active(titulo).select(
+                F.col(titulo_num_if).cast("long").alias("NUM_IF"),
+                F.col(qtd_resgatada).cast("decimal(38,10)").alias("redeemed_quantity"),
+            )
+            record(
+                "2c.rdb_inclusao_redeemed_quantity",
+                "TITULO",
+                "QTD_RESGATADA",
+                roots.select("NUM_IF").join(
+                    titulo_quantities, "NUM_IF", "left"
+                ).where(
+                    F.col("redeemed_quantity").isNull()
+                    | (F.col("redeemed_quantity") != F.lit(0))
+                ),
+                ["NUM_IF", "redeemed_quantity"],
+                SEV_ERROR,
+                "Set TITULO.QTD_RESGATADA=0 for newly registered RDB inclusion rows.",
+                "RDB inclusion titles with missing or nonzero redeemed quantity.",
+            )
 
     schedule = tables.get("CONDICAO_RESGATE")
     if schedule is None:
@@ -2567,13 +2655,14 @@ def check_rdb_resgate_schedule_rules(
     ]
     if missing_schedule:
         count = max(com_tabela.count(), schedule.count())
-        return [Finding(
+        out.append(Finding(
             "2c.rdb_resgate_schedule_availability", cat,
             SEV_ERROR if count else SEV_INFO, "CONDICAO_RESGATE", count == 0,
             count=count, column=",".join(missing_schedule),
             hint="Include the required schedule columns." if count else "",
             message=f"RDB schedule columns unavailable: {missing_schedule}.",
-        )]
+        ))
+        return out
 
     active_schedule = schedule
     if schedule_cols["IND_EXCLUIDO"]:
@@ -8862,7 +8951,7 @@ def check_required_lookup_frames(
     run_account = not _check_is_skipped("6.required.active_account", skip_prefixes)
     run_operation = not _check_is_skipped("6.required.operation_tos", skip_prefixes)
     run_platform = not _check_is_skipped("6.required.cdb_platform", skip_prefixes)
-    quantity_product = "rdb" if profile.name == "rdb" else "cdb"
+    quantity_product = "rdb" if _is_rdb_profile(profile) else "cdb"
     run_quantity = not _check_is_skipped(
         f"6.required.{quantity_product}_quantity", skip_prefixes
     )
@@ -8887,9 +8976,11 @@ def check_required_lookup_frames(
         return {name: actual for name, actual in resolved.items() if actual}
 
     tos_semantics_supported = (
-        CAP_LOOKUP_TOS in profile.supported_capabilities or profile.name == "rdb"
+        CAP_LOOKUP_TOS in profile.supported_capabilities or _is_rdb_profile(profile)
     )
-    registration_account_contract = profile.name in ("cdb", "cdb_simplificado", "rdb")
+    registration_account_contract = (
+        profile.name in ("cdb", "cdb_simplificado") or _is_rdb_profile(profile)
+    )
     registration_account_tos = None
     account_scope_error = None
     if ((run_account or run_quantity)
@@ -9078,7 +9169,7 @@ def check_required_lookup_frames(
                 )
                 .where(
                     F.col("situation_id").isin(*(
-                        ("1", "2") if profile.name == "rdb" else ("1",)
+                        ("1", "2") if _is_rdb_profile(profile) else ("1",)
                     ))
                     & F.col("account_code").rlike(r"^[0-9]{5}\.(40|10)-[0-9]$")
                     & (F.col("area_id") == "1")
@@ -9133,7 +9224,7 @@ def check_required_lookup_frames(
                     "Use a nonblank target CONTA_PARTICIPANTE with "
                     + (
                         "NUM_ID_SITUACAO_CONTA in (1,2) "
-                        if profile.name == "rdb" else "NUM_ID_SITUACAO_CONTA=1 "
+                        if _is_rdb_profile(profile) else "NUM_ID_SITUACAO_CONTA=1 "
                     )
                     + "whose COD_CONTA_PARTICIPANTE has a "
                     "V_FAMILIA_CONTAS row with NUM_ID_AREA_ATUACAO=1 and COD_TIPO_ACESSO='L'. "
@@ -9144,7 +9235,7 @@ def check_required_lookup_frames(
                     )
                     +
                     "The trimmed account code must match ^[0-9]{5}\\.(40|10)-[0-9]$; "
-                    + ("" if profile.name == "rdb" else "situation 2 is not eligible.")
+                    + ("" if _is_rdb_profile(profile) else "situation 2 is not eligible.")
                     if invalid_account_count else ""
                 ),
                 message=(
@@ -9678,7 +9769,7 @@ def check_lookup_combos(
     run_required_platform = run_required and not _check_is_skipped(
         "6.required.cdb_platform", skip_prefixes
     )
-    quantity_product = "rdb" if profile.name == "rdb" else "cdb"
+    quantity_product = "rdb" if _is_rdb_profile(profile) else "cdb"
     run_required_quantity = run_required and not _check_is_skipped(
         f"6.required.{quantity_product}_quantity", skip_prefixes
     )
@@ -9704,7 +9795,7 @@ def check_lookup_combos(
         existing = []
 
     lookup_tos_supported = CAP_LOOKUP_TOS in profile.supported_capabilities
-    registration_lookup_supported = lookup_tos_supported or profile.name == "rdb"
+    registration_lookup_supported = lookup_tos_supported or _is_rdb_profile(profile)
     queries = {}
     if registration_lookup_supported and (
         run_combo or run_required_operation or run_required_account or run_required_quantity
@@ -9758,7 +9849,7 @@ def check_lookup_combos(
         tos_lookup = lookups.get(TIPO_OPER_OBJETO_SERV_TABLE)
         tipo_lookup = lookups.get(TIPO_OPERACAO_TABLE)
         if (
-            profile.name in ("cdb", "cdb_simplificado", "rdb")
+            (profile.name in ("cdb", "cdb_simplificado") or _is_rdb_profile(profile))
             and tos_lookup is not None
             and tipo_lookup is not None
         ):
@@ -9793,8 +9884,9 @@ def check_lookup_combos(
         key_frames = []
         for table, column in ACCOUNT_REFERENCES:
             source = tables[table]
-            if table == OPERACAO_TABLE and profile.name in (
-                "cdb", "cdb_simplificado", "rdb"
+            if table == OPERACAO_TABLE and (
+                profile.name in ("cdb", "cdb_simplificado")
+                or _is_rdb_profile(profile)
             ):
                 operation_tos = resolve(source, "NUM_ID_TIPO_OPER_OBJETO_SERV")
                 if registration_tos_ids is None or operation_tos is None:
@@ -10989,7 +11081,7 @@ def _load_shape_baseline(
         raise ValueError(f"Baseline {path} has no 'shapes' section.")
     if (
         profile is not None
-        and profile.name in {"cdb_simplificado", "cdb", "rdb"}
+        and (profile.name in {"cdb_simplificado", "cdb"} or _is_rdb_profile(profile))
         and not baseline.get("filtros_fonte_applied")
     ):
         logger.warning(
@@ -11552,7 +11644,7 @@ def check_event_condition_families(
     tables: Dict[str, DataFrame], sample: int, profile: "ValidationProfile"
 ) -> List[Finding]:
     """Require observed event families to coexist with their physical condition family."""
-    if profile.name not in ("cdb", "cdb_simplificado", "rdb"):
+    if profile.name not in ("cdb", "cdb_simplificado") and not _is_rdb_profile(profile):
         return []
     check_id = "8a.event_condition_family"
     cat = "Log-derived invariants"

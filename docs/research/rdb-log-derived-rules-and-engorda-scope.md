@@ -238,8 +238,9 @@ the target or are handled by the existing faltantes workflow.
 ## Recommended Product Split
 
 1. Define `rdb_inclusao` from active type-50 roots, active type `20`/`RESGATE` rows,
-   `RESGATE.COD_COND_RESGATE='SEM TABELA'`, and no **active** `CONDICAO_RESGATE` rows.
-2. Define `rdb_com_resgate` from the same active root/condition predicates,
+   `RESGATE.COD_COND_RESGATE='SEM TABELA'`, no **active** `CONDICAO_RESGATE` rows, and
+   `TITULO.QTD_RESGATADA=0` for newly registered titles.
+2. Define `rdb_resgate` from the same active root/condition predicates,
    `RESGATE.COD_COND_RESGATE='COM TABELA'`, and at least one **active**
    `CONDICAO_RESGATE` row. Resolve activity through `IND_EXCLUIDO`; deleted historical rows
    must not classify a product variant.
@@ -250,9 +251,10 @@ the target or are handled by the existing faltantes workflow.
 5. Validate registration-operation TOS `5177` separately from unrestricted historical RDB
    operations; otherwise the evidence-backed code-`1` rule becomes an overbroad false failure.
 
-`check_rdb_resgate_schedule_rules` now enforces COM/SEM schedule ownership and valid values as
-errors. Duplicate dates, out-of-bounds dates, and non-increasing percentages are advisory WARNs
-until broader production evidence promotes them.
+The validator now exposes distinct `rdb_inclusao` and `rdb_resgate` profiles while preserving
+`rdb` as a compatibility alias. Variant mode, inclusion redeemed quantity, COM/SEM schedule
+ownership, and valid schedule values are errors. Duplicate dates, out-of-bounds dates, and
+non-increasing percentages are advisory WARNs until broader production evidence promotes them.
 
 ## Countercheck and Limits
 

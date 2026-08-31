@@ -121,6 +121,11 @@ The five CCB variants and `gravame` support `engorda -> validate -> load`. `last
 `direito_creditorio` support validation and load of adopted synthetic outputs, but not
 engorda because the generic generator does not provide their root/domain contract yet.
 
+`rdb_inclusao` and `rdb_resgate` use distinct validator profiles. Inclusion requires one
+`SEM TABELA` RESGATE, no active schedule rows, and `TITULO.QTD_RESGATADA=0`; resgate requires
+`COM TABELA` plus an active `CONDICAO_RESGATE` schedule. The generic `rdb` validator name
+remains only as a compatibility alias for direct invocations.
+
 ## Load validated output
 
 Load is APPEND-only and requires explicit approval. It consumes the exact synthetic

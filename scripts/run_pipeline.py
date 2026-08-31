@@ -384,8 +384,14 @@ PRODUCTS: dict[str, dict[str, Any]] = {
     },
     "cdb_resgate": {"validator_product": "cdb", "capabilities": _ENGORDA_VALIDATE_LOAD},
     "cdb_escalonamento": {"validator_product": "cdb", "capabilities": _ENGORDA_VALIDATE_LOAD},
-    "rdb_inclusao": {"validator_product": "rdb", "capabilities": _ENGORDA_VALIDATE_LOAD},
-    "rdb_resgate": {"validator_product": "rdb", "capabilities": _ENGORDA_VALIDATE_LOAD},
+    "rdb_inclusao": {
+        "validator_product": "rdb_inclusao",
+        "capabilities": _ENGORDA_VALIDATE_LOAD,
+    },
+    "rdb_resgate": {
+        "validator_product": "rdb_resgate",
+        "capabilities": _ENGORDA_VALIDATE_LOAD,
+    },
     "lci": {"validator_product": "lci", "capabilities": _ENGORDA_VALIDATE_LOAD},
     "lca": {"validator_product": "lca", "capabilities": _ENGORDA_VALIDATE_LOAD},
     "ccb_pppre": {"validator_product": "ccb", "capabilities": _ENGORDA_VALIDATE_LOAD},
