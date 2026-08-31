@@ -56,6 +56,10 @@ _Avoid_: RDB without RESGATE, RDB resgate
 An RDB with one type-20 RESGATE in `COM TABELA` mode and at least one active CONDICAO_RESGATE schedule row.
 _Avoid_: RDB inclusion, redemption row
 
+**Registration account roles**:
+The product-specific account-code groups assigned to the party and counterparty of a registration operation. CDB, RDB, LCI, and LCA use `.10`/`.40`; CCB uses `.00`/`.40`.
+_Avoid_: Universal operation account regex, participant P1/P2 IDs
+
 **Operation-party nature**:
 The mutually exclusive PF or PJ classification associated with an operation party. A valid party is one nature or the other, never a required PF-and-PJ pair.
 _Avoid_: PF/PJ pair

@@ -92,10 +92,22 @@ def lca_tables(spark):
             [(1, "control.0")], "NUM_IF long, NUM_CONTROLE_LANCAMENTO string"
         ),
         "OPERACAO": spark.createDataFrame(
-            [(41, 1, 8430, "operation.0", "control.0", "control.0")],
+            [
+                (
+                    41,
+                    1,
+                    8430,
+                    "operation.0",
+                    "control.0",
+                    "control.0",
+                    "12345.10-1",
+                    "12345.40-1",
+                )
+            ],
             "NUM_ID_OPERACAO long, NUM_IF long, NUM_ID_TIPO_OPER_OBJETO_SERV long, "
             "COD_OPERACAO string, NUM_CONTROLE_LANCAMENTO_P1 string, "
-            "NUM_CONTROLE_LANCAMENTO_P2 string",
+            "NUM_CONTROLE_LANCAMENTO_P2 string, COD_CONTA_PARTE string, "
+            "COD_CONTA_CONTRAPARTE string",
         ),
         "DADO_OPERACAO": spark.createDataFrame(
             [(51, 41, 287), (52, 41, 288)],
@@ -337,9 +349,68 @@ def test_lca_target_positive_has_no_lci_access_area_assumption(spark):
     for check_id in (
         "6g.lookup.tipo_if", "6g.lookup.lot", "6g.lookup.lot_root_type",
         "6g.lookup.issuer_account", "6g.lookup.municipality", "6g.lookup.uf",
-        "6g.lookup.object_service", "6g.lookup.route",
+        "6g.lookup.object_service", "6g.lookup.route", "6g.registration_account_roles",
     ):
         assert findings[check_id].passed, findings[check_id]
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("COD_CONTA_PARTE", "12345.40-1"),
+        ("COD_CONTA_CONTRAPARTE", "12345.10-1"),
+        ("COD_CONTA_CONTRAPARTE", " 12345.40-1 "),
+    ],
+)
+def test_lca_registration_operation_requires_10_40_account_roles(
+    spark, column, value
+):
+    tables = lca_tables(spark)
+    tables["OPERACAO"] = tables["OPERACAO"].withColumn(column, validator.F.lit(value))
+
+    finding = target_findings(tables, target_frames(spark))[
+        "6g.registration_account_roles"
+    ]
+    assert finding.severity == validator.SEV_ERROR
+    assert finding.count == 1
+
+
+def test_lca_account_role_check_fails_closed_without_route_evidence(spark):
+    frames = target_frames(spark)
+    del frames["LCA_ROUTES"]
+
+    finding = target_findings(lca_tables(spark), frames)[
+        "6g.registration_account_roles"
+    ]
+    assert finding.severity == validator.SEV_ERROR
+
+
+def test_lca_account_role_columns_are_required(spark):
+    tables = lca_tables(spark)
+    tables["OPERACAO"] = tables["OPERACAO"].drop("COD_CONTA_CONTRAPARTE")
+
+    finding = target_findings(tables, target_frames(spark))["6g.lookup.availability"]
+    assert finding.severity == validator.SEV_ERROR
+    assert "COD_CONTA_CONTRAPARTE" in finding.message
+
+
+def test_lca_account_roles_ignore_nonregistration_route(spark):
+    tables = lca_tables(spark)
+    historical = (
+        tables["OPERACAO"]
+        .withColumn("NUM_ID_OPERACAO", validator.F.lit(42))
+        .withColumn("NUM_ID_TIPO_OPER_OBJETO_SERV", validator.F.lit(999))
+        .withColumn("COD_CONTA_PARTE", validator.F.lit("invalid"))
+        .withColumn("COD_CONTA_CONTRAPARTE", validator.F.lit("invalid"))
+    )
+    tables["OPERACAO"] = tables["OPERACAO"].union(historical)
+    frames = target_frames(spark)
+    frames["LCA_ROUTES"] = frames["LCA_ROUTES"].union(
+        spark.createDataFrame([(999, 843, "2", "S")], frames["LCA_ROUTES"].schema)
+    )
+
+    finding = target_findings(tables, frames)["6g.registration_account_roles"]
+    assert finding.passed
 
 
 def test_lca_missing_lot_root_type_is_unavailable_not_false_pass(spark):

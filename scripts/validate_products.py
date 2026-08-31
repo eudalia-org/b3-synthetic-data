@@ -7233,6 +7233,7 @@ def check_lci_target_frames(
         "DEPOSITO_AUTOMATICO_IF": ("NUM_IF", "NUM_CONTROLE_LANCAMENTO"),
         "OPERACAO": (
             "NUM_ID_OPERACAO", "NUM_IF", "NUM_ID_TIPO_OPER_OBJETO_SERV", "COD_OPERACAO",
+            "COD_CONTA_PARTE", "COD_CONTA_CONTRAPARTE",
         ),
         "CARTEIRA_COMITENTE": (
             "NUM_ID_ENTIDADE", "COD_TIPO_POSICAO_CARTEIRA", "NUM_SISTEMA", "NUM_IF",
@@ -7386,6 +7387,10 @@ def check_lci_target_frames(
         _canon_key_col(F.col(op_cols["NUM_ID_OPERACAO"])).alias("operation_id"),
         _canon_key_col(F.col(op_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias("route_id"),
         _lci_text(F.col(op_cols["COD_OPERACAO"])).alias("operation_code"),
+        F.col(op_cols["COD_CONTA_PARTE"]).cast("string").alias("party_account"),
+        F.col(op_cols["COD_CONTA_CONTRAPARTE"]).cast("string").alias(
+            "counterparty_account"
+        ),
     )
     route_frame = lookup_frames.get("LCI_ROUTES")
     route_names = (
@@ -7397,8 +7402,12 @@ def check_lci_target_frames(
         for name in route_names
     }
     if route_frame is None or any(value is None for value in route_columns.values()):
+        route_error = lookup_errors.get("LCI_ROUTES", "LCI_ROUTES required columns")
         out.append(_lci_unavailable(
-            "6e.lookup.route", [lookup_errors.get("LCI_ROUTES", "LCI_ROUTES required columns")]
+            "6e.lookup.route", [route_error]
+        ))
+        out.append(_lci_unavailable(
+            "6e.registration_account_roles", [route_error], SEV_ERROR
         ))
     else:
         eligible_routes = route_frame.select(
@@ -7425,6 +7434,41 @@ def check_lci_target_frames(
                  "operation code 1."
                  if count else "",
             message="Synthetic LCI operations using ineligible target route IDs.",
+        ))
+        registration = operations.join(F.broadcast(eligible_routes), "route_id", "inner")
+        account_bad = registration.where(
+            ~F.coalesce(F.col("party_account"), F.lit("")).rlike(
+                r"^[0-9]{5}\.10-[0-9]$"
+            )
+            | ~F.coalesce(F.col("counterparty_account"), F.lit("")).rlike(
+                r"^[0-9]{5}\.40-[0-9]$"
+            )
+        )
+        account_count = account_bad.count()
+        out.append(Finding(
+            "6e.registration_account_roles",
+            "LCI target eligibility",
+            SEV_ERROR if account_count else SEV_INFO,
+            "OPERACAO",
+            account_count == 0,
+            count=account_count,
+            column="COD_CONTA_PARTE,COD_CONTA_CONTRAPARTE",
+            sample=_sample_keys(
+                account_bad,
+                [
+                    "operation_id",
+                    "party_account",
+                    "counterparty_account",
+                ],
+                sample,
+            ),
+            hint=(
+                "Persist registration party as xxxxx.10-x and counterparty as xxxxx.40-x."
+                if account_count else ""
+            ),
+            message=(
+                "LCI registration operations preserve the observed .10/.40 account roles."
+            ),
         ))
 
     target_codes = lookup_frames.get("LCI_ROOT_CODES")

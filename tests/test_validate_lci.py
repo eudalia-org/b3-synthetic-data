@@ -74,10 +74,23 @@ def lci_tables(spark):
             [(1, "control.0")], "NUM_IF long, NUM_CONTROLE_LANCAMENTO string"
         ),
         "OPERACAO": spark.createDataFrame(
-            [(41, 1, 3949, "operation.0", 10.0, 1.0, 10.0)],
+            [
+                (
+                    41,
+                    1,
+                    3949,
+                    "operation.0",
+                    10.0,
+                    1.0,
+                    10.0,
+                    "12345.10-1",
+                    "12345.40-1",
+                )
+            ],
             "NUM_ID_OPERACAO long, NUM_IF long, NUM_ID_TIPO_OPER_OBJETO_SERV long, "
             "COD_OPERACAO string, QTD_OPERACAO double, VAL_PRECO_UNITARIO double, "
-            "VAL_FINANCEIRO double",
+            "VAL_FINANCEIRO double, COD_CONTA_PARTE string, "
+            "COD_CONTA_CONTRAPARTE string",
         ),
         "DADO_OPERACAO": spark.createDataFrame(
             [(51, 41, 265), (52, 41, 269)],
@@ -351,6 +364,66 @@ def test_lci_rejects_ineligible_target_lot_account_and_route(
     frames = target_frames(spark)
     frames[frame] = frames[frame].withColumn(column, validator.F.lit(value))
     assert lookup_findings(lci_tables(spark), frames)[check_id].severity == validator.SEV_ERROR
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("COD_CONTA_PARTE", "12345.40-1"),
+        ("COD_CONTA_CONTRAPARTE", "12345.10-1"),
+        ("COD_CONTA_PARTE", ""),
+        ("COD_CONTA_PARTE", " 12345.10-1 "),
+    ],
+)
+def test_lci_registration_operation_requires_10_40_account_roles(
+    spark, column, value
+):
+    tables = lci_tables(spark)
+    tables["OPERACAO"] = tables["OPERACAO"].withColumn(column, validator.F.lit(value))
+
+    finding = lookup_findings(tables, target_frames(spark))[
+        "6e.registration_account_roles"
+    ]
+    assert finding.severity == validator.SEV_ERROR
+    assert finding.count == 1
+
+
+def test_lci_account_role_check_fails_closed_without_route_evidence(spark):
+    frames = target_frames(spark)
+    del frames["LCI_ROUTES"]
+
+    finding = lookup_findings(lci_tables(spark), frames)[
+        "6e.registration_account_roles"
+    ]
+    assert finding.severity == validator.SEV_ERROR
+
+
+def test_lci_account_role_columns_are_required(spark):
+    tables = lci_tables(spark)
+    tables["OPERACAO"] = tables["OPERACAO"].drop("COD_CONTA_PARTE")
+
+    finding = lookup_findings(tables, target_frames(spark))["6e.lookup.availability"]
+    assert finding.severity == validator.SEV_ERROR
+    assert "COD_CONTA_PARTE" in finding.message
+
+
+def test_lci_account_roles_ignore_nonregistration_route(spark):
+    tables = lci_tables(spark)
+    historical = (
+        tables["OPERACAO"]
+        .withColumn("NUM_ID_OPERACAO", validator.F.lit(42))
+        .withColumn("NUM_ID_TIPO_OPER_OBJETO_SERV", validator.F.lit(999))
+        .withColumn("COD_CONTA_PARTE", validator.F.lit("invalid"))
+        .withColumn("COD_CONTA_CONTRAPARTE", validator.F.lit("invalid"))
+    )
+    tables["OPERACAO"] = tables["OPERACAO"].union(historical)
+    frames = target_frames(spark)
+    frames["LCI_ROUTES"] = frames["LCI_ROUTES"].union(
+        spark.createDataFrame([(999, 75, "2", "S")], frames["LCI_ROUTES"].schema)
+    )
+
+    finding = lookup_findings(tables, frames)["6e.registration_account_roles"]
+    assert finding.passed
 
 
 def test_lci_detects_exact_active_target_cod_if_collision(spark):
