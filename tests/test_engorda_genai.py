@@ -2,6 +2,7 @@ import json
 import os
 import sys
 from datetime import date
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -584,6 +585,33 @@ class TestGenAiJobContract:
 
 
 class TestGenAiSparkApplication:
+    def test_collects_decimal_root_identity_without_integer_string_parsing(self, spark):
+        root = spark.createDataFrame(
+            [(Decimal("2253875817.0000000000"), "text")],
+            "NUM_IF decimal(38,10), TXT_CARACT_COMPLEMENTARES string",
+        )
+        provenance = spark.createDataFrame(
+            [(Decimal("2253875817.0000000000"), Decimal("2253875817.0000000000"))],
+            "NUM_IF decimal(38,10), __root_num_if decimal(38,10)",
+        )
+        aggregates = E.collect_genai_instruments(
+            {E.TABELA_RAIZ: root},
+            {E.TABELA_RAIZ: provenance},
+            {
+                E.TABELA_RAIZ: E.PlanoTabela(
+                    E.TABELA_RAIZ,
+                    (E.COL_NUM_IF,),
+                    pk_regra="OFFSET_PROPRIO",
+                    pk_start=1,
+                ),
+            },
+        )
+
+        assert aggregates[0].root_num_if == "2253875817.0000000000"
+        assert aggregates[0].rows[0].source_pk == {
+            "NUM_IF": Decimal("2253875817.0000000000")
+        }
+
     def test_materialize_rejects_enablement_mismatch_before_loading_tables(self, spark):
         with pytest.raises(ValueError, match="--enable-genai diverge"):
             E.executa_clonagem(
@@ -603,6 +631,122 @@ class TestGenAiSparkApplication:
                 enable_genai=False,
             )
 
+    def test_clone_matches_decimal_source_pk_using_canonical_string(self, spark):
+        lote = spark.createDataFrame(
+            [(Decimal("1.0000000000"), "original")],
+            "ID decimal(38,10), TXT string",
+        )
+        replacements = spark.createDataFrame(
+            [
+                (
+                    "EXAMPLE",
+                    '{"ID":"1.0000000000"}',
+                    1,
+                    "TXT",
+                    "generated",
+                    "REPLACE",
+                ),
+            ],
+            [
+                "TABLE_NAME",
+                "SOURCE_PK_JSON",
+                "CLONE_INDEX",
+                "COLUMN_NAME",
+                "GENERATED_VALUE",
+                "ACTION",
+            ],
+        )
+
+        clones, _mapping = E.clona_tabela(
+            spark,
+            E.PlanoTabela(
+                name="EXAMPLE",
+                pk_cols=("ID",),
+                pk_regra="OFFSET_PROPRIO",
+                pk_start=100,
+            ),
+            lote,
+            1,
+            {},
+            genai_replacements=replacements,
+        )
+
+        assert clones.first().TXT == "generated"
+
+    def test_composite_unicode_source_pk_matches_python_and_spark_json(self, spark):
+        source = E.GenAiSourceRow(
+            table="EVENTO",
+            source_pk={
+                "Z_CODE": "ação",
+                "A_ID": Decimal("1.0000000000"),
+            },
+            values={
+                "Z_CODE": "ação",
+                "A_ID": Decimal("1.0000000000"),
+                "TXT_OBSERVACAO": "original",
+            },
+        )
+        request = E.build_genai_request(
+            E.GenAiInstrumentAggregate(root_num_if=10, rows=(source,)),
+            policy=resolved_policy(),
+            clone_factor=1,
+            run_seed=42,
+        )
+        source_pk_json = request.cells[0].source_pk_json
+        replacements = spark.createDataFrame(
+            [
+                (
+                    "EVENTO",
+                    source_pk_json,
+                    1,
+                    "TXT_OBSERVACAO",
+                    "gerado",
+                    "REPLACE",
+                ),
+            ],
+            [
+                "TABLE_NAME",
+                "SOURCE_PK_JSON",
+                "CLONE_INDEX",
+                "COLUMN_NAME",
+                "GENERATED_VALUE",
+                "ACTION",
+            ],
+        )
+        clones = spark.createDataFrame(
+            [
+                (
+                    "novo",
+                    Decimal("100.0000000000"),
+                    "original",
+                    "ação",
+                    Decimal("1.0000000000"),
+                    1,
+                ),
+            ],
+            (
+                "Z_CODE string, A_ID decimal(38,10), TXT_OBSERVACAO string, "
+                "__orig_Z_CODE string, __orig_A_ID decimal(38,10), __clone_k int"
+            ),
+        )
+
+        enriched = E._aplica_genai_replacements(
+            clones,
+            E.PlanoTabela(
+                name="EVENTO",
+                pk_cols=("Z_CODE", "A_ID"),
+                pk_regra="OFFSET_PROPRIO",
+            ),
+            {"Z_CODE": "__orig_Z_CODE", "A_ID": "__orig_A_ID"},
+            replacements,
+        )
+
+        assert source_pk_json == '{"A_ID":"1.0000000000","Z_CODE":"ação"}'
+        assert enriched.first().TXT_OBSERVACAO == "gerado"
+
+    def test_replacement_artifact_schema_is_versioned_for_string_identities(self):
+        assert E.GENAI_ARTIFACT_SCHEMA_VERSION == 2
+
     def test_clone_applies_replacement_by_source_pk_and_clone_index(self, spark):
         lote = spark.createDataFrame(
             [(1, "original", "keep-1"), (2, "second", "keep-2")],
@@ -618,7 +762,7 @@ class TestGenAiSparkApplication:
             [
                 (
                     "EXAMPLE",
-                    '{"ID":1}',
+                    '{"ID":"1"}',
                     1,
                     "TXT",
                     "generated",

@@ -955,6 +955,10 @@ def _genai_canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
+def _genai_identity_json(value: Mapping[str, str]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
 def _genai_required_mapping(value: Any, label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"GenAI policy {label} must be an object")
@@ -1388,6 +1392,16 @@ def _genai_json_value(value: Any) -> Any:
     return str(value)
 
 
+def _genai_identity_value(value: Any) -> str:
+    if value is None:
+        raise ValueError("GenAI identity values cannot be null")
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).hex()
+    return str(value)
+
+
 def build_genai_request(
     instrument: GenAiInstrumentAggregate,
     *,
@@ -1406,10 +1420,10 @@ def build_genai_request(
     for row in instrument.rows:
         table = row.table.upper()
         source_pk = {
-            str(column).upper(): _genai_json_value(value)
+            str(column).upper(): _genai_identity_value(value)
             for column, value in row.source_pk.items()
         }
-        source_pk_json = _genai_canonical_json(source_pk)
+        source_pk_json = _genai_identity_json(source_pk)
         values = {
             str(column).upper(): _genai_json_value(value)
             for column, value in row.values.items()
@@ -1419,7 +1433,7 @@ def build_genai_request(
     normalized_rows.sort(key=lambda item: (item[0], item[1]))
 
     context = {
-        "root_num_if": str(instrument.root_num_if),
+        "root_num_if": _genai_identity_value(instrument.root_num_if),
         "tables": [
             {"table": table, "source_pk": json.loads(source_pk), "values": values}
             for table, source_pk, values, _row in normalized_rows
@@ -1452,7 +1466,7 @@ def build_genai_request(
         in enumerate(pending_cells, start=1)
     )
     return GenAiInstrumentRequest(
-        root_num_if=str(instrument.root_num_if),
+        root_num_if=_genai_identity_value(instrument.root_num_if),
         context_json=context_json,
         cells=cells,
         clone_factor=clone_factor,
@@ -1784,7 +1798,7 @@ def collect_genai_instruments(
     planos: Mapping[str, "PlanoTabela"],
 ) -> Tuple[GenAiInstrumentAggregate, ...]:
     roots = {
-        str(row[COL_NUM_IF]): []
+        _genai_identity_value(row[COL_NUM_IF]): []
         for row in lotes[TABELA_RAIZ].select(COL_NUM_IF).collect()
     }
     for table in sorted(lotes):
@@ -1803,7 +1817,7 @@ def collect_genai_instruments(
         )
         for row in joined.collect():
             values = row.asDict(recursive=True)
-            root = str(values.pop(ROOT_PROVENANCE_COL))
+            root = _genai_identity_value(values.pop(ROOT_PROVENANCE_COL))
             if root not in roots:
                 raise ValueError(f"GenAI provenance references unknown root {root}")
             roots[root].append(GenAiSourceRow(
@@ -1813,7 +1827,7 @@ def collect_genai_instruments(
             ))
     return tuple(
         GenAiInstrumentAggregate(root_num_if=root, rows=tuple(roots[root]))
-        for root in sorted(roots, key=lambda value: int(value))
+        for root in sorted(roots, key=Decimal)
     )
 
 
@@ -3051,7 +3065,7 @@ def _read_json_artifact(spark: SparkSession, uri: str) -> dict[str, Any]:
     return parsed
 
 
-GENAI_ARTIFACT_SCHEMA_VERSION = 1
+GENAI_ARTIFACT_SCHEMA_VERSION = 2
 GENAI_REPLACEMENT_SCHEMA = T.StructType([
     T.StructField("ROOT_NUM_IF", T.StringType(), False),
     T.StructField("TABLE_NAME", T.StringType(), False),
@@ -7142,7 +7156,8 @@ def _aplica_genai_replacements(
         source_json_col,
         F.to_json(
             F.struct(*[
-                F.col(orig[column]).alias(column) for column in plano.pk_cols
+                F.col(orig[column]).cast("string").alias(column)
+                for column in sorted(plano.pk_cols)
             ]),
             options={"ignoreNullFields": "false"},
         ),
