@@ -1017,6 +1017,91 @@ def test_dry_run_is_offline_and_prints_resolved_argv(tmp_path, capsys):
     assert not (tmp_path / "local-runs").exists()
 
 
+def test_genai_dry_run_resolves_conditional_plan_contract(tmp_path, capsys):
+    config = write_config(tmp_path)
+    payload = json.loads(config.read_text())
+    payload["genai"] = {
+        "endpoint_id": "ocid1.generativeaiendpoint.test",
+        "compartment_id": "ocid1.compartment.genai",
+        "region": "sa-saopaulo-1",
+    }
+    payload["stage_defaults"]["engorda"]["genai_policy"] = (
+        "oci://source@namespace/genai-policy.json"
+    )
+    config.write_text(json.dumps(payload))
+    upstream = write_upstream(tmp_path)
+
+    assert P.main(
+        run_args(tmp_path, config, upstream, "--dry-run", "--enable-genai"),
+        adapter=NoCallsAdapter(),
+    ) == 0
+
+    plan = json.loads(capsys.readouterr().out)
+    plan_node = plan["nodes"]["cdb_simplificado.engorda.plan"]
+    materialize_node = plan["nodes"]["cdb_simplificado.engorda.materialize"]
+    assert plan_node["max_retries"] == 0
+    assert plan_node["arguments"][-11:] == [
+        "--enable-genai",
+        "--genai-policy",
+        "oci://source@namespace/genai-policy.json",
+        "--genai-endpoint-id",
+        "ocid1.generativeaiendpoint.test",
+        "--genai-compartment-id",
+        "ocid1.compartment.genai",
+        "--genai-region",
+        "sa-saopaulo-1",
+        "--genai-artifact-root",
+        plan["artifacts"]["products"]["cdb_simplificado"]["genai"]["uri"],
+    ]
+    assert materialize_node["arguments"][-1] == "--enable-genai"
+    assert "--genai-policy" not in materialize_node["arguments"]
+    assert plan["artifacts"]["products"]["cdb_simplificado"]["genai"]["uri"].endswith(
+        "/products/cdb_simplificado/genai"
+    )
+
+
+@pytest.mark.parametrize(
+    ("configure", "extra_args", "message"),
+    [
+        (False, (), "config.genai"),
+        (True, ("--n-instrumentos", "101"), "at most 100"),
+        (True, ("--fator-k", "6"), "fator_k <= 5"),
+        (True, ("--product", "cdb_resgate"), "exactly one"),
+    ],
+)
+def test_genai_rejects_missing_config_scope_and_hard_limits(
+    tmp_path, capsys, configure, extra_args, message
+):
+    config = write_config(tmp_path)
+    if configure:
+        payload = json.loads(config.read_text())
+        payload["genai"] = {
+            "endpoint_id": "ocid1.generativeaiendpoint.test",
+            "compartment_id": "ocid1.compartment.genai",
+            "region": "sa-saopaulo-1",
+        }
+        payload["stage_defaults"]["engorda"]["genai_policy"] = (
+            "oci://source@namespace/genai-policy.json"
+        )
+        config.write_text(json.dumps(payload))
+    upstream = write_upstream(tmp_path)
+
+    result = P.main(
+        run_args(
+            tmp_path,
+            config,
+            upstream,
+            "--dry-run",
+            "--enable-genai",
+            *extra_args,
+        ),
+        adapter=NoCallsAdapter(),
+    )
+
+    assert result == 2
+    assert message in capsys.readouterr().err
+
+
 def test_load_dry_run_needs_no_approval_and_uses_exact_artifacts(tmp_path, capsys):
     config = write_config(tmp_path)
     upstream = write_upstream(tmp_path, products=("cdb_simplificado",))

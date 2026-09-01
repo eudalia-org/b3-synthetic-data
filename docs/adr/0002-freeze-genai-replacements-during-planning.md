@@ -1,0 +1,9 @@
+# Freeze GenAI replacements during engorda planning
+
+GenAI-enabled split runs call Oracle Generative AI only during engorda planning. Planning persists a logically hashed replacement Parquet and resolved policy snapshot, then references both from the immutable selection plan; materialization validates and applies those exact replacements without endpoint access. This places nondeterministic, fallible, and billable generation before Oracle key reservation, preventing materialization retries from changing text, duplicating endpoint cost, or wasting reserved key ranges after a generation failure.
+
+We rejected materialization-time generation because it couples remote model availability to already-reserved database identities and requires a second idempotency protocol inside Spark execution. We also rejected embedding responses directly in the plan because replacement rows are tabular, can grow with source rows and `K`, and must be joined through existing source-PK mappings. A separate artifact keeps the plan interface small while preserving exact lineage.
+
+Direct legacy `phase all` remains an explicit exception: it generates and applies replacements in memory, then publishes equivalent policy, replacement, and manifest artifacts with the output. This path is less reproducible before publication but preserves the established one-process workflow. GenAI remains disabled by default, and enabled plan/materialize runs require matching operator acknowledgement.
+
+The runner does not automatically retry a GenAI-enabled planning Data Flow node. A submission or polling ambiguity could mean that the first remote run already incurred model calls before the runner observes its immutable plan, so an automatic second run could duplicate cost and produce different unpublished responses. Bounded logical retries remain inside one planning process; later recovery requires operator inspection of the immutable run artifacts.

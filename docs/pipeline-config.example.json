@@ -4,6 +4,11 @@
   "compartment_id": "ocid1.compartment.oc1..replace-me",
   "artifact_root": "oci://synthetic-data@namespace/pipeline-runs",
   "manifest_root": "oci://synthetic-data@namespace/pipeline-manifests",
+  "genai": {
+    "endpoint_id": "ocid1.generativeaiendpoint.oc1..replace-me",
+    "compartment_id": "ocid1.compartment.oc1..replace-genai-compartment",
+    "region": "sa-saopaulo-1"
+  },
   "applications": {
     "engorda_plan": "ocid1.dataflowapplication.oc1..replace-engorda-plan",
     "engorda_materialize": "ocid1.dataflowapplication.oc1..replace-engorda-materialize",
@@ -49,6 +54,7 @@
       "fator_k": 1,
       "seed": 42,
       "no_oracle": false,
+      "genai_policy": "oci://synthetic-data@namespace/contracts/genai-policy.json",
       "specs": "oci://synthetic-data@namespace/contracts/specs.json",
       "query_num_if_sql": "oci://synthetic-data@namespace/contracts/queries_produtos.sql"
     },

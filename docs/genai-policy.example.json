@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "defaults": {
+    "model_family": "meta_llama",
+    "language": "pt-BR",
+    "temperature": 0.8,
+    "top_p": 0.9,
+    "max_tokens": 4096
+  },
+  "products": {
+    "cdb_simplificado": {
+      "system_instruction": "Gere somente os valores solicitados em portugues brasileiro, como texto operacional realista e coerente com o contexto fornecido.",
+      "excluded_context_columns": {
+        "LANCAMENTO": [
+          "TXT_XML_LANCAMENTO"
+        ]
+      },
+      "targets": [
+        {
+          "table": "INSTRUMENTO_FINANCEIRO",
+          "column": "TXT_CARACT_COMPLEMENTARES",
+          "max_chars": 772,
+          "instruction": "Descreva caracteristicas complementares plausiveis do instrumento."
+        },
+        {
+          "table": "EVENTO",
+          "column": "TXT_OBSERVACAO",
+          "max_chars": 60,
+          "instruction": "Escreva uma observacao curta e plausivel para o evento."
+        },
+        {
+          "table": "OPERACAO",
+          "column": "TXT_HISTORICO",
+          "max_chars": 138,
+          "instruction": "Escreva um historico operacional curto e plausivel."
+        }
+      ]
+    }
+  }
+}

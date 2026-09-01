@@ -164,11 +164,13 @@ import dataclasses
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -804,6 +806,32 @@ SNAPSHOT_ROWS_PER_PARTITION = 100_000
 SNAPSHOT_MAX_PARTITIONS = 64
 ENGORDA_RESERVATION_ARTIFACT = "engorda_reservation"
 ENGORDA_PHASES = ("all", "plan", "materialize")
+GENAI_POLICY_VERSION = 1
+GENAI_MAX_SOURCE_INSTRUMENTS = 100
+GENAI_MAX_FACTOR_K = 5
+GENAI_MAX_CONCURRENCY = 4
+GENAI_LOGICAL_ATTEMPTS = 3
+GENAI_TRANSPORT_ATTEMPTS = 3
+GENAI_READ_TIMEOUT_SECONDS = 120
+GENAI_MAX_CONTEXT_CHARS = 50_000
+GENAI_REVIEWED_TARGETS = (
+    ("INSTRUMENTO_FINANCEIRO", "TXT_CARACT_COMPLEMENTARES", 772),
+    ("EVENTO", "TXT_OBSERVACAO", 60),
+    ("OPERACAO", "TXT_HISTORICO", 138),
+)
+GENAI_REVIEWED_CONTEXT_EXCLUSIONS = {
+    "LANCAMENTO": ("TXT_XML_LANCAMENTO",),
+}
+
+
+def _default_genai_artifact_root(plan_uri: str) -> str:
+    normalized = plan_uri.rstrip("/")
+    parent, separator, _name = normalized.rpartition("/")
+    if not separator:
+        return "genai"
+    if parent.endswith("/engorda"):
+        parent = parent[:-len("/engorda")]
+    return f"{parent}/genai"
 
 
 # ---------------------------------------------------------------------------
@@ -864,6 +892,932 @@ class ProductProfile:
 
 
 @dataclass(frozen=True)
+class GenAiTargetPolicy:
+    table: str
+    column: str
+    max_chars: int
+    instruction: str
+
+
+@dataclass(frozen=True)
+class GenAiPolicy:
+    version: int
+    product: str
+    model_family: str
+    language: str
+    temperature: float
+    top_p: float
+    max_tokens: int
+    system_instruction: str
+    excluded_context_columns: Mapping[str, Tuple[str, ...]]
+    targets: Tuple[GenAiTargetPolicy, ...]
+    source_sha256: str
+    resolved_sha256: str
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {
+            "version": self.version,
+            "product": self.product,
+            "defaults": {
+                "model_family": self.model_family,
+                "language": self.language,
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+                "max_tokens": self.max_tokens,
+            },
+            "system_instruction": self.system_instruction,
+            "excluded_context_columns": {
+                table: list(columns)
+                for table, columns in sorted(self.excluded_context_columns.items())
+            },
+            "targets": [dataclasses.asdict(target) for target in self.targets],
+        }
+
+
+@dataclass(frozen=True)
+class GenAiExecutionConfig:
+    policy: GenAiPolicy
+    policy_uri: str
+    adapter: Any
+    artifact_root: str
+    endpoint_id: str
+    compartment_id: str
+    region: str
+
+
+@dataclass(frozen=True)
+class GenAiFrozenArtifacts:
+    descriptor: Mapping[str, Any]
+    replacements: DataFrame
+
+
+def _genai_canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _genai_required_mapping(value: Any, label: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"GenAI policy {label} must be an object")
+    return value
+
+
+def _genai_required_string(mapping: Mapping[str, Any], key: str, label: str) -> str:
+    value = mapping.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"GenAI policy {label}.{key} must be a non-empty string")
+    return value.strip()
+
+
+def _genai_required_number(mapping: Mapping[str, Any], key: str, label: str) -> float:
+    value = mapping.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"GenAI policy {label}.{key} must be numeric")
+    return float(value)
+
+
+def resolve_genai_policy(document: Any, *, product: str) -> GenAiPolicy:
+    if isinstance(document, (str, bytes, bytearray)):
+        try:
+            document = json.loads(document)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"GenAI policy is not valid JSON: {exc}") from exc
+    root = _genai_required_mapping(document, "root")
+    version = root.get("version")
+    if version != GENAI_POLICY_VERSION:
+        raise ValueError(
+            f"GenAI policy version must be {GENAI_POLICY_VERSION}; received {version!r}"
+        )
+    defaults = _genai_required_mapping(root.get("defaults"), "defaults")
+    products = _genai_required_mapping(root.get("products"), "products")
+    product_config = _genai_required_mapping(
+        products.get(product), f"products.{product}"
+    )
+
+    targets_raw = product_config.get("targets")
+    if not isinstance(targets_raw, list):
+        raise ValueError(f"GenAI policy products.{product}.targets must be an array")
+    targets: List[GenAiTargetPolicy] = []
+    for index, raw in enumerate(targets_raw):
+        item = _genai_required_mapping(raw, f"products.{product}.targets[{index}]")
+        table = _genai_required_string(item, "table", "targets").upper()
+        column = _genai_required_string(item, "column", "targets").upper()
+        max_chars = item.get("max_chars")
+        if isinstance(max_chars, bool) or not isinstance(max_chars, int) or max_chars < 1:
+            raise ValueError("GenAI policy targets.max_chars must be a positive integer")
+        targets.append(GenAiTargetPolicy(
+            table=table,
+            column=column,
+            max_chars=max_chars,
+            instruction=_genai_required_string(item, "instruction", "targets"),
+        ))
+
+    observed_targets = tuple(
+        (target.table, target.column, target.max_chars) for target in targets
+    )
+    if set(observed_targets) != set(GENAI_REVIEWED_TARGETS):
+        raise ValueError(
+            "GenAI policy targets do not match the reviewed version-1 pilot targets"
+        )
+    target_order = {
+        identity: index for index, identity in enumerate(GENAI_REVIEWED_TARGETS)
+    }
+    targets.sort(
+        key=lambda target: target_order[(target.table, target.column, target.max_chars)]
+    )
+
+    exclusions_raw = _genai_required_mapping(
+        product_config.get("excluded_context_columns"),
+        f"products.{product}.excluded_context_columns",
+    )
+    exclusions: Dict[str, Tuple[str, ...]] = {}
+    for table, columns in exclusions_raw.items():
+        if not isinstance(table, str) or not isinstance(columns, list) or not all(
+            isinstance(column, str) and column.strip() for column in columns
+        ):
+            raise ValueError("GenAI policy excluded_context_columns is invalid")
+        exclusions[table.upper()] = tuple(column.upper() for column in columns)
+    if exclusions != GENAI_REVIEWED_CONTEXT_EXCLUSIONS:
+        raise ValueError(
+            "GenAI policy excluded_context_columns do not match the reviewed version-1 policy"
+        )
+
+    model_family = _genai_required_string(defaults, "model_family", "defaults")
+    if model_family != "meta_llama":
+        raise ValueError("GenAI policy defaults.model_family must be meta_llama")
+    language = _genai_required_string(defaults, "language", "defaults")
+    if language != "pt-BR":
+        raise ValueError("GenAI policy defaults.language must be pt-BR")
+    temperature = _genai_required_number(defaults, "temperature", "defaults")
+    top_p = _genai_required_number(defaults, "top_p", "defaults")
+    if not 0 <= temperature <= 2:
+        raise ValueError("GenAI policy defaults.temperature must be between 0 and 2")
+    if not 0 < top_p <= 1:
+        raise ValueError("GenAI policy defaults.top_p must be greater than 0 and at most 1")
+    max_tokens = defaults.get("max_tokens")
+    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1:
+        raise ValueError("GenAI policy defaults.max_tokens must be a positive integer")
+
+    source_hash = hashlib.sha256(_genai_canonical_json(root).encode("ascii")).hexdigest()
+    provisional = GenAiPolicy(
+        version=version,
+        product=product,
+        model_family=model_family,
+        language=language,
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+        system_instruction=_genai_required_string(
+            product_config, "system_instruction", f"products.{product}"
+        ),
+        excluded_context_columns=exclusions,
+        targets=tuple(targets),
+        source_sha256=source_hash,
+        resolved_sha256="",
+    )
+    resolved_hash = hashlib.sha256(
+        _genai_canonical_json(provisional.snapshot()).encode("ascii")
+    ).hexdigest()
+    return dataclasses.replace(provisional, resolved_sha256=resolved_hash)
+
+
+def validate_genai_policy_runtime(
+    policy: GenAiPolicy,
+    *,
+    specs: Mapping[str, Mapping[str, Any]],
+    column_types: Mapping[str, Mapping[str, str]],
+    static_tables: Sequence[str],
+    nullified_columns: Mapping[str, Sequence[str]],
+) -> None:
+    normalized_specs = {str(table).upper(): cfg for table, cfg in specs.items()}
+    normalized_types = {
+        str(table).upper(): {str(column).upper(): str(kind).lower()
+                             for column, kind in columns.items()}
+        for table, columns in column_types.items()
+    }
+    normalized_static = {str(table).upper() for table in static_tables}
+    normalized_nullified = {
+        str(table).upper(): {str(column).upper() for column in columns}
+        for table, columns in nullified_columns.items()
+    }
+
+    protected: Dict[str, Set[str]] = {}
+    for table, cfg in normalized_specs.items():
+        protected.setdefault(table, set()).update(
+            str(column).upper() for column in (cfg.get("pk_cols") or [])
+        )
+        protected[table].update(
+            str(column).upper() for column in (cfg.get("not_null_cols") or [])
+        )
+        for fk in _fk_list(dict(cfg)):
+            protected[table].update(
+                str(column).upper() for column in (fk.get("columns") or [])
+            )
+            parent = str(fk.get("parent_table") or "").upper()
+            protected.setdefault(parent, set()).update(
+                str(column).upper() for column in (fk.get("parent_columns") or [])
+            )
+
+    for target in policy.targets:
+        label = f"{target.table}.{target.column}"
+        if target.table in normalized_static:
+            raise ValueError(f"GenAI target {label} belongs to a runtime-static table")
+        if target.column in normalized_nullified.get(target.table, set()):
+            raise ValueError(f"GenAI target {label} conflicts with nullification")
+        if target.column in protected.get(target.table, set()):
+            raise ValueError(f"GenAI target {label} is protected by specs.json")
+        kind = normalized_types.get(target.table, {}).get(target.column)
+        if kind is None:
+            raise ValueError(f"GenAI target {label} is absent from the selected schema")
+        if kind != "string" and not kind.startswith(("char", "varchar", "nvarchar")):
+            raise ValueError(f"GenAI target {label} must be textual, found {kind}")
+
+
+@dataclass(frozen=True)
+class GenAiSourceRow:
+    table: str
+    source_pk: Mapping[str, Any]
+    values: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class GenAiInstrumentAggregate:
+    root_num_if: Any
+    rows: Tuple[GenAiSourceRow, ...]
+
+
+@dataclass(frozen=True)
+class GenAiRequestCell:
+    target_id: str
+    table: str
+    source_pk_json: str
+    column: str
+    source_value: Optional[str]
+    max_chars: int
+    instruction: str
+
+
+@dataclass(frozen=True)
+class GenAiInstrumentRequest:
+    root_num_if: str
+    context_json: str
+    cells: Tuple[GenAiRequestCell, ...]
+    clone_factor: int
+    run_seed: int
+    policy: GenAiPolicy
+
+
+@dataclass(frozen=True)
+class GenAiGenerationAttempt:
+    root_num_if: str
+    attempt_number: int
+    expected: Tuple[Tuple[int, str], ...]
+    payload_json: str
+    system_instruction: str
+    seed: int
+    retry_token: str
+    temperature: float
+    top_p: float
+    max_tokens: int
+    read_timeout_seconds: int = GENAI_READ_TIMEOUT_SECONDS
+
+
+@dataclass(frozen=True)
+class GenAiReplacementRow:
+    root_num_if: str
+    table_name: str
+    source_pk_json: str
+    clone_index: int
+    column_name: str
+    target_id: str
+    generated_value: Optional[str]
+    action: str
+    status: str
+    attempt_count: int
+    differs_from_source: bool
+
+    def record(self) -> Dict[str, Any]:
+        return dataclasses.asdict(self)
+
+
+@dataclass(frozen=True)
+class GenAiGenerationMetrics:
+    status: str
+    source_instruments: int
+    clone_factor: int
+    api_successes: int
+    request_errors: int
+    endpoint_call_count: int
+    logical_attempts: int
+    duration_seconds: float
+    generated_cells: int
+    fallback_cells: int
+    status_counts: Mapping[str, int]
+    column_status_counts: Mapping[str, Mapping[str, int]]
+    diversity: Mapping[str, Mapping[str, float]]
+
+
+@dataclass(frozen=True)
+class GenAiGenerationResult:
+    rows: Tuple[GenAiReplacementRow, ...]
+    metrics: GenAiGenerationMetrics
+    content_sha256: str
+
+
+class OracleGenAiChatAdapter:
+    _MODEL_CLASSES = (
+        "ChatDetails",
+        "DedicatedServingMode",
+        "GenericChatRequest",
+        "SystemMessage",
+        "UserMessage",
+        "TextContent",
+        "JsonSchemaResponseFormat",
+        "ResponseJsonSchema",
+    )
+
+    def __init__(
+        self,
+        *,
+        endpoint_id: str,
+        compartment_id: str,
+        region: str,
+        oci_module: Any = None,
+        client: Any = None,
+    ) -> None:
+        if oci_module is None:
+            oci_module = _load_oci_genai_module()
+        inference, models = preflight_oci_genai_runtime(oci_module)
+        self.endpoint_id = endpoint_id
+        self.compartment_id = compartment_id
+        self.region = region
+        self.models = models
+        if client is None:
+            try:
+                signer = oci_module.auth.signers.get_resource_principals_signer()
+            except AttributeError as exc:
+                raise ValueError("OCI SDK lacks resource-principal signer support") from exc
+            client = inference.GenerativeAiInferenceClient(
+                {"region": region},
+                signer=signer,
+                timeout=(10, GENAI_READ_TIMEOUT_SECONDS),
+            )
+        self.client = client
+
+    def complete(self, attempt: GenAiGenerationAttempt) -> str:
+        text_content = self.models.TextContent(type="TEXT", text=attempt.payload_json)
+        system_content = self.models.TextContent(
+            type="TEXT", text=attempt.system_instruction
+        )
+        payload = json.loads(attempt.payload_json)
+        target_limits = {
+            target["target_id"]: int(target["max_chars"])
+            for target in payload["targets"]
+        }
+        response_schema = {
+            "type": "object",
+            "properties": {
+                "variants": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "k": {
+                                "type": "integer",
+                                "enum": sorted({clone for clone, _target in attempt.expected}),
+                            },
+                            "values": {
+                                "type": "object",
+                                "properties": {
+                                    target_id: {
+                                        "type": "string",
+                                        "maxLength": max_chars,
+                                    }
+                                    for target_id, max_chars in sorted(target_limits.items())
+                                },
+                                "additionalProperties": False,
+                            },
+                        },
+                        "required": ["k", "values"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["variants"],
+            "additionalProperties": False,
+        }
+        response_format = self.models.JsonSchemaResponseFormat(
+            type="JSON_SCHEMA",
+            json_schema=self.models.ResponseJsonSchema(
+                name="engorda_text_replacements",
+                description="Generated text replacements grouped by clone index.",
+                schema=response_schema,
+                is_strict=True,
+            ),
+        )
+        chat_request = self.models.GenericChatRequest(
+            api_format="GENERIC",
+            messages=[
+                self.models.SystemMessage(role="SYSTEM", content=[system_content]),
+                self.models.UserMessage(role="USER", content=[text_content]),
+            ],
+            response_format=response_format,
+            is_stream=False,
+            max_tokens=attempt.max_tokens,
+            temperature=attempt.temperature,
+            top_p=attempt.top_p,
+            seed=attempt.seed,
+        )
+        details = self.models.ChatDetails(
+            compartment_id=self.compartment_id,
+            serving_mode=self.models.DedicatedServingMode(
+                serving_type="DEDICATED", endpoint_id=self.endpoint_id
+            ),
+            chat_request=chat_request,
+        )
+        response = self.client.chat(
+            details,
+            opc_retry_token=attempt.retry_token,
+            opc_request_id=f"engorda-genai-{attempt.retry_token[:24]}",
+        )
+        try:
+            return response.data.chat_response.choices[0].message.content[0].text
+        except (AttributeError, IndexError, TypeError) as exc:
+            raise ValueError("Oracle GenAI response has no text content") from exc
+
+
+def _load_oci_genai_module() -> Any:
+    try:
+        import oci  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise ValueError(
+            "Oracle GenAI requires a compatible OCI SDK in the Data Flow runtime"
+        ) from exc
+    return oci
+
+
+def preflight_oci_genai_runtime(oci_module: Any = None) -> Tuple[Any, Any]:
+    oci_module = oci_module or _load_oci_genai_module()
+    try:
+        inference = oci_module.generative_ai_inference
+        models = inference.models
+    except AttributeError as exc:
+        raise ValueError("OCI SDK lacks generative_ai_inference support") from exc
+    for name in OracleGenAiChatAdapter._MODEL_CLASSES:
+        if not hasattr(models, name):
+            raise ValueError(f"OCI SDK lacks required GenAI class {name}")
+    return inference, models
+
+
+def _genai_json_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("GenAI context cannot contain non-finite floats")
+        return value
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).hex()
+    if isinstance(value, Mapping):
+        return {str(key): _genai_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_genai_json_value(item) for item in value]
+    return str(value)
+
+
+def build_genai_request(
+    instrument: GenAiInstrumentAggregate,
+    *,
+    policy: GenAiPolicy,
+    clone_factor: int,
+    run_seed: int,
+) -> GenAiInstrumentRequest:
+    if clone_factor < 1 or clone_factor > GENAI_MAX_FACTOR_K:
+        raise ValueError(f"GenAI clone_factor must be between 1 and {GENAI_MAX_FACTOR_K}")
+    excluded = {
+        (table, column)
+        for table, columns in policy.excluded_context_columns.items()
+        for column in columns
+    }
+    normalized_rows: List[Tuple[str, str, Dict[str, Any], GenAiSourceRow]] = []
+    for row in instrument.rows:
+        table = row.table.upper()
+        source_pk = {
+            str(column).upper(): _genai_json_value(value)
+            for column, value in row.source_pk.items()
+        }
+        source_pk_json = _genai_canonical_json(source_pk)
+        values = {
+            str(column).upper(): _genai_json_value(value)
+            for column, value in row.values.items()
+            if (table, str(column).upper()) not in excluded
+        }
+        normalized_rows.append((table, source_pk_json, values, row))
+    normalized_rows.sort(key=lambda item: (item[0], item[1]))
+
+    context = {
+        "root_num_if": str(instrument.root_num_if),
+        "tables": [
+            {"table": table, "source_pk": json.loads(source_pk), "values": values}
+            for table, source_pk, values, _row in normalized_rows
+        ],
+    }
+    context_json = _genai_canonical_json(context)
+
+    pending_cells: List[Tuple[str, str, str, Optional[str], GenAiTargetPolicy]] = []
+    for table, source_pk_json, values, _row in normalized_rows:
+        for target in policy.targets:
+            if target.table != table or target.column not in values:
+                continue
+            source = values[target.column]
+            source_value = None if source is None else str(source)
+            pending_cells.append(
+                (table, source_pk_json, target.column, source_value, target)
+            )
+    pending_cells.sort(key=lambda item: (item[0], item[1], item[2]))
+    cells = tuple(
+        GenAiRequestCell(
+            target_id=f"t{index:04d}",
+            table=table,
+            source_pk_json=source_pk_json,
+            column=column,
+            source_value=source_value,
+            max_chars=target.max_chars,
+            instruction=target.instruction,
+        )
+        for index, (table, source_pk_json, column, source_value, target)
+        in enumerate(pending_cells, start=1)
+    )
+    return GenAiInstrumentRequest(
+        root_num_if=str(instrument.root_num_if),
+        context_json=context_json,
+        cells=cells,
+        clone_factor=clone_factor,
+        run_seed=run_seed,
+        policy=policy,
+    )
+
+
+def _genai_attempt_seed(request: GenAiInstrumentRequest, attempt_number: int) -> int:
+    digest = hashlib.sha256(
+        f"{request.run_seed}:{request.root_num_if}:{attempt_number}".encode("ascii")
+    ).digest()
+    return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
+
+
+def _build_genai_attempt(
+    request: GenAiInstrumentRequest,
+    attempt_number: int,
+    expected: Set[Tuple[int, str]],
+) -> GenAiGenerationAttempt:
+    cell_by_id = {cell.target_id: cell for cell in request.cells}
+    expected_sorted = tuple(sorted(expected))
+    target_ids = sorted({target_id for _clone, target_id in expected_sorted})
+    payload = {
+        "context": json.loads(request.context_json),
+        "targets": [
+            {
+                "target_id": target_id,
+                "table": cell_by_id[target_id].table,
+                "column": cell_by_id[target_id].column,
+                "instruction": cell_by_id[target_id].instruction,
+                "max_chars": cell_by_id[target_id].max_chars,
+                "source_value": cell_by_id[target_id].source_value,
+            }
+            for target_id in target_ids
+        ],
+        "expected": [
+            {"k": clone, "target_id": target_id}
+            for clone, target_id in expected_sorted
+        ],
+        "response_contract": {
+            "variants": [{"k": "integer", "values": {"target_id": "string"}}]
+        },
+    }
+    retry_token = hashlib.sha256(
+        f"{request.root_num_if}:{request.run_seed}:{attempt_number}".encode("ascii")
+    ).hexdigest()
+    return GenAiGenerationAttempt(
+        root_num_if=request.root_num_if,
+        attempt_number=attempt_number,
+        expected=expected_sorted,
+        payload_json=_genai_canonical_json(payload),
+        system_instruction=request.policy.system_instruction,
+        seed=_genai_attempt_seed(request, attempt_number),
+        retry_token=retry_token,
+        temperature=request.policy.temperature,
+        top_p=request.policy.top_p,
+        max_tokens=request.policy.max_tokens,
+    )
+
+
+def _parse_genai_response(
+    attempt: GenAiGenerationAttempt,
+    response_text: str,
+    cells: Mapping[str, GenAiRequestCell],
+) -> Dict[Tuple[int, str], str]:
+    def reject_duplicate_keys(pairs: Sequence[Tuple[str, Any]]) -> Dict[str, Any]:
+        parsed: Dict[str, Any] = {}
+        for key, value in pairs:
+            if key in parsed:
+                raise ValueError(f"duplicate JSON key {key!r}")
+            parsed[key] = value
+        return parsed
+
+    try:
+        document = json.loads(response_text, object_pairs_hook=reject_duplicate_keys)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(document, Mapping) or not isinstance(document.get("variants"), list):
+        return {}
+    expected = set(attempt.expected)
+    resolved: Dict[Tuple[int, str], str] = {}
+    seen_clones: Set[int] = set()
+    for variant in document["variants"]:
+        if not isinstance(variant, Mapping):
+            return {}
+        clone = variant.get("k")
+        values = variant.get("values")
+        if isinstance(clone, bool) or not isinstance(clone, int) or clone in seen_clones:
+            return {}
+        if not isinstance(values, Mapping):
+            return {}
+        seen_clones.add(clone)
+        for target_id, value in values.items():
+            identity = (clone, target_id)
+            if identity not in expected:
+                return {}
+            if isinstance(value, str) and len(value) <= cells[target_id].max_chars:
+                resolved[identity] = value
+    return resolved
+
+
+def _fallback_genai_rows(
+    request: GenAiInstrumentRequest,
+    status: str,
+    attempt_count: int,
+) -> List[GenAiReplacementRow]:
+    return [
+        GenAiReplacementRow(
+            root_num_if=request.root_num_if,
+            table_name=cell.table,
+            source_pk_json=cell.source_pk_json,
+            clone_index=clone,
+            column_name=cell.column,
+            target_id=cell.target_id,
+            generated_value=None,
+            action="KEEP_SOURCE",
+            status=status,
+            attempt_count=attempt_count,
+            differs_from_source=False,
+        )
+        for clone in range(1, request.clone_factor + 1)
+        for cell in request.cells
+    ]
+
+
+def _generate_one_instrument(request: GenAiInstrumentRequest, adapter: Any):
+    if len(request.context_json) > GENAI_MAX_CONTEXT_CHARS:
+        return _fallback_genai_rows(request, "CONTEXT_TOO_LARGE", 0), 0, 0
+    worst_case_response = {
+        "variants": [
+            {
+                "k": clone,
+                "values": {
+                    cell.target_id: "X" * cell.max_chars for cell in request.cells
+                },
+            }
+            for clone in range(1, request.clone_factor + 1)
+        ]
+    }
+    output_chars = len(_genai_canonical_json(worst_case_response))
+    if output_chars > 2 * request.policy.max_tokens:
+        return _fallback_genai_rows(request, "OUTPUT_BUDGET_EXCEEDED", 0), 0, 0
+
+    cells = {cell.target_id: cell for cell in request.cells}
+    unresolved = {
+        (clone, cell.target_id)
+        for clone in range(1, request.clone_factor + 1)
+        for cell in request.cells
+    }
+    generated: Dict[Tuple[int, str], Tuple[str, int]] = {}
+    api_successes = 0
+    request_errors = 0
+    attempts_used = 0
+    for attempt_number in range(1, GENAI_LOGICAL_ATTEMPTS + 1):
+        if not unresolved:
+            break
+        attempts_used = attempt_number
+        attempt = _build_genai_attempt(request, attempt_number, unresolved)
+        response = None
+        for transport_attempt in range(1, GENAI_TRANSPORT_ATTEMPTS + 1):
+            try:
+                response = adapter.complete(attempt)
+                break
+            except Exception as exc:
+                request_errors += 1
+                logger.warning(
+                    "GenAI request root=%s logical_attempt=%d transport_attempt=%d "
+                    "failed: %s",
+                    request.root_num_if,
+                    attempt_number,
+                    transport_attempt,
+                    type(exc).__name__,
+                )
+        if response is None:
+            continue
+        api_successes += 1
+        accepted = _parse_genai_response(attempt, response, cells)
+        for identity, value in accepted.items():
+            generated[identity] = (value, attempt_number)
+        unresolved.difference_update(accepted)
+
+    rows: List[GenAiReplacementRow] = []
+    for clone in range(1, request.clone_factor + 1):
+        for cell in request.cells:
+            identity = (clone, cell.target_id)
+            accepted = generated.get(identity)
+            if accepted is None:
+                rows.append(GenAiReplacementRow(
+                    root_num_if=request.root_num_if,
+                    table_name=cell.table,
+                    source_pk_json=cell.source_pk_json,
+                    clone_index=clone,
+                    column_name=cell.column,
+                    target_id=cell.target_id,
+                    generated_value=None,
+                    action="KEEP_SOURCE",
+                    status=("FALLBACK_REQUEST" if api_successes == 0
+                            else "FALLBACK_INVALID"),
+                    attempt_count=attempts_used,
+                    differs_from_source=False,
+                ))
+                continue
+            value, accepted_attempt = accepted
+            rows.append(GenAiReplacementRow(
+                root_num_if=request.root_num_if,
+                table_name=cell.table,
+                source_pk_json=cell.source_pk_json,
+                clone_index=clone,
+                column_name=cell.column,
+                target_id=cell.target_id,
+                generated_value=value,
+                action="REPLACE",
+                status="GENERATED",
+                attempt_count=accepted_attempt,
+                differs_from_source=value != cell.source_value,
+            ))
+    return rows, api_successes, request_errors
+
+
+def generate_genai_replacements(
+    requests: Sequence[GenAiInstrumentRequest], *, adapter: Any
+) -> GenAiGenerationResult:
+    started = time.perf_counter()
+    if len(requests) > GENAI_MAX_SOURCE_INSTRUMENTS:
+        raise ValueError(
+            f"GenAI supports at most {GENAI_MAX_SOURCE_INSTRUMENTS} source instruments"
+        )
+    rows: List[GenAiReplacementRow] = []
+    api_successes = 0
+    request_errors = 0
+    with ThreadPoolExecutor(max_workers=GENAI_MAX_CONCURRENCY) as executor:
+        futures = {
+            executor.submit(_generate_one_instrument, request, adapter): request.root_num_if
+            for request in requests
+        }
+        for future in as_completed(futures):
+            generated_rows, successes, errors = future.result()
+            rows.extend(generated_rows)
+            api_successes += successes
+            request_errors += errors
+    if requests and api_successes == 0:
+        raise ValueError("no Oracle GenAI request succeeded")
+    rows.sort(key=lambda row: (
+        row.root_num_if,
+        row.table_name,
+        row.source_pk_json,
+        row.clone_index,
+        row.column_name,
+    ))
+    status_counts: Dict[str, int] = {}
+    column_status_counts: Dict[str, Dict[str, int]] = {}
+    for row in rows:
+        status_counts[row.status] = status_counts.get(row.status, 0) + 1
+        label = f"{row.table_name}.{row.column_name}"
+        column_counts = column_status_counts.setdefault(label, {})
+        column_counts[row.status] = column_counts.get(row.status, 0) + 1
+    fallback_cells = sum(row.action == "KEEP_SOURCE" for row in rows)
+    source_values = {
+        (request.root_num_if, cell.target_id): cell.source_value
+        for request in requests
+        for cell in request.cells
+    }
+    diversity_counts: Dict[str, Dict[str, Any]] = {}
+    sibling_groups: Dict[Tuple[str, str, str, str], List[Optional[str]]] = {}
+    for row in rows:
+        label = f"{row.table_name}.{row.column_name}"
+        counts = diversity_counts.setdefault(
+            label, {"cells": 0, "changed": 0, "sibling_cells": 0, "distinct": 0}
+        )
+        counts["cells"] += 1
+        counts["changed"] += int(row.differs_from_source)
+        effective_value = (
+            row.generated_value
+            if row.action == "REPLACE"
+            else source_values[(row.root_num_if, row.target_id)]
+        )
+        sibling_groups.setdefault(
+            (row.root_num_if, row.table_name, row.source_pk_json, row.column_name), []
+        ).append(effective_value)
+    for (_root, table, _pk, column), values in sibling_groups.items():
+        counts = diversity_counts[f"{table}.{column}"]
+        counts["sibling_cells"] += len(values)
+        counts["distinct"] += len(set(values))
+    diversity = {
+        label: {
+            "source_change_rate": (
+                counts["changed"] / counts["cells"] if counts["cells"] else 0.0
+            ),
+            "sibling_uniqueness_rate": (
+                counts["distinct"] / counts["sibling_cells"]
+                if counts["sibling_cells"] else 0.0
+            ),
+        }
+        for label, counts in sorted(diversity_counts.items())
+    }
+    metrics = GenAiGenerationMetrics(
+        status="DEGRADED" if fallback_cells else "SUCCESS",
+        source_instruments=len(requests),
+        clone_factor=(requests[0].clone_factor if requests else 0),
+        api_successes=api_successes,
+        request_errors=request_errors,
+        endpoint_call_count=api_successes + request_errors,
+        logical_attempts=sum(
+            max((row.attempt_count for row in rows if row.root_num_if == request.root_num_if),
+                default=0)
+            for request in requests
+        ),
+        duration_seconds=time.perf_counter() - started,
+        generated_cells=len(rows) - fallback_cells,
+        fallback_cells=fallback_cells,
+        status_counts=status_counts,
+        column_status_counts={
+            label: dict(sorted(counts.items()))
+            for label, counts in sorted(column_status_counts.items())
+        },
+        diversity=diversity,
+    )
+    content = [row.record() for row in rows]
+    content_hash = hashlib.sha256(
+        _genai_canonical_json(content).encode("ascii")
+    ).hexdigest()
+    return GenAiGenerationResult(tuple(rows), metrics, content_hash)
+
+
+def collect_genai_instruments(
+    lotes: Mapping[str, DataFrame],
+    provenances: Mapping[str, DataFrame],
+    planos: Mapping[str, "PlanoTabela"],
+) -> Tuple[GenAiInstrumentAggregate, ...]:
+    roots = {
+        str(row[COL_NUM_IF]): []
+        for row in lotes[TABELA_RAIZ].select(COL_NUM_IF).collect()
+    }
+    for table in sorted(lotes):
+        provenance = provenances.get(table)
+        if provenance is None:
+            raise ValueError(f"GenAI context has no provenance for {table}")
+        pk_columns = list(planos[table].pk_cols)
+        frame = lotes[table]
+        joined = frame.join(
+            provenance.select(*pk_columns, ROOT_PROVENANCE_COL),
+            pk_columns,
+            "inner",
+        ).select(
+            F.col(ROOT_PROVENANCE_COL),
+            *[frame[column].alias(column) for column in frame.columns],
+        )
+        for row in joined.collect():
+            values = row.asDict(recursive=True)
+            root = str(values.pop(ROOT_PROVENANCE_COL))
+            if root not in roots:
+                raise ValueError(f"GenAI provenance references unknown root {root}")
+            roots[root].append(GenAiSourceRow(
+                table=table,
+                source_pk={column: values[column] for column in pk_columns},
+                values=values,
+            ))
+    return tuple(
+        GenAiInstrumentAggregate(root_num_if=root, rows=tuple(roots[root]))
+        for root in sorted(roots, key=lambda value: int(value))
+    )
+
+
+@dataclass(frozen=True)
 class EngordaJob:
     produto: str
     num_ifs: Optional[Tuple[int, ...]] = None
@@ -906,6 +1860,13 @@ class EngordaJob:
     reservation_uri: Optional[str] = None
     raw_uri: Optional[str] = None
     output_uri: Optional[str] = None
+    enable_genai: bool = False
+    genai_policy: Optional[str] = None
+    genai_endpoint_id: Optional[str] = None
+    genai_compartment_id: Optional[str] = None
+    genai_region: Optional[str] = None
+    genai_artifact_root: Optional[str] = None
+    genai_adapter: Any = field(default=None, repr=False, compare=False)
 
 
 # Tabelas que devem ser engordadas por produto. As tabelas correspondentes são
@@ -2090,6 +3051,200 @@ def _read_json_artifact(spark: SparkSession, uri: str) -> dict[str, Any]:
     return parsed
 
 
+GENAI_ARTIFACT_SCHEMA_VERSION = 1
+GENAI_REPLACEMENT_SCHEMA = T.StructType([
+    T.StructField("ROOT_NUM_IF", T.StringType(), False),
+    T.StructField("TABLE_NAME", T.StringType(), False),
+    T.StructField("SOURCE_PK_JSON", T.StringType(), False),
+    T.StructField("CLONE_INDEX", T.IntegerType(), False),
+    T.StructField("COLUMN_NAME", T.StringType(), False),
+    T.StructField("TARGET_ID", T.StringType(), False),
+    T.StructField("GENERATED_VALUE", T.StringType(), True),
+    T.StructField("ACTION", T.StringType(), False),
+    T.StructField("STATUS", T.StringType(), False),
+    T.StructField("ATTEMPT_COUNT", T.IntegerType(), False),
+    T.StructField("DIFFERS_FROM_SOURCE", T.BooleanType(), False),
+])
+
+
+def _genai_replacement_record(row: GenAiReplacementRow) -> Tuple[Any, ...]:
+    return (
+        row.root_num_if,
+        row.table_name,
+        row.source_pk_json,
+        row.clone_index,
+        row.column_name,
+        row.target_id,
+        row.generated_value,
+        row.action,
+        row.status,
+        row.attempt_count,
+        row.differs_from_source,
+    )
+
+
+def _genai_replacement_hash(frame: DataFrame) -> str:
+    rows = [
+        GenAiReplacementRow(
+            root_num_if=str(row["ROOT_NUM_IF"]),
+            table_name=str(row["TABLE_NAME"]),
+            source_pk_json=str(row["SOURCE_PK_JSON"]),
+            clone_index=int(row["CLONE_INDEX"]),
+            column_name=str(row["COLUMN_NAME"]),
+            target_id=str(row["TARGET_ID"]),
+            generated_value=row["GENERATED_VALUE"],
+            action=str(row["ACTION"]),
+            status=str(row["STATUS"]),
+            attempt_count=int(row["ATTEMPT_COUNT"]),
+            differs_from_source=bool(row["DIFFERS_FROM_SOURCE"]),
+        )
+        for row in frame.collect()
+    ]
+    rows.sort(key=lambda item: (
+        item.root_num_if,
+        item.table_name,
+        item.source_pk_json,
+        item.clone_index,
+        item.column_name,
+    ))
+    return hashlib.sha256(
+        _genai_canonical_json([row.record() for row in rows]).encode("ascii")
+    ).hexdigest()
+
+
+def write_genai_artifacts(
+    spark: SparkSession,
+    artifact_root: str,
+    *,
+    policy: GenAiPolicy,
+    result: GenAiGenerationResult,
+    endpoint_id: str,
+    compartment_id: str,
+    region: str,
+    source_policy_uri: Optional[str] = None,
+) -> Dict[str, Any]:
+    artifact_root = artifact_root.rstrip("/")
+    _assert_exact_output_absent(spark, artifact_root)
+    replacements_uri = f"{artifact_root}/replacements"
+    policy_uri = f"{artifact_root}/policy.json"
+    manifest_uri = f"{artifact_root}/manifest.json"
+    replacement_frame = spark.createDataFrame(
+        [_genai_replacement_record(row) for row in result.rows],
+        GENAI_REPLACEMENT_SCHEMA,
+    )
+    replacement_frame.write.mode("errorifexists").parquet(replacements_uri)
+    persisted = spark.read.parquet(replacements_uri)
+    row_count = persisted.count()
+    if row_count != len(result.rows):
+        raise ValueError(
+            f"GenAI replacement readback count {row_count} != {len(result.rows)}"
+        )
+    content_hash = _genai_replacement_hash(persisted)
+    if content_hash != result.content_sha256:
+        raise ValueError("GenAI replacement logical content hash mismatch after write")
+
+    policy_snapshot = policy.snapshot()
+    policy_snapshot["source_sha256"] = policy.source_sha256
+    policy_snapshot["resolved_sha256"] = policy.resolved_sha256
+    _write_json_artifact(spark, policy_uri, policy_snapshot)
+    manifest_body = {
+        "artifact_type": "engorda_genai_manifest",
+        "schema_version": GENAI_ARTIFACT_SCHEMA_VERSION,
+        "status": result.metrics.status,
+        "endpoint_id": endpoint_id,
+        "compartment_id": compartment_id,
+        "region": region,
+        "model_family": policy.model_family,
+        "policy_uri": source_policy_uri,
+        "policy_snapshot_uri": policy_uri,
+        "policy_sha256": policy.resolved_sha256,
+        "replacements_uri": replacements_uri,
+        "replacements_sha256": result.content_sha256,
+        "metrics": dataclasses.asdict(result.metrics),
+    }
+    manifest_sha256 = hashlib.sha256(
+        _genai_canonical_json(manifest_body).encode("ascii")
+    ).hexdigest()
+    _write_json_artifact(
+        spark, manifest_uri, {**manifest_body, "manifest_sha256": manifest_sha256}
+    )
+    return {
+        "enabled": True,
+        "schema_version": GENAI_ARTIFACT_SCHEMA_VERSION,
+        "artifact_root": artifact_root,
+        "status": result.metrics.status,
+        "policy": {
+            "source_uri": source_policy_uri,
+            "snapshot_uri": policy_uri,
+            "source_sha256": policy.source_sha256,
+            "resolved_sha256": policy.resolved_sha256,
+        },
+        "replacements": {
+            "uri": replacements_uri,
+            "row_count": row_count,
+            "schema": persisted.schema.jsonValue(),
+            "content_sha256": content_hash,
+            "status_counts": dict(sorted(result.metrics.status_counts.items())),
+        },
+        "manifest": {"uri": manifest_uri, "content_sha256": manifest_sha256},
+    }
+
+
+def load_genai_replacements(
+    spark: SparkSession, descriptor: Mapping[str, Any]
+) -> DataFrame:
+    if descriptor.get("enabled") is not True:
+        raise ValueError("GenAI descriptor is not enabled")
+    if descriptor.get("schema_version") != GENAI_ARTIFACT_SCHEMA_VERSION:
+        raise ValueError("GenAI descriptor schema_version is incompatible")
+    artifact_root = descriptor.get("artifact_root")
+    if not isinstance(artifact_root, str) or not artifact_root:
+        raise ValueError("GenAI descriptor artifact_root is invalid")
+    policy_descriptor = descriptor.get("policy")
+    manifest_descriptor = descriptor.get("manifest")
+    if not isinstance(policy_descriptor, Mapping):
+        raise ValueError("GenAI descriptor has no policy snapshot")
+    if not isinstance(manifest_descriptor, Mapping):
+        raise ValueError("GenAI descriptor has no manifest")
+    policy_uri = policy_descriptor.get("snapshot_uri")
+    manifest_uri = manifest_descriptor.get("uri")
+    for label, uri in (("policy", policy_uri), ("manifest", manifest_uri)):
+        if not isinstance(uri, str) or not _mesmo_ou_ancestral(artifact_root, uri):
+            raise ValueError(f"GenAI {label} URI is outside artifact_root")
+    policy_snapshot = _read_json_artifact(spark, policy_uri)
+    policy_hash = policy_snapshot.pop("resolved_sha256", None)
+    if policy_hash != policy_descriptor.get("resolved_sha256"):
+        raise ValueError("GenAI policy snapshot hash marker differs from plan")
+    policy_snapshot.pop("source_sha256", None)
+    if hashlib.sha256(
+        _genai_canonical_json(policy_snapshot).encode("ascii")
+    ).hexdigest() != policy_hash:
+        raise ValueError("GenAI policy snapshot content hash differs from plan")
+    manifest = _read_json_artifact(spark, manifest_uri)
+    manifest_hash = manifest.pop("manifest_sha256", None)
+    if manifest_hash != manifest_descriptor.get("content_sha256"):
+        raise ValueError("GenAI manifest hash marker differs from plan")
+    if hashlib.sha256(
+        _genai_canonical_json(manifest).encode("ascii")
+    ).hexdigest() != manifest_hash:
+        raise ValueError("GenAI manifest content hash differs from plan")
+    replacements = descriptor.get("replacements")
+    if not isinstance(replacements, Mapping):
+        raise ValueError("GenAI descriptor has no replacements")
+    uri = replacements.get("uri")
+    if (not isinstance(uri, str)
+            or not _mesmo_ou_ancestral(artifact_root, uri)):
+        raise ValueError("GenAI replacement URI is invalid")
+    frame = spark.read.parquet(uri)
+    if frame.schema.jsonValue() != replacements.get("schema"):
+        raise ValueError("GenAI replacement schema differs from plan descriptor")
+    if frame.count() != replacements.get("row_count"):
+        raise ValueError("GenAI replacement count differs from plan descriptor")
+    if _genai_replacement_hash(frame) != replacements.get("content_sha256"):
+        raise ValueError("GenAI replacement content hash differs from plan descriptor")
+    return frame
+
+
 def _plan_id(plan_without_id: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical_json(plan_without_id).encode("ascii")).hexdigest()
 
@@ -2866,6 +4021,7 @@ class TargetInstrumentSelection:
     values: List[int]
     missing_keys: Optional[DataFrame] = None
     lotes: Optional[Dict[str, DataFrame]] = None
+    provenances: Optional[Dict[str, DataFrame]] = None
 
 
 def _fks_para_pais_clonados(spec: dict, tabela: str,
@@ -4757,6 +5913,7 @@ def seleciona_instrumentos_destino(
     somente_ativos: bool = True,
     nullify_columns: Optional[Mapping[str, Sequence[str]]] = None,
     permitir_lote_menor: bool = False,
+    retain_provenance: bool = False,
 ) -> TargetInstrumentSelection:
     """Admite exactly N roots whose complete FK closure is loadable in Oracle."""
     if (num_ifs is None) == (n_instrumentos is None):
@@ -4826,6 +5983,7 @@ def seleciona_instrumentos_destino(
     all_reasons: Dict[int, Set[str]] = {}
     selective_missing: Optional[DataFrame] = None
     accepted_lotes: Dict[str, DataFrame] = {}
+    accepted_provenances: Dict[str, DataFrame] = {}
     cursor: Optional[Tuple[int, int]] = None
     current_band = 0
     active_band: Optional[DataFrame] = None
@@ -4940,15 +6098,20 @@ def seleciona_instrumentos_destino(
                 )
             for table in ordem:
                 table_pk = list(planos[table].pk_cols)
-                accepted_keys = (
+                accepted_provenance = (
                     proveniencias[table]
                     .join(F.broadcast(accepted_roots), ROOT_PROVENANCE_COL, "left_semi")
-                    .select(*table_pk)
+                    .select(*table_pk, ROOT_PROVENANCE_COL)
                     .dropDuplicates()
                 )
+                accepted_keys = accepted_provenance.select(*table_pk).dropDuplicates()
                 accepted_page_lote = _durable_materialize(
                     lotes[table]
                     .join(accepted_keys, table_pk, "left_semi")
+                )
+                accepted_page_provenance = (
+                    _durable_materialize(accepted_provenance)
+                    if retain_provenance else None
                 )
                 if table in accepted_lotes:
                     previous_lote = accepted_lotes[table]
@@ -4961,8 +6124,20 @@ def seleciona_instrumentos_destino(
                     accepted_lotes[table].count()
                     previous_lote.unpersist(blocking=False)
                     accepted_page_lote.unpersist(blocking=False)
+                    if retain_provenance:
+                        previous_provenance = accepted_provenances[table]
+                        accepted_provenances[table] = _durable_materialize(
+                            previous_provenance
+                            .unionByName(accepted_page_provenance)
+                            .dropDuplicates(table_pk + [ROOT_PROVENANCE_COL])
+                        )
+                        accepted_provenances[table].count()
+                        previous_provenance.unpersist(blocking=False)
+                        accepted_page_provenance.unpersist(blocking=False)
                 else:
                     accepted_lotes[table] = accepted_page_lote
+                    if retain_provenance:
+                        accepted_provenances[table] = accepted_page_provenance
         for frame in lotes.values():
             frame.unpersist(blocking=False)
         for frame in proveniencias.values():
@@ -4994,7 +6169,12 @@ def seleciona_instrumentos_destino(
         len(accepted),
         len(all_reasons),
     )
-    return TargetInstrumentSelection(accepted, missing_df, accepted_lotes)
+    return TargetInstrumentSelection(
+        accepted,
+        missing_df,
+        accepted_lotes,
+        accepted_provenances if retain_provenance else None,
+    )
 
 
 def _deriva_tipo_oracle(spark, config, num_if_valores: List,
@@ -5750,9 +6930,10 @@ def calcula_lotes(spark, config, spec: dict, planos: Dict[str, PlanoTabela],
                   max_passadas: int,
                   somente_ativos: bool = True,
                   counts_out: Optional[Dict[str, int]] = None,
-                  produto: Optional[str] = None,
-                  lastros_por_lote: int = LASTROS_POR_LOTE_PADRAO,
-                  ) -> Dict[str, DataFrame]:
+                   produto: Optional[str] = None,
+                   lastros_por_lote: int = LASTROS_POR_LOTE_PADRAO,
+                   provenance_out: Optional[Dict[str, DataFrame]] = None,
+                   ) -> Dict[str, DataFrame]:
     lotes, proveniencias = _calcula_lotes_com_proveniencia(
         spark,
         config,
@@ -5766,8 +6947,12 @@ def calcula_lotes(spark, config, spec: dict, planos: Dict[str, PlanoTabela],
         produto=produto,
         lastros_por_lote=lastros_por_lote,
     )
-    for provenance in proveniencias.values():
-        provenance.unpersist(blocking=False)
+    if provenance_out is None:
+        for provenance in proveniencias.values():
+            provenance.unpersist(blocking=False)
+    else:
+        provenance_out.clear()
+        provenance_out.update(proveniencias)
     return lotes
 
 
@@ -5927,8 +7112,83 @@ def _aplica_remap_fk(clones: DataFrame, fk: FkRemap, mapa_pai: DataFrame,
     return joined.select(*proj)
 
 
-def clona_tabela(spark, plano: PlanoTabela, lote: DataFrame, fator_k: int,
-                 mapeamentos: Dict[str, DataFrame]) -> Tuple[DataFrame, DataFrame]:
+def _aplica_genai_replacements(
+    clones: DataFrame,
+    plano: PlanoTabela,
+    orig: Mapping[str, str],
+    replacements: DataFrame,
+) -> DataFrame:
+    required = {
+        "TABLE_NAME", "SOURCE_PK_JSON", "CLONE_INDEX", "COLUMN_NAME",
+        "GENERATED_VALUE", "ACTION",
+    }
+    missing = sorted(required - set(replacements.columns))
+    if missing:
+        raise ValueError(f"GenAI replacements missing columns: {missing}")
+    table_replacements = replacements.where(
+        (F.col("TABLE_NAME") == F.lit(plano.name))
+        & (F.col("ACTION") == F.lit("REPLACE"))
+    )
+    columns = [
+        str(row["COLUMN_NAME"])
+        for row in table_replacements.select("COLUMN_NAME").distinct().collect()
+    ]
+    if not columns:
+        return clones
+    source_json_col = "__genai_source_pk_json"
+    if source_json_col in clones.columns:
+        raise ValueError(f"{plano.name}: temporary GenAI column already exists")
+    clones = clones.withColumn(
+        source_json_col,
+        F.to_json(
+            F.struct(*[
+                F.col(orig[column]).alias(column) for column in plano.pk_cols
+            ]),
+            options={"ignoreNullFields": "false"},
+        ),
+    )
+    for index, column in enumerate(sorted(columns)):
+        if column not in clones.columns:
+            raise ValueError(f"GenAI target {plano.name}.{column} is absent from clones")
+        source_alias = f"__genai_source_{index}"
+        clone_alias = f"__genai_clone_{index}"
+        value_alias = f"__genai_value_{index}"
+        present_alias = f"__genai_present_{index}"
+        mapping = (
+            table_replacements.where(F.col("COLUMN_NAME") == F.lit(column))
+            .select(
+                F.col("SOURCE_PK_JSON").alias(source_alias),
+                F.col("CLONE_INDEX").cast("int").alias(clone_alias),
+                F.col("GENERATED_VALUE").alias(value_alias),
+                F.lit(True).alias(present_alias),
+            )
+        )
+        joined = clones.join(
+            F.broadcast(mapping),
+            (clones[source_json_col] == mapping[source_alias])
+            & (clones[K_COL] == mapping[clone_alias]),
+            "left",
+        )
+        clones = (
+            joined.withColumn(
+                column,
+                F.when(F.col(present_alias), F.col(value_alias))
+                .otherwise(F.col(column))
+                .cast(clones.schema[column].dataType),
+            )
+            .drop(source_alias, clone_alias, value_alias, present_alias)
+        )
+    return clones.drop(source_json_col)
+
+
+def clona_tabela(
+    spark,
+    plano: PlanoTabela,
+    lote: DataFrame,
+    fator_k: int,
+    mapeamentos: Dict[str, DataFrame],
+    genai_replacements: Optional[DataFrame] = None,
+) -> Tuple[DataFrame, DataFrame]:
     """Sintetiza uma tabela: lote × K, mapeia a própria PK e reescreve as FKs.
     Devolve (sintéticos prontos SEM colunas temporárias, mapeamento da PK).
 
@@ -5986,6 +7246,11 @@ def clona_tabela(spark, plano: PlanoTabela, lote: DataFrame, fator_k: int,
                            plano.name, fk.parent_table, list(fk.columns))
             continue
         clones = _aplica_remap_fk(clones, fk, mapa_pai, orig)
+
+    if genai_replacements is not None:
+        clones = _aplica_genai_replacements(
+            clones, plano, orig, genai_replacements
+        )
 
     return clones.drop(K_COL, *orig.values()), mapa_pk
 
@@ -7302,6 +8567,7 @@ def _build_engorda_plan(
     anular_cols: Optional[Mapping[str, Sequence[str]]] = None,
     meu_numero_prefix: Optional[str] = None,
     no_oracle: bool = False,
+    genai_descriptor: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     source_counts = (
         {table: int(count) for table, count in lote_counts.items()}
@@ -7393,6 +8659,8 @@ def _build_engorda_plan(
     }
     if no_oracle:
         body["oracle_access"] = "disabled"
+    if genai_descriptor is not None:
+        body["genai"] = dict(genai_descriptor)
     return {**body, "plan_id": _plan_id(body)}
 
 
@@ -7428,6 +8696,13 @@ def _validate_plan_artifact(plan: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("artefato de plano precisa conter tables")
     if plan.get("oracle_access", "live") not in {"live", "disabled"}:
         raise ValueError("artefato de plano possui oracle_access inválido")
+    genai = plan.get("genai")
+    if genai is not None:
+        if not isinstance(genai, Mapping) or genai.get("enabled") is not True:
+            raise ValueError("artefato de plano possui descriptor GenAI inválido")
+        for section in ("policy", "replacements", "manifest"):
+            if not isinstance(genai.get(section), Mapping):
+                raise ValueError(f"descriptor GenAI sem seção {section}")
     selected_lote = _validate_selected_lote_descriptor(
         plan["selected_lote"], expected_tables=set(plan["tables"])
     )
@@ -7593,8 +8868,12 @@ def executa_clonagem(spark, config, spec: dict, *,
                        reservation: Optional[Mapping[str, Any]] = None,
                        snapshot_lotes: Optional[Mapping[str, DataFrame]] = None,
                        snapshot_faltantes: Optional[DataFrame] = None,
-                       snapshot_lote_counts: Optional[Mapping[str, int]] = None,
-                       specs_uri: Optional[str] = None) -> Dict[str, dict]:
+                        snapshot_lote_counts: Optional[Mapping[str, int]] = None,
+                        specs_uri: Optional[str] = None,
+                        enable_genai: bool = False,
+                        genai_execution: Optional[GenAiExecutionConfig] = None,
+                        genai_frozen: Optional[GenAiFrozenArtifacts] = None,
+                        ) -> Dict[str, dict]:
     """Roda a sintetização fim a fim; devolve {tabela: estatísticas} (para uso em
     notebook). Aborta sem gravar NADA se qualquer validação falhar.
 
@@ -7645,6 +8924,18 @@ def executa_clonagem(spark, config, spec: dict, *,
             raise ValueError(
                 "materialize --no-oracle diverge do oracle_access congelado no plano"
             )
+        planned_genai = bool(
+            isinstance(planned_artifact.get("genai"), Mapping)
+            and planned_artifact["genai"].get("enabled") is True
+        )
+        if enable_genai != planned_genai:
+            raise ValueError(
+                "materialize --enable-genai diverge do descriptor congelado no plano"
+            )
+        if enable_genai and (
+            genai_frozen is None
+        ):
+            raise ValueError("materialize GenAI exige descriptor e replacements validados")
         meu_reservation = reservation.get("meu_numero") or {}
         requested_meu_numero_prefix = (
             planned_artifact.get("meu_numero") or {}
@@ -7810,6 +9101,7 @@ def executa_clonagem(spark, config, spec: dict, *,
     logger.info("Ordem de sintetização (%d tabela(s)): %s", len(ordem), ordem)
 
     selected_lotes: Optional[Dict[str, DataFrame]] = None
+    selected_provenances: Optional[Dict[str, DataFrame]] = None
     closure_lote_counts: Optional[Dict[str, int]] = None
     if phase == "materialize":
         selected_lotes = dict(snapshot_lotes)
@@ -7876,11 +9168,13 @@ def executa_clonagem(spark, config, spec: dict, *,
                 somente_ativos=somente_ativos,
                 nullify_columns=anular_cols,
                 permitir_lote_menor=ajusta_fator_k,
+                retain_provenance=enable_genai,
             )
         finally:
             admission_connection.close()
         valores = selection.values
         selected_lotes = selection.lotes
+        selected_provenances = selection.provenances
         # Também substitui o input offline para a nulificação seletiva: somente
         # ausências confirmadas live podem alterar o sintético desta execução.
         faltantes = selection.missing_keys
@@ -7889,6 +9183,10 @@ def executa_clonagem(spark, config, spec: dict, *,
     if phase != "materialize" and ajusta_fator_k:
         fator_k = _ajusta_fator_k_por_dominio(
             fator_k, n_instrumentos, len(valores)
+        )
+    if enable_genai and fator_k > GENAI_MAX_FACTOR_K:
+        raise ValueError(
+            f"GenAI final adjusted fator_k must be <= {GENAI_MAX_FACTOR_K}"
         )
 
     # Tipo do instrumento DERIVADO do lote — antes de qualquer round-trip Oracle.
@@ -7908,6 +9206,7 @@ def executa_clonagem(spark, config, spec: dict, *,
         lotes = selected_lotes
     else:
         closure_lote_counts = {}
+        provenance_out = {} if enable_genai else None
         with _perf_timer("closure", product=product_profile.name, roots=len(valores)):
             lotes = calcula_lotes(
                 spark,
@@ -7921,7 +9220,9 @@ def executa_clonagem(spark, config, spec: dict, *,
                 counts_out=closure_lote_counts,
                 produto=produto,
                 lastros_por_lote=lastros_por_lote,
+                provenance_out=provenance_out,
             )
+        selected_provenances = provenance_out
     # Invariante de lastro: conferido sobre o fecho (não sobre o domínio), então
     # vale para os três caminhos — dry-run, admissão FK live e lote de snapshot.
     _valida_lastro_obrigatorio(produto, lotes)
@@ -7940,11 +9241,74 @@ def executa_clonagem(spark, config, spec: dict, *,
         }
         if set(final_lote_counts) != set(lotes):
             raise ValueError("materialize: contagens do snapshot divergem do table_set")
-    elif closure_lote_counts is not None:
+    elif closure_lote_counts:
         final_lote_counts = dict(closure_lote_counts)
     else:
         with _perf_timer("final_lote_counts", product=product_profile.name):
             final_lote_counts = _count_final_lotes(lotes)
+
+    active_genai_descriptor = (
+        dict(genai_frozen.descriptor) if genai_frozen is not None else None
+    )
+    genai_replacements = (
+        genai_frozen.replacements if genai_frozen is not None else None
+    )
+    if enable_genai and phase != "materialize":
+        if genai_execution is None:
+            raise ValueError("GenAI execution configuration was not resolved")
+        genai_policy = genai_execution.policy
+        column_types = {
+            table: {
+                field.name: field.dataType.simpleString()
+                for field in frame.schema.fields
+            }
+            for table, frame in lotes.items()
+        }
+        validate_genai_policy_runtime(
+            genai_policy,
+            specs=spec,
+            column_types=column_types,
+            static_tables=estaticas_extra,
+            nullified_columns=anular_cols,
+        )
+        if not dry_run:
+            if selected_provenances is None:
+                raise ValueError("GenAI planning requires closure provenance")
+            if genai_execution.adapter is None:
+                raise ValueError("GenAI adapter was not configured")
+            _assert_exact_output_absent(spark, genai_execution.artifact_root)
+            aggregates = collect_genai_instruments(
+                lotes, selected_provenances, planos
+            )
+            requests = tuple(
+                build_genai_request(
+                    aggregate,
+                    policy=genai_policy,
+                    clone_factor=fator_k,
+                    run_seed=seed,
+                )
+                for aggregate in aggregates
+            )
+            generation = generate_genai_replacements(
+                requests, adapter=genai_execution.adapter
+            )
+            active_genai_descriptor = write_genai_artifacts(
+                spark,
+                genai_execution.artifact_root,
+                policy=genai_policy,
+                result=generation,
+                endpoint_id=genai_execution.endpoint_id,
+                compartment_id=genai_execution.compartment_id,
+                region=genai_execution.region,
+                source_policy_uri=genai_execution.policy_uri,
+            )
+            if phase == "all":
+                genai_replacements = load_genai_replacements(
+                    spark, active_genai_descriptor
+                )
+    if selected_provenances is not None:
+        for provenance in selected_provenances.values():
+            provenance.unpersist(blocking=False)
 
     current_plan: Optional[dict[str, Any]] = None
     if phase == "plan":
@@ -7990,6 +9354,7 @@ def executa_clonagem(spark, config, spec: dict, *,
             anular_cols=anular_cols,
             meu_numero_prefix=requested_meu_numero_prefix,
             no_oracle=no_oracle,
+            genai_descriptor=active_genai_descriptor,
         )
     if phase == "plan":
         with _perf_timer("plan_artifact_write", product=product_profile.name):
@@ -8021,7 +9386,14 @@ def executa_clonagem(spark, config, spec: dict, *,
         n_lote = final_lote_counts[t]
         if n_lote == 0:
             logger.info("[%s] lote vazio — materializando sintético e mapa vazios.", t)
-        clones, mapa_pk = clona_tabela(spark, plano, lotes[t], fator_k, mapeamentos)
+        clones, mapa_pk = clona_tabela(
+            spark,
+            plano,
+            lotes[t],
+            fator_k,
+            mapeamentos,
+            genai_replacements=genai_replacements,
+        )
         mapeamentos[t] = mapa_pk
         # Regras de data ANTES do checkpoint/validação: o NOT NULL precisa ser
         # conferido no valor que vai ser gravado, não no valor sintetizado.
@@ -8293,7 +9665,9 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
         raise TypeError("job precisa ser uma instância de EngordaJob")
     for field_name in ("query_num_if_path", "specs_uri", "clone_prefix",
                        "cod_if_pattern", "cod_if_dry_prefix", "plan_uri",
-                       "reservation_uri", "raw_uri", "output_uri"):
+                       "reservation_uri", "raw_uri", "output_uri", "genai_policy",
+                       "genai_endpoint_id", "genai_compartment_id", "genai_region",
+                       "genai_artifact_root"):
         value = getattr(job, field_name)
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise ValueError(f"{field_name} precisa ser texto não vazio")
@@ -8345,6 +9719,40 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
     if job.n_instrumentos is not None:
         if type(job.n_instrumentos) is not int or job.n_instrumentos < 1:
             raise ValueError("n_instrumentos deve ser inteiro >= 1")
+    if job.enable_genai:
+        selected_count = (
+            len(job.num_ifs) if job.num_ifs is not None else job.n_instrumentos
+        )
+        if (selected_count is not None
+                and selected_count > GENAI_MAX_SOURCE_INSTRUMENTS):
+            raise ValueError(
+                f"GenAI supports at most {GENAI_MAX_SOURCE_INSTRUMENTS} source instruments"
+            )
+        if job.fator_k > GENAI_MAX_FACTOR_K:
+            raise ValueError(f"GenAI supports fator_k <= {GENAI_MAX_FACTOR_K}")
+        if job.phase in {"all", "plan"}:
+            for field_name in (
+                "genai_policy",
+                "genai_endpoint_id",
+                "genai_compartment_id",
+                "genai_region",
+            ):
+                if not getattr(job, field_name):
+                    raise ValueError(
+                        f"{field_name} is required when GenAI is enabled for {job.phase}"
+                    )
+            if not job.genai_endpoint_id.startswith("ocid1.generativeaiendpoint."):
+                raise ValueError("genai_endpoint_id must be a Generative AI endpoint OCID")
+            if not job.genai_compartment_id.startswith("ocid1.compartment."):
+                raise ValueError("genai_compartment_id must be a compartment OCID")
+            if job.phase == "all" and not job.genai_artifact_root:
+                raise ValueError(
+                    "genai_artifact_root is required when GenAI is enabled for all"
+                )
+            output = (job.output_uri or "").rstrip("/")
+            artifact = (job.genai_artifact_root or "").rstrip("/")
+            if output and (artifact == output or artifact.startswith(output + "/")):
+                raise ValueError("genai_artifact_root must be outside output_uri")
     for field_name in ("fator_k", "pk_passo", "max_passadas",
                        "oracle_code_batch_size"):
         value = getattr(job, field_name)
@@ -8396,6 +9804,7 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
         "dry_run",
         "no_oracle",
         "somente_ativos",
+        "enable_genai",
     ):
         if type(getattr(job, field_name)) is not bool:
             raise ValueError(f"{field_name} precisa ser booleano")
@@ -8434,6 +9843,14 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
         config["DATAGEN_CLONE_PREFIX"] = _normalize_clone_prefix(
             config["DATAGEN_CLONE_PREFIX"]
         )
+    genai_artifact_root = job.genai_artifact_root
+    if job.enable_genai and job.phase == "plan" and not genai_artifact_root:
+        genai_artifact_root = _default_genai_artifact_root(job.plan_uri)
+    if (job.enable_genai and job.phase in {"all", "plan"}
+            and _mesmo_ou_ancestral(
+                clone_base_path(config), genai_artifact_root
+            )):
+        raise ValueError("genai_artifact_root must be outside the synthetic table root")
     logger.info(
         "Job produto=%s phase=%s query=%s specs=%s destino=%s tipo_oracle=%s "
         "dry_run=%s no_oracle=%s",
@@ -8449,12 +9866,42 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
 
     spark = create_spark_session(f"DataGenEngorda_{profile.name}")
     try:
+        if (job.enable_genai and job.phase in {"all", "plan"}
+                and not job.dry_run):
+            _assert_exact_output_absent(spark, genai_artifact_root)
         specs_uri = job.specs_uri or config["DATAGEN_SPECS_URI"]
         planned_artifact = None
         reservation = None
         snapshot_lotes = None
         snapshot_faltantes = None
         snapshot_lote_counts = None
+        resolved_genai_policy = None
+        genai_adapter = job.genai_adapter
+        genai_execution = None
+        genai_frozen = None
+        if job.enable_genai and job.phase in {"all", "plan"}:
+            resolved_genai_policy = resolve_genai_policy(
+                _read_json_artifact(spark, job.genai_policy),
+                product=profile.name,
+            )
+            if genai_adapter is None:
+                if job.dry_run:
+                    preflight_oci_genai_runtime()
+                else:
+                    genai_adapter = OracleGenAiChatAdapter(
+                        endpoint_id=job.genai_endpoint_id,
+                        compartment_id=job.genai_compartment_id,
+                        region=job.genai_region,
+                    )
+            genai_execution = GenAiExecutionConfig(
+                policy=resolved_genai_policy,
+                policy_uri=job.genai_policy,
+                adapter=genai_adapter,
+                artifact_root=genai_artifact_root,
+                endpoint_id=job.genai_endpoint_id,
+                compartment_id=job.genai_compartment_id,
+                region=job.genai_region,
+            )
         num_ifs = list(job.num_ifs) if job.num_ifs is not None else None
         n_instrumentos = job.n_instrumentos
         fator_k = job.fator_k
@@ -8474,6 +9921,20 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
             )
             if planned_artifact["product"] != profile.name:
                 raise ValueError("produto do plano diverge do job")
+            planned_genai = bool(
+                isinstance(planned_artifact.get("genai"), Mapping)
+                and planned_artifact["genai"].get("enabled") is True
+            )
+            if job.enable_genai != planned_genai:
+                raise ValueError(
+                    "materialize --enable-genai diverge do descriptor GenAI do plano"
+                )
+            if planned_genai:
+                descriptor = dict(planned_artifact["genai"])
+                genai_frozen = GenAiFrozenArtifacts(
+                    descriptor=descriptor,
+                    replacements=load_genai_replacements(spark, descriptor),
+                )
             planned_no_oracle = (
                 planned_artifact.get("oracle_access", "live") == "disabled"
             )
@@ -8562,6 +10023,9 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
             snapshot_faltantes=snapshot_faltantes,
             snapshot_lote_counts=snapshot_lote_counts,
             specs_uri=specs_uri,
+            enable_genai=job.enable_genai,
+            genai_execution=genai_execution,
+            genai_frozen=genai_frozen,
         )
     finally:
         spark.stop()
@@ -8802,6 +10266,12 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--reservation-uri", default=None)
     parser.add_argument("--raw-uri", default=None)
     parser.add_argument("--output-uri", default=None)
+    parser.add_argument("--enable-genai", action="store_true")
+    parser.add_argument("--genai-policy", default=None)
+    parser.add_argument("--genai-endpoint-id", default=None)
+    parser.add_argument("--genai-compartment-id", default=None)
+    parser.add_argument("--genai-region", default=None)
+    parser.add_argument("--genai-artifact-root", default=None)
     args = parser.parse_args(argv)
     has_selection = (args.num_ifs is not None) + (args.n_instrumentos is not None)
     if args.phase in {"all", "plan"} and has_selection != 1:
@@ -8887,6 +10357,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         reservation_uri=args.reservation_uri,
         raw_uri=args.raw_uri,
         output_uri=args.output_uri,
+        enable_genai=args.enable_genai,
+        genai_policy=args.genai_policy,
+        genai_endpoint_id=args.genai_endpoint_id,
+        genai_compartment_id=args.genai_compartment_id,
+        genai_region=args.genai_region,
+        genai_artifact_root=args.genai_artifact_root,
     ))
 
 

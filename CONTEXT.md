@@ -75,3 +75,11 @@ _Avoid_: Only operation, extra operation error
 **CDB operation closure**:
 The mandatory per-operation CDB structure rooted at one operation: exactly two operation-data records and one launch. A CDB may have multiple operations, but each operation must independently satisfy this 1:2:1 closure.
 _Avoid_: Per-instrument operation ratio, aggregate 1:2:1 ratio
+
+**Best-effort observational text diversity**:
+Variation in synthetic textual values intended to make cloned records less visibly repetitive rather than exercise specific business behavior. Operators accept that populating previously absent text can still affect NoMe behavior.
+_Avoid_: Guaranteed behavior-preserving enrichment, functional scenario generation, anonymization
+
+**Instrument text enrichment**:
+The optional generation of allowlisted observational text values using one selected source financial-instrument aggregate as semantic context.
+_Avoid_: Independent cell generation, business-rule generation
