@@ -201,3 +201,16 @@ rejected. For one product in a multi-product run, use
 `--set cdb_resgate.engorda.no_oracle=true`; it automatically propagates downstream.
 For validate-only runs, use `--no-oracle` or
 `--set cdb_resgate.validate.no_oracle=true`.
+
+## Final terminal summary
+
+Every real run that reaches the scheduler ends with a summary on stderr. Dry-run and
+config/auth/preflight failures before manifest creation keep their existing output.
+The summary contains global product counts and elapsed time, followed by one line per
+product with wall-clock duration, extra retries, and compact states for
+`plan/reserve/materialize/validate/load`.
+
+FAILED and CANCELLED products include the problem node, the last Data Flow run ID, and
+a shortened error; complete details remain in the manifest. The final lines print both
+the local and OCI manifest paths plus `upload=SUCCEEDED|FAILED`. A manifest-upload
+failure still renders the product summary and changes the pipeline result to FAILED.

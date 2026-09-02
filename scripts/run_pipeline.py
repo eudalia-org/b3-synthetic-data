@@ -481,6 +481,7 @@ class ProgressReporter:
             "[submit]": "cyan",
             "[poll]": "blue",
             "[reserve]": "magenta",
+            "[summary]": "bright_white",
             "[done]": "green",
             "[failed]": "red",
             "[dry-run]": "yellow",
@@ -489,7 +490,7 @@ class ProgressReporter:
             click.secho(
                 message,
                 fg=color,
-                bold=tag in {"[run]", "[done]", "[failed]"},
+                bold=tag in {"[run]", "[summary]", "[done]", "[failed]"},
                 err=True,
             )
 
@@ -3252,6 +3253,192 @@ def _initial_manifest(plan: dict[str, Any], upstream_path: str) -> dict[str, Any
     }
 
 
+_SUMMARY_OPERATIONS = ("plan", "reserve", "materialize", "validate", "load")
+_SUMMARY_STATE_LABELS = {
+    "SUCCEEDED": "OK",
+    "FAILED": "FAIL",
+    "BLOCKED": "BLOCKED",
+    "CANCELLED": "CANCEL",
+    "RUNNING": "RUNNING",
+    "PENDING": "PENDING",
+}
+
+
+def _summary_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _summary_elapsed(start: Any, finish: Any) -> float | None:
+    started_at = _summary_datetime(start)
+    finished_at = _summary_datetime(finish)
+    if started_at is None or finished_at is None:
+        return None
+    return max(0.0, (finished_at - started_at).total_seconds())
+
+
+def _format_summary_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "-"
+    rounded = int(round(seconds))
+    if rounded < 60:
+        return f"{rounded}s"
+    minutes, remaining_seconds = divmod(rounded, 60)
+    if minutes < 60:
+        return f"{minutes}m{remaining_seconds:02d}s"
+    hours, remaining_minutes = divmod(minutes, 60)
+    return f"{hours}h{remaining_minutes:02d}m{remaining_seconds:02d}s"
+
+
+def _product_summary_state(nodes: Sequence[Mapping[str, Any]]) -> str:
+    states = {str(node.get("state", "PENDING")) for node in nodes}
+    for state in ("FAILED", "CANCELLED", "BLOCKED"):
+        if state in states:
+            return state
+    return "SUCCEEDED" if states == {"SUCCEEDED"} else "RUNNING"
+
+
+def _summary_error(node: Mapping[str, Any], maximum: int = 180) -> str:
+    error = node.get("error")
+    if not error and isinstance(node.get("validation"), dict):
+        error = "validation gate rejected report"
+    if not error and isinstance(node.get("load_manifest"), dict):
+        error = "load manifest gate rejected artifact"
+    if not error and isinstance(node.get("load_preparation"), dict):
+        error = "load preparation gate rejected artifact"
+    if not error:
+        attempts = node.get("attempts")
+        if isinstance(attempts, list) and attempts:
+            error = f"Data Flow state {attempts[-1].get('state', 'UNKNOWN')}"
+    text = " ".join(str(error or "unknown failure").split())
+    return text if len(text) <= maximum else f"{text[:maximum - 3]}..."
+
+
+def render_run_summary(
+    manifest: Mapping[str, Any],
+    local_manifest: str,
+    manifest_uri: str,
+    upload_status: str,
+) -> list[str]:
+    products = [str(product) for product in manifest.get("products", [])]
+    manifest_nodes = manifest.get("nodes", {})
+    nodes = manifest_nodes if isinstance(manifest_nodes, dict) else {}
+    product_rows: list[tuple[str, str, list[Mapping[str, Any]]]] = []
+    totals = {state: 0 for state in ("SUCCEEDED", "FAILED", "BLOCKED", "CANCELLED")}
+    for product in products:
+        product_nodes = [
+            node for node in nodes.values()
+            if isinstance(node, dict) and node.get("product") == product
+        ]
+        state = _product_summary_state(product_nodes)
+        totals[state] = totals.get(state, 0) + 1
+        product_rows.append((product, state, product_nodes))
+
+    pipeline_elapsed = _summary_elapsed(
+        manifest.get("created_at"), manifest.get("finished_at")
+    )
+    lines = [
+        "[summary] "
+        f"pipeline={manifest.get('status', 'UNKNOWN')} products={len(products)} "
+        f"success={totals['SUCCEEDED']} failed={totals['FAILED']} "
+        f"blocked={totals['BLOCKED']} cancelled={totals['CANCELLED']} "
+        f"elapsed={_format_summary_duration(pipeline_elapsed)}"
+    ]
+    operation_index = {name: index for index, name in enumerate(_SUMMARY_OPERATIONS)}
+    for product, state, product_nodes in product_rows:
+        by_operation = {
+            str(node.get("operation")): node for node in product_nodes
+        }
+        starts = [
+            parsed for parsed in (
+                _summary_datetime(node.get("started_at")) for node in product_nodes
+            ) if parsed is not None
+        ]
+        finishes = [
+            parsed for parsed in (
+                _summary_datetime(node.get("finished_at")) for node in product_nodes
+            ) if parsed is not None
+        ]
+        elapsed = (
+            max(0.0, (max(finishes) - min(starts)).total_seconds())
+            if starts and finishes else None
+        )
+        retries = sum(
+            max(0, len(node.get("attempts", [])) - 1)
+            for node in product_nodes
+            if isinstance(node.get("attempts"), list)
+        )
+        stage_parts = []
+        for operation in _SUMMARY_OPERATIONS:
+            if operation not in by_operation:
+                stage_parts.append(f"{operation}=-")
+                continue
+            operation_state = str(by_operation[operation].get("state"))
+            stage_parts.append(
+                f"{operation}={_SUMMARY_STATE_LABELS.get(operation_state, operation_state)}"
+            )
+        stages = " ".join(stage_parts)
+        lines.append(
+            f"[summary] product={product} status={state} "
+            f"elapsed={_format_summary_duration(elapsed)} retries={retries} {stages}"
+        )
+        if state in {"FAILED", "CANCELLED"}:
+            problem_nodes = [
+                node for node in product_nodes
+                if node.get("state") in {"FAILED", "CANCELLED"}
+            ]
+            if problem_nodes:
+                problem = min(
+                    problem_nodes,
+                    key=lambda node: operation_index.get(
+                        str(node.get("operation")), len(operation_index)
+                    ),
+                )
+                attempted_nodes = sorted(
+                    product_nodes,
+                    key=lambda node: operation_index.get(
+                        str(node.get("operation")), len(operation_index)
+                    ),
+                    reverse=True,
+                )
+                run_id = "-"
+                for attempted_node in attempted_nodes:
+                    attempts = attempted_node.get("attempts")
+                    if isinstance(attempts, list) and attempts:
+                        run_id = attempts[-1].get("run_id", "-")
+                        break
+                lines.append(
+                    f"[summary] failure product={product} node={problem.get('id', '-')} "
+                    f"run_id={run_id} error={_summary_error(problem)}"
+                )
+    lines.extend((
+        f"[summary] manifest_local={local_manifest}",
+        f"[summary] manifest_oci={manifest_uri} upload={upload_status}",
+    ))
+    return lines
+
+
+def emit_run_summary(
+    progress: ProgressReporter,
+    manifest: Mapping[str, Any],
+    local_manifest: Path,
+    manifest_uri: str,
+    upload_status: str,
+) -> None:
+    try:
+        for line in render_run_summary(
+            manifest, str(local_manifest), manifest_uri, upload_status
+        ):
+            progress.emit(line)
+    except Exception as exc:  # summary rendering must not change pipeline outcome
+        progress.emit(f"[failed] final summary unavailable: {type(exc).__name__}: {exc}")
+
+
 def _auth_from_args(args: SimpleNamespace) -> dict[str, str]:
     return AuthOptions(
         args.profile,
@@ -3355,22 +3542,47 @@ def run_command(
             raise PipelineError(f"immutable OCI {label} already exists: {uri}")
     progress.emit("[preflight] OCI paths are available")
     store = AtomicManifest(manifest_path, _initial_manifest(plan, args.upstream_manifest))
-    result = execute_plan(
-        plan,
-        config,
-        store,
-        adapter,
-        auth,
-        args.max_concurrency,
-        args.max_retries,
-        args.poll_seconds,
-        progress,
-    )
+    try:
+        result = execute_plan(
+            plan,
+            config,
+            store,
+            adapter,
+            auth,
+            args.max_concurrency,
+            args.max_retries,
+            args.poll_seconds,
+            progress,
+        )
+    except Exception as exc:
+        scheduler_error = f"{type(exc).__name__}: {exc}"
+
+        def fail_nonterminal_nodes(payload: dict[str, Any]) -> None:
+            for node in payload["nodes"].values():
+                if node["state"] == "RUNNING":
+                    node.update(
+                        state="FAILED",
+                        finished_at=utc_now(),
+                        error=scheduler_error,
+                    )
+                elif node["state"] == "PENDING":
+                    node.update(
+                        state="BLOCKED",
+                        finished_at=utc_now(),
+                        error=scheduler_error,
+                    )
+            payload["scheduler_error"] = scheduler_error
+
+        store.update(fail_nonterminal_nodes)
+        progress.emit(f"[failed] pipeline scheduler {scheduler_error}")
+        result = 1
     status = "CANCELLED" if result == 130 else ("SUCCEEDED" if result == 0 else "FAILED")
     store.update(lambda payload: payload.update(status=status, finished_at=utc_now()))
+    upload_status = "SUCCEEDED"
     try:
         adapter.upload_file(str(manifest_path), plan["manifest_uri"], auth=auth)
     except Exception as exc:
+        upload_status = "FAILED"
         upload_error = str(exc)
         store.update(
             lambda payload: payload.update(
@@ -3380,6 +3592,13 @@ def run_command(
         progress.emit(
             f"[failed] pipeline run_id={args.run_id} manifest upload failed: {exc}"
         )
+        emit_run_summary(
+            progress,
+            store.payload,
+            manifest_path,
+            plan["manifest_uri"],
+            upload_status,
+        )
         return 1
     if result == 0:
         progress.emit(f"[done] pipeline SUCCEEDED run_id={args.run_id}")
@@ -3387,6 +3606,13 @@ def run_command(
         progress.emit(f"[failed] pipeline CANCELLED run_id={args.run_id}")
     else:
         progress.emit(f"[failed] pipeline FAILED run_id={args.run_id}")
+    emit_run_summary(
+        progress,
+        store.payload,
+        manifest_path,
+        plan["manifest_uri"],
+        upload_status,
+    )
     return result
 
 

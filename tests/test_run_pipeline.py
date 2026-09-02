@@ -366,6 +366,156 @@ def test_click_cli_reports_submission_and_each_mocked_poll(tmp_path):
     assert "ACCEPTED" in result.output
     assert "IN_PROGRESS" in result.output
     assert "[done] cdb_simplificado.validate SUCCEEDED" in result.output
+    assert "[summary] pipeline=SUCCEEDED products=1 success=1" in result.output
+    assert "[summary] product=cdb_simplificado status=SUCCEEDED" in result.output
+    assert "plan=OK reserve=OK materialize=OK validate=OK load=-" in result.output
+    assert "manifest_local=" in result.output
+    assert "manifest_oci=" in result.output
+    assert "upload=SUCCEEDED" in result.output
+    assert "[summary] pipeline=SUCCEEDED" in result.stderr
+    assert "[summary]" not in result.stdout
+    assert result.output.index("[done] pipeline SUCCEEDED") < result.output.index(
+        "[summary] pipeline=SUCCEEDED"
+    )
+
+
+def test_render_run_summary_reports_mixed_products_retries_and_failure():
+    manifest = {
+        "status": "FAILED",
+        "created_at": "2026-08-31T00:00:00Z",
+        "finished_at": "2026-08-31T01:02:03Z",
+        "products": ["ok", "bad", "blocked", "cancelled"],
+        "nodes": {
+            "ok.plan": {
+                "id": "ok.plan", "product": "ok", "operation": "plan",
+                "state": "SUCCEEDED", "started_at": "2026-08-31T00:00:00Z",
+                "finished_at": "2026-08-31T00:00:30Z",
+                "attempts": [
+                    {"run_id": "df-1", "state": "FAILED"},
+                    {"run_id": "df-2", "state": "SUCCEEDED"},
+                ],
+            },
+            "ok.validate": {
+                "id": "ok.validate", "product": "ok", "operation": "validate",
+                "state": "SUCCEEDED", "started_at": "2026-08-31T00:00:30Z",
+                "finished_at": "2026-08-31T00:01:05Z", "attempts": [],
+            },
+            "bad.plan": {
+                "id": "bad.plan", "product": "bad", "operation": "plan",
+                "state": "SUCCEEDED", "started_at": "2026-08-31T00:00:00Z",
+                "finished_at": "2026-08-31T00:00:05Z",
+                "attempts": [{"run_id": "df-9", "state": "SUCCEEDED"}],
+            },
+            "bad.reserve": {
+                "id": "bad.reserve", "product": "bad", "operation": "reserve",
+                "state": "FAILED", "started_at": "2026-08-31T00:00:05Z",
+                "finished_at": "2026-08-31T00:00:10Z", "attempts": [],
+                "error": "reservation CAS failed",
+            },
+            "blocked.plan": {
+                "id": "blocked.plan", "product": "blocked", "operation": "plan",
+                "state": "BLOCKED", "finished_at": "2026-08-31T00:00:10Z",
+                "attempts": [],
+            },
+            "cancelled.plan": {
+                "id": "cancelled.plan", "product": "cancelled", "operation": "plan",
+                "state": "CANCELLED", "started_at": "2026-08-31T00:00:00Z",
+                "finished_at": "2026-08-31T00:00:02Z",
+                "attempts": [{"run_id": "df-10", "state": "CANCELLED"}],
+            },
+        },
+    }
+
+    lines = P.render_run_summary(
+        manifest, "/tmp/run/manifest.json", "oci://bucket@ns/manifest.json", "FAILED"
+    )
+
+    assert lines[0] == (
+        "[summary] pipeline=FAILED products=4 success=1 failed=1 blocked=1 "
+        "cancelled=1 elapsed=1h02m03s"
+    )
+    assert any(
+        "product=ok status=SUCCEEDED elapsed=1m05s retries=1 "
+        "plan=OK reserve=- materialize=- validate=OK load=-" in line
+        for line in lines
+    )
+    assert any(
+        "failure product=bad node=bad.reserve run_id=df-9 "
+        "error=reservation CAS failed" in line
+        for line in lines
+    )
+    assert any("product=cancelled status=CANCELLED" in line for line in lines)
+    assert lines[-2] == "[summary] manifest_local=/tmp/run/manifest.json"
+    assert lines[-1].endswith("manifest.json upload=FAILED")
+
+
+def test_manifest_upload_failure_still_prints_final_summary(tmp_path):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+
+    class UploadFailureAdapter(FakeAdapter):
+        def upload_file(self, path, uri, *, auth):
+            raise RuntimeError("upload unavailable")
+
+    result = CliRunner().invoke(
+        P.cli,
+        run_args(tmp_path, config, upstream),
+        obj={"adapter": UploadFailureAdapter()},
+    )
+
+    assert result.exit_code == 1
+    assert "manifest upload failed: upload unavailable" in result.output
+    assert "[summary] pipeline=FAILED products=1 success=1" in result.output
+    assert "manifest_oci=" in result.output
+    assert "upload=FAILED" in result.output
+    assert "[summary] pipeline=FAILED" in result.stderr
+
+
+def test_scheduler_exception_finalizes_uploads_and_summarizes(tmp_path, monkeypatch):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+    adapter = FakeAdapter()
+    monkeypatch.setattr(
+        P,
+        "execute_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            P.PipelineError("scheduler stalled")
+        ),
+    )
+
+    result = CliRunner().invoke(
+        P.cli,
+        run_args(tmp_path, config, upstream),
+        obj={"adapter": adapter},
+    )
+
+    assert result.exit_code == 1
+    assert "pipeline scheduler PipelineError: scheduler stalled" in result.stderr
+    assert "[summary] pipeline=FAILED products=1" in result.stderr
+    assert "product=cdb_simplificado status=BLOCKED" in result.stderr
+    manifest = read_run_manifest(tmp_path)
+    assert manifest["scheduler_error"] == "PipelineError: scheduler stalled"
+    assert adapter.uploads[0][0]["status"] == "FAILED"
+
+
+def test_summary_render_failure_does_not_change_pipeline_outcome(tmp_path, monkeypatch):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+    monkeypatch.setattr(
+        P,
+        "render_run_summary",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad timestamp")),
+    )
+
+    result = CliRunner().invoke(
+        P.cli,
+        run_args(tmp_path, config, upstream),
+        obj={"adapter": FakeAdapter()},
+    )
+
+    assert result.exit_code == 0
+    assert "[done] pipeline SUCCEEDED" in result.stderr
+    assert "[failed] final summary unavailable: ValueError: bad timestamp" in result.stderr
 
 
 def test_click_help_exposes_commands_and_polling_default():
@@ -405,6 +555,7 @@ def test_click_dry_run_finishes_without_submitting_jobs(tmp_path):
     assert "[dry-run] resolved pipeline plan" in result.stderr
     assert "[done] dry-run complete" in result.output
     assert "[submit]" not in result.output
+    assert "[summary]" not in result.output
 
 
 def test_live_wrapper_matches_shared_oci_dataflow_operation_signatures():
