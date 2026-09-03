@@ -650,6 +650,72 @@ def test_target_fk_admission_streams_all_child_edges_once(
     assert missing is None
 
 
+def test_target_fk_admission_bounds_iterator_partition_fanout(spark, monkeypatch):
+    prior_shuffle = spark.conf.get("spark.sql.shuffle.partitions")
+    prior_aqe = spark.conf.get("spark.sql.adaptive.enabled")
+    prior_broadcast = spark.conf.get("spark.sql.autoBroadcastJoinThreshold")
+    spark.conf.set("spark.sql.shuffle.partitions", "32")
+    spark.conf.set("spark.sql.adaptive.enabled", "false")
+    spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
+    parent = spark.range(32).selectExpr("id AS ID").repartition(32)
+    parent_provenance = parent.selectExpr(
+        "ID", f"ID AS {eng.ROOT_PROVENANCE_COL}"
+    ).repartition(32)
+    child = spark.range(32).selectExpr("id AS ID", "id AS FK").repartition(32)
+    provenance = child.selectExpr(
+        "ID", f"ID AS {eng.ROOT_PROVENANCE_COL}"
+    ).repartition(32)
+    iterator_partitions = []
+    frame_class = type(child)
+    original_iterator = frame_class.toLocalIterator
+
+    def tracked_iterator(frame, *args, **kwargs):
+        iterator_partitions.append(frame.rdd.getNumPartitions())
+        return original_iterator(frame, *args, **kwargs)
+
+    monkeypatch.setattr(frame_class, "toLocalIterator", tracked_iterator)
+    try:
+        rejected, reasons, missing = eng._target_fk_rejections(
+            spark,
+            {
+                "PARENT": {"pk_cols": ["ID"], "foreign_keys": []},
+                "CHILD": {
+                    "pk_cols": ["ID"],
+                    "foreign_keys": [{
+                        "columns": ["FK"],
+                        "parent_table": "PARENT",
+                        "parent_columns": ["ID"],
+                    }],
+                }
+            },
+            {
+                "PARENT": eng.PlanoTabela("PARENT", ("ID",)),
+                "CHILD": eng.PlanoTabela(
+                    "CHILD", ("ID",),
+                    [eng.FkRemap(("FK",), "PARENT", ("ID",), False)],
+                ),
+            },
+            {"PARENT": parent, "CHILD": child},
+            {"PARENT": parent_provenance, "CHILD": provenance},
+            ["PARENT", "CHILD"],
+            frozenset(),
+            {},
+            lambda *_args: pytest.fail("internally satisfied keys reached Oracle"),
+        )
+    finally:
+        spark.conf.set("spark.sql.shuffle.partitions", prior_shuffle)
+        spark.conf.set("spark.sql.adaptive.enabled", prior_aqe)
+        spark.conf.set("spark.sql.autoBroadcastJoinThreshold", prior_broadcast)
+
+    assert iterator_partitions == [
+        eng.FK_ADMISSION_ITERATOR_PARTITIONS,
+        eng.FK_ADMISSION_ITERATOR_PARTITIONS,
+    ]
+    assert rejected == set()
+    assert reasons == {}
+    assert missing is None
+
+
 def test_target_fk_admission_streams_multiple_parent_column_sets_once(
     spark, monkeypatch
 ):

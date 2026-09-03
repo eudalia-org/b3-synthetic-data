@@ -803,6 +803,7 @@ ENGORDA_PLAN_ARTIFACT = "engorda_plan"
 ENGORDA_SELECTED_LOTE_ARTIFACT = "engorda_selected_lote"
 SNAPSHOT_ROWS_PER_PARTITION = 100_000
 SNAPSHOT_MAX_PARTITIONS = 64
+FK_ADMISSION_ITERATOR_PARTITIONS = 8
 TRANSIENT_OCI_RETRY_DELAYS_SECONDS = (35, 70)
 ENGORDA_RESERVATION_ARTIFACT = "engorda_reservation"
 ENGORDA_PHASES = ("all", "plan", "materialize")
@@ -5732,6 +5733,7 @@ def _target_fk_rejections(
                     for column in wide_columns
                 ],
             )
+            .coalesce(FK_ADMISSION_ITERATOR_PARTITIONS)
         )
         table_sets = {
             columns: set() for columns in requirements
@@ -5755,10 +5757,11 @@ def _target_fk_rejections(
                 )
                 table_sets[columns].add((root, key))
         logger.info(
-            "PERF FK parent=%s rows=%d internal_distinct_keys=%d "
+            "PERF FK parent=%s rows=%d partitions=%d internal_distinct_keys=%d "
             "requirements=%d extraction_seconds=%.3f",
             parent_table,
             row_count,
+            projected.rdd.getNumPartitions(),
             sum(len(keys) for keys in table_sets.values()),
             len(requirements),
             time.perf_counter() - started,
@@ -5791,6 +5794,7 @@ def _target_fk_rejections(
                     for column in wide_columns
                 ],
             )
+            .coalesce(FK_ADMISSION_ITERATOR_PARTITIONS)
         )
         row_count = 0
         started = time.perf_counter()
@@ -5818,10 +5822,11 @@ def _target_fk_rejections(
                 roots.add(root)
         extraction_seconds = time.perf_counter() - started
         logger.info(
-            "PERF FK table=%s rows=%d residual_distinct_keys=%d edges=%d "
+            "PERF FK table=%s rows=%d partitions=%d residual_distinct_keys=%d edges=%d "
             "extraction_seconds=%.3f",
             table,
             row_count,
+            projected.rdd.getNumPartitions(),
             sum(len(state["residual_roots"]) for state in edge_states),
             len(edge_states),
             extraction_seconds,
