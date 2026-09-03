@@ -6489,16 +6489,29 @@ def _semente_lateral_por_lote(spark, config, produto: Optional[str],
                 raise ValueError(
                     "Produto %s: %s nao expoe %s."
                     % (produto, hist, faltando_h))
-            mestres_com_historico = src_h.select(*fk_h.columns).dropDuplicates()
+            aliases_mestre = [f"__master_key_{i}" for i in range(len(plano.pk_cols))]
+            mestres_do_lote = cand.select(*(
+                F.col(parent_col).alias(alias)
+                for parent_col, alias in zip(plano.pk_cols, aliases_mestre)
+            )).dropDuplicates()
+            condicao_alvo = [
+                src_h[child_col] == mestres_do_lote[alias]
+                for child_col, alias in zip(fk_h.columns, aliases_mestre)
+            ]
+            mestres_com_historico = (
+                src_h.join(
+                    F.broadcast(mestres_do_lote), condicao_alvo, "left_semi"
+                )
+                .select(*fk_h.columns)
+                .dropDuplicates()
+            )
             condicao = [
                 cand[parent_col] == mestres_com_historico[child_col]
                 for parent_col, child_col in zip(
                     fk_h.parent_columns, fk_h.columns
                 )
             ]
-            cand = cand.join(
-                F.broadcast(mestres_com_historico), condicao, "left_semi"
-            )
+            cand = cand.join(mestres_com_historico, condicao, "left_semi")
 
         # Teto por lote. Ordenacao pela PK => deterministico entre execucoes.
         ordem_pk = [F.col(c).asc() for c in plano.pk_cols]

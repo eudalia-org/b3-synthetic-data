@@ -192,6 +192,14 @@ def test_lci_lateral_cap_ignores_incomplete_master_and_keeps_all_histories(
     monkeypatch.setattr(
         eng, "_read_source", lambda _spark, _config, table: sources[table]
     )
+    original_broadcast = eng.F.broadcast
+
+    def reject_global_history_broadcast(frame):
+        if frame.columns == ["NUM_ID_CREDITO_SCR"]:
+            raise AssertionError("global SCR history IDs must not be broadcast")
+        return original_broadcast(frame)
+
+    monkeypatch.setattr(eng.F, "broadcast", reject_global_history_broadcast)
     plans = {
         eng.TABELA_RAIZ: eng.PlanoTabela(
             eng.TABELA_RAIZ, (eng.COL_NUM_IF,)
