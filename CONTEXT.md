@@ -20,9 +20,17 @@ _Avoid_: Credito DC, DICRE
 The Letra de Credito Imobiliario product rooted at an Instrumento Financeiro. Its placeholder Credito row and Lastro prerequisites do not make it a Credito SCR or Credito DC.
 _Avoid_: Lastro LCI, Credito SCR, DICRE
 
+**LCI backing set**:
+The active Credito SCR masters linked to an LCI through their shared lot, together with the Historico Credito SCR rows linked to those masters. Engorda selects only complete master/history pairs, and under the Osias validation profile every cloned master has history evidence in the synthetic output.
+_Avoid_: Same-NUM_IF credit, placeholder Credito
+
 **LCA**:
 The Letra de Credito do Agronegocio product rooted at an Instrumento Financeiro. Its populated Credito, guarantee, and representative rows belong to the LCA aggregate, not to Credito SCR or Credito DC.
 _Avoid_: Credito SCR, Credito DC, DICRE
+
+**LCA backing set**:
+The active Credito DC masters linked to an LCA through their shared lot, together with the Historico Credito DC rows linked to those masters by credit code. These backing rows remain distinct from the LCA aggregate's own populated Credito row.
+_Avoid_: Same-NUM_IF credit, LCA Credito row
 
 **DICRE IROP closure**:
 The conditional family of IROP records linked to a Credito DC. Presence varies by DICRE subtype, but present records remain part of the aggregate.
@@ -56,6 +64,10 @@ _Avoid_: RDB without RESGATE, RDB resgate
 An RDB with one type-20 RESGATE in `COM TABELA` mode and at least one active CONDICAO_RESGATE schedule row.
 _Avoid_: RDB inclusion, redemption row
 
+**CDB escalonamento**:
+A CDB with an issuance escalation schedule and no quantity redeemed on TITULO. Under the Osias validation profile, every operation uses operation-and-service classification 4509.
+_Avoid_: CDB resgate, escalonamento with redeemed quantity
+
 **Registration account roles**:
 The product-specific account-code groups assigned to the party and counterparty of a registration operation. CDB, RDB, LCI, and LCA use `.10`/`.40`; CCB uses `.00`/`.40`.
 _Avoid_: Universal operation account regex, participant P1/P2 IDs
@@ -71,6 +83,10 @@ _Avoid_: Independent resgate, redemption parent
 **Registration operation**:
 The operation that registers the financial instrument, identified by its operation and service classification. Additional operations are assessed by their own classification and are not invalid merely because more than one operation exists for the instrument.
 _Avoid_: Only operation, extra operation error
+
+**Osias validation profile**:
+An opt-in scenario acceptance profile in which every cloned operation must use an explicitly approved operation-and-service classification for that scenario. Unlike general product validation, an otherwise valid historical or secondary operation outside the scenario allowlist is an error.
+_Avoid_: Registration operation check, universal product rule
 
 **CDB operation closure**:
 The mandatory per-operation CDB structure rooted at one operation: exactly two operation-data records and one launch. A CDB may have multiple operations, but each operation must independently satisfy this 1:2:1 closure.

@@ -346,11 +346,10 @@ LASTROS_POR_LOTE_PADRAO = 10
 # HISTORICO DO LASTRO (Etapa 2) — dois caminhos, porque o modelo e assimetrico.
 #
 # SCR: HISTORICO_CREDITO_SCR.NUM_ID_CREDITO_SCR aponta para a PK de CREDITO_SCR
-# e tem o MESMO nome — e portanto vinculo PRINCIPAL. O spec so nao declara essa
-# FK (o validador, esse sim, compara as duas colunas). Injetamos a FK EM
-# MEMORIA no startup, e a partir dai o fecho desce CREDITO_SCR ->
-# HISTORICO_CREDITO_SCR sozinho e a FK e remapeada para a PK nova do credito.
-# O spec_config em disco NAO e tocado.
+# e tem o MESMO nome — e portanto vinculo PRINCIPAL. O spec principal declara
+# essa FK; a injecao idempotente em memoria preserva o vinculo para specs antigos.
+# A partir dai o fecho desce CREDITO_SCR -> HISTORICO_CREDITO_SCR sozinho e a FK
+# e remapeada para a PK nova do credito.
 #
 # DC: HISTORICO_CREDITO_DC nao tem coluna de id do credito — o validador exige
 # COD_CREDITO_DC. Ligar por codigo de negocio nao serve como FK aqui, porque o
@@ -5928,6 +5927,8 @@ def seleciona_instrumentos_destino(
     nullify_columns: Optional[Mapping[str, Sequence[str]]] = None,
     permitir_lote_menor: bool = False,
     retain_provenance: bool = False,
+    produto: Optional[str] = None,
+    lastros_por_lote: int = LASTROS_POR_LOTE_PADRAO,
 ) -> TargetInstrumentSelection:
     """Admite exactly N roots whose complete FK closure is loadable in Oracle."""
     if (num_ifs is None) == (n_instrumentos is None):
@@ -6054,6 +6055,8 @@ def seleciona_instrumentos_destino(
                 candidates,
                 max_passadas,
                 somente_ativos=somente_ativos,
+                produto=produto,
+                lastros_por_lote=lastros_por_lote,
             )
         with _perf_timer(
             "live_fk_admission", product=profile.name, roots=len(candidates)
@@ -6460,6 +6463,43 @@ def _semente_lateral_por_lote(spark, config, produto: Optional[str],
             cand = cand.where(F.col(COL_DAT_EXCLUSAO).isNull())
         cand = cand.join(F.broadcast(lotes_alvo), on="__lote", how="left_semi")
 
+        # Filtra mestres incompletos antes do teto por lote. O fecho abaixo
+        # ainda clona todos os historicos ligados aos mestres selecionados.
+        for hist, fk_config in FK_COMPLEMENTAR_POR_PRODUTO.get(produto or "", ()):
+            if fk_config.get("parent_table") != tabela:
+                continue
+            plano_h = planos.get(hist)
+            if plano_h is None:
+                raise ValueError(
+                    "Produto %s: %s nao esta no plano — inclua em "
+                    "TABELAS_ENGORDA_POR_PRODUTO." % (produto, hist))
+            fks_h = [
+                fk for fk in plano_h.fks_remap
+                if fk.parent_table == tabela
+                and tuple(fk.parent_columns) == tuple(plano.pk_cols)
+            ]
+            if not fks_h:
+                raise ValueError(
+                    "Produto %s: %s nao declara FK para %s.%s."
+                    % (produto, hist, tabela, list(plano.pk_cols)))
+            fk_h = fks_h[0]
+            src_h = _read_source(spark, config, hist)
+            faltando_h = [c for c in fk_h.columns if c not in src_h.columns]
+            if faltando_h:
+                raise ValueError(
+                    "Produto %s: %s nao expoe %s."
+                    % (produto, hist, faltando_h))
+            mestres_com_historico = src_h.select(*fk_h.columns).dropDuplicates()
+            condicao = [
+                cand[parent_col] == mestres_com_historico[child_col]
+                for parent_col, child_col in zip(
+                    fk_h.parent_columns, fk_h.columns
+                )
+            ]
+            cand = cand.join(
+                F.broadcast(mestres_com_historico), condicao, "left_semi"
+            )
+
         # Teto por lote. Ordenacao pela PK => deterministico entre execucoes.
         ordem_pk = [F.col(c).asc() for c in plano.pk_cols]
         cand = (
@@ -6586,7 +6626,6 @@ def _aplica_cod_credito_sintetico(produto: Optional[str],
                 "Produto %s: %s sem pk_start — nao da para derivar %s de forma "
                 "coordenada com o destino." % (produto, tabela, col_cod))
         base = int(plano.pk_start)
-        ordem_pk = [F.col(c).asc() for c in plano.pk_cols]
         mapa = (
             lote_c.select(
                 F.trim(F.col(col_cod).cast("string")).alias("__cod_ant"))
@@ -6760,6 +6799,13 @@ def _calcula_lotes_com_proveniencia(
     proveniencias: Dict[str, DataFrame] = {}
     contagens: Dict[str, int] = {}
     contagens_proveniencia: Dict[str, int] = {}
+
+    laterais_planejadas = set(planos).intersection(TABELAS_SEMEADAS_LATERALMENTE)
+    if laterais_planejadas and not produto:
+        raise ValueError(
+            "Tabelas laterais planejadas sem produto: "
+            f"{sorted(laterais_planejadas)}"
+        )
 
     def _fonte(tabela: str) -> DataFrame:
         if tabela in fontes:
@@ -8254,10 +8300,22 @@ def _assert_exact_output_absent(spark: SparkSession, path: str) -> None:
         )
 
 
-def escreve_tabela(spark: SparkSession, df: DataFrame, out_path: str) -> None:
+def escreve_tabela(
+    spark: SparkSession,
+    df: DataFrame,
+    out_path: str,
+    expected_rows: Optional[int] = None,
+) -> None:
+    expected = df.count() if expected_rows is None else expected_rows
+    partitions = _snapshot_partition_count(expected)
+    current_partitions = df.rdd.getNumPartitions()
+    output = df.coalesce(partitions) if current_partitions > partitions else df
+    logger.info(
+        "Gravando %s: %d linha(s), %d -> %d partição(ões).",
+        out_path, expected, current_partitions, output.rdd.getNumPartitions(),
+    )
     _delete_path(spark, out_path)
-    df.write.mode("append").parquet(out_path)
-    expected = df.count()
+    output.write.mode("append").parquet(out_path)
     actual = spark.read.parquet(out_path).count()
     if actual != expected:
         raise ValueError(
@@ -9019,8 +9077,8 @@ def executa_clonagem(spark, config, spec: dict, *,
         )
     for table in tabelas_produto:
         spec[table]["static"] = False
-    # FK que o spec em disco nao declara, injetada SO em memoria e SO
-    # para os produtos que a exigem. Ver FK_COMPLEMENTAR_POR_PRODUTO.
+    # Fallback idempotente para specs antigos que ainda nao declaram a FK.
+    # Ver FK_COMPLEMENTAR_POR_PRODUTO.
     for tabela_fk, fk_nova in FK_COMPLEMENTAR_POR_PRODUTO.get(produto, ()):
         if tabela_fk not in tabelas_produto:
             continue
@@ -9039,7 +9097,7 @@ def executa_clonagem(spark, config, spec: dict, *,
         existentes.append(copy.deepcopy(fk_nova))
         logger.info(
             "FK complementar injetada EM MEMORIA para %s: %s.%s -> %s.%s "
-            "(spec em disco intacto).", produto, tabela_fk,
+            "(compatibilidade com spec antigo).", produto, tabela_fk,
             fk_nova["columns"], fk_nova["parent_table"],
             fk_nova["parent_columns"])
     if tabelas_produto:
@@ -9184,6 +9242,8 @@ def executa_clonagem(spark, config, spec: dict, *,
                 nullify_columns=anular_cols,
                 permitir_lote_menor=ajusta_fator_k,
                 retain_provenance=enable_genai,
+                produto=produto,
+                lastros_por_lote=lastros_por_lote,
             )
         finally:
             admission_connection.close()
@@ -9572,15 +9632,22 @@ def executa_clonagem(spark, config, spec: dict, *,
         if output_base is None:
             raise RuntimeError("output_base ausente fora do dry-run")
         for t in ordem:
-            clones, _ = resultados[t]
+            clones, n_lote = resultados[t]
             out_path = f"{output_base}/{t}"
             logger.info("Gravando staging %s -> %s", t, out_path)
-            escreve_tabela(spark, clones, out_path)
+            escreve_tabela(
+                spark, clones, out_path, expected_rows=n_lote * fator_k,
+            )
         mapa_if = (mapeamentos[TABELA_RAIZ]
                    .select(F.col(f"old_{COL_NUM_IF}").alias("NUM_IF_ORIG"),
                            F.col(K_COL).alias("K"),
                            F.col(f"new_{COL_NUM_IF}").alias("NUM_IF_NOVO")))
-        escreve_tabela(spark, mapa_if, f"{output_base}/{MAPA_NUM_IF_TABLE}")
+        escreve_tabela(
+            spark,
+            mapa_if,
+            f"{output_base}/{MAPA_NUM_IF_TABLE}",
+            expected_rows=n_raiz * fator_k,
+        )
         if no_oracle:
             _write_offline_artifact_marker(
                 spark,

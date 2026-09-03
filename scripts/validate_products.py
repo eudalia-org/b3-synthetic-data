@@ -12167,6 +12167,312 @@ def check_log_invariants(
 
 
 # ---------------------------------------------------------------------------
+# Opt-in Osias ERROR profile
+# ---------------------------------------------------------------------------
+def check_osias(
+    tables: Dict[str, DataFrame], sample: int, profile: ValidationProfile, enabled: bool
+) -> List[Finding]:
+    """Enforce the narrow product/scenario rules requested by the Osias profile."""
+    if not enabled or profile.name not in {"cdb", "ccb", "gravame", "lci"}:
+        return []
+
+    category = "Osias ERROR profile"
+
+    def unavailable(missing: List[str]) -> List[Finding]:
+        return [Finding(
+            f"9.osias.{profile.name}.availability", category, SEV_ERROR,
+            ",".join(sorted({item.split(".")[0] for item in missing})), False,
+            count=len(missing),
+            hint="Export every required table and column before using --osias.",
+            message=f"Osias evidence cannot be established; missing: {', '.join(missing)}.",
+        )]
+
+    def finding(
+        check_id: str,
+        table: str,
+        column: str,
+        bad: DataFrame,
+        keys: List[str],
+        message: str,
+        hint: str,
+    ) -> Finding:
+        count = bad.count()
+        return Finding(
+            check_id, category, SEV_ERROR if count else SEV_INFO, table, count == 0,
+            count=count, column=column,
+            sample=_sample_keys(bad, keys, sample) if count else [],
+            hint=hint if count else "", message=message,
+        )
+
+    if profile.name == "cdb":
+        requirements = {
+            "INSTRUMENTO_FINANCEIRO": ("NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO"),
+            "TITULO": ("NUM_IF", "COD_TIPO_ESCALONAMENTO", "QTD_RESGATADA"),
+            "CONDICAO_IF": (
+                "NUM_CONDICAO_IF", "NUM_IF", "DAT_EXCLUSAO",
+            ),
+            "RESGATE": ("NUM_CONDICAO_IF", "COD_COND_RESGATE", "DAT_EXCLUSAO"),
+            "OPERACAO": ("NUM_IF", "NUM_ID_TIPO_OPER_OBJETO_SERV"),
+        }
+        columns, missing = _credito_scr_columns(tables, requirements)
+        if missing:
+            return unavailable(missing)
+
+        root_cols = columns["INSTRUMENTO_FINANCEIRO"]
+        roots = tables["INSTRUMENTO_FINANCEIRO"].where(
+            _oracle_null_equivalent(F.col(root_cols["DAT_EXCLUSAO"]))
+            & (_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == "49")
+        ).select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id")) \
+            .dropDuplicates()
+        title_cols = columns["TITULO"]
+        titles = tables["TITULO"].select(
+            _canon_key_col(F.col(title_cols["NUM_IF"])).alias("root_id"),
+            F.col(title_cols["COD_TIPO_ESCALONAMENTO"]).alias("escalation"),
+            F.col(title_cols["QTD_RESGATADA"]).alias("redeemed_quantity"),
+        ).join(roots, "root_id", "inner")
+        condition_cols = columns["CONDICAO_IF"]
+        conditions = tables["CONDICAO_IF"].where(
+            _oracle_null_equivalent(F.col(condition_cols["DAT_EXCLUSAO"]))
+        ).select(
+            _canon_key_col(F.col(condition_cols["NUM_CONDICAO_IF"]))
+            .alias("condition_id"),
+            _canon_key_col(F.col(condition_cols["NUM_IF"])).alias("root_id"),
+        ).join(roots, "root_id", "inner")
+        resgate_cols = columns["RESGATE"]
+        resgate_paths = tables["RESGATE"].where(
+            _oracle_null_equivalent(F.col(resgate_cols["DAT_EXCLUSAO"]))
+        ).select(
+            _canon_key_col(F.col(resgate_cols["NUM_CONDICAO_IF"])).alias("condition_id"),
+            F.upper(F.trim(F.col(resgate_cols["COD_COND_RESGATE"]).cast("string")))
+            .alias("resgate_mode"),
+        ).join(conditions, "condition_id", "inner")
+        resgate_roots = titles.where(
+            _oracle_null_equivalent(F.col("escalation"))
+        ).select("root_id").join(
+            resgate_paths.where(
+                F.col("resgate_mode").isin("MERCADO", "COM TABELA", "ESPECIFICA")
+            ).select("root_id"),
+            "root_id", "inner",
+        ).dropDuplicates()
+        escalation_roots = titles.where(
+            ~_oracle_null_equivalent(F.col("escalation"))
+        ).select("root_id").join(
+            resgate_paths.where(F.col("resgate_mode") == "SEM TABELA").select("root_id"),
+            "root_id", "inner",
+        ).dropDuplicates()
+        operation_cols = columns["OPERACAO"]
+        operations = tables["OPERACAO"].select(
+            _canon_key_col(F.col(operation_cols["NUM_IF"])).alias("root_id"),
+            _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
+            .alias("route_id"),
+        )
+
+        classified_roots = resgate_roots.unionByName(escalation_roots).dropDuplicates()
+        out = [finding(
+            "9.osias.cdb.scenario", "INSTRUMENTO_FINANCEIRO", "NUM_IF",
+            roots.join(classified_roots, "root_id", "left_anti"), ["root_id"],
+            "Every active full-CDB root must resolve to resgate or escalonamento.",
+            "Include the title, active redemption condition, and scenario discriminator.",
+        )]
+        for scenario, selected_roots in (
+            ("resgate", resgate_roots), ("escalonamento", escalation_roots),
+        ):
+            owned = operations.join(selected_roots, "root_id", "inner")
+            bad = owned.where(
+                ~F.coalesce(F.col("route_id") == "4509", F.lit(False))
+            )
+            out.append(finding(
+                f"9.osias.cdb.{scenario}.route", "OPERACAO",
+                "NUM_ID_TIPO_OPER_OBJETO_SERV", bad, ["root_id", "route_id"],
+                f"Every operation owned by a CDB {scenario} root must canonicalize to route 4509.",
+                "Set every owned operation route to canonical ID 4509.",
+            ))
+
+        quantity = F.expr("try_cast(`redeemed_quantity` AS DECIMAL(38,18))")
+        bad_quantity = titles.join(escalation_roots, "root_id", "inner").where(
+            _oracle_null_equivalent(F.col("redeemed_quantity"))
+            | quantity.isNull()
+            | (quantity != F.lit(Decimal(0)))
+        )
+        out.append(finding(
+            "9.osias.cdb.escalonamento.redeemed_quantity", "TITULO", "QTD_RESGATADA",
+            bad_quantity, ["root_id", "redeemed_quantity"],
+            "Every title owned by a CDB escalonamento root must have numeric zero QTD_RESGATADA.",
+            "Set QTD_RESGATADA to a nonnull numeric zero.",
+        ))
+        return out
+
+    if profile.name == "ccb":
+        requirements = {
+            "INSTRUMENTO_FINANCEIRO": (
+                "NUM_IF", "NUM_TIPO_IF", "NUM_IF_PERTENCE", "DAT_EXCLUSAO",
+            ),
+            "ACTPCCB_CONDICAO_IF": (
+                "NUM_IF", "RENT_INDEXADOR_TAXA_FLU", "FORMA_PAGAMENTO",
+            ),
+            "OPERACAO": (
+                "NUM_IF", "NUM_ID_TIPO_OPER_OBJETO_SERV", "COD_SITUACAO_OPERACAO",
+            ),
+        }
+        columns, missing = _credito_scr_columns(tables, requirements)
+        if missing:
+            return unavailable(missing)
+
+        root_cols = columns["INSTRUMENTO_FINANCEIRO"]
+        roots = tables["INSTRUMENTO_FINANCEIRO"].where(
+            _oracle_null_equivalent(F.col(root_cols["DAT_EXCLUSAO"]))
+            & _oracle_null_equivalent(F.col(root_cols["NUM_IF_PERTENCE"]))
+            & (_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == "53")
+        ).select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id")) \
+            .dropDuplicates()
+        actp_cols = columns["ACTPCCB_CONDICAO_IF"]
+        variants = tables["ACTPCCB_CONDICAO_IF"].select(
+            _canon_key_col(F.col(actp_cols["NUM_IF"])).alias("root_id"),
+            F.upper(F.trim(F.col(actp_cols["RENT_INDEXADOR_TAXA_FLU"]).cast("string")))
+            .alias("indexer"),
+            F.upper(F.trim(F.col(actp_cols["FORMA_PAGAMENTO"]).cast("string")))
+            .alias("payment"),
+        ).join(roots, "root_id", "inner")
+        discriminators = {
+            "favcp": ("VCP", "LIQUIDAÇÃO FORA DO ÂMBITO B3"),
+            "fapre": ("PREFIXADO", "LIQUIDAÇÃO FORA DO ÂMBITO B3"),
+            "pfpre": ("PREFIXADO", "PAGAMENTO DE PARCELAS FIXAS"),
+            "pgrpre": ("VCP", "PAGAMENTO DE RENDIMENTO PREFIXADO"),
+            "pppre": ("PREFIXADO", "PAGAMENTO DE PARCELAS"),
+        }
+        selected = {
+            name: variants.where(
+                (F.col("indexer") == indexer) & (F.col("payment") == payment)
+            ).select("root_id").dropDuplicates()
+            for name, (indexer, payment) in discriminators.items()
+        }
+        operation_cols = columns["OPERACAO"]
+        operations = tables["OPERACAO"].select(
+            _canon_key_col(F.col(operation_cols["NUM_IF"])).alias("root_id"),
+            _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
+            .alias("route_id"),
+            _canon_key_col(F.col(operation_cols["COD_SITUACAO_OPERACAO"]))
+            .alias("operation_status"),
+        )
+        classified_roots = None
+        for selected_roots in selected.values():
+            classified_roots = (
+                selected_roots if classified_roots is None
+                else classified_roots.unionByName(selected_roots)
+            )
+        assert classified_roots is not None
+        classified_roots = classified_roots.dropDuplicates()
+        out = [finding(
+            "9.osias.ccb.scenario", "ACTPCCB_CONDICAO_IF",
+            "RENT_INDEXADOR_TAXA_FLU,FORMA_PAGAMENTO",
+            roots.join(classified_roots, "root_id", "left_anti"), ["root_id"],
+            "Every active CCB root must resolve to a known generator scenario.",
+            "Include the ACTPCCB condition row and exact scenario discriminators.",
+        )]
+        for scenario in ("favcp", "pfpre", "pppre"):
+            selected_roots = selected[scenario]
+            bad = operations.join(selected_roots, "root_id", "inner").where(
+                ~F.coalesce(F.col("route_id") == "871", F.lit(False))
+            )
+            out.append(finding(
+                f"9.osias.ccb.{scenario}.route", "OPERACAO",
+                "NUM_ID_TIPO_OPER_OBJETO_SERV", bad, ["root_id", "route_id"],
+                f"Every operation owned by a CCB {scenario.upper()} root must canonicalize "
+                "to route 871.",
+                "Set every owned operation route to canonical ID 871.",
+            ))
+        bad_status = operations.join(selected["pppre"], "root_id", "inner").where(
+            ~F.coalesce(F.col("operation_status") == "43", F.lit(False))
+        )
+        out.append(finding(
+            "9.osias.ccb.pppre.operation_status", "OPERACAO", "COD_SITUACAO_OPERACAO",
+            bad_status, ["root_id", "operation_status"],
+            "Every operation owned by a CCB PPPRE root must canonicalize to status 43.",
+            "Set every PPPRE-owned operation status to canonical code 43.",
+        ))
+        return out
+
+    if profile.name == "gravame":
+        requirements = {
+            "INSTRUMENTO_FINANCEIRO": ("NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO"),
+            "OPERACAO": ("NUM_IF", "NUM_ID_TIPO_OPER_OBJETO_SERV"),
+        }
+        columns, missing = _credito_scr_columns(tables, requirements)
+        if missing:
+            return unavailable(missing)
+        root_cols = columns["INSTRUMENTO_FINANCEIRO"]
+        roots = tables["INSTRUMENTO_FINANCEIRO"].where(
+            _oracle_null_equivalent(F.col(root_cols["DAT_EXCLUSAO"]))
+            & (_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == "175")
+        ).select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id")) \
+            .dropDuplicates()
+        operation_cols = columns["OPERACAO"]
+        owned = tables["OPERACAO"].select(
+            _canon_key_col(F.col(operation_cols["NUM_IF"])).alias("root_id"),
+            _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
+            .alias("route_id"),
+        ).join(roots, "root_id", "inner")
+        bad = owned.where(
+            ~F.coalesce(F.col("route_id").isin("15394", "15512"), F.lit(False))
+        )
+        return [finding(
+            "9.osias.gravame.route", "OPERACAO", "NUM_ID_TIPO_OPER_OBJETO_SERV",
+            bad, ["root_id", "route_id"],
+            "Every operation owned by a Gravame root must use route 15394 or 15512.",
+            "Set every owned operation route to canonical ID 15394 or 15512.",
+        )]
+
+    requirements = {
+        "INSTRUMENTO_FINANCEIRO": (
+            "NUM_IF", "NUM_TIPO_IF", "NUM_ID_LOTE", "DAT_EXCLUSAO",
+        ),
+        CREDITO_SCR_TABLE: ("NUM_ID_CREDITO_SCR", "NUM_ID_LOTE", "DAT_EXCLUSAO"),
+        HISTORICO_CREDITO_SCR_TABLE: ("NUM_ID_CREDITO_SCR",),
+    }
+    columns, missing = _credito_scr_columns(tables, requirements)
+    if missing:
+        return unavailable(missing)
+    root_cols = columns["INSTRUMENTO_FINANCEIRO"]
+    root_lots = tables["INSTRUMENTO_FINANCEIRO"].where(
+        _oracle_null_equivalent(F.col(root_cols["DAT_EXCLUSAO"]))
+        & (_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == "81")
+    ).select(
+        _canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"),
+        _canon_key_col(F.col(root_cols["NUM_ID_LOTE"])).alias("lot_id"),
+    ).dropDuplicates()
+    credit_cols = columns[CREDITO_SCR_TABLE]
+    credits = tables[CREDITO_SCR_TABLE].where(
+        _oracle_null_equivalent(F.col(credit_cols["DAT_EXCLUSAO"]))
+    ).select(
+        _canon_key_col(F.col(credit_cols["NUM_ID_CREDITO_SCR"])).alias("credit_id"),
+        _canon_key_col(F.col(credit_cols["NUM_ID_LOTE"])).alias("lot_id"),
+    )
+    bad_roots = root_lots.join(
+        credits.select("lot_id").dropDuplicates(), "lot_id", "left_anti"
+    )
+    selected_credits = credits.dropDuplicates(["credit_id", "lot_id"])
+    history_col = columns[HISTORICO_CREDITO_SCR_TABLE]["NUM_ID_CREDITO_SCR"]
+    history_ids = tables[HISTORICO_CREDITO_SCR_TABLE].select(
+        _canon_key_col(F.col(history_col)).alias("credit_id")
+    ).dropDuplicates()
+    bad_credits = selected_credits.join(history_ids, "credit_id", "left_anti")
+    return [
+        finding(
+            "9.osias.lci.credit_backing", CREDITO_SCR_TABLE, "NUM_ID_LOTE",
+            bad_roots, ["root_id", "lot_id"],
+            "Each active type-81 root lot must have at least one output CREDITO_SCR master.",
+            "Output at least one CREDITO_SCR master for every active LCI root lot.",
+        ),
+        finding(
+            "9.osias.lci.credit_history", HISTORICO_CREDITO_SCR_TABLE,
+            "NUM_ID_CREDITO_SCR", bad_credits, ["credit_id", "lot_id"],
+            "Every active CREDITO_SCR master in the LCI output needs history.",
+            "Output at least one linked HISTORICO_CREDITO_SCR row per active master.",
+        ),
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
 def emit_report(spark: SparkSession, findings: List[Finding],
@@ -12176,7 +12482,8 @@ def emit_report(spark: SparkSession, findings: List[Finding],
                  baseline_identity: Optional[dict] = None,
                  runtime_identity: Optional[dict] = None,
                  allow_partial: bool = False,
-                 no_oracle: bool = False) -> int:
+                 no_oracle: bool = False,
+                 osias: bool = False) -> int:
     fail_level = _SEV_ORDER[fail_severity.upper()]
     failing = [f for f in findings if (not f.passed) and _SEV_ORDER[f.severity] >= fail_level]
 
@@ -12214,6 +12521,7 @@ def emit_report(spark: SparkSession, findings: List[Finding],
     print(f"SYNTHETIC OUTPUT VALIDATION — product={profile.name} ({identity})")
     print("=" * 78)
     print(f"input: {resolved_input}")
+    print(f"osias: {'enabled' if osias else 'disabled'}")
     for cat in sorted(by_cat):
         print(f"\n### {cat}")
         for f in by_cat[cat]:
@@ -12251,6 +12559,7 @@ def emit_report(spark: SparkSession, findings: List[Finding],
             "evidence_version": profile.evidence_version,
             "resolved_input": resolved_input,
             "oracle_access": "disabled" if no_oracle else "live",
+            "osias": osias,
             "load_eligible": not no_oracle,
             "table_inventory": sorted(table_inventory),
             "baseline_identity": baseline_identity,
@@ -12344,6 +12653,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--registration-profile", action="store_true",
                    help="Enable Cat 8 current-registration format, persisted-profile, and "
                         "exact type-mix WARN checks.")
+    p.add_argument("--osias", action="store_true",
+                   help="Enable the opt-in Osias scenario rules as ERROR checks.")
     return p.parse_args()
 
 
@@ -12533,6 +12844,10 @@ def main() -> None:
     if args.max_parent_keys is not None:
         logger.warning("--max-parent-keys is deprecated and ignored; "
                        "see --max-residual-keys.")
+    findings += _run_check_group(
+        "category 9 Osias ERROR profile", ("9.osias.",), skip_prefixes,
+        lambda: check_osias(tables, args.sample_size, profile, args.osias),
+    )
     referential_prefixes = ("3.fk_", "3.shared_key")
     if _check_group_is_skipped(referential_prefixes, skip_prefixes):
         ref_findings, faltantes = [], []
@@ -12853,6 +13168,7 @@ def main() -> None:
             spark, findings, args.report_path, args.fail_severity, profile,
             cfg.synthetic_base, list(tables), partial_reasons,
             baseline_identity, runtime_identity, args.allow_partial, args.no_oracle,
+            args.osias,
         ),
     )
     logger.info("[PERF] complete run elapsed=%.1fs", perf_counter() - run_started)

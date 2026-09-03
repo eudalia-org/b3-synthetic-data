@@ -79,6 +79,8 @@ uv run --allow-insecure-host pypi.org `
 
 Use `--dry-run` first. It performs no OCI or Oracle calls and prints the resolved
 DAG, immutable paths, Data Flow application arguments, and reservation contract.
+Add `--osias` to forward that flag to every validator Data Flow run; it does not
+affect engorda or load and has no config or `--set` form.
 The plan job writes an `engorda_plan` schema v2 artifact. It snapshots the selected
 lote to a location derived by engorda and commits that location as the plan's
 `selected_lote` descriptor; there is intentionally no runner snapshot-path option.

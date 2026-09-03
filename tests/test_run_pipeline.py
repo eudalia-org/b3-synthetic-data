@@ -536,6 +536,7 @@ def test_click_help_exposes_commands_and_polling_default():
     assert "--region" in run.output
     assert "--auth-refresh-seconds" in run.output
     assert "1800" in run.output
+    assert "--osias" in run.output
 
 
 def test_click_dry_run_finishes_without_submitting_jobs(tmp_path):
@@ -1165,7 +1166,96 @@ def test_dry_run_is_offline_and_prints_resolved_argv(tmp_path, capsys):
     validator_argv = output["nodes"]["cdb_simplificado.validate"]["arguments"]
     assert validator_argv[validator_argv.index("--product") + 1] == "cdb_simplificado"
     assert "--allow-partial" in validator_argv
+    assert "--osias" not in validator_argv
     assert not (tmp_path / "local-runs").exists()
+
+
+def test_osias_is_forwarded_only_to_every_validator_data_flow_argv(tmp_path, capsys):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado", "lci"))
+
+    assert P.main(
+        run_args(
+            tmp_path,
+            config,
+            upstream,
+            "--product",
+            "lci",
+            "--dry-run",
+            "--osias",
+        ),
+        adapter=NoCallsAdapter(),
+    ) == 0
+
+    plan = json.loads(capsys.readouterr().out)
+    validator_nodes = [
+        node for node in plan["nodes"].values() if node["operation"] == "validate"
+    ]
+    other_data_flow_nodes = [
+        node
+        for node in plan["nodes"].values()
+        if node["lane"] == "data-flow" and node["operation"] != "validate"
+    ]
+    assert len(validator_nodes) == 2
+    assert all(node["arguments"].count("--osias") == 1 for node in validator_nodes)
+    assert all("--osias" not in node["arguments"] for node in other_data_flow_nodes)
+
+
+def test_osias_has_no_product_config_or_set_support(tmp_path, capsys):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+    payload = json.loads(config.read_text())
+    payload["products"]["cdb_simplificado"]["validate"] = {"osias": True}
+    config.write_text(json.dumps(payload))
+
+    assert P.main(
+        run_args(tmp_path, config, upstream, "--dry-run"), adapter=NoCallsAdapter()
+    ) == 2
+    assert "contains unsupported option(s): osias" in capsys.readouterr().err
+
+    config = write_config(tmp_path)
+    assert P.main(
+        run_args(
+            tmp_path,
+            config,
+            upstream,
+            "--dry-run",
+            "--set",
+            "cdb_simplificado.validate.osias=true",
+        ),
+        adapter=NoCallsAdapter(),
+    ) == 2
+    assert "--set option is not allowed" in capsys.readouterr().err
+
+
+def test_validation_gate_attests_requested_osias_mode():
+    report = {
+        "verdict": "PASS",
+        "counts": {"error": 0},
+        "product": "lci",
+        "resolved_input": "oci://bucket/input",
+    }
+
+    ordinary = P._validation_gate(
+        report, expected_product="lci", expected_input="oci://bucket/input"
+    )
+    assert ordinary["accepted"]
+    assert ordinary["osias_matches"]
+
+    required = P._validation_gate(
+        report, expected_product="lci", expected_input="oci://bucket/input",
+        require_osias=True,
+    )
+    assert not required["accepted"]
+    assert not required["osias_matches"]
+
+    report["osias"] = True
+    required = P._validation_gate(
+        report, expected_product="lci", expected_input="oci://bucket/input",
+        require_osias=True,
+    )
+    assert required["accepted"]
+    assert required["osias_matches"]
 
 
 def test_genai_dry_run_resolves_conditional_plan_contract(tmp_path, capsys):
@@ -2160,6 +2250,7 @@ def test_validation_report_gate_accepts_only_zero_error_pass_or_partial(
         "accepted": expected_exit == 0,
         "error_count": report["counts"]["error"],
         "input_matches": True,
+        "osias_matches": True,
         "product_matches": True,
         "verdict": report["verdict"],
     }

@@ -1998,7 +1998,12 @@ def build_engorda_materialize_argv(
 
 
 def build_validator_argv(
-    product: str, synthetic_uri: str, report_uri: str, options: dict[str, Any]
+    product: str,
+    synthetic_uri: str,
+    report_uri: str,
+    options: dict[str, Any],
+    *,
+    osias: bool = False,
 ) -> list[str]:
     argv = [
         "--product",
@@ -2024,6 +2029,8 @@ def build_validator_argv(
             raise PipelineError("validate.no_oracle must be boolean")
         if options["no_oracle"]:
             argv.append("--no-oracle")
+    if osias:
+        argv.append("--osias")
     return argv
 
 
@@ -2341,7 +2348,11 @@ def build_pipeline_plan(
                 "dependencies": [dependency] if dependency else [],
                 "application_id": config["applications"]["validate"],
                 "arguments": build_validator_argv(
-                    product, synthetic_uri, paths["validation_report"], validate_options
+                    product,
+                    synthetic_uri,
+                    paths["validation_report"],
+                    validate_options,
+                    osias=bool(getattr(args, "osias", False)),
                 ),
                 "input_uri": synthetic_uri,
                 "output_uri": paths["validation_report"],
@@ -2475,7 +2486,8 @@ def _run_id_from_response(response: Any) -> str:
 
 
 def _validation_gate(
-    report: dict[str, Any], *, expected_product: str, expected_input: str
+    report: dict[str, Any], *, expected_product: str, expected_input: str,
+    require_osias: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(report, dict):
         raise PipelineError("validation report must be a JSON object")
@@ -2490,17 +2502,20 @@ def _validation_gate(
         isinstance(resolved_input, str)
         and resolved_input.rstrip("/") == expected_input.rstrip("/")
     )
+    osias_matches = not require_osias or report.get("osias") is True
     accepted = (
         errors == 0
         and verdict in {"PASS", "PARTIAL"}
         and product_matches
         and input_matches
+        and osias_matches
     )
     return {
         "verdict": verdict,
         "error_count": errors,
         "product_matches": product_matches,
         "input_matches": input_matches,
+        "osias_matches": osias_matches,
         "accepted": accepted,
     }
 
@@ -2854,6 +2869,7 @@ def _execute_remote_node(
                     report,
                     expected_product=PRODUCTS[node["product"]]["validator_product"],
                     expected_input=node["input_uri"],
+                    require_osias="--osias" in node["arguments"],
                 )
                 if not detail["validation"]["accepted"]:
                     progress.emit(
@@ -3785,6 +3801,12 @@ def cli(context: click.Context) -> None:
     "--no-oracle",
     is_flag=True,
     help="Disable Oracle access in engorda/validate and forbid downstream load.",
+)
+@click.option(
+    "--osias",
+    is_flag=True,
+    default=False,
+    help="Enable OSIAS mode for every validator Data Flow run.",
 )
 @click.option(
     "--set",

@@ -3016,6 +3016,15 @@
     "foreign_keys": [
       {
         "columns": [
+          "NUM_ID_CREDITO_SCR"
+        ],
+        "parent_table": "CREDITO_SCR",
+        "parent_columns": [
+          "NUM_ID_CREDITO_SCR"
+        ]
+      },
+      {
+        "columns": [
           "COD_ID_CANAL"
         ],
         "parent_table": "CANAL",
