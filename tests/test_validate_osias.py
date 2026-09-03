@@ -38,9 +38,12 @@ def test_osias_is_opt_in_and_does_not_apply_to_sibling_profiles():
     assert validator.check_osias(
         {}, 5, validator.VALIDATION_PROFILES["lca"], True
     ) == []
+    assert validator.check_osias(
+        {}, 5, validator.VALIDATION_PROFILES["rdb_inclusao"], True
+    ) == []
 
 
-@pytest.mark.parametrize("product", ["cdb", "ccb", "gravame", "lci"])
+@pytest.mark.parametrize("product", ["cdb", "ccb", "gravame", "lci", "rdb_resgate"])
 def test_osias_fails_closed_when_required_evidence_is_missing(product):
     finding = validator.check_osias(
         {}, 5, validator.VALIDATION_PROFILES[product], True
@@ -49,6 +52,44 @@ def test_osias_fails_closed_when_required_evidence_is_missing(product):
     assert finding.check_id == f"9.osias.{product}.availability"
     assert finding.severity == validator.SEV_ERROR
     assert not finding.passed
+
+
+def rdb_resgate_tables(spark):
+    return {
+        "INSTRUMENTO_FINANCEIRO": spark.createDataFrame(
+            [(1, 50, None), (2, 50, "2026-01-01")],
+            "NUM_IF long, NUM_TIPO_IF long, DAT_EXCLUSAO string",
+        ),
+        "TITULO": spark.createDataFrame(
+            [(1, "0.00"), (2, "9")], "NUM_IF long, QTD_RESGATADA string"
+        ),
+        "OPERACAO": spark.createDataFrame(
+            [(1, "5177.0"), (2, "7549")],
+            "NUM_IF long, NUM_ID_TIPO_OPER_OBJETO_SERV string",
+        ),
+    }
+
+
+def test_osias_rdb_resgate_requires_only_route_5177_and_zero_quantity(spark):
+    profile = validator.VALIDATION_PROFILES["rdb_resgate"]
+    findings = by_id(validator.check_osias(rdb_resgate_tables(spark), 5, profile, True))
+    assert all(finding.passed for finding in findings.values())
+
+    tables = rdb_resgate_tables(spark)
+    tables["OPERACAO"] = tables["OPERACAO"].unionByName(
+        spark.createDataFrame(
+            [(1, "7549")], "NUM_IF long, NUM_ID_TIPO_OPER_OBJETO_SERV string"
+        )
+    )
+    tables["TITULO"] = tables["TITULO"].withColumn(
+        "QTD_RESGATADA",
+        validator.F.when(validator.F.col("NUM_IF") == 1, "1")
+        .otherwise(validator.F.col("QTD_RESGATADA")),
+    )
+    findings = by_id(validator.check_osias(tables, 5, profile, True))
+
+    assert findings["9.osias.rdb_resgate.route"].count == 1
+    assert findings["9.osias.rdb_resgate.redeemed_quantity"].count == 1
 
 
 def cdb_tables(spark):

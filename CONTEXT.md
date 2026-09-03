@@ -61,7 +61,7 @@ A newly registered RDB with one type-20 RESGATE in `SEM TABELA` mode, no active 
 _Avoid_: RDB without RESGATE, RDB resgate
 
 **RDB resgate**:
-An RDB with one type-20 RESGATE in `COM TABELA` mode and at least one active CONDICAO_RESGATE schedule row.
+An RDB registering a redemption schedule, with one type-20 RESGATE in `COM TABELA` mode, at least one active CONDICAO_RESGATE schedule row, and no quantity yet redeemed on TITULO. Under the Osias validation profile, every operation uses operation-and-service classification 5177.
 _Avoid_: RDB inclusion, redemption row
 
 **CDB escalonamento**:

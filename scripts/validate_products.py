@@ -12173,7 +12173,9 @@ def check_osias(
     tables: Dict[str, DataFrame], sample: int, profile: ValidationProfile, enabled: bool
 ) -> List[Finding]:
     """Enforce the narrow product/scenario rules requested by the Osias profile."""
-    if not enabled or profile.name not in {"cdb", "ccb", "gravame", "lci"}:
+    if not enabled or profile.name not in {
+        "cdb", "ccb", "gravame", "lci", "rdb_resgate",
+    }:
         return []
 
     category = "Osias ERROR profile"
@@ -12203,6 +12205,59 @@ def check_osias(
             sample=_sample_keys(bad, keys, sample) if count else [],
             hint=hint if count else "", message=message,
         )
+
+    if profile.name == "rdb_resgate":
+        requirements = {
+            "INSTRUMENTO_FINANCEIRO": ("NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO"),
+            "TITULO": ("NUM_IF", "QTD_RESGATADA"),
+            "OPERACAO": ("NUM_IF", "NUM_ID_TIPO_OPER_OBJETO_SERV"),
+        }
+        columns, missing = _credito_scr_columns(tables, requirements)
+        if missing:
+            return unavailable(missing)
+
+        root_cols = columns["INSTRUMENTO_FINANCEIRO"]
+        roots = tables["INSTRUMENTO_FINANCEIRO"].where(
+            _oracle_null_equivalent(F.col(root_cols["DAT_EXCLUSAO"]))
+            & (_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == "50")
+        ).select(
+            _canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id")
+        ).dropDuplicates()
+        operation_cols = columns["OPERACAO"]
+        operations = tables["OPERACAO"].select(
+            _canon_key_col(F.col(operation_cols["NUM_IF"])).alias("root_id"),
+            _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
+            .alias("route_id"),
+        ).join(roots, "root_id", "inner")
+        title_cols = columns["TITULO"]
+        titles = tables["TITULO"].select(
+            _canon_key_col(F.col(title_cols["NUM_IF"])).alias("root_id"),
+            F.col(title_cols["QTD_RESGATADA"]).alias("redeemed_quantity"),
+        )
+        quantity = F.expr("try_cast(`redeemed_quantity` AS DECIMAL(38,18))")
+        return [
+            finding(
+                "9.osias.rdb_resgate.route", "OPERACAO",
+                "NUM_ID_TIPO_OPER_OBJETO_SERV",
+                operations.where(
+                    ~F.coalesce(F.col("route_id") == "5177", F.lit(False))
+                ),
+                ["root_id", "route_id"],
+                "Every operation owned by an RDB resgate root must canonicalize to route 5177.",
+                "Set every owned operation route to canonical ID 5177.",
+            ),
+            finding(
+                "9.osias.rdb_resgate.redeemed_quantity", "TITULO", "QTD_RESGATADA",
+                roots.join(titles, "root_id", "left").where(
+                    _oracle_null_equivalent(F.col("redeemed_quantity"))
+                    | quantity.isNull()
+                    | (quantity != F.lit(Decimal(0)))
+                ),
+                ["root_id", "redeemed_quantity"],
+                "Every RDB resgate title must have numeric zero QTD_RESGATADA.",
+                "Set QTD_RESGATADA to a nonnull numeric zero.",
+            ),
+        ]
 
     if profile.name == "cdb":
         requirements = {

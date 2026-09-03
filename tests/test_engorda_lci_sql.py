@@ -80,6 +80,16 @@ def test_cdb_escalonamento_requires_numeric_nonnull_zero_redeemed_quantity():
     )
 
 
+def test_rdb_resgate_requires_zero_redeemed_quantity_and_only_route_5177():
+    query = _query_block("rdb_resgate")
+
+    assert "TRY_CAST(TIT.QTD_RESGATADA AS DECIMAL(38, 18)) = 0" in query
+    assert "O.NUM_ID_TIPO_OPER_OBJETO_SERV IS NULL" in query
+    assert "OR O.NUM_ID_TIPO_OPER_OBJETO_SERV <> 5177" in query
+    assert "LEFT ANTI JOIN OPERACAO_FORA_ROTA" in query
+    assert "OPERACAO_FORA_ROTA" not in _query_block("rdb_inclusao")
+
+
 def test_gravame_rejects_any_operation_outside_approved_route_set():
     query = _query_block("gravame")
 
