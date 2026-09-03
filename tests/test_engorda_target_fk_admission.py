@@ -17,6 +17,111 @@ from pyspark.sql import functions as F
 from datagen import engorda_tables as eng
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "ObjectStorage service returned status: 429",
+        "ObjectStorage CircuitBreaker has been OPEN for 2.109 seconds",
+        "HeadObject CallNotAllowedException: default does not permit further calls",
+        "BmcDataStore BmcException: TooManyRequests from HeadObject",
+        "UnknownHostException: objectstorage.sa-saopaulo-1.oraclecloud.com",
+        "ObjectStorage HeadObject failed with HTTP 503",
+        "ObjectStorage HeadObject failed with statusCode: 503",
+        "BmcDataStore BmcException: (503, ServiceUnavailable, false)",
+    ],
+)
+def test_transient_oci_object_storage_error_is_classified(message):
+    assert eng._is_transient_oci_object_storage_error(RuntimeError(message))
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "ObjectStorage HeadObject failed with HTTP 404",
+        "Oracle ORA-00942: table or view does not exist",
+        "schema mismatch for NUM_IF",
+        "Circuit breaker configuration is malformed",
+        "Oracle CallNotAllowedException: database circuit is open",
+        "Oracle BmcException: TooManyRequests",
+    ],
+)
+def test_nontransient_errors_are_not_classified(message):
+    assert not eng._is_transient_oci_object_storage_error(RuntimeError(message))
+
+
+def test_transient_oci_action_waits_past_breaker_then_recovers(monkeypatch):
+    calls = 0
+    waits = []
+
+    def action():
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise RuntimeError("HeadObject status: 429; CircuitBreaker is OPEN")
+        return "recovered"
+
+    monkeypatch.setattr(eng, "_sleep_before_transient_oci_retry", waits.append)
+
+    assert eng._retry_transient_oci_action("test action", action) == "recovered"
+    assert calls == 3
+    assert waits == [35, 70]
+
+
+def test_transient_oci_action_does_not_retry_nontransient_error(monkeypatch):
+    waits = []
+    monkeypatch.setattr(eng, "_sleep_before_transient_oci_retry", waits.append)
+
+    with pytest.raises(ValueError, match="business rule"):
+        eng._retry_transient_oci_action(
+            "test action", lambda: (_ for _ in ()).throw(ValueError("business rule"))
+        )
+
+    assert waits == []
+
+
+def test_transient_oci_action_stops_after_bounded_attempts(monkeypatch):
+    calls = 0
+    waits = []
+
+    def unavailable():
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("ObjectStorage HeadObject statusCode: 503")
+
+    monkeypatch.setattr(eng, "_sleep_before_transient_oci_retry", waits.append)
+
+    with pytest.raises(RuntimeError, match="statusCode: 503"):
+        eng._retry_transient_oci_action("test action", unavailable)
+
+    assert calls == 3
+    assert waits == [35, 70]
+
+
+def test_read_pk_max_recreates_transiently_failed_spark_action(
+    spark, tmp_path, monkeypatch
+):
+    source = tmp_path / "RAW_TABLE"
+    spark.createDataFrame([(1,), (9,)], "ID long").write.parquet(str(source))
+    frame_class = type(spark.read.parquet(str(source)))
+    original_first = frame_class.first
+    first_calls = 0
+    waits = []
+
+    def flaky_first(frame):
+        nonlocal first_calls
+        first_calls += 1
+        if first_calls == 1:
+            raise RuntimeError("ObjectStorage HeadObject status: 429")
+        return original_first(frame)
+
+    monkeypatch.setattr(frame_class, "first", flaky_first)
+    monkeypatch.setattr(eng, "_sleep_before_transient_oci_retry", waits.append)
+
+    assert eng._read_pk_max(spark, str(source), "ID") == 9
+    assert first_calls == 2
+    assert waits == [35]
+
+
 class _ResultSet:
     def __init__(self, rows):
         self.rows = rows
@@ -325,6 +430,33 @@ def _root_only_selection_harness(spark, monkeypatch, domain, reject=None):
         )
 
     return run, pages
+
+
+def test_selection_retries_fk_admission_without_resampling(spark, monkeypatch):
+    domain = spark.createDataFrame([(1,)], "NUM_IF long")
+    run, pages = _root_only_selection_harness(spark, monkeypatch, domain)
+    successful_admission = eng._target_fk_rejections
+    calls = 0
+    waits = []
+
+    def flaky_admission(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("ObjectStorage CircuitBreaker has been OPEN for 2 seconds")
+        return successful_admission(*args, **kwargs)
+
+    monkeypatch.setattr(eng, "_target_fk_rejections", flaky_admission)
+    monkeypatch.setattr(eng, "_sleep_before_transient_oci_retry", waits.append)
+
+    selection = run(num_ifs=[1])
+
+    assert selection.values == [1]
+    assert pages == [[1]]
+    assert calls == 2
+    assert waits == [35]
+    for frame in selection.lotes.values():
+        frame.unpersist(blocking=False)
 
 
 @pytest.mark.parametrize(

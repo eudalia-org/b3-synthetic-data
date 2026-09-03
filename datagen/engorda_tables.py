@@ -803,6 +803,7 @@ ENGORDA_PLAN_ARTIFACT = "engorda_plan"
 ENGORDA_SELECTED_LOTE_ARTIFACT = "engorda_selected_lote"
 SNAPSHOT_ROWS_PER_PARTITION = 100_000
 SNAPSHOT_MAX_PARTITIONS = 64
+TRANSIENT_OCI_RETRY_DELAYS_SECONDS = (35, 70)
 ENGORDA_RESERVATION_ARTIFACT = "engorda_reservation"
 ENGORDA_PHASES = ("all", "plan", "materialize")
 GENAI_POLICY_VERSION = 1
@@ -2817,6 +2818,73 @@ def read_parquet(spark: SparkSession, path: str) -> DataFrame:
     return spark.read.parquet(path)
 
 
+def _is_transient_oci_object_storage_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    has_object_storage_context = any(
+        marker in message
+        for marker in (
+            "objectstorage",
+            "headobject",
+            "bmcfilesystem",
+            "bmcdatastore",
+        )
+    )
+    if not has_object_storage_context:
+        return False
+    if "unknownhostexception" in message:
+        return True
+    if (
+        "callnotallowedexception" in message
+        or re.search(r"circuitbreaker\s+(?:has been|is)\s+open", message)
+        or "too many requests" in message
+        or "toomanyrequests" in message
+    ):
+        return True
+    transient_status = r"(?:408|429|500|502|503|504)"
+    return bool(
+        re.search(
+            rf"(?:status(?:\s*code)?\s*[:=]?\s*|http\s+){transient_status}\b",
+            message,
+        )
+        or re.search(rf"\({transient_status}\s*,", message)
+        or re.search(
+            r"\b(?:requesttimeout|internalservererror|badgateway|"
+            r"serviceunavailable|gatewaytimeout)\b",
+            message,
+        )
+    )
+
+
+def _sleep_before_transient_oci_retry(seconds: int) -> None:
+    time.sleep(seconds)
+
+
+def _retry_transient_oci_action(label: str, action: Callable[[], Any]) -> Any:
+    attempts = len(TRANSIENT_OCI_RETRY_DELAYS_SECONDS) + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return action()
+        except Exception as exc:
+            if (
+                attempt == attempts
+                or not _is_transient_oci_object_storage_error(exc)
+            ):
+                raise
+            delay = TRANSIENT_OCI_RETRY_DELAYS_SECONDS[attempt - 1]
+            summary = " ".join(str(exc).split())[:300]
+            logger.warning(
+                "Falha OCI Object Storage transitória em %s (tentativa %d/%d): "
+                "%s. Aguardando %ds para o circuit breaker fechar.",
+                label,
+                attempt,
+                attempts,
+                summary,
+                delay,
+            )
+            _sleep_before_transient_oci_retry(delay)
+    raise AssertionError("retry loop terminou sem retorno ou exceção")
+
+
 def _default_num_if_query_path(filename: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
 
@@ -3579,8 +3647,11 @@ def _read_pk_max(spark, path: str, pk_col: str):
     """max(pk_col) do Parquet COMPLETO (footer-fast com aggregatePushdown) —
     cópia de engorda_tables._read_pk_max. Sem filtros de produto de propósito:
     a PK nova precisa ficar acima de TODAS as linhas de produção."""
-    row = read_parquet(spark, path).agg(F.max(F.col(pk_col))).first()
-    return row[0] if row is not None else None
+    def read_max():
+        row = read_parquet(spark, path).agg(F.max(F.col(pk_col))).first()
+        return row[0] if row is not None else None
+
+    return _retry_transient_oci_action(f"max PK {path}.{pk_col}", read_max)
 
 
 def _pk_capacity_of(dt: T.DataType) -> Optional[int]:
@@ -6061,16 +6132,19 @@ def seleciona_instrumentos_destino(
         with _perf_timer(
             "live_fk_admission", product=profile.name, roots=len(candidates)
         ):
-            rejected, reasons, page_selective = _target_fk_rejections(
-                spark,
-                spec,
-                planos,
-                lotes,
-                proveniencias,
-                ordem,
-                profile.integrity.selective_missing_keys,
-                nullify_columns or {},
-                existing_key_lookup,
+            rejected, reasons, page_selective = _retry_transient_oci_action(
+                f"admissão FK de {profile.name}",
+                lambda: _target_fk_rejections(
+                    spark,
+                    spec,
+                    planos,
+                    lotes,
+                    proveniencias,
+                    ordem,
+                    profile.integrity.selective_missing_keys,
+                    nullify_columns or {},
+                    existing_key_lookup,
+                ),
             )
         all_reasons.update(reasons)
         if num_ifs is not None and rejected:
