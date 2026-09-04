@@ -479,7 +479,7 @@ def test_hash_band_plan_targets_bounded_expected_size(
 
 @pytest.mark.parametrize(
     ("configured", "parallelism", "expected"),
-    [(512, 32, 64), (128, 32, 64), (32, 32, 32), (512, 1, 8)],
+    [(512, 128, 128), (256, 128, 128), (64, 128, 64), (512, 1, 8)],
 )
 def test_small_plan_shuffle_partition_target(configured, parallelism, expected):
     assert eng._small_plan_shuffle_partition_target(

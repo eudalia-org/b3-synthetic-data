@@ -5990,7 +5990,7 @@ def _small_plan_shuffle_partition_target(
 ) -> int:
     if configured < 1 or default_parallelism < 1:
         raise ValueError("shuffle partitions e defaultParallelism devem ser >= 1")
-    return min(configured, max(8, 2 * default_parallelism))
+    return min(configured, max(8, default_parallelism))
 
 
 def _tune_small_plan_shuffles(spark: SparkSession) -> int:
