@@ -81,16 +81,26 @@ Use `--dry-run` first. It performs no OCI or Oracle calls and prints the resolve
 DAG, immutable paths, Data Flow application arguments, and reservation contract.
 Add `--osias` to forward that flag to every validator Data Flow run; it does not
 affect engorda or load and has no config or `--set` form.
-The plan job writes an `engorda_plan` schema v2 artifact. It snapshots the selected
+The plan job writes an `engorda_plan` schema v3 artifact. It snapshots the selected
 lote to a location derived by engorda and commits that location as the plan's
 `selected_lote` descriptor; there is intentionally no runner snapshot-path option.
 Materialization consumes that committed snapshot instead of rebuilding the lote.
-Schema v1 plans are incompatible with reservation and must be regenerated with the
-current plan job; reservation artifacts remain schema v1.
-Before burning ranges, the runner verifies the plan-v2 snapshot descriptor's UUID,
+Schema v1 plans are incompatible with reservation. Existing schema v2 plans and
+schema v1 reservations retain their legacy global meu-number allocation behavior.
+New reservations and the reservation ledger use schema v2; the runner migrates a
+valid schema v1 ledger under the existing lease and ETag/CAS boundary.
+Before burning ranges, the runner verifies the plan snapshot descriptor's UUID,
 table paths, schema-object presence, source row counts, and optional selective-missing
 dataset contract against the hashed plan. Spark performs the deeper
 Parquet/StructType checks during materialization.
+
+Plan v3 allocates meu-number ordinals by operational-date/account/TOS groups. One
+shared interval may be reused by disjoint groups, but overlapping groups receive
+non-overlapping intervals through per-group ledger high-water marks. Plans store
+only SHA-256 group identifiers and counts, not raw account/TOS values; these hashes
+are pseudonymous rather than secret. Live meu-number generation must use the
+`plan -> reserve -> materialize` flow. Direct `phase=all` remains available only for
+dry/no-Oracle runs because it cannot participate safely in concurrent reservations.
 The engorda config must include an Object Storage `query_num_if_sql` URI. Upload
 `datagen/queries_produtos.sql` there; both plan and materialize receive that exact
 URI and freeze it into plan lineage, so no Data Flow local companion file is needed.

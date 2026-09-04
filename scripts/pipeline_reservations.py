@@ -16,6 +16,9 @@ except ModuleNotFoundError:  # Supports ``from scripts import pipeline_reservati
     from scripts import run_pipeline as _implementation
 
 SCHEMA_VERSION = _implementation.SCHEMA_VERSION
+LEASE_SCHEMA_VERSION = _implementation.LEASE_SCHEMA_VERSION
+LEDGER_SCHEMA_VERSION = _implementation.LEDGER_SCHEMA_VERSION
+RESERVATION_SCHEMA_VERSION = _implementation.RESERVATION_SCHEMA_VERSION
 MAX_CAS_ATTEMPTS = _implementation.MAX_CAS_ATTEMPTS
 MIN_MEU_NUMERO_PREFIX = _implementation.MIN_MEU_NUMERO_PREFIX
 MAX_MEU_NUMERO_PREFIX = _implementation.MAX_MEU_NUMERO_PREFIX

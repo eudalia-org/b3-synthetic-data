@@ -944,7 +944,11 @@ def parse_oci_uri(uri: str) -> tuple[str, str, str]:
     return bucket, namespace, object_name
 
 
-SCHEMA_VERSION = 1
+LEASE_SCHEMA_VERSION = 1
+LEDGER_SCHEMA_VERSION = 2
+RESERVATION_SCHEMA_VERSION = 2
+# Compatibility for callers that used the original lease-era shared constant.
+SCHEMA_VERSION = LEASE_SCHEMA_VERSION
 MAX_CAS_ATTEMPTS = 5
 MIN_MEU_NUMERO_PREFIX = 100
 MAX_MEU_NUMERO_PREFIX = 999
@@ -1185,7 +1189,7 @@ def _lease_payload(
     now = _now()
     return {
         "artifact_type": "pipeline_environment_lease",
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": LEASE_SCHEMA_VERSION,
         "environment": environment,
         "run_id": run_id,
         "product": product,
@@ -1267,6 +1271,107 @@ def _positive_or_zero(value: Any, location: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ReservationError(f"{location} must be a non-negative integer")
     return value
+
+
+def _validate_meu_numero_prefix(value: Any, location: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 3
+        or not value.isdigit()
+        or not MIN_MEU_NUMERO_PREFIX <= int(value) <= MAX_MEU_NUMERO_PREFIX
+    ):
+        raise ReservationError(f"{location} is invalid")
+    return value
+
+
+def _canonical_operational_date(value: Any, location: str) -> str:
+    if not isinstance(value, str):
+        raise ReservationError(f"{location} must be an ISO date")
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d").date().isoformat()
+    except ValueError as error:
+        raise ReservationError(f"{location} must be an ISO date") from error
+    if parsed != value:
+        raise ReservationError(f"{location} must be an ISO date")
+    return value
+
+
+def _validate_meu_numero_plan(plan: Mapping[str, Any]) -> None:
+    descriptor = plan.get("meu_numero")
+    if not isinstance(descriptor, Mapping):
+        raise ReservationError("plan.meu_numero must be an object")
+    requested_keys = {"requested_prefix"} if "requested_prefix" in descriptor else set()
+    if requested_keys:
+        _validate_meu_numero_prefix(
+            descriptor["requested_prefix"], "plan.meu_numero.requested_prefix"
+        )
+
+    if plan["schema_version"] == 2:
+        if set(descriptor) != {"ordinal_count_demand", *requested_keys}:
+            raise ReservationError("plan.meu_numero must have the exact plan-v2 structure")
+        _positive_or_zero(
+            descriptor.get("ordinal_count_demand"),
+            "plan.meu_numero.ordinal_count_demand",
+        )
+        return
+
+    expected_keys = {
+        "strategy",
+        "operational_date",
+        "normalization",
+        "tuple_count_demand",
+        "ordinal_count_demand",
+        "groups",
+        *requested_keys,
+    }
+    if set(descriptor) != expected_keys:
+        raise ReservationError("plan.meu_numero must have the exact plan-v3 structure")
+    if descriptor["strategy"] != "date_account_tos_shared_interval_v1":
+        raise ReservationError("plan.meu_numero.strategy is invalid")
+    if descriptor["normalization"] != "trim_strip_decimal_zeroes_v1":
+        raise ReservationError("plan.meu_numero.normalization is invalid")
+    operational_date = _canonical_operational_date(
+        descriptor["operational_date"], "plan.meu_numero.operational_date"
+    )
+    if operational_date != plan.get("controle_operacional_date"):
+        raise ReservationError(
+            "plan.meu_numero.operational_date must match controle_operacional_date"
+        )
+    tuple_demand = _positive_or_zero(
+        descriptor["tuple_count_demand"],
+        "plan.meu_numero.tuple_count_demand",
+    )
+    ordinal_demand = _positive_or_zero(
+        descriptor["ordinal_count_demand"],
+        "plan.meu_numero.ordinal_count_demand",
+    )
+    groups = descriptor["groups"]
+    if not isinstance(groups, list):
+        raise ReservationError("plan.meu_numero.groups must be an array")
+    group_ids: list[str] = []
+    counts: list[int] = []
+    for index, group in enumerate(groups):
+        location = f"plan.meu_numero.groups[{index}]"
+        if not isinstance(group, Mapping) or set(group) != {"group_id", "count_demand"}:
+            raise ReservationError(f"{location} must have group_id and count_demand")
+        group_id = group["group_id"]
+        if (
+            not isinstance(group_id, str)
+            or len(group_id) != 64
+            or any(character not in "0123456789abcdef" for character in group_id)
+        ):
+            raise ReservationError(f"{location}.group_id must be 64 lowercase hex characters")
+        count = group["count_demand"]
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            raise ReservationError(f"{location}.count_demand must be a positive integer")
+        group_ids.append(group_id)
+        counts.append(count)
+    if group_ids != sorted(set(group_ids)):
+        raise ReservationError("plan.meu_numero.groups must be sorted and unique")
+    if sum(counts) != tuple_demand:
+        raise ReservationError("plan.meu_numero tuple demand must equal the group count sum")
+    if max(counts, default=0) != ordinal_demand:
+        raise ReservationError("plan.meu_numero ordinal demand must equal the maximum group count")
 
 
 def _validate_selected_lote(
@@ -1363,9 +1468,9 @@ def _validate_selected_lote(
 def _validate_plan(plan: dict[str, Any], product: str, request_uri: str) -> None:
     if plan.get("artifact_type") != "engorda_plan":
         raise ReservationError("reservation request is not an engorda plan")
-    if plan.get("schema_version") != 2:
+    if plan.get("schema_version") not in {2, 3}:
         raise ReservationError(
-            "engorda plan schema_version is incompatible; regenerate it with plan-v2 "
+            "engorda plan schema_version is incompatible; regenerate it with plan-v2 or plan-v3 "
             "before reserving ranges"
         )
     if not isinstance(plan.get("plan_id"), str) or not plan["plan_id"]:
@@ -1409,30 +1514,48 @@ def _validate_plan(plan: dict[str, Any], product: str, request_uri: str) -> None
         elif count != 0 or minimum is not None:
             raise ReservationError(f"plan.tables.{table}.pk VIA_PAI must not request a range")
     _validate_selected_lote(plan.get("selected_lote"), plan["tables"], request_uri)
-    for section, field in (
-        ("cod_operacao", "count"),
-        ("meu_numero", "ordinal_count_demand"),
-    ):
-        value = plan.get(section)
-        if not isinstance(value, Mapping):
-            raise ReservationError(f"plan.{section} must be an object")
-        _positive_or_zero(value.get(field), f"plan.{section}.{field}")
+    cod_operacao = plan.get("cod_operacao")
+    if not isinstance(cod_operacao, Mapping):
+        raise ReservationError("plan.cod_operacao must be an object")
+    _positive_or_zero(cod_operacao.get("count"), "plan.cod_operacao.count")
+    _validate_meu_numero_plan(plan)
 
 
 def _new_ledger(environment: str) -> dict[str, Any]:
     return {
         "artifact_type": "engorda_reservation_ledger",
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": LEDGER_SCHEMA_VERSION,
         "environment": environment,
         "revision": 0,
         "table_pks": {},
-        "meu_numero": {"prefixes": {}},
+        "meu_numero": {"legacy_prefixes": {}, "groups": {}},
         "reservations": [],
     }
 
 
-def _validate_ledger(ledger: dict[str, Any], environment: str) -> None:
-    expected = ("engorda_reservation_ledger", SCHEMA_VERSION, environment)
+def _validate_ordinal(value: Any, location: str) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= MAX_MEU_NUMERO_ORDINAL + 1
+    ):
+        raise ReservationError(f"{location} must be an ordinal next value")
+    return value
+
+
+def _validate_ledger_common(ledger: dict[str, Any], environment: str, version: int) -> None:
+    expected_keys = {
+        "artifact_type",
+        "schema_version",
+        "environment",
+        "revision",
+        "table_pks",
+        "meu_numero",
+        "reservations",
+    }
+    if set(ledger) != expected_keys:
+        raise ReservationError("ledger must have the exact persisted structure")
+    expected = ("engorda_reservation_ledger", version, environment)
     actual = (
         ledger.get("artifact_type"),
         ledger.get("schema_version"),
@@ -1440,13 +1563,87 @@ def _validate_ledger(ledger: dict[str, Any], environment: str) -> None:
     )
     if actual != expected:
         raise ReservationError("ledger identity or schema does not match the environment")
-    if not isinstance(ledger.get("table_pks"), dict):
+    _positive_or_zero(ledger.get("revision"), "ledger.revision")
+    table_pks = ledger.get("table_pks")
+    if not isinstance(table_pks, dict):
         raise ReservationError("ledger.table_pks must be an object")
-    meu_numero = ledger.get("meu_numero")
-    if not isinstance(meu_numero, dict) or not isinstance(meu_numero.get("prefixes"), dict):
-        raise ReservationError("ledger.meu_numero.prefixes must be an object")
+    for table, state in table_pks.items():
+        if (
+            not isinstance(table, str)
+            or not table
+            or not isinstance(state, dict)
+            or set(state) != {"next_start"}
+            or isinstance(state["next_start"], bool)
+            or not isinstance(state["next_start"], int)
+        ):
+            raise ReservationError(f"ledger.table_pks.{table} is invalid")
     if not isinstance(ledger.get("reservations"), list):
         raise ReservationError("ledger.reservations must be an array")
+
+
+def _validate_prefixes(prefixes: Any, location: str) -> None:
+    if not isinstance(prefixes, dict):
+        raise ReservationError(f"{location} must be an object")
+    for prefix, next_value in prefixes.items():
+        _validate_meu_numero_prefix(prefix, f"{location}.{prefix}")
+        _validate_ordinal(next_value, f"{location}.{prefix}")
+
+
+def _validate_ledger(ledger: dict[str, Any], environment: str) -> None:
+    _validate_ledger_common(ledger, environment, LEDGER_SCHEMA_VERSION)
+    meu_numero = ledger.get("meu_numero")
+    if not isinstance(meu_numero, dict) or set(meu_numero) != {
+        "legacy_prefixes",
+        "groups",
+    }:
+        raise ReservationError("ledger.meu_numero must have legacy_prefixes and groups")
+    _validate_prefixes(
+        meu_numero["legacy_prefixes"], "ledger.meu_numero.legacy_prefixes"
+    )
+    groups = meu_numero["groups"]
+    if not isinstance(groups, dict):
+        raise ReservationError("ledger.meu_numero.groups must be an object")
+    for operational_date, date_state in groups.items():
+        _canonical_operational_date(
+            operational_date, f"ledger.meu_numero.groups.{operational_date}"
+        )
+        if not isinstance(date_state, dict):
+            raise ReservationError(
+                f"ledger.meu_numero.groups.{operational_date} must be an object"
+            )
+        for prefix, group_state in date_state.items():
+            prefix_location = f"ledger.meu_numero.groups.{operational_date}.{prefix}"
+            _validate_meu_numero_prefix(prefix, prefix_location)
+            if not isinstance(group_state, dict):
+                raise ReservationError(f"{prefix_location} must be an object")
+            for group_id, next_value in group_state.items():
+                if (
+                    not isinstance(group_id, str)
+                    or len(group_id) != 64
+                    or any(character not in "0123456789abcdef" for character in group_id)
+                ):
+                    raise ReservationError(f"{prefix_location}.{group_id} is invalid")
+                _validate_ordinal(next_value, f"{prefix_location}.{group_id}")
+
+
+def _migrate_ledger(ledger: dict[str, Any], environment: str) -> dict[str, Any]:
+    if ledger.get("schema_version") == LEDGER_SCHEMA_VERSION:
+        _validate_ledger(ledger, environment)
+        return ledger
+    if ledger.get("schema_version") != 1:
+        raise ReservationError("ledger identity or schema does not match the environment")
+    _validate_ledger_common(ledger, environment, 1)
+    meu_numero = ledger.get("meu_numero")
+    if not isinstance(meu_numero, dict) or set(meu_numero) != {"prefixes"}:
+        raise ReservationError("ledger.meu_numero.prefixes must be the legacy object")
+    _validate_prefixes(meu_numero["prefixes"], "ledger.meu_numero.prefixes")
+    migrated = deepcopy(ledger)
+    migrated["schema_version"] = LEDGER_SCHEMA_VERSION
+    migrated["meu_numero"] = {
+        "legacy_prefixes": deepcopy(meu_numero["prefixes"]),
+        "groups": {},
+    }
+    return migrated
 
 
 def _allocate_artifact(
@@ -1476,21 +1673,33 @@ def _allocate_artifact(
             "step": request["step"],
         }
 
-    meu_count = plan["meu_numero"]["ordinal_count_demand"]
-    meu_numero: dict[str, int | str | None]
+    meu_plan = plan["meu_numero"]
+    meu_count = meu_plan["ordinal_count_demand"]
+    meu_numero: dict[str, Any]
     if meu_count == 0:
-        meu_numero = {"prefix": None, "count": 0, "start": None, "end": None}
+        meu_numero = {
+            "strategy": (
+                "legacy_global_v1"
+                if plan["schema_version"] == 2
+                else "date_account_tos_shared_interval_v1"
+            ),
+            "prefix": None,
+            "count": 0,
+            "start": None,
+            "end": None,
+        }
+        if plan["schema_version"] == 3:
+            meu_numero.update(
+                operational_date=meu_plan["operational_date"],
+                group_ids=[],
+            )
     else:
         if meu_count > MAX_MEU_NUMERO_ORDINAL:
             raise ReservationError("meu_numero demand exceeds one prefix's ordinal capacity")
-        prefixes = ledger["meu_numero"]["prefixes"]
-        requested_prefix = plan["meu_numero"].get("requested_prefix")
+        meu_state = ledger["meu_numero"]
+        legacy_prefixes = meu_state["legacy_prefixes"]
+        requested_prefix = meu_plan.get("requested_prefix")
         if requested_prefix is not None:
-            if (not isinstance(requested_prefix, str)
-                    or not requested_prefix.isdigit()
-                    or len(requested_prefix) != 3
-                    or requested_prefix[0] == "0"):
-                raise ReservationError("plan.meu_numero.requested_prefix is invalid")
             prefix_candidates = (int(requested_prefix),)
         else:
             prefix_candidates = range(
@@ -1498,18 +1707,52 @@ def _allocate_artifact(
             )
         for prefix in prefix_candidates:
             key = str(prefix)
-            start = prefixes.get(key, 1)
-            if isinstance(start, bool) or not isinstance(start, int) or start < 1:
-                raise ReservationError(f"ledger.meu_numero.prefixes.{key} must be an ordinal")
+            floors = [legacy_prefixes.get(key, 1)]
+            if plan["schema_version"] == 2:
+                floors.extend(
+                    next_value
+                    for date_state in meu_state["groups"].values()
+                    for next_value in date_state.get(key, {}).values()
+                )
+                group_ids: list[str] = []
+                operational_date = None
+            else:
+                operational_date = meu_plan["operational_date"]
+                group_ids = [group["group_id"] for group in meu_plan["groups"]]
+                prefix_groups = (
+                    meu_state["groups"]
+                    .get(operational_date, {})
+                    .get(key, {})
+                )
+                floors.extend(prefix_groups.get(group_id, 1) for group_id in group_ids)
+            start = max(floors)
             end = start + meu_count - 1
             if end <= MAX_MEU_NUMERO_ORDINAL:
-                prefixes[key] = end + 1
                 meu_numero = {
+                    "strategy": (
+                        "legacy_global_v1"
+                        if plan["schema_version"] == 2
+                        else "date_account_tos_shared_interval_v1"
+                    ),
                     "prefix": key,
                     "count": meu_count,
                     "start": start,
                     "end": end,
                 }
+                if plan["schema_version"] == 2:
+                    legacy_prefixes[key] = end + 1
+                else:
+                    prefix_groups = (
+                        meu_state["groups"]
+                        .setdefault(operational_date, {})
+                        .setdefault(key, {})
+                    )
+                    for group_id in group_ids:
+                        prefix_groups[group_id] = end + 1
+                    meu_numero.update(
+                        operational_date=operational_date,
+                        group_ids=group_ids,
+                    )
                 break
         else:
             scope = requested_prefix or "100..999"
@@ -1517,7 +1760,7 @@ def _allocate_artifact(
 
     artifact = {
         "artifact_type": "engorda_reservation",
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": RESERVATION_SCHEMA_VERSION,
         "plan_id": plan["plan_id"],
         "product": product,
         "table_pks": table_pks,
@@ -1555,8 +1798,7 @@ def _reserve_in_ledger(
             current, etag = _read_json(storage, ledger_uri)
         except ObjectNotFound:
             current, etag = _new_ledger(environment), None
-        _validate_ledger(current, environment)
-        updated = deepcopy(current)
+        updated = deepcopy(_migrate_ledger(current, environment))
         artifact = _allocate_artifact(updated, plan, run_id, product, reservation_uri)
         try:
             storage.put(
@@ -1579,12 +1821,76 @@ def _existing_reservation(
     payload, etag = _read_json(storage, uri)
     expected = {
         "artifact_type": "engorda_reservation",
-        "schema_version": SCHEMA_VERSION,
         "plan_id": plan["plan_id"],
         "product": product,
     }
     if any(payload.get(key) != value for key, value in expected.items()):
         raise ReservationError(f"immutable reservation URI contains a different artifact: {uri}")
+    schema_version = payload.get("schema_version")
+    allowed_versions = {1, RESERVATION_SCHEMA_VERSION} if plan["schema_version"] == 2 else {
+        RESERVATION_SCHEMA_VERSION
+    }
+    meu_numero = payload.get("meu_numero")
+    expected_strategy = (
+        "legacy_global_v1"
+        if plan["schema_version"] == 2
+        else "date_account_tos_shared_interval_v1"
+    )
+    if (
+        schema_version not in allowed_versions
+        or not isinstance(meu_numero, Mapping)
+        or (
+            schema_version == RESERVATION_SCHEMA_VERSION
+            and meu_numero.get("strategy") != expected_strategy
+        )
+    ):
+        raise ReservationError(f"immutable reservation URI contains a different artifact: {uri}")
+    if schema_version == RESERVATION_SCHEMA_VERSION:
+        expected_keys = {"strategy", "prefix", "count", "start", "end"}
+        if plan["schema_version"] == 3:
+            expected_keys.update({"operational_date", "group_ids"})
+        count = plan["meu_numero"]["ordinal_count_demand"]
+        if set(meu_numero) != expected_keys or meu_numero.get("count") != count:
+            raise ReservationError(
+                f"immutable reservation URI contains a different artifact: {uri}"
+            )
+        if plan["schema_version"] == 3 and (
+            meu_numero.get("operational_date")
+            != plan["meu_numero"]["operational_date"]
+            or meu_numero.get("group_ids")
+            != [group["group_id"] for group in plan["meu_numero"]["groups"]]
+        ):
+            raise ReservationError(
+                f"immutable reservation URI contains a different artifact: {uri}"
+            )
+        if count == 0:
+            if any(meu_numero.get(key) is not None for key in ("prefix", "start", "end")):
+                raise ReservationError(
+                    f"immutable reservation URI contains a different artifact: {uri}"
+                )
+        else:
+            prefix = meu_numero.get("prefix")
+            start = meu_numero.get("start")
+            end = meu_numero.get("end")
+            try:
+                _validate_meu_numero_prefix(prefix, "reservation.meu_numero.prefix")
+            except ReservationError as error:
+                raise ReservationError(
+                    f"immutable reservation URI contains a different artifact: {uri}"
+                ) from error
+            if (
+                (plan["meu_numero"].get("requested_prefix") or prefix) != prefix
+                or isinstance(start, bool)
+                or not isinstance(start, int)
+                or start < 1
+                or isinstance(end, bool)
+                or not isinstance(end, int)
+                or end != start + count - 1
+                or end > MAX_MEU_NUMERO_ORDINAL
+            ):
+                raise ReservationError(
+                    f"immutable reservation URI contains a different artifact: {uri}"
+                )
     return payload, etag
 
 

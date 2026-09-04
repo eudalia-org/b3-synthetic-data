@@ -36,6 +36,10 @@ _Avoid_: Same-NUM_IF credit, LCA Credito row
 The business date governing synthetic financial and operation dates. `DAT_FINANCEIRO` and `DAT_OPERACAO` use this date alongside the other operational date fields; audit timestamps remain tied to execution time.
 _Avoid_: Run date, audit timestamp
 
+**Meu-number allocation group**:
+Operation sides sharing an operational date, normalized participant account, and normalized operation-and-service classification. Control-number ordinals may repeat across different groups, while the complete date/account/control/classification tuple remains unique. Concurrent runs reserve non-overlapping intervals whenever their groups overlap.
+_Avoid_: Globally unique control number, operation-only sequence
+
 **DICRE IROP closure**:
 The conditional family of IROP records linked to a Credito DC. Presence varies by DICRE subtype, but present records remain part of the aggregate.
 _Avoid_: Mandatory CCB closure, mandatory CMER closure

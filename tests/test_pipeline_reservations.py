@@ -121,6 +121,39 @@ def plan(
     return with_plan_id(body)
 
 
+def grouped_plan(
+    request_uri,
+    plan_id,
+    groups,
+    *,
+    operational_date="2026-09-04",
+    requested_prefix=None,
+):
+    request = plan(request_uri, plan_id, meu_count=0)
+    request["schema_version"] = 3
+    request["controle_operacional_date"] = operational_date
+    request["meu_numero"] = {
+        "strategy": "date_account_tos_shared_interval_v1",
+        "operational_date": operational_date,
+        "normalization": "trim_strip_decimal_zeroes_v1",
+        "tuple_count_demand": sum(group["count_demand"] for group in groups),
+        "ordinal_count_demand": max(
+            (group["count_demand"] for group in groups), default=0
+        ),
+        "groups": groups,
+        **(
+            {"requested_prefix": requested_prefix}
+            if requested_prefix is not None
+            else {}
+        ),
+    }
+    return with_plan_id(request)
+
+
+GROUP_A = "a" * 64
+GROUP_B = "b" * 64
+
+
 class FakeStorage:
     def __init__(self):
         self.objects = {}
@@ -207,14 +240,20 @@ def test_allocates_schema_compatible_ranges_and_keeps_oracle_as_cod_authority():
     }
     assert artifact == {
         "artifact_type": "engorda_reservation",
-        "schema_version": 1,
+        "schema_version": 2,
         "plan_id": plan(REQUEST_A, "plan-a")["plan_id"],
         "product": "cdb_simplificado",
         "table_pks": {
             "OPERACAO": {"count": 3, "start": 100, "end": 104, "step": 2}
         },
         "cod_operacao": {"strategy": "oracle_allocator", "count": 7},
-        "meu_numero": {"prefix": "100", "count": 4, "start": 1, "end": 4},
+        "meu_numero": {
+            "strategy": "legacy_global_v1",
+            "prefix": "100",
+            "count": 4,
+            "start": 1,
+            "end": 4,
+        },
     }
     assert LEASE not in store.objects
     ledger_put = next(call for call in store.calls if call[:2] == ("put", LEDGER))
@@ -235,7 +274,7 @@ def test_plan_v1_requires_migration_and_plan_v2_is_accepted():
     store.seed(REQUEST_A, plan(REQUEST_A, "current"))
     reserve(store, REQUEST_A, RESERVATION_A, "run-v2")
 
-    assert store.json(RESERVATION_A)["schema_version"] == 1
+    assert store.json(RESERVATION_A)["schema_version"] == 2
 
 
 def test_plan_v2_requires_selected_lote_descriptor():
@@ -251,13 +290,34 @@ def test_plan_v2_requires_selected_lote_descriptor():
     assert RESERVATION_A not in store.objects
 
 
+@pytest.mark.parametrize(
+    "meu_numero",
+    [
+        {},
+        {"ordinal_count_demand": 4, "extra": True},
+        {"ordinal_count_demand": 4, "requested_prefix": "099"},
+    ],
+    ids=["missing-demand", "extra-key", "invalid-prefix"],
+)
+def test_plan_v2_requires_exact_legacy_meu_numero_descriptor(meu_numero):
+    store = FakeStorage()
+    request = plan(REQUEST_A, "invalid-legacy")
+    request["meu_numero"] = meu_numero
+    store.seed(REQUEST_A, with_plan_id(request))
+
+    with pytest.raises(R.ReservationError, match="plan.meu_numero"):
+        reserve(store, REQUEST_A, RESERVATION_A, "run-invalid-legacy")
+
+    assert store.calls == [("get", REQUEST_A)]
+
+
 def test_plan_v2_accepts_present_selective_missing_descriptor():
     store = FakeStorage()
     store.seed(REQUEST_A, plan(REQUEST_A, "selective", selective_missing=True))
 
     reserve(store, REQUEST_A, RESERVATION_A, "run-selective")
 
-    assert store.json(RESERVATION_A)["schema_version"] == 1
+    assert store.json(RESERVATION_A)["schema_version"] == 2
 
 
 def test_external_selected_lote_uri_is_rejected_before_lease_or_ledger():
@@ -354,7 +414,7 @@ def test_parallel_products_and_later_runs_never_reuse_ranges():
     assert sorted(item["table_pks"]["OPERACAO"]["start"] for item in artifacts) == [100, 106]
     assert sorted(item["meu_numero"]["start"] for item in artifacts) == [1, 5]
     assert store.json(LEDGER)["table_pks"]["OPERACAO"]["next_start"] == 112
-    assert store.json(LEDGER)["meu_numero"]["prefixes"]["100"] == 9
+    assert store.json(LEDGER)["meu_numero"]["legacy_prefixes"]["100"] == 9
 
 
 def test_requested_meu_numero_prefix_is_honored():
@@ -364,6 +424,356 @@ def test_requested_meu_numero_prefix_is_honored():
     reserve(store, REQUEST_A, RESERVATION_A, "run-prefix")
 
     assert store.json(RESERVATION_A)["meu_numero"]["prefix"] == "321"
+
+
+def test_facade_exports_independent_schema_versions():
+    assert R.LEASE_SCHEMA_VERSION == 1
+    assert R.LEDGER_SCHEMA_VERSION == 2
+    assert R.RESERVATION_SCHEMA_VERSION == 2
+    assert R.SCHEMA_VERSION == R.LEASE_SCHEMA_VERSION
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda request: request["meu_numero"].update(strategy="wrong"),
+        lambda request: request["meu_numero"].update(operational_date="2026-09-05"),
+        lambda request: request["meu_numero"].update(normalization="wrong"),
+        lambda request: request["meu_numero"].update(tuple_count_demand=-1),
+        lambda request: request["meu_numero"].update(ordinal_count_demand=True),
+        lambda request: request["meu_numero"].update(tuple_count_demand=1),
+        lambda request: request["meu_numero"].update(ordinal_count_demand=1),
+        lambda request: request["meu_numero"].update(
+            groups=[
+                {"group_id": GROUP_B, "count_demand": 2},
+                {"group_id": GROUP_A, "count_demand": 4},
+            ]
+        ),
+        lambda request: request["meu_numero"]["groups"][0].update(group_id="A" * 64),
+        lambda request: request["meu_numero"]["groups"][0].update(count_demand=0),
+        lambda request: request["meu_numero"].update(extra=True),
+    ],
+    ids=[
+        "strategy",
+        "operational-date",
+        "normalization",
+        "negative-tuple-demand",
+        "boolean-ordinal-demand",
+        "tuple-sum",
+        "ordinal-maximum",
+        "group-order",
+        "group-id",
+        "group-count",
+        "extra-key",
+    ],
+)
+def test_invalid_grouped_plan_never_acquires_lease_or_burns_ranges(mutation):
+    store = FakeStorage()
+    request = grouped_plan(
+        REQUEST_A,
+        "grouped-invalid",
+        [
+            {"group_id": GROUP_A, "count_demand": 4},
+            {"group_id": GROUP_B, "count_demand": 2},
+        ],
+    )
+    mutation(request)
+    store.seed(REQUEST_A, with_plan_id(request))
+
+    with pytest.raises(R.ReservationError, match="plan.meu_numero"):
+        reserve(store, REQUEST_A, RESERVATION_A, "run-invalid-grouped")
+
+    assert store.calls == [("get", REQUEST_A)]
+    assert LEASE not in store.objects
+    assert LEDGER not in store.objects
+
+
+def test_grouped_plan_allocates_strategy_aware_reservation_and_ledger_state():
+    store = FakeStorage()
+    store.seed(
+        REQUEST_A,
+        grouped_plan(
+            REQUEST_A,
+            "grouped",
+            [
+                {"group_id": GROUP_A, "count_demand": 4},
+                {"group_id": GROUP_B, "count_demand": 2},
+            ],
+            requested_prefix="321",
+        ),
+    )
+
+    reserve(store, REQUEST_A, RESERVATION_A, "run-grouped")
+
+    assert store.json(RESERVATION_A)["meu_numero"] == {
+        "strategy": "date_account_tos_shared_interval_v1",
+        "prefix": "321",
+        "count": 4,
+        "start": 1,
+        "end": 4,
+        "operational_date": "2026-09-04",
+        "group_ids": [GROUP_A, GROUP_B],
+    }
+    ledger = store.json(LEDGER)
+    assert ledger["schema_version"] == 2
+    assert ledger["meu_numero"] == {
+        "legacy_prefixes": {},
+        "groups": {
+            "2026-09-04": {
+                "321": {
+                    GROUP_A: 5,
+                    GROUP_B: 5,
+                }
+            }
+        },
+    }
+
+
+def test_zero_grouped_demand_emits_coherent_empty_reservation():
+    store = FakeStorage()
+    store.seed(REQUEST_A, grouped_plan(REQUEST_A, "empty", []))
+
+    reserve(store, REQUEST_A, RESERVATION_A, "run-empty")
+
+    assert store.json(RESERVATION_A)["meu_numero"] == {
+        "strategy": "date_account_tos_shared_interval_v1",
+        "prefix": None,
+        "count": 0,
+        "start": None,
+        "end": None,
+        "operational_date": "2026-09-04",
+        "group_ids": [],
+    }
+
+
+def test_concurrent_disjoint_groups_reuse_same_interval():
+    store = FakeStorage()
+    store.seed(
+        REQUEST_A,
+        grouped_plan(REQUEST_A, "disjoint-a", [{"group_id": GROUP_A, "count_demand": 4}]),
+    )
+    store.seed(
+        REQUEST_B,
+        grouped_plan(REQUEST_B, "disjoint-b", [{"group_id": GROUP_B, "count_demand": 4}]),
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(reserve, store, REQUEST_A, RESERVATION_A, "run-a"),
+            executor.submit(reserve, store, REQUEST_B, RESERVATION_B, "run-b"),
+        ]
+        for future in futures:
+            future.result()
+
+    assert [
+        store.json(uri)["meu_numero"]["start"]
+        for uri in (RESERVATION_A, RESERVATION_B)
+    ] == [1, 1]
+
+
+def test_concurrent_overlapping_groups_get_non_overlapping_intervals():
+    store = FakeStorage()
+    for request_uri, label in ((REQUEST_A, "overlap-a"), (REQUEST_B, "overlap-b")):
+        store.seed(
+            request_uri,
+            grouped_plan(
+                request_uri,
+                label,
+                [{"group_id": GROUP_A, "count_demand": 4}],
+            ),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(reserve, store, REQUEST_A, RESERVATION_A, "run-a"),
+            executor.submit(reserve, store, REQUEST_B, RESERVATION_B, "run-b"),
+        ]
+        for future in futures:
+            future.result()
+
+    intervals = sorted(
+        (
+            store.json(uri)["meu_numero"]["start"],
+            store.json(uri)["meu_numero"]["end"],
+        )
+        for uri in (RESERVATION_A, RESERVATION_B)
+    )
+    assert intervals == [(1, 4), (5, 8)]
+
+
+def test_v1_ledger_migrates_without_losing_legacy_floor_or_history():
+    store = FakeStorage()
+    store.seed(REQUEST_A, plan(REQUEST_A, "migration", meu_count=4))
+    existing_reservations = [{"run_id": "older"}]
+    store.seed(
+        LEDGER,
+        {
+            "artifact_type": "engorda_reservation_ledger",
+            "schema_version": 1,
+            "environment": "qab",
+            "revision": 7,
+            "table_pks": {"OPERACAO": {"next_start": 200}},
+            "meu_numero": {"prefixes": {"100": 10}},
+            "reservations": existing_reservations,
+        },
+    )
+
+    reserve(store, REQUEST_A, RESERVATION_A, "run-migration")
+
+    assert store.json(RESERVATION_A)["meu_numero"]["start"] == 10
+    ledger = store.json(LEDGER)
+    assert ledger["schema_version"] == 2
+    assert ledger["revision"] == 8
+    assert ledger["table_pks"]["OPERACAO"]["next_start"] == 206
+    assert ledger["meu_numero"]["legacy_prefixes"]["100"] == 14
+    assert ledger["meu_numero"]["groups"] == {}
+    assert ledger["reservations"][0] == existing_reservations[0]
+
+
+def test_malformed_v1_ledger_is_not_migrated():
+    store = FakeStorage()
+    store.seed(REQUEST_A, plan(REQUEST_A, "bad-migration"))
+    ledger = {
+        "artifact_type": "engorda_reservation_ledger",
+        "schema_version": 1,
+        "environment": "qab",
+        "revision": 0,
+        "table_pks": {},
+        "meu_numero": {"prefixes": {"100": 0}},
+        "reservations": [],
+    }
+    store.seed(LEDGER, ledger)
+
+    with pytest.raises(R.ReservationError, match="ordinal next value"):
+        reserve(store, REQUEST_A, RESERVATION_A, "run-bad-migration")
+
+    assert store.json(LEDGER) == ledger
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda ledger: ledger.update(revision=True),
+        lambda ledger: ledger["table_pks"].update(BAD={"next_start": True}),
+        lambda ledger: ledger["meu_numero"]["legacy_prefixes"].update({"099": 1}),
+        lambda ledger: ledger["meu_numero"]["legacy_prefixes"].update({"100": 0}),
+        lambda ledger: ledger["meu_numero"]["groups"].update({"not-a-date": {}}),
+        lambda ledger: ledger["meu_numero"]["groups"].update(
+            {"2026-09-04": {"100": {"A" * 64: 2}}}
+        ),
+        lambda ledger: ledger.update(extra=True),
+    ],
+    ids=[
+        "revision",
+        "table-next",
+        "legacy-prefix",
+        "legacy-next",
+        "group-date",
+        "group-id",
+        "extra-key",
+    ],
+)
+def test_malformed_v2_ledger_is_rejected_without_replacement(mutation):
+    store = FakeStorage()
+    store.seed(REQUEST_A, plan(REQUEST_A, "malformed-ledger"))
+    ledger = {
+        "artifact_type": "engorda_reservation_ledger",
+        "schema_version": 2,
+        "environment": "qab",
+        "revision": 0,
+        "table_pks": {},
+        "meu_numero": {"legacy_prefixes": {}, "groups": {}},
+        "reservations": [],
+    }
+    mutation(ledger)
+    store.seed(LEDGER, ledger)
+
+    with pytest.raises(R.ReservationError, match="ledger"):
+        reserve(store, REQUEST_A, RESERVATION_A, "run-malformed-ledger")
+
+    assert store.json(LEDGER) == ledger
+    assert RESERVATION_A not in store.objects
+
+
+def test_legacy_and_grouped_allocations_respect_each_others_floors():
+    store = FakeStorage()
+    request_c = REQUEST_A.replace("/a/", "/c/")
+    request_d = REQUEST_A.replace("/a/", "/d/")
+    reservation_c = RESERVATION_A.replace("/a/", "/c/")
+    reservation_d = RESERVATION_A.replace("/a/", "/d/")
+    store.seed(
+        REQUEST_A,
+        grouped_plan(REQUEST_A, "group-a", [{"group_id": GROUP_A, "count_demand": 4}]),
+    )
+    store.seed(
+        REQUEST_B,
+        grouped_plan(REQUEST_B, "group-b", [{"group_id": GROUP_B, "count_demand": 7}]),
+    )
+    store.seed(request_c, plan(request_c, "legacy", meu_count=2))
+    store.seed(
+        request_d,
+        grouped_plan(request_d, "after-legacy", [{"group_id": "c" * 64, "count_demand": 3}]),
+    )
+
+    reserve(store, REQUEST_A, RESERVATION_A, "run-group-a")
+    reserve(store, REQUEST_B, RESERVATION_B, "run-group-b")
+    reserve(store, request_c, reservation_c, "run-legacy")
+    reserve(store, request_d, reservation_d, "run-after-legacy")
+
+    assert store.json(RESERVATION_A)["meu_numero"]["start"] == 1
+    assert store.json(RESERVATION_B)["meu_numero"]["start"] == 1
+    assert store.json(reservation_c)["meu_numero"]["start"] == 8
+    assert store.json(reservation_d)["meu_numero"]["start"] == 10
+
+
+def test_existing_plan2_reservation_v1_remains_idempotently_readable():
+    store = FakeStorage()
+    request = plan(REQUEST_A, "legacy-reservation")
+    store.seed(REQUEST_A, request)
+    store.seed(
+        RESERVATION_A,
+        {
+            "artifact_type": "engorda_reservation",
+            "schema_version": 1,
+            "plan_id": request["plan_id"],
+            "product": "cdb_simplificado",
+            "table_pks": {},
+            "cod_operacao": {"strategy": "oracle_allocator", "count": 7},
+            "meu_numero": {"prefix": "100", "count": 4, "start": 1, "end": 4},
+        },
+    )
+
+    result = reserve(store, REQUEST_A, RESERVATION_A, "run-existing-v1")
+
+    assert result == {"uri": RESERVATION_A, "etag": store.etags[RESERVATION_A]}
+    assert LEDGER not in store.objects
+    assert LEASE not in store.objects
+
+
+def test_existing_reservation_must_have_schema_appropriate_for_plan_version():
+    store = FakeStorage()
+    request = grouped_plan(
+        REQUEST_A,
+        "wrong-reservation-strategy",
+        [{"group_id": GROUP_A, "count_demand": 4}],
+    )
+    store.seed(REQUEST_A, request)
+    store.seed(
+        RESERVATION_A,
+        {
+            "artifact_type": "engorda_reservation",
+            "schema_version": 2,
+            "plan_id": request["plan_id"],
+            "product": "cdb_simplificado",
+            "meu_numero": {"strategy": "legacy_global_v1"},
+        },
+    )
+
+    with pytest.raises(R.ReservationError, match="different artifact"):
+        reserve(store, REQUEST_A, RESERVATION_A, "run-wrong-strategy")
+
+    assert LEDGER not in store.objects
+    assert LEASE not in store.objects
 
 
 def test_failed_publication_burns_ranges_and_ledger_cas_retries_are_bounded():

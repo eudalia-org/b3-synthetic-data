@@ -84,6 +84,21 @@ class TestEngordaPhaseCli:
         assert args.sem_poda_conta is False
         assert args.sem_ajuste_k is False
 
+    def test_live_all_with_meu_numero_requires_reserved_materialization(self):
+        job = engorda_tables.EngordaJob(
+            produto="cdb_simplificado",
+            num_ifs=(123,),
+            meu_numero_prefix="321",
+            phase="all",
+        )
+
+        with pytest.raises(ValueError, match="plan.*reserve.*materialize"):
+            engorda_tables._validate_engorda_job(job)
+
+        assert engorda_tables._validate_engorda_job(
+            dataclasses.replace(job, no_oracle=True)
+        ).name == "cdb_simplificado"
+
     def test_cli_disables_schedule_pruning_and_main_forwards_it(self, monkeypatch):
         captured = []
         monkeypatch.setattr(
@@ -259,7 +274,17 @@ class TestEngordaArtifacts:
             },
             "cod_if": {"count": 2, "oracle_type": 49},
             "cod_operacao": {"count": 2},
-            "meu_numero": {"ordinal_count_demand": 3},
+            "meu_numero": {
+                "strategy": "date_account_tos_shared_interval_v1",
+                "operational_date": "2026-08-18",
+                "normalization": "trim_strip_decimal_zeroes_v1",
+                "tuple_count_demand": 4,
+                "ordinal_count_demand": 3,
+                "groups": [
+                    {"group_id": "a" * 64, "count_demand": 3},
+                    {"group_id": "b" * 64, "count_demand": 1},
+                ],
+            },
         }
         return {**body, "plan_id": engorda_tables._plan_id(body)}
 
@@ -293,10 +318,20 @@ class TestEngordaArtifacts:
 
     def test_plan_v2_requires_spec_sha256(self):
         body = {key: value for key, value in self._plan().items() if key != "plan_id"}
+        body["schema_version"] = 2
+        body["meu_numero"] = {"ordinal_count_demand": 3}
         body.pop("spec_sha256")
         plan = {**body, "plan_id": engorda_tables._plan_id(body)}
 
         with pytest.raises(ValueError, match="spec_sha256"):
+            engorda_tables._validate_plan_artifact(plan)
+
+    def test_plan_v3_rejects_inconsistent_group_demands_after_hash_validation(self):
+        body = {key: value for key, value in self._plan().items() if key != "plan_id"}
+        body["meu_numero"]["tuple_count_demand"] = 5
+        plan = {**body, "plan_id": engorda_tables._plan_id(body)}
+
+        with pytest.raises(ValueError, match="tuple_count_demand diverge dos grupos"):
             engorda_tables._validate_plan_artifact(plan)
 
     def test_plan_builder_freezes_exact_public_demands(self):
@@ -360,7 +395,14 @@ class TestEngordaArtifacts:
         }
         assert plan["cod_if"] == {"count": 6, "oracle_type": 49}
         assert plan["cod_operacao"] == {"count": 0}
-        assert plan["meu_numero"] == {"ordinal_count_demand": 0}
+        assert plan["meu_numero"] == {
+            "strategy": "date_account_tos_shared_interval_v1",
+            "operational_date": "2026-08-18",
+            "normalization": "trim_strip_decimal_zeroes_v1",
+            "tuple_count_demand": 0,
+            "ordinal_count_demand": 0,
+            "groups": [],
+        }
         assert "oracle_access" not in plan
         assert engorda_tables._validate_plan_artifact(plan) == plan
 
@@ -476,15 +518,16 @@ class TestEngordaArtifacts:
             def count(self):
                 raise AssertionError("supplied lote counts must prevent frame.count()")
 
-        class SameAccountRows:
-            def count(self):
-                return 1
-
-        class OperationFrame(NoCountFrame):
-            def where(self, _predicate):
-                return SameAccountRows()
-
         profile = engorda_tables.get_product_profile("cdb_simplificado")
+        operations = spark.createDataFrame(
+            [
+                (1, "100", "100.0", "4509"),
+                (2, "100", "200", "4509.0"),
+                (3, "300", "400", "4509"),
+            ],
+            "NUM_ID_OPERACAO long, NUM_CONTA_PARTICIPANTE_P1 string, "
+            "NUM_CONTA_PARTICIPANTE_P2 string, NUM_ID_TIPO_OPER_OBJETO_SERV string",
+        )
         planos = {
             "INSTRUMENTO_FINANCEIRO": engorda_tables.PlanoTabela(
                 "INSTRUMENTO_FINANCEIRO", ("NUM_IF",)
@@ -512,7 +555,7 @@ class TestEngordaArtifacts:
             planos=planos,
             lotes={
                 "INSTRUMENTO_FINANCEIRO": NoCountFrame(),
-                "OPERACAO": OperationFrame(),
+                "OPERACAO": operations,
             },
             lote_counts={"INSTRUMENTO_FINANCEIRO": 2, "OPERACAO": 3},
             faltantes_uri=None,
@@ -525,7 +568,8 @@ class TestEngordaArtifacts:
 
         assert plan["tables"]["OPERACAO"]["source_count"] == 3
         assert plan["cod_operacao"] == {"count": 6}
-        assert plan["meu_numero"] == {"ordinal_count_demand": 8}
+        assert plan["meu_numero"]["tuple_count_demand"] == 12
+        assert plan["meu_numero"]["ordinal_count_demand"] == 6
 
     def test_final_lote_counts_use_one_combined_action(self, spark, monkeypatch):
         frames = {
@@ -642,6 +686,9 @@ class TestEngordaArtifacts:
             },
             "cod_operacao": {"strategy": "oracle_allocator", "count": 2},
             "meu_numero": {
+                "strategy": "date_account_tos_shared_interval_v1",
+                "operational_date": "2026-08-18",
+                "group_ids": ["a" * 64, "b" * 64],
                 "prefix": "321",
                 "start": 50,
                 "end": 52,
@@ -677,10 +724,117 @@ class TestEngordaArtifacts:
             "table_pks": {},
             "cod_operacao": {"strategy": "oracle_allocator", "count": 2},
             "meu_numero": {
+                "strategy": "date_account_tos_shared_interval_v1",
+                "operational_date": "2026-08-18",
+                "group_ids": ["a" * 64, "b" * 64],
                 "prefix": "321", "start": 1, "end": 3, "count": 3,
             },
         }
         with pytest.raises(ValueError, match="plan_id"):
+            engorda_tables._validate_reservation_artifact(plan, reservation)
+
+    def test_plan_v2_and_reservation_v1_keep_legacy_contract(self):
+        body = {key: value for key, value in self._plan().items() if key != "plan_id"}
+        body["schema_version"] = engorda_tables.ENGORDA_LEGACY_PLAN_SCHEMA_VERSION
+        body["meu_numero"] = {
+            "ordinal_count_demand": 3,
+            "requested_prefix": "321",
+        }
+        plan = {**body, "plan_id": engorda_tables._plan_id(body)}
+        reservation = {
+            "artifact_type": engorda_tables.ENGORDA_RESERVATION_ARTIFACT,
+            "schema_version": engorda_tables.ENGORDA_LEGACY_RESERVATION_SCHEMA_VERSION,
+            "plan_id": plan["plan_id"],
+            "product": plan["product"],
+            "table_pks": {
+                "INSTRUMENTO_FINANCEIRO": {
+                    "start": 200,
+                    "end": 201,
+                    "count": 2,
+                    "step": 1,
+                },
+            },
+            "cod_operacao": {"strategy": "oracle_allocator", "count": 2},
+            "meu_numero": {
+                "prefix": "321",
+                "start": 50,
+                "end": 52,
+                "count": 3,
+            },
+        }
+
+        assert engorda_tables._validate_plan_artifact(plan) == plan
+        assert engorda_tables._validate_reservation_artifact(plan, reservation) == reservation
+
+        reservation_v2 = {
+            **reservation,
+            "schema_version": engorda_tables.ENGORDA_RESERVATION_SCHEMA_VERSION,
+            "meu_numero": {
+                "strategy": "legacy_global_v1",
+                **reservation["meu_numero"],
+            },
+        }
+        assert (
+            engorda_tables._validate_reservation_artifact(plan, reservation_v2)
+            == reservation_v2
+        )
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("strategy", "global_v1", "strategy"),
+            ("operational_date", "2026-08-19", "operational_date"),
+            ("group_ids", ["a" * 64], "group_ids"),
+        ],
+    )
+    def test_v3_reservation_rejects_group_scope_mismatch(self, field, value, message):
+        plan = self._plan()
+        reservation = {
+            "artifact_type": engorda_tables.ENGORDA_RESERVATION_ARTIFACT,
+            "schema_version": engorda_tables.ENGORDA_RESERVATION_SCHEMA_VERSION,
+            "plan_id": plan["plan_id"],
+            "product": plan["product"],
+            "table_pks": {
+                "INSTRUMENTO_FINANCEIRO": {
+                    "start": 200,
+                    "end": 201,
+                    "count": 2,
+                    "step": 1,
+                },
+            },
+            "cod_operacao": {"strategy": "oracle_allocator", "count": 2},
+            "meu_numero": {
+                "strategy": "date_account_tos_shared_interval_v1",
+                "operational_date": "2026-08-18",
+                "group_ids": ["a" * 64, "b" * 64],
+                "prefix": "321",
+                "start": 50,
+                "end": 52,
+                "count": 3,
+            },
+        }
+        reservation["meu_numero"][field] = value
+
+        with pytest.raises(ValueError, match=message):
+            engorda_tables._validate_reservation_artifact(plan, reservation)
+
+    @pytest.mark.parametrize(
+        ("plan_version", "reservation_version"),
+        [(3, 1)],
+    )
+    def test_plan_and_reservation_schema_versions_cannot_be_crossed(
+        self, plan_version, reservation_version
+    ):
+        plan = self._plan()
+        plan = {**plan, "schema_version": plan_version}
+        reservation = {
+            "artifact_type": engorda_tables.ENGORDA_RESERVATION_ARTIFACT,
+            "schema_version": reservation_version,
+            "plan_id": plan["plan_id"],
+            "product": plan["product"],
+        }
+
+        with pytest.raises(ValueError, match="schema_version"):
             engorda_tables._validate_reservation_artifact(plan, reservation)
 
 
@@ -1745,6 +1899,176 @@ def test_meu_numero_uses_reserved_ordinal_interval(spark):
 
     assert row.NUM_CONTROLE_LANCAMENTO_P1 == "3210000050"
     assert row.NUM_CONTROLE_LANCAMENTO_P2 == "3210000051"
+
+
+def _grouped_meu_operations(spark):
+    return spark.createDataFrame(
+        [
+            (1, datetime(2020, 1, 1), "100.000", "200", "old-1", "old-2", "4509.0"),
+            (2, datetime(2020, 1, 1), "100", "100.0", "old-3", "old-4", "4509"),
+        ],
+        "NUM_ID_OPERACAO long, DAT_OPERACAO timestamp, "
+        "NUM_CONTA_PARTICIPANTE_P1 string, NUM_CONTA_PARTICIPANTE_P2 string, "
+        "NUM_CONTROLE_LANCAMENTO_P1 string, NUM_CONTROLE_LANCAMENTO_P2 string, "
+        "NUM_ID_TIPO_OPER_OBJETO_SERV string",
+    )
+
+
+def test_grouped_meu_descriptor_freezes_tuple_and_shared_interval_demand(spark):
+    descriptor = engorda_tables._grouped_meu_numero_descriptor(
+        _grouped_meu_operations(spark),
+        fator_k=2,
+        operational_date=date(2026, 8, 18),
+        requested_prefix="321",
+    )
+
+    assert descriptor == {
+        "strategy": "date_account_tos_shared_interval_v1",
+        "operational_date": "2026-08-18",
+        "normalization": "trim_strip_decimal_zeroes_v1",
+        "tuple_count_demand": 8,
+        "ordinal_count_demand": 6,
+        "groups": [
+            {
+                "group_id": "22b6f17eb4da2c54916fc874a20999cd75c324edf0941548f75b1e853e5171bf",
+                "count_demand": 6,
+            },
+            {
+                "group_id": "5e8f10f411a7639b4199e8f35988f2831e8518fa4cee229668e69e28a7c6f1ee",
+                "count_demand": 2,
+            },
+        ],
+        "requested_prefix": "321",
+    }
+
+
+def test_grouped_meu_descriptor_is_empty_when_operation_count_is_zero(spark):
+    descriptor = engorda_tables._grouped_meu_numero_descriptor(
+        _grouped_meu_operations(spark).limit(0),
+        fator_k=3,
+        operational_date=date(2026, 8, 18),
+        operation_count=0,
+    )
+
+    assert descriptor["tuple_count_demand"] == 0
+    assert descriptor["ordinal_count_demand"] == 0
+    assert descriptor["groups"] == []
+
+
+def test_meu_preflight_is_required_only_for_positive_ordinal_demand():
+    assert not engorda_tables._meu_preflight_required(
+        {"ordinal_count_demand": 0}
+    )
+    assert engorda_tables._meu_preflight_required(
+        {"ordinal_count_demand": 1}
+    )
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("NUM_CONTA_PARTICIPANTE_P1", "  "),
+        ("NUM_CONTA_PARTICIPANTE_P2", None),
+        ("NUM_ID_TIPO_OPER_OBJETO_SERV", ""),
+    ],
+)
+def test_grouped_meu_descriptor_rejects_blank_group_fields(spark, column, value):
+    operations = _grouped_meu_operations(spark).withColumn(
+        column, engorda_tables.F.lit(value)
+    )
+
+    with pytest.raises(ValueError, match="conta/TOS nulo ou vazio"):
+        engorda_tables._grouped_meu_numero_descriptor(
+            operations,
+            fator_k=1,
+            operational_date=date(2026, 8, 18),
+        )
+
+
+def test_grouped_meu_generation_reuses_ordinals_only_across_complete_tuples(spark):
+    operations = _grouped_meu_operations(spark)
+    descriptor = engorda_tables._grouped_meu_numero_descriptor(
+        operations,
+        fator_k=1,
+        operational_date=date(2026, 8, 18),
+    )
+
+    generated = engorda_tables._generate_grouped_meu_numeros(
+        operations,
+        "321",
+        date(2026, 8, 18),
+        descriptor,
+        ordinal_start=50,
+        ordinal_end=52,
+    )
+    rows = {row.NUM_ID_OPERACAO: row for row in generated.collect()}
+
+    assert rows[1].NUM_CONTROLE_LANCAMENTO_P1 == "3210000050"
+    assert rows[1].NUM_CONTROLE_LANCAMENTO_P2 == "3210000050"
+    assert rows[2].NUM_CONTROLE_LANCAMENTO_P1 == "3210000051"
+    assert rows[2].NUM_CONTROLE_LANCAMENTO_P2 == "3210000052"
+    assert rows[2].NUM_CONTROLE_LANCAMENTO_P1 != rows[2].NUM_CONTROLE_LANCAMENTO_P2
+    tuples = engorda_tables._flatten_meu_tuples(generated)
+    assert tuples.count() == tuples.dropDuplicates().count() == 4
+    assert [field.dataType for field in generated.schema] == [
+        field.dataType for field in operations.schema
+    ]
+    assert {row.DAT_OPERACAO.date() for row in rows.values()} == {date(2026, 8, 18)}
+
+
+def test_grouped_meu_preflight_allows_control_reuse_for_another_account(spark):
+    operations = _grouped_meu_operations(spark)
+    descriptor = engorda_tables._grouped_meu_numero_descriptor(
+        operations,
+        fator_k=1,
+        operational_date=date(2026, 8, 18),
+    )
+    generated = engorda_tables._generate_grouped_meu_numeros(
+        operations,
+        "321",
+        date(2026, 8, 18),
+        descriptor,
+        ordinal_start=50,
+        ordinal_end=52,
+    )
+    first = engorda_tables._flatten_meu_tuples(generated).first()
+    existing = spark.createDataFrame(
+        [(
+            first.DAT_OPERACAO,
+            "999",
+            first.NUM_CONTROLE_LANCAMENTO,
+            first.NUM_ID_TIPO_OPER_OBJETO_SERV,
+        )],
+        engorda_tables._flatten_meu_tuples(generated).schema,
+    )
+
+    engorda_tables._assert_no_meu_collisions(generated, existing)
+
+    exact = spark.createDataFrame(
+        [tuple(first)], engorda_tables._flatten_meu_tuples(generated).schema
+    )
+    with pytest.raises(ValueError, match="colisão"):
+        engorda_tables._assert_no_meu_collisions(generated, exact)
+
+
+def test_grouped_meu_generation_fails_closed_on_frozen_group_mismatch(spark):
+    operations = _grouped_meu_operations(spark)
+    descriptor = engorda_tables._grouped_meu_numero_descriptor(
+        operations,
+        fator_k=1,
+        operational_date=date(2026, 8, 18),
+    )
+    descriptor["groups"][0]["count_demand"] += 1
+
+    with pytest.raises(ValueError, match="grupos.*plano congelado"):
+        engorda_tables._generate_grouped_meu_numeros(
+            operations,
+            "321",
+            date(2026, 8, 18),
+            descriptor,
+            ordinal_start=50,
+            ordinal_end=53,
+        )
 
 
 class TestEngordaDateRules:

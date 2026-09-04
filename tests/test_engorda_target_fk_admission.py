@@ -1604,7 +1604,7 @@ def test_key_canonicalization_is_type_aware():
 def test_materialize_job_consumes_frozen_plan_without_resampling(tmp_path, monkeypatch):
     plan_body = {
         "artifact_type": eng.ENGORDA_PLAN_ARTIFACT,
-        "schema_version": eng.ENGORDA_PLAN_SCHEMA_VERSION,
+        "schema_version": eng.ENGORDA_LEGACY_PLAN_SCHEMA_VERSION,
         "product": "cdb_simplificado",
         "selected_num_ifs": [10, 20],
         "fator_k": 3,
@@ -1664,7 +1664,7 @@ def test_materialize_job_consumes_frozen_plan_without_resampling(tmp_path, monke
     plan = {**plan_body, "plan_id": eng._plan_id(plan_body)}
     reservation = {
         "artifact_type": eng.ENGORDA_RESERVATION_ARTIFACT,
-        "schema_version": eng.ENGORDA_RESERVATION_SCHEMA_VERSION,
+        "schema_version": eng.ENGORDA_LEGACY_RESERVATION_SCHEMA_VERSION,
         "plan_id": plan["plan_id"],
         "product": "cdb_simplificado",
         "table_pks": {
@@ -2288,7 +2288,15 @@ def test_materialize_uses_frozen_lotes_and_rejects_spec_hash_divergence_before_s
             eng.TABELA_RAIZ: {"count": 1, "start": 200, "end": 200, "step": 1}
         },
         "cod_operacao": {"strategy": "oracle_allocator", "count": 0},
-        "meu_numero": {"prefix": None, "count": 0, "start": None, "end": None},
+        "meu_numero": {
+            "strategy": eng.MEU_NUMERO_GROUPED_STRATEGY,
+            "operational_date": "2026-08-20",
+            "group_ids": [],
+            "prefix": None,
+            "count": 0,
+            "start": None,
+            "end": None,
+        },
     }
     forbidden = (
         "_carrega_faltantes",
@@ -2567,6 +2575,7 @@ def test_require_absent_never_replaces_output_raced_after_recheck():
 
 def test_reservation_must_honor_requested_meu_numero_prefix():
     plan = {
+        "schema_version": eng.ENGORDA_LEGACY_PLAN_SCHEMA_VERSION,
         "plan_id": "plan",
         "product": "cdb_simplificado",
         "tables": {},
@@ -2578,7 +2587,7 @@ def test_reservation_must_honor_requested_meu_numero_prefix():
     }
     reservation = {
         "artifact_type": eng.ENGORDA_RESERVATION_ARTIFACT,
-        "schema_version": eng.ENGORDA_RESERVATION_SCHEMA_VERSION,
+        "schema_version": eng.ENGORDA_LEGACY_RESERVATION_SCHEMA_VERSION,
         "plan_id": "plan",
         "product": "cdb_simplificado",
         "table_pks": {},

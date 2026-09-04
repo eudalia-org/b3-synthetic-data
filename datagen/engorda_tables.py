@@ -804,9 +804,11 @@ SQL_PLACEHOLDER_RE = re.compile(r"\{\{[^{}]+\}\}")
 DEFAULT_COD_IF_PATTERN = r"^[0-9A-Z]{6,20}$"
 DEFAULT_COD_IF_DRY_PREFIX = "SYN100"
 DEFAULT_COD_OPERACAO_PATTERN = r"^[0-9]{16}$"
-ENGORDA_PLAN_SCHEMA_VERSION = 2
+ENGORDA_PLAN_SCHEMA_VERSION = 3
+ENGORDA_LEGACY_PLAN_SCHEMA_VERSION = 2
 ENGORDA_SELECTED_LOTE_SCHEMA_VERSION = 1
-ENGORDA_RESERVATION_SCHEMA_VERSION = 1
+ENGORDA_RESERVATION_SCHEMA_VERSION = 2
+ENGORDA_LEGACY_RESERVATION_SCHEMA_VERSION = 1
 ENGORDA_PLAN_ARTIFACT = "engorda_plan"
 ENGORDA_SELECTED_LOTE_ARTIFACT = "engorda_selected_lote"
 SNAPSHOT_ROWS_PER_PARTITION = 100_000
@@ -814,6 +816,9 @@ SNAPSHOT_MAX_PARTITIONS = 64
 FK_ADMISSION_ITERATOR_PARTITIONS = 8
 TRANSIENT_OCI_RETRY_DELAYS_SECONDS = (35, 70)
 ENGORDA_RESERVATION_ARTIFACT = "engorda_reservation"
+MEU_NUMERO_GROUPED_STRATEGY = "date_account_tos_shared_interval_v1"
+MEU_NUMERO_LEGACY_STRATEGY = "legacy_global_v1"
+MEU_NUMERO_NORMALIZATION = "trim_strip_decimal_zeroes_v1"
 ENGORDA_PHASES = ("all", "plan", "materialize")
 GENAI_POLICY_VERSION = 1
 GENAI_MAX_SOURCE_INSTRUMENTS = 100
@@ -8065,6 +8070,195 @@ def _generate_meu_numeros(
                   "__meu_same_account"))
 
 
+def _normalized_meu_sides(operacoes: DataFrame) -> DataFrame:
+    required = {
+        "NUM_ID_OPERACAO",
+        "NUM_CONTA_PARTICIPANTE_P1",
+        "NUM_CONTA_PARTICIPANTE_P2",
+        "NUM_ID_TIPO_OPER_OBJETO_SERV",
+    }
+    missing = sorted(required - set(operacoes.columns))
+    if missing:
+        raise ValueError(f"OPERACAO sem coluna(s) para meu-número: {missing}")
+    tos = _norm_key_col(F.col("NUM_ID_TIPO_OPER_OBJETO_SERV"))
+    sides = [
+        operacoes.select(
+            "NUM_ID_OPERACAO",
+            F.lit(side_number).cast("int").alias("__meu_side"),
+            _norm_key_col(F.col(f"NUM_CONTA_PARTICIPANTE_{side_name}")).alias(
+                "__meu_account"
+            ),
+            tos.alias("__meu_tos"),
+        )
+        for side_number, side_name in ((1, "P1"), (2, "P2"))
+    ]
+    return sides[0].unionByName(sides[1])
+
+
+def _meu_group_id(account: str, tos: str) -> str:
+    canonical_tuple = json.dumps(
+        [account, tos], ensure_ascii=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical_tuple.encode("ascii")).hexdigest()
+
+
+def _grouped_meu_numero_descriptor(
+    operacoes: DataFrame,
+    fator_k: int,
+    operational_date: date,
+    *,
+    requested_prefix: Optional[str] = None,
+    operation_count: Optional[int] = None,
+) -> dict[str, Any]:
+    if fator_k < 1:
+        raise ValueError("meu-número: fator_k deve ser >= 1")
+    if requested_prefix is not None:
+        _validate_meu_numero_prefix(requested_prefix)
+    sides = _normalized_meu_sides(operacoes)
+    if operation_count is not None and int(operation_count) == 0:
+        grouped_rows = []
+    else:
+        grouped_rows = sides.groupBy("__meu_account", "__meu_tos").count().collect()
+    if any(
+        row["__meu_account"] in {None, ""} or row["__meu_tos"] in {None, ""}
+        for row in grouped_rows
+    ):
+        raise ValueError("meu-número: conta/TOS nulo ou vazio")
+    groups = sorted(
+        (
+            {
+                "group_id": _meu_group_id(
+                    str(row["__meu_account"]), str(row["__meu_tos"])
+                ),
+                "count_demand": int(row["count"]) * fator_k,
+            }
+            for row in grouped_rows
+        ),
+        key=lambda group: group["group_id"],
+    )
+    if len({group["group_id"] for group in groups}) != len(groups):
+        raise ValueError("meu-número: colisão entre group_ids normalizados")
+    descriptor: dict[str, Any] = {
+        "strategy": MEU_NUMERO_GROUPED_STRATEGY,
+        "operational_date": operational_date.isoformat(),
+        "normalization": MEU_NUMERO_NORMALIZATION,
+        "tuple_count_demand": sum(group["count_demand"] for group in groups),
+        "ordinal_count_demand": max(
+            (group["count_demand"] for group in groups), default=0
+        ),
+        "groups": groups,
+    }
+    if requested_prefix is not None:
+        descriptor["requested_prefix"] = requested_prefix
+    return descriptor
+
+
+def _meu_preflight_required(descriptor: Mapping[str, Any]) -> bool:
+    demand = descriptor.get("ordinal_count_demand")
+    return isinstance(demand, int) and not isinstance(demand, bool) and demand > 0
+
+
+def _generate_grouped_meu_numeros(
+    operacoes: DataFrame,
+    prefix: str,
+    engorda_date: date,
+    descriptor: Mapping[str, Any],
+    *,
+    ordinal_start: int,
+    ordinal_end: int,
+) -> DataFrame:
+    _validate_meu_numero_prefix(prefix)
+    required = {
+        "DAT_OPERACAO",
+        "NUM_CONTROLE_LANCAMENTO_P1",
+        "NUM_CONTROLE_LANCAMENTO_P2",
+    }
+    missing = sorted(required - set(operacoes.columns))
+    if missing:
+        raise ValueError(f"OPERACAO sem coluna(s) para meu-número: {missing}")
+    if (
+        descriptor.get("strategy") != MEU_NUMERO_GROUPED_STRATEGY
+        or descriptor.get("normalization") != MEU_NUMERO_NORMALIZATION
+        or descriptor.get("operational_date") != engorda_date.isoformat()
+    ):
+        raise ValueError("meu-número: estratégia/data/normalização diverge do plano congelado")
+
+    sides = _normalized_meu_sides(operacoes)
+    grouped_rows = sides.groupBy("__meu_account", "__meu_tos").count().collect()
+    if any(
+        row["__meu_account"] in {None, ""} or row["__meu_tos"] in {None, ""}
+        for row in grouped_rows
+    ):
+        raise ValueError("meu-número: conta/TOS nulo ou vazio")
+    actual_groups = sorted(
+        (
+            {
+                "group_id": _meu_group_id(
+                    str(row["__meu_account"]), str(row["__meu_tos"])
+                ),
+                "count_demand": int(row["count"]),
+            }
+            for row in grouped_rows
+        ),
+        key=lambda group: group["group_id"],
+    )
+    actual_tuple_count = sum(group["count_demand"] for group in actual_groups)
+    actual_ordinal_count = max(
+        (group["count_demand"] for group in actual_groups), default=0
+    )
+    if (
+        descriptor.get("groups") != actual_groups
+        or descriptor.get("tuple_count_demand") != actual_tuple_count
+        or descriptor.get("ordinal_count_demand") != actual_ordinal_count
+    ):
+        raise ValueError("meu-número: grupos reais divergem do plano congelado")
+    if ordinal_start < 1:
+        raise ValueError("meu-número: ordinal_start deve ser >= 1")
+    expected_end = ordinal_start + actual_ordinal_count - 1
+    if ordinal_end != expected_end:
+        raise ValueError(
+            f"meu-número: reserva {ordinal_start}..{ordinal_end} não atende "
+            f"intervalo compartilhado de {actual_ordinal_count} ordinal(is)"
+        )
+    _validate_meu_capacity(ordinal_end)
+
+    window = Window.partitionBy("__meu_account", "__meu_tos").orderBy(
+        "NUM_ID_OPERACAO", "__meu_side"
+    )
+    allocations = sides.withColumn(
+        "__meu_ord",
+        (F.row_number().over(window) + F.lit(ordinal_start - 1)).cast("long"),
+    ).withColumn(
+        "__meu_control",
+        F.concat(F.lit(prefix), F.lpad(F.col("__meu_ord").cast("string"), 7, "0")),
+    )
+    p1_map = allocations.where(F.col("__meu_side") == 1).select(
+        "NUM_ID_OPERACAO", F.col("__meu_control").alias("__meu_p1_control")
+    )
+    p2_map = allocations.where(F.col("__meu_side") == 2).select(
+        "NUM_ID_OPERACAO", F.col("__meu_control").alias("__meu_p2_control")
+    )
+    dat_type = operacoes.schema["DAT_OPERACAO"].dataType
+    generated = (
+        operacoes.join(p1_map, "NUM_ID_OPERACAO", "inner")
+        .join(p2_map, "NUM_ID_OPERACAO", "inner")
+        .withColumn("DAT_OPERACAO", _date_literal_for_type(engorda_date, dat_type))
+        .withColumn(
+            "NUM_CONTROLE_LANCAMENTO_P1",
+            F.col("__meu_p1_control").cast(
+                operacoes.schema["NUM_CONTROLE_LANCAMENTO_P1"].dataType
+            ),
+        )
+        .withColumn(
+            "NUM_CONTROLE_LANCAMENTO_P2",
+            F.col("__meu_p2_control").cast(
+                operacoes.schema["NUM_CONTROLE_LANCAMENTO_P2"].dataType
+            ),
+        )
+    )
+    return generated.select(*operacoes.columns)
+
+
 def _flatten_meu_tuples(operacoes: DataFrame) -> DataFrame:
     pieces = []
     for side in ("P1", "P2"):
@@ -8858,7 +9052,13 @@ def _build_engorda_plan(
     meu_numero_prefix: Optional[str] = None,
     no_oracle: bool = False,
     genai_descriptor: Optional[Mapping[str, Any]] = None,
+    schema_version: int = ENGORDA_PLAN_SCHEMA_VERSION,
 ) -> dict[str, Any]:
+    if schema_version not in {
+        ENGORDA_LEGACY_PLAN_SCHEMA_VERSION,
+        ENGORDA_PLAN_SCHEMA_VERSION,
+    }:
+        raise ValueError(f"schema_version de plano incompatível: {schema_version}")
     source_counts = (
         {table: int(count) for table, count in lote_counts.items()}
         if lote_counts is not None
@@ -8898,20 +9098,51 @@ def _build_engorda_plan(
 
     operation = product_profile.business_keys.operation
     operation_count = 0
-    meu_demand = 0
+    meu_descriptor: dict[str, Any]
+    operational_date = controle_operacional_date or engorda_ts.date()
+    if schema_version == ENGORDA_PLAN_SCHEMA_VERSION:
+        meu_descriptor = {
+            "strategy": MEU_NUMERO_GROUPED_STRATEGY,
+            "operational_date": operational_date.isoformat(),
+            "normalization": MEU_NUMERO_NORMALIZATION,
+            "tuple_count_demand": 0,
+            "ordinal_count_demand": 0,
+            "groups": [],
+            **(
+                {"requested_prefix": meu_numero_prefix}
+                if meu_numero_prefix is not None else {}
+            ),
+        }
+    else:
+        meu_descriptor = {
+            "ordinal_count_demand": 0,
+            **(
+                {"requested_prefix": meu_numero_prefix}
+                if meu_numero_prefix is not None else {}
+            ),
+        }
     if operation is not None and operation.table in lotes:
         operation_source_count = source_counts[operation.table]
         operation_count = operation_source_count * fator_k
         if operation.generate_meu_numero:
-            meu_demand = _meu_numero_ordinal_demand(
-                lotes[operation.table],
-                fator_k,
-                operation_count=operation_source_count,
-            )
+            if schema_version == ENGORDA_PLAN_SCHEMA_VERSION:
+                meu_descriptor = _grouped_meu_numero_descriptor(
+                    lotes[operation.table],
+                    fator_k,
+                    operational_date,
+                    requested_prefix=meu_numero_prefix,
+                    operation_count=operation_source_count,
+                )
+            else:
+                meu_descriptor["ordinal_count_demand"] = _meu_numero_ordinal_demand(
+                    lotes[operation.table],
+                    fator_k,
+                    operation_count=operation_source_count,
+                )
 
     body: dict[str, Any] = {
         "artifact_type": ENGORDA_PLAN_ARTIFACT,
-        "schema_version": ENGORDA_PLAN_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "product": product_profile.name,
         "selected_num_ifs": sorted(int(value) for value in valores),
         "fator_k": fator_k,
@@ -8941,17 +9172,90 @@ def _build_engorda_plan(
             "oracle_type": tipo_derivado,
         },
         "cod_operacao": {"count": operation_count},
-        "meu_numero": {
-            "ordinal_count_demand": meu_demand,
-            **({"requested_prefix": meu_numero_prefix}
-               if meu_numero_prefix is not None else {}),
-        },
+        "meu_numero": meu_descriptor,
     }
     if no_oracle:
         body["oracle_access"] = "disabled"
     if genai_descriptor is not None:
         body["genai"] = dict(genai_descriptor)
     return {**body, "plan_id": _plan_id(body)}
+
+
+def _validate_meu_numero_plan_descriptor(plan: Mapping[str, Any]) -> None:
+    descriptor = plan.get("meu_numero")
+    if not isinstance(descriptor, Mapping):
+        raise ValueError("artefato de plano possui meu_numero inválido")
+    version = plan.get("schema_version")
+    if version == ENGORDA_LEGACY_PLAN_SCHEMA_VERSION:
+        allowed = {"ordinal_count_demand", "requested_prefix"}
+        if set(descriptor) - allowed or "ordinal_count_demand" not in descriptor:
+            raise ValueError("plano v2 possui descriptor meu_numero inválido")
+        _nonnegative_int(
+            descriptor.get("ordinal_count_demand"),
+            "plano meu_numero.ordinal_count_demand",
+        )
+    else:
+        required = {
+            "strategy",
+            "operational_date",
+            "normalization",
+            "tuple_count_demand",
+            "ordinal_count_demand",
+            "groups",
+        }
+        allowed = required | {"requested_prefix"}
+        if set(descriptor) != required and set(descriptor) != allowed:
+            raise ValueError("plano v3 possui descriptor meu_numero incompleto/inválido")
+        if descriptor.get("strategy") != MEU_NUMERO_GROUPED_STRATEGY:
+            raise ValueError("plano meu_numero.strategy inválida")
+        if descriptor.get("normalization") != MEU_NUMERO_NORMALIZATION:
+            raise ValueError("plano meu_numero.normalization inválida")
+        operational_date = descriptor.get("operational_date")
+        try:
+            parsed_date = date.fromisoformat(operational_date)
+        except (TypeError, ValueError):
+            raise ValueError("plano meu_numero.operational_date inválida") from None
+        if operational_date != parsed_date.isoformat():
+            raise ValueError("plano meu_numero.operational_date não é ISO canônica")
+        planned_date = plan.get("controle_operacional_date")
+        if not isinstance(planned_date, str):
+            raise ValueError("plano não possui controle_operacional_date para meu_numero")
+        if operational_date != planned_date:
+            raise ValueError("plano meu_numero.operational_date diverge da data congelada")
+        tuple_count = _nonnegative_int(
+            descriptor.get("tuple_count_demand"),
+            "plano meu_numero.tuple_count_demand",
+        )
+        ordinal_count = _nonnegative_int(
+            descriptor.get("ordinal_count_demand"),
+            "plano meu_numero.ordinal_count_demand",
+        )
+        raw_groups = descriptor.get("groups")
+        if not isinstance(raw_groups, list):
+            raise ValueError("plano meu_numero.groups precisa ser uma lista")
+        groups = []
+        for group in raw_groups:
+            if not isinstance(group, Mapping) or set(group) != {"group_id", "count_demand"}:
+                raise ValueError("plano meu_numero.groups possui item inválido")
+            group_id = group.get("group_id")
+            if not isinstance(group_id, str) or not re.fullmatch(r"[0-9a-f]{64}", group_id):
+                raise ValueError("plano meu_numero.groups possui group_id inválido")
+            count = group.get("count_demand")
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+                raise ValueError("plano meu_numero.groups possui count_demand inválido")
+            groups.append((group_id, count))
+        if groups != sorted(groups) or len({group_id for group_id, _ in groups}) != len(groups):
+            raise ValueError("plano meu_numero.groups não está canonicamente ordenado")
+        if tuple_count != sum(count for _, count in groups):
+            raise ValueError("plano meu_numero.tuple_count_demand diverge dos grupos")
+        if ordinal_count != max((count for _, count in groups), default=0):
+            raise ValueError("plano meu_numero.ordinal_count_demand diverge dos grupos")
+    requested_prefix = descriptor.get("requested_prefix")
+    if requested_prefix is not None:
+        try:
+            _validate_meu_numero_prefix(requested_prefix)
+        except argparse.ArgumentTypeError as exc:
+            raise ValueError(str(exc)) from exc
 
 
 def _validate_plan_artifact(plan: Mapping[str, Any]) -> dict[str, Any]:
@@ -8962,7 +9266,10 @@ def _validate_plan_artifact(plan: Mapping[str, Any]) -> dict[str, Any]:
             "plano schema_version=1 não possui snapshot imutável; gere novamente "
             "com phase plan antes de materializar"
         )
-    if plan.get("schema_version") != ENGORDA_PLAN_SCHEMA_VERSION:
+    if plan.get("schema_version") not in {
+        ENGORDA_LEGACY_PLAN_SCHEMA_VERSION,
+        ENGORDA_PLAN_SCHEMA_VERSION,
+    }:
         raise ValueError("artefato de plano possui schema_version incompatível")
     plan_id = plan.get("plan_id")
     if not isinstance(plan_id, str) or not plan_id:
@@ -8986,6 +9293,7 @@ def _validate_plan_artifact(plan: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("artefato de plano precisa conter tables")
     if plan.get("oracle_access", "live") not in {"live", "disabled"}:
         raise ValueError("artefato de plano possui oracle_access inválido")
+    _validate_meu_numero_plan_descriptor(plan)
     genai = plan.get("genai")
     if genai is not None:
         if not isinstance(genai, Mapping) or genai.get("enabled") is not True:
@@ -9029,8 +9337,20 @@ def _validate_reservation_artifact(
 ) -> dict[str, Any]:
     if reservation.get("artifact_type") != ENGORDA_RESERVATION_ARTIFACT:
         raise ValueError("artefato de reserva possui artifact_type inválido")
-    if reservation.get("schema_version") != ENGORDA_RESERVATION_SCHEMA_VERSION:
-        raise ValueError("artefato de reserva possui schema_version incompatível")
+    plan_version = plan.get("schema_version")
+    allowed_reservation_versions = {
+        ENGORDA_LEGACY_PLAN_SCHEMA_VERSION: {
+            ENGORDA_LEGACY_RESERVATION_SCHEMA_VERSION,
+            ENGORDA_RESERVATION_SCHEMA_VERSION,
+        },
+        ENGORDA_PLAN_SCHEMA_VERSION: {ENGORDA_RESERVATION_SCHEMA_VERSION},
+    }.get(plan_version, set())
+    if (
+        reservation.get("schema_version") not in allowed_reservation_versions
+    ):
+        raise ValueError(
+            "artefato de reserva possui schema_version incompatível com o plano"
+        )
     if reservation.get("plan_id") != plan["plan_id"]:
         raise ValueError("reserva não está vinculada ao plan_id consumido")
     if reservation.get("product") != plan["product"]:
@@ -9079,13 +9399,32 @@ def _validate_reservation_artifact(
     meu_reservation = reservation.get("meu_numero")
     if not isinstance(meu_reservation, Mapping):
         raise ValueError("reserva precisa conter meu_numero")
-    meu_count = plan["meu_numero"]["ordinal_count_demand"]
+    meu_plan = plan["meu_numero"]
+    meu_count = meu_plan["ordinal_count_demand"]
+    reservation_version = reservation["schema_version"]
+    expected_scope: dict[str, Any] = {}
+    if reservation_version == ENGORDA_RESERVATION_SCHEMA_VERSION:
+        if plan_version == ENGORDA_PLAN_SCHEMA_VERSION:
+            expected_group_ids = [group["group_id"] for group in meu_plan["groups"]]
+            expected_scope = {
+                "strategy": meu_plan["strategy"],
+                "operational_date": meu_plan["operational_date"],
+                "group_ids": expected_group_ids,
+            }
+        else:
+            expected_scope = {"strategy": MEU_NUMERO_LEGACY_STRATEGY}
+        for field, expected in expected_scope.items():
+            if meu_reservation.get(field) != expected:
+                raise ValueError(f"reserva meu_numero.{field} diverge do plano")
+        expected_keys = set(expected_scope) | {"prefix", "count", "start", "end"}
+        if set(meu_reservation) != expected_keys:
+            raise ValueError("reserva meu_numero v2 possui campos inválidos")
     if meu_count:
         try:
             _validate_meu_numero_prefix(meu_reservation.get("prefix"))
         except argparse.ArgumentTypeError as exc:
             raise ValueError(str(exc)) from exc
-        requested_prefix = plan["meu_numero"].get("requested_prefix")
+        requested_prefix = meu_plan.get("requested_prefix")
         if (requested_prefix is not None
                 and meu_reservation.get("prefix") != requested_prefix):
             raise ValueError(
@@ -9094,10 +9433,17 @@ def _validate_reservation_artifact(
         start, end = _reservation_range(meu_reservation, "meu_numero", meu_count)
         if start < 1 or end > MAX_MEU_NUMERO_ORDINAL:
             raise ValueError("reserva meu_numero excede os ordinais de 1 a 9999999")
-    elif dict(meu_reservation) != {
-        "prefix": None, "count": 0, "start": None, "end": None
-    }:
-        raise ValueError("reserva meu_numero vazia possui contrato inválido")
+    else:
+        empty_reservation = {
+            "prefix": None,
+            "count": 0,
+            "start": None,
+            "end": None,
+        }
+        if reservation_version == ENGORDA_RESERVATION_SCHEMA_VERSION:
+            empty_reservation = {**expected_scope, **empty_reservation}
+        if dict(meu_reservation) != empty_reservation:
+            raise ValueError("reserva meu_numero vazia possui contrato inválido")
     return dict(reservation)
 
 
@@ -9199,6 +9545,15 @@ def executa_clonagem(spark, config, spec: dict, *,
         raise ValueError("--oracle-code-batch-size deve ser >= 1")
     business_policy = product_profile.business_keys
     operation_policy = business_policy.operation
+    if (
+        phase == "all"
+        and operation_policy is not None
+        and operation_policy.generate_meu_numero
+        and not (dry_run or no_oracle)
+    ):
+        raise ValueError(
+            "meu-número live exige phase plan -> reserve -> materialize"
+        )
     meu_numero_ordinal_start = 1
     meu_numero_ordinal_end: Optional[int] = None
     requested_meu_numero_prefix = meu_numero_prefix if phase == "plan" else None
@@ -9234,8 +9589,13 @@ def executa_clonagem(spark, config, spec: dict, *,
             meu_numero_prefix = str(meu_reservation["prefix"])
             meu_numero_ordinal_start = int(meu_reservation["start"])
             meu_numero_ordinal_end = int(meu_reservation["end"])
+    planned_meu_count = (
+        int((planned_artifact.get("meu_numero") or {}).get("ordinal_count_demand", 0))
+        if planned_artifact is not None else None
+    )
     if (phase != "plan" and operation_policy is not None
-            and operation_policy.generate_meu_numero):
+            and operation_policy.generate_meu_numero
+            and (phase != "materialize" or planned_meu_count != 0)):
         meu_numero_prefix = _validate_meu_numero_prefix(meu_numero_prefix)
     elif phase != "plan" and meu_numero_prefix is not None:
         logger.info(
@@ -9652,6 +10012,10 @@ def executa_clonagem(spark, config, spec: dict, *,
             meu_numero_prefix=requested_meu_numero_prefix,
             no_oracle=no_oracle,
             genai_descriptor=active_genai_descriptor,
+            schema_version=(
+                int(planned_artifact["schema_version"])
+                if phase == "materialize" else ENGORDA_PLAN_SCHEMA_VERSION
+            ),
         )
     if phase == "plan":
         with _perf_timer("plan_artifact_write", product=product_profile.name):
@@ -9672,6 +10036,22 @@ def executa_clonagem(spark, config, spec: dict, *,
         )
         _validate_reservation_live_pk_floors(planos, validated_reservation)
         _inject_reserved_pk_starts(planos, validated_reservation)
+
+    if operation_policy is not None and operation_policy.generate_meu_numero:
+        if phase in {"plan", "materialize"}:
+            active_meu_descriptor = current_plan["meu_numero"]
+        else:
+            operation_source_count = final_lote_counts.get(operation_policy.table, 0)
+            active_meu_descriptor = _grouped_meu_numero_descriptor(
+                lotes[operation_policy.table],
+                fator_k,
+                controle_operacional_date or engorda_ts.date(),
+                requested_prefix=meu_numero_prefix,
+                operation_count=operation_source_count,
+            )
+            meu_numero_ordinal_end = active_meu_descriptor["ordinal_count_demand"]
+    else:
+        active_meu_descriptor = None
 
     mapeamentos: Dict[str, DataFrame] = {}
     resultados: Dict[str, Tuple[DataFrame, int]] = {}
@@ -9820,20 +10200,39 @@ def executa_clonagem(spark, config, spec: dict, *,
                 new_pk_alias="NUM_ID_OPERACAO_NOVO", code_col="COD_OPERACAO",
                 generated_alias="COD_OPERACAO_GERADO")
             if operation_policy.generate_meu_numero:
-                operacoes = _generate_meu_numeros(
-                    operacoes,
-                    meu_numero_prefix,
-                    code_allocation_date,
-                    ordinal_start=meu_numero_ordinal_start,
-                    ordinal_end=meu_numero_ordinal_end,
-                )
+                if active_meu_descriptor is None:
+                    raise RuntimeError("descriptor meu_numero não foi resolvido")
+                if _meu_preflight_required(active_meu_descriptor):
+                    if (
+                        phase == "materialize"
+                        and planned_artifact["schema_version"]
+                        == ENGORDA_LEGACY_PLAN_SCHEMA_VERSION
+                    ):
+                        operacoes = _generate_meu_numeros(
+                            operacoes,
+                            meu_numero_prefix,
+                            code_allocation_date,
+                            ordinal_start=meu_numero_ordinal_start,
+                            ordinal_end=meu_numero_ordinal_end,
+                        )
+                    else:
+                        operacoes = _generate_grouped_meu_numeros(
+                            operacoes,
+                            meu_numero_prefix,
+                            code_allocation_date,
+                            active_meu_descriptor,
+                            ordinal_start=meu_numero_ordinal_start,
+                            ordinal_end=meu_numero_ordinal_end,
+                        )
             operacoes = operacoes.localCheckpoint(eager=True)
             resultados[operation_table] = (operacoes, n_operacoes)
 
         _validate_business_keys(instrumentos, operacoes, business_policy)
 
         if (not is_dry_run and not no_oracle and operation_policy is not None
-                and operation_policy.generate_meu_numero):
+                and operation_policy.generate_meu_numero
+                and active_meu_descriptor is not None
+                and _meu_preflight_required(active_meu_descriptor)):
             if (credentials is None or meu_numero_prefix is None
                     or operacoes is None):
                 raise RuntimeError(
@@ -10119,6 +10518,12 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
     if job.anular_cols is not None:
         _merge_nullification_mappings(
             profile.integrity.nullify_mapping(), job.anular_cols
+        )
+    if (job.phase == "all" and operation_policy is not None
+            and operation_policy.generate_meu_numero
+            and not (job.dry_run or job.no_oracle)):
+        raise ValueError(
+            "meu-número live exige phase plan -> reserve -> materialize"
         )
     if (job.phase == "all" and operation_policy is not None
             and operation_policy.generate_meu_numero):
