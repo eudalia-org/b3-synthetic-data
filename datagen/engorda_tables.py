@@ -392,7 +392,7 @@ TABELAS_SEMEADAS_LATERALMENTE = frozenset(
 )
 
 # ---------------------------------------------------------------------------
-# Poda de familia de evento (check 8a.event_condition_family) — SOMENTE RDB.
+# Poda de familia de evento (check 8a.event_condition_family).
 #
 # REGRA DO VALIDADOR: todo EVENTO ativo com NUM_TIPO_EVENTO_LEGADO 83 ou 85
 # precisa, NO MESMO NUM_IF, da familia de condicao correspondente:
@@ -410,13 +410,14 @@ TABELAS_SEMEADAS_LATERALMENTE = frozenset(
 # instrumento nao tem condicao tipo 3 nenhuma", que tambem reprova no 8a. Esta
 # poda espelha o check inteiro.
 #
-# ESCOPO: rdb_inclusao e rdb_resgate. O 8a tambem roda para cdb/cdb_simplificado,
-# mas esses passam hoje — nao mexo no dominio de produto que esta funcionando.
+# ESCOPO: produtos cujo validador exige a familia observada. A poda acontece
+# depois da query, preservando o SQL de selecao e repondo candidatos invalidos.
 #
 # FIDELIDADE: usa _norm_code_validador e _canon_key_validador para normalizar
 # exatamente como o validador, e a nocao de ativo dele (nulo OU string vazia).
 # ---------------------------------------------------------------------------
 PRODUTOS_COM_PODA_FAMILIA_EVENTO = frozenset({
+    'cdb_simplificado',
     'rdb_inclusao',
     'rdb_resgate',
 })
@@ -432,6 +433,9 @@ PRODUTOS_COM_PODA_CRONOGRAMA_RESGATE = frozenset({
     'cdb_resgate',
     'rdb_resgate',
 })
+MODO_RESGATE_EXIGIDO_POR_PRODUTO = {
+    'rdb_resgate': 'COM TABELA',
+}
 
 # ---------------------------------------------------------------------------
 # Poda de domínio (itens 1, 3 e 4) — instrumentos que o sintético NÃO conseguiria
@@ -4548,10 +4552,11 @@ def _num_if_cronograma_resgate_invalido(
     spark,
     config,
     dominio: DataFrame,
+    required_mode: Optional[str] = None,
 ) -> DataFrame:
-    """Find active type-20 COM TABELA roots with an unusable RAW schedule.
+    """Find invalid active type-20 redemption variants or RAW schedules.
 
-    Invalid parents are pruned row-wise after closure rather than removing roots.
+    The optional mode check mirrors the strict RDB profile before sampling.
     """
     sources: Dict[str, DataFrame] = {}
     for table in (CONDICAO_IF_TABLE, RESGATE_TABELA, CRONOGRAMA_TABELA):
@@ -4602,15 +4607,18 @@ def _num_if_cronograma_resgate_invalido(
         .join(target_roots, "__num_if", "left_semi")
         .where(F.col("__tipo") == F.lit(CONDICAO_IF_TIPO_RESGATE))
     )
-    com_tabela = (
+    parents = (
         redemptions.select(
             _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__nci"),
             _norm_code_validador(F.col(COL_COD_COND_RESGATE)).alias("__modo"),
         )
-        .where(F.col("__modo") == F.lit(COD_COND_RESGATE_COM_TABELA))
         .join(conditions, "__nci", "inner")
-        .select("__num_if", "__nci")
+        .select("__num_if", "__nci", "__modo")
         .dropDuplicates()
+    )
+    com_tabela = (
+        parents.where(F.col("__modo") == F.lit(COD_COND_RESGATE_COM_TABELA))
+        .select("__num_if", "__nci")
     )
 
     schedule_values = schedules.select(
@@ -4640,7 +4648,37 @@ def _num_if_cronograma_resgate_invalido(
         )
         .select("__num_if")
     )
-    invalid_roots = missing_schedule.unionByName(invalid_values).dropDuplicates()
+    invalid_roots = missing_schedule.unionByName(invalid_values)
+    if required_mode is not None:
+        redemption_modes = redemptions.select(
+            _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__nci"),
+            _norm_code_validador(F.col(COL_COD_COND_RESGATE)).alias("__modo"),
+        )
+        variant_counts = (
+            target_roots.join(
+                conditions.select("__num_if", "__nci"), "__num_if", "left"
+            )
+            .join(redemption_modes, "__nci", "left")
+            .groupBy("__num_if")
+            .agg(
+                F.count("__nci").alias("__parent_count"),
+                F.sum(
+                    F.when(F.col("__modo") == F.lit(required_mode), 1).otherwise(0)
+                ).alias("__required_mode_count"),
+            )
+        )
+        invalid_variant = (
+            variant_counts.where(
+                (F.coalesce(F.col("__parent_count"), F.lit(0)) != F.lit(1))
+                | (
+                    F.coalesce(F.col("__required_mode_count"), F.lit(0))
+                    != F.lit(1)
+                )
+            )
+            .select("__num_if")
+        )
+        invalid_roots = invalid_roots.unionByName(invalid_variant)
+    invalid_roots = invalid_roots.dropDuplicates()
     return (
         _copia_independente(dominio.select(COL_NUM_IF))
         .withColumn("__num_if", _norm_key_col(F.col(COL_NUM_IF)))
@@ -5457,7 +5495,12 @@ def _dominio_instrumentos_elegiveis(
             and profile.name in PRODUTOS_COM_PODA_CRONOGRAMA_RESGATE):
         exclusoes.append((
             "cronograma de resgate COM TABELA",
-            _num_if_cronograma_resgate_invalido(spark, config, fonte),
+            _num_if_cronograma_resgate_invalido(
+                spark,
+                config,
+                fonte,
+                required_mode=MODO_RESGATE_EXIGIDO_POR_PRODUTO.get(profile.name),
+            ),
         ))
     if poda_conta and profile.name in PRODUTOS_COM_PODA_CONTA:
         exclusoes.append((

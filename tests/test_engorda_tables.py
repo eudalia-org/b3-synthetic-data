@@ -1442,6 +1442,67 @@ def test_schedule_guard_rejects_only_active_type20_com_tabela_defects(
     }
 
 
+def test_rdb_schedule_guard_requires_exact_com_tabela_variant(spark, monkeypatch):
+    sources = _schedule_guard_sources(spark)
+    monkeypatch.setattr(
+        engorda_tables,
+        "_read_source",
+        lambda _spark, _config, table: sources[table],
+    )
+    domain = spark.createDataFrame([(root,) for root in range(1, 17)], "NUM_IF long")
+
+    invalid = engorda_tables._num_if_cronograma_resgate_invalido(
+        spark, {}, domain, required_mode="COM TABELA"
+    )
+
+    assert {row.NUM_IF for row in invalid.collect()} == (
+        set(range(1, 17)) - {1, 9}
+    )
+
+
+def test_simplified_cdb_prunes_event_without_condition_family(spark, monkeypatch):
+    domain = spark.createDataFrame([(1,), (2,)], "NUM_IF long")
+    sources = {
+        engorda_tables.EVENTO_TABELA: spark.createDataFrame(
+            [(1, "83"), (2, "83")],
+            "NUM_IF long, NUM_TIPO_EVENTO_LEGADO string",
+        ),
+        engorda_tables.CONDICAO_IF_TABLE: spark.createDataFrame(
+            [(1, 11, "3"), (2, 22, "20")],
+            "NUM_IF long, NUM_CONDICAO_IF long, COD_TIPO_CONDICAO_IF string",
+        ),
+        "JUROS_FLUTUANTE": spark.createDataFrame(
+            [(11,)], "NUM_CONDICAO_IF long"
+        ),
+        engorda_tables.RESGATE_TABELA: spark.createDataFrame(
+            [(22,)], "NUM_CONDICAO_IF long"
+        ),
+    }
+    monkeypatch.setattr(
+        engorda_tables,
+        "_dominio_num_if_produto",
+        lambda *_args, **_kwargs: domain,
+    )
+    monkeypatch.setattr(
+        engorda_tables,
+        "_read_source",
+        lambda _spark, _config, table: sources[table],
+    )
+
+    _, valid = engorda_tables._dominio_instrumentos_elegiveis(
+        spark,
+        {},
+        {},
+        engorda_tables.get_product_profile("cdb_simplificado"),
+        poda_subtipo=False,
+        poda_cronograma_resgate=False,
+        poda_conta=False,
+        politica_estrita_operacao=False,
+    )
+
+    assert [row.NUM_IF for row in valid.orderBy("NUM_IF").collect()] == [1]
+
+
 def test_schedule_guard_refills_sampling_but_rejects_explicit_invalid_root(
     spark, monkeypatch
 ):
