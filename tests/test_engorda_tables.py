@@ -1736,17 +1736,18 @@ class TestEngordaDateRules:
         assert row.DAT_VENCIMENTO == operational_midnight + timedelta(days=original_term)
         assert row.DAT_ATUALIZACAO_REGISTRO == self.ENGORDA_TS.replace(microsecond=0)
 
-    def test_operation_uses_run_timestamp_and_formats_legacy_value(self, spark):
+    def test_operation_uses_run_timestamp_and_operational_dates(self, spark):
         old = datetime(2020, 1, 1)
         df = spark.createDataFrame(
-            [(old, old, old, old, old, old, "old")],
+            [(old, old, old, old, old, old, old, "old")],
             "DAT_INCLUSAO timestamp, DAT_ALTERACAO timestamp, "
             "DAT_INCLUSAO_REGISTRO timestamp, "
             "DAT_ATUALIZACAO_REGISTRO timestamp, TSP_SITUACAO timestamp, "
-            "DAT_OPERACAO timestamp, VAL_TIME_STAMP_ATUALIZACAO string",
+            "DAT_FINANCEIRO timestamp, DAT_OPERACAO timestamp, "
+            "VAL_TIME_STAMP_ATUALIZACAO string",
         )
 
-        out, _ = engorda_tables.aplica_regras_engorda(
+        out, applied = engorda_tables.aplica_regras_engorda(
             df,
             "OPERACAO",
             engorda_ts=self.ENGORDA_TS,
@@ -1754,6 +1755,9 @@ class TestEngordaDateRules:
         )
         row = out.first()
         expected = self.ENGORDA_TS.replace(microsecond=0)
+        operational_midnight = datetime.combine(
+            self.OPERATIONAL_DATE, datetime.min.time()
+        )
 
         for column in (
             "DAT_INCLUSAO",
@@ -1764,7 +1768,9 @@ class TestEngordaDateRules:
         ):
             assert row[column] == expected
         assert row.VAL_TIME_STAMP_ATUALIZACAO == "2026080810190634"
-        assert row.DAT_OPERACAO == old
+        assert row.DAT_FINANCEIRO == operational_midnight
+        assert row.DAT_OPERACAO == operational_midnight
+        assert {"DAT_FINANCEIRO", "DAT_OPERACAO"}.issubset(applied)
 
     def test_event_keeps_liquidation_and_copies_related_dates(self, spark):
         liquidation = datetime(2028, 4, 27)

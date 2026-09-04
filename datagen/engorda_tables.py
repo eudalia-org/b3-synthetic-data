@@ -525,6 +525,10 @@ ENGORDA_FORMATTED_TIMESTAMP_COLS_BY_TABLE = {
     "OPERACAO": ("VAL_TIME_STAMP_ATUALIZACAO",),
 }
 ENGORDA_OPERATIONAL_DATE_COLS_BY_TABLE = {
+    "OPERACAO": (
+        "DAT_FINANCEIRO",
+        "DAT_OPERACAO",
+    ),
     "INSTRUMENTO_FINANCEIRO": (
         ENGORDA_COL_DAT_EMISSAO,
         "DAT_REGISTRO",
@@ -9776,7 +9780,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                 operacoes = _generate_meu_numeros(
                     operacoes,
                     meu_numero_prefix,
-                    engorda_ts.date(),
+                    code_allocation_date,
                     ordinal_start=meu_numero_ordinal_start,
                     ordinal_end=meu_numero_ordinal_end,
                 )
@@ -9796,7 +9800,7 @@ def executa_clonagem(spark, config, spec: dict, *,
             preflight_path = f"{output_base}/__PREFLIGHT_MEU"
             try:
                 existing = _read_existing_meu_tuples(
-                    spark, credentials, engorda_date=engorda_ts.date(),
+                    spark, credentials, engorda_date=code_allocation_date,
                     prefix=meu_numero_prefix, temp_path=preflight_path)
                 _assert_no_meu_collisions(operacoes, existing)
             finally:

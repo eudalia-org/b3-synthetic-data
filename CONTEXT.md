@@ -32,6 +32,10 @@ _Avoid_: Credito SCR, Credito DC, DICRE
 The active Credito DC masters linked to an LCA through their shared lot, together with the Historico Credito DC rows linked to those masters by credit code. These backing rows remain distinct from the LCA aggregate's own populated Credito row.
 _Avoid_: Same-NUM_IF credit, LCA Credito row
 
+**Operational control date**:
+The business date governing synthetic financial and operation dates. `DAT_FINANCEIRO` and `DAT_OPERACAO` use this date alongside the other operational date fields; audit timestamps remain tied to execution time.
+_Avoid_: Run date, audit timestamp
+
 **DICRE IROP closure**:
 The conditional family of IROP records linked to a Credito DC. Presence varies by DICRE subtype, but present records remain part of the aggregate.
 _Avoid_: Mandatory CCB closure, mandatory CMER closure
