@@ -4107,6 +4107,7 @@ class TargetInstrumentSelection:
     missing_keys: Optional[DataFrame] = None
     lotes: Optional[Dict[str, DataFrame]] = None
     provenances: Optional[Dict[str, DataFrame]] = None
+    lote_counts: Optional[Dict[str, int]] = None
 
 
 def _fks_para_pais_clonados(spec: dict, tabela: str,
@@ -4352,8 +4353,6 @@ def _dominio_num_if_produto(spark, config, profile: ProductProfile,
             f"colunas encontradas: {queried.columns}"
         )
     base = queried.select(F.col(num_if_columns[0]).alias(COL_NUM_IF))
-    if base.where(F.col(COL_NUM_IF).isNull()).limit(1).count():
-        raise ValueError("query de NUM_IF retornou NUM_IF nulo")
     base = base.dropDuplicates()
 
     return base
@@ -5424,7 +5423,14 @@ def _dominio_instrumentos_elegiveis(
     # reexecução da query, que era refeita uma vez por poda (cada uma faz
     # left_semi contra `fonte`).
     fonte = fonte.localCheckpoint(eager=True)
-    n_dominio = fonte.count()
+    domain_stats = fonte.agg(
+        F.count(F.lit(1)).alias("row_count"),
+        F.max(F.when(F.col(COL_NUM_IF).isNull(), F.lit(1)).otherwise(F.lit(0)))
+        .alias("has_null"),
+    ).first()
+    if domain_stats["has_null"]:
+        raise ValueError("query de NUM_IF retornou NUM_IF nulo")
+    n_dominio = int(domain_stats["row_count"])
     logger.info("Produto %s: domínio de NUM_IF vindo integralmente da query — "
                 "%d instrumento(s) ANTES da poda.", profile.name, n_dominio)
     if n_dominio == 0:
@@ -5606,6 +5612,7 @@ def _target_fk_rejections(
         [str, Tuple[str, ...], List[Tuple[str, ...]], Tuple[bool, ...]],
         Set[Tuple[str, ...]],
     ],
+    lote_counts: Optional[Mapping[str, int]] = None,
 ) -> Tuple[Set[int], Dict[int, Set[str]], Optional[DataFrame]]:
     """Resolve every emitted FK against same-root synthetic parents or Oracle."""
     rejected: Set[int] = set()
@@ -5739,6 +5746,14 @@ def _target_fk_rejections(
             columns: set() for columns in requirements
         }
         internal_sets[parent_table] = table_sets
+        if lote_counts is not None and lote_counts.get(parent_table) == 0:
+            logger.info(
+                "PERF FK parent=%s rows=0 partitions=0 internal_distinct_keys=0 "
+                "requirements=%d extraction_seconds=0.000",
+                parent_table,
+                len(requirements),
+            )
+            return
         row_count = 0
         started = time.perf_counter()
         for row in projected.toLocalIterator(prefetchPartitions=False):
@@ -5785,48 +5800,53 @@ def _target_fk_rejections(
             for state in edge_states
             for column in state["child_cols"]
         ))
-        projected = (
-            child.join(provenance, child_pk, "inner")
-            .select(
-                ROOT_PROVENANCE_COL,
-                *[
-                    F.col(column).cast("string").alias(column)
-                    for column in wide_columns
-                ],
-            )
-            .coalesce(FK_ADMISSION_ITERATOR_PARTITIONS)
-        )
         row_count = 0
         started = time.perf_counter()
-        for row in projected.toLocalIterator(prefetchPartitions=False):
-            row_count += 1
-            root = row[ROOT_PROVENANCE_COL]
-            for state in edge_states:
-                values = tuple(row[column] for column in state["child_cols"])
-                if any(
-                    value is None
-                    or (isinstance(data_type, T.StringType) and value == "")
-                    for value, data_type in zip(values, state["child_types"])
-                ):
-                    continue
-                key = tuple(
-                    _canon_oracle_key(value, numeric)
-                    for value, numeric in zip(values, state["numeric_flags"])
+        if lote_counts is not None and lote_counts.get(table) == 0:
+            projected = None
+            projected_partitions = 0
+        else:
+            projected = (
+                child.join(provenance, child_pk, "inner")
+                .select(
+                    ROOT_PROVENANCE_COL,
+                    *[
+                        F.col(column).cast("string").alias(column)
+                        for column in wide_columns
+                    ],
                 )
-                requirement = state["internal_requirement"]
-                if requirement is not None:
-                    parent_table, parent_cols = requirement
-                    if (root, key) in internal_sets[parent_table][parent_cols]:
+                .coalesce(FK_ADMISSION_ITERATOR_PARTITIONS)
+            )
+            projected_partitions = projected.rdd.getNumPartitions()
+            for row in projected.toLocalIterator(prefetchPartitions=False):
+                row_count += 1
+                root = row[ROOT_PROVENANCE_COL]
+                for state in edge_states:
+                    values = tuple(row[column] for column in state["child_cols"])
+                    if any(
+                        value is None
+                        or (isinstance(data_type, T.StringType) and value == "")
+                        for value, data_type in zip(values, state["child_types"])
+                    ):
                         continue
-                roots = state["residual_roots"].setdefault(key, set())
-                roots.add(root)
+                    key = tuple(
+                        _canon_oracle_key(value, numeric)
+                        for value, numeric in zip(values, state["numeric_flags"])
+                    )
+                    requirement = state["internal_requirement"]
+                    if requirement is not None:
+                        parent_table, parent_cols = requirement
+                        if (root, key) in internal_sets[parent_table][parent_cols]:
+                            continue
+                    roots = state["residual_roots"].setdefault(key, set())
+                    roots.add(root)
         extraction_seconds = time.perf_counter() - started
         logger.info(
             "PERF FK table=%s rows=%d partitions=%d residual_distinct_keys=%d edges=%d "
             "extraction_seconds=%.3f",
             table,
             row_count,
-            projected.rdd.getNumPartitions(),
+            projected_partitions,
             sum(len(state["residual_roots"]) for state in edge_states),
             len(edge_states),
             extraction_seconds,
@@ -5961,6 +5981,30 @@ def _hash_band_plan(domain_count: int, requested: int) -> Tuple[int, int, float]
     return target_size, band_count, domain_count / band_count
 
 
+def _small_plan_shuffle_partition_target(
+    configured: int, default_parallelism: int
+) -> int:
+    if configured < 1 or default_parallelism < 1:
+        raise ValueError("shuffle partitions e defaultParallelism devem ser >= 1")
+    return min(configured, max(8, 2 * default_parallelism))
+
+
+def _tune_small_plan_shuffles(spark: SparkSession) -> int:
+    key = "spark.sql.shuffle.partitions"
+    configured = int(spark.conf.get(key))
+    parallelism = int(spark.sparkContext.defaultParallelism)
+    target = _small_plan_shuffle_partition_target(configured, parallelism)
+    if target < configured:
+        spark.conf.set(key, str(target))
+    logger.info(
+        "PERF small_plan_shuffle configured=%d effective=%d default_parallelism=%d",
+        configured,
+        target,
+        parallelism,
+    )
+    return target
+
+
 def _ranked_hash_band_domain(
     valid_domain: DataFrame,
     seed: int,
@@ -6027,6 +6071,8 @@ def seleciona_instrumentos_destino(
             poda_conta=poda_conta,
             politica_estrita_operacao=politica_estrita_operacao,
         )
+    configured_plan_shuffles = int(spark.conf.get("spark.sql.shuffle.partitions"))
+    _tune_small_plan_shuffles(spark)
     requested = len(num_ifs) if num_ifs is not None else int(n_instrumentos)
     if requested < 1:
         raise ValueError("n_instrumentos deve ser >= 1")
@@ -6075,6 +6121,7 @@ def seleciona_instrumentos_destino(
     selective_missing: Optional[DataFrame] = None
     accepted_lotes: Dict[str, DataFrame] = {}
     accepted_provenances: Dict[str, DataFrame] = {}
+    accepted_lote_counts: Dict[str, int] = {}
     cursor: Optional[Tuple[int, int]] = None
     current_band = 0
     active_band: Optional[DataFrame] = None
@@ -6121,6 +6168,7 @@ def seleciona_instrumentos_destino(
 
         if not candidates:
             break
+        page_lote_counts: Dict[str, int] = {}
         with _perf_timer("closure", product=profile.name, roots=len(candidates)):
             lotes, proveniencias = _calcula_lotes_com_proveniencia(
                 spark,
@@ -6131,6 +6179,7 @@ def seleciona_instrumentos_destino(
                 candidates,
                 max_passadas,
                 somente_ativos=somente_ativos,
+                counts_out=page_lote_counts,
                 produto=produto,
                 lastros_por_lote=lastros_por_lote,
             )
@@ -6149,6 +6198,7 @@ def seleciona_instrumentos_destino(
                     profile.integrity.selective_missing_keys,
                     nullify_columns or {},
                     existing_key_lookup,
+                    lote_counts=page_lote_counts,
                 ),
             )
         all_reasons.update(reasons)
@@ -6171,6 +6221,7 @@ def seleciona_instrumentos_destino(
         ][:requested - len(accepted)]
         accepted.extend(page_accepted)
         if page_accepted:
+            accepted_materialization_started = time.perf_counter()
             accepted_roots = spark.createDataFrame(
                 [(value,) for value in page_accepted], [ROOT_PROVENANCE_COL]
             ).select(
@@ -6205,19 +6256,30 @@ def seleciona_instrumentos_destino(
                     lotes[table]
                     .join(accepted_keys, table_pk, "left_semi")
                 )
+                accepted_page_count = _retry_transient_oci_action(
+                    f"materialização do lote aceito {table}",
+                    accepted_page_lote.count,
+                )
                 accepted_page_provenance = (
                     _durable_materialize(accepted_provenance)
                     if retain_provenance else None
                 )
+                if accepted_page_provenance is not None:
+                    _retry_transient_oci_action(
+                        f"materialização da proveniência aceita {table}",
+                        accepted_page_provenance.count,
+                    )
                 if table in accepted_lotes:
                     previous_lote = accepted_lotes[table]
-                    accepted_page_lote.count()
                     accepted_lotes[table] = _durable_materialize(
                         previous_lote
                         .unionByName(accepted_page_lote)
                         .dropDuplicates(table_pk)
                     )
-                    accepted_lotes[table].count()
+                    accepted_lote_counts[table] = _retry_transient_oci_action(
+                        f"materialização do lote aceito acumulado {table}",
+                        accepted_lotes[table].count,
+                    )
                     previous_lote.unpersist(blocking=False)
                     accepted_page_lote.unpersist(blocking=False)
                     if retain_provenance:
@@ -6227,13 +6289,23 @@ def seleciona_instrumentos_destino(
                             .unionByName(accepted_page_provenance)
                             .dropDuplicates(table_pk + [ROOT_PROVENANCE_COL])
                         )
-                        accepted_provenances[table].count()
+                        _retry_transient_oci_action(
+                            f"materialização da proveniência aceita acumulada {table}",
+                            accepted_provenances[table].count,
+                        )
                         previous_provenance.unpersist(blocking=False)
                         accepted_page_provenance.unpersist(blocking=False)
                 else:
                     accepted_lotes[table] = accepted_page_lote
+                    accepted_lote_counts[table] = accepted_page_count
                     if retain_provenance:
                         accepted_provenances[table] = accepted_page_provenance
+            logger.info(
+                "PERF accepted_lote_materialization seconds=%.3f product=%s roots=%d",
+                time.perf_counter() - accepted_materialization_started,
+                profile.name,
+                len(page_accepted),
+            )
         for frame in lotes.values():
             frame.unpersist(blocking=False)
         for frame in proveniencias.values():
@@ -6265,11 +6337,17 @@ def seleciona_instrumentos_destino(
         len(accepted),
         len(all_reasons),
     )
+    if int(spark.conf.get("spark.sql.shuffle.partitions")) != configured_plan_shuffles:
+        spark.conf.set("spark.sql.shuffle.partitions", str(configured_plan_shuffles))
+        logger.info(
+            "PERF small_plan_shuffle restored=%d", configured_plan_shuffles
+        )
     return TargetInstrumentSelection(
-        accepted,
-        missing_df,
-        accepted_lotes,
-        accepted_provenances if retain_provenance else None,
+        values=accepted,
+        missing_keys=missing_df,
+        lotes=accepted_lotes,
+        provenances=accepted_provenances if retain_provenance else None,
+        lote_counts=accepted_lote_counts,
     )
 
 
@@ -9342,6 +9420,7 @@ def executa_clonagem(spark, config, spec: dict, *,
         valores = selection.values
         selected_lotes = selection.lotes
         selected_provenances = selection.provenances
+        closure_lote_counts = selection.lote_counts
         # Também substitui o input offline para a nulificação seletiva: somente
         # ausências confirmadas live podem alterar o sintético desta execução.
         faltantes = selection.missing_keys
@@ -9363,6 +9442,10 @@ def executa_clonagem(spark, config, spec: dict, *,
         tipo_derivado = _deriva_tipo_oracle_do_lote(
             selected_lotes[TABELA_RAIZ],
             int(planned_artifact["cod_if"]["oracle_type"]),
+        )
+    elif selected_lotes is not None:
+        tipo_derivado = _deriva_tipo_oracle_do_lote(
+            selected_lotes[TABELA_RAIZ], tipo_oracle
         )
     else:
         tipo_derivado = _deriva_tipo_oracle(spark, config, valores, tipo_oracle)

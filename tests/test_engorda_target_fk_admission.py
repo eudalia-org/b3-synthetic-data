@@ -477,6 +477,59 @@ def test_hash_band_plan_targets_bounded_expected_size(
     )
 
 
+@pytest.mark.parametrize(
+    ("configured", "parallelism", "expected"),
+    [(512, 32, 64), (128, 32, 64), (32, 32, 32), (512, 1, 8)],
+)
+def test_small_plan_shuffle_partition_target(configured, parallelism, expected):
+    assert eng._small_plan_shuffle_partition_target(
+        configured, parallelism
+    ) == expected
+
+
+def test_product_domain_query_construction_stays_lazy(spark, monkeypatch):
+    queried = spark.createDataFrame([(1,), (1,)], "NUM_IF long")
+    frame_class = type(queried)
+    monkeypatch.setattr(
+        eng,
+        "_read_num_if_query_text",
+        lambda *_args: ("SELECT NUM_IF", "query.sql"),
+    )
+    monkeypatch.setattr(eng, "_render_num_if_query", lambda *_args: "rendered")
+    monkeypatch.setattr(spark, "sql", lambda _sql: queried)
+    monkeypatch.setattr(
+        frame_class,
+        "count",
+        lambda *_args, **_kwargs: pytest.fail("domain builder triggered a Spark action"),
+    )
+
+    domain = eng._dominio_num_if_produto(
+        spark, {}, eng.get_product_profile("cdb_simplificado"), "query.sql"
+    )
+
+    assert [row.NUM_IF for row in domain.collect()] == [1]
+
+
+def test_materialized_domain_rejects_null_num_if(spark, monkeypatch):
+    domain = spark.createDataFrame([(None,), (1,)], "NUM_IF long")
+    profile = dataclasses.replace(
+        eng.get_product_profile("cdb_simplificado"), name="test_domain"
+    )
+    monkeypatch.setattr(eng, "_dominio_num_if_produto", lambda *_args, **_kwargs: domain)
+
+    with pytest.raises(ValueError, match="NUM_IF nulo"):
+        eng._dominio_instrumentos_elegiveis(
+            spark,
+            {},
+            {},
+            profile,
+            poda_subtipo=False,
+            poda_cronograma_resgate=False,
+            poda_conta=False,
+            politica_estrita_operacao=False,
+        )
+
+
 @pytest.mark.parametrize("domain_count, requested", [(-1, 1), (1, 0)])
 def test_hash_band_plan_rejects_invalid_counts(domain_count, requested):
     with pytest.raises(ValueError):
@@ -516,6 +569,24 @@ def test_hash_band_sampling_is_bounded_and_seeded_on_200k_domain(
     domain.unpersist(blocking=False)
 
 
+def test_target_selection_returns_materialized_final_counts(spark, monkeypatch):
+    domain = spark.range(20).select((F.col("id") + 1).alias(eng.COL_NUM_IF))
+    run, _pages = _root_only_selection_harness(spark, monkeypatch, domain)
+    prior_shuffle = spark.conf.get("spark.sql.shuffle.partitions")
+    spark.conf.set("spark.sql.shuffle.partitions", "32")
+
+    try:
+        selection = run(n_instrumentos=10, seed=42)
+        assert spark.conf.get("spark.sql.shuffle.partitions") == "32"
+    finally:
+        spark.conf.set("spark.sql.shuffle.partitions", prior_shuffle)
+
+    assert selection.lote_counts == {eng.TABELA_RAIZ: 10}
+    assert selection.lotes[eng.TABELA_RAIZ].count() == 10
+    for frame in selection.lotes.values():
+        frame.unpersist(blocking=False)
+
+
 def test_hash_band_admission_refills_across_pages_and_bands_exactly(
     spark, monkeypatch
 ):
@@ -546,6 +617,7 @@ def test_hash_band_admission_refills_across_pages_and_bands_exactly(
 
     assert band_count == 5
     assert len(selection.values) == 10
+    assert selection.lote_counts == {eng.TABELA_RAIZ: 10}
     assert len(seen) == len(set(seen))
     assert sum(bands == {0} for bands in page_bands) >= 2
     assert page_bands[-1] == {1}
@@ -711,6 +783,108 @@ def test_target_fk_admission_bounds_iterator_partition_fanout(spark, monkeypatch
         eng.FK_ADMISSION_ITERATOR_PARTITIONS,
         eng.FK_ADMISSION_ITERATOR_PARTITIONS,
     ]
+    assert rejected == set()
+    assert reasons == {}
+    assert missing is None
+
+
+def test_target_fk_admission_skips_iterators_for_known_empty_tables(
+    spark, monkeypatch
+):
+    parent = spark.createDataFrame([], "ID long")
+    child = spark.createDataFrame([], "ID long, FK long")
+    parent_provenance = spark.createDataFrame(
+        [], f"ID long, {eng.ROOT_PROVENANCE_COL} long"
+    )
+    child_provenance = spark.createDataFrame(
+        [], f"ID long, {eng.ROOT_PROVENANCE_COL} long"
+    )
+    frame_class = type(child)
+    monkeypatch.setattr(
+        frame_class,
+        "toLocalIterator",
+        lambda *_args, **_kwargs: pytest.fail("known-empty table started an iterator"),
+    )
+
+    rejected, reasons, missing = eng._target_fk_rejections(
+        spark,
+        {
+            "PARENT": {"pk_cols": ["ID"], "foreign_keys": []},
+            "CHILD": {
+                "pk_cols": ["ID"],
+                "foreign_keys": [{
+                    "columns": ["FK"],
+                    "parent_table": "PARENT",
+                    "parent_columns": ["ID"],
+                }],
+            },
+        },
+        {
+            "PARENT": eng.PlanoTabela("PARENT", ("ID",)),
+            "CHILD": eng.PlanoTabela(
+                "CHILD", ("ID",),
+                [eng.FkRemap(("FK",), "PARENT", ("ID",), False)],
+            ),
+        },
+        {"PARENT": parent, "CHILD": child},
+        {"PARENT": parent_provenance, "CHILD": child_provenance},
+        ["PARENT", "CHILD"],
+        frozenset(),
+        {},
+        lambda *_args: pytest.fail("known-empty table reached Oracle"),
+        lote_counts={"PARENT": 0, "CHILD": 0},
+    )
+
+    assert rejected == set()
+    assert reasons == {}
+    assert missing is None
+
+
+def test_empty_internal_parent_still_checks_nonempty_child_in_oracle(spark):
+    parent = spark.createDataFrame([], "ID long")
+    child = spark.createDataFrame([(1, 99)], "ID long, FK long")
+    parent_provenance = spark.createDataFrame(
+        [], f"ID long, {eng.ROOT_PROVENANCE_COL} long"
+    )
+    child_provenance = spark.createDataFrame(
+        [(1, 10)], f"ID long, {eng.ROOT_PROVENANCE_COL} long"
+    )
+    lookups = []
+
+    def lookup(table, columns, keys, numeric_flags):
+        lookups.append((table, columns, keys, numeric_flags))
+        return set(keys)
+
+    rejected, reasons, missing = eng._target_fk_rejections(
+        spark,
+        {
+            "PARENT": {"pk_cols": ["ID"], "foreign_keys": []},
+            "CHILD": {
+                "pk_cols": ["ID"],
+                "foreign_keys": [{
+                    "columns": ["FK"],
+                    "parent_table": "PARENT",
+                    "parent_columns": ["ID"],
+                }],
+            },
+        },
+        {
+            "PARENT": eng.PlanoTabela("PARENT", ("ID",)),
+            "CHILD": eng.PlanoTabela(
+                "CHILD", ("ID",),
+                [eng.FkRemap(("FK",), "PARENT", ("ID",), False)],
+            ),
+        },
+        {"PARENT": parent, "CHILD": child},
+        {"PARENT": parent_provenance, "CHILD": child_provenance},
+        ["PARENT", "CHILD"],
+        frozenset(),
+        {},
+        lookup,
+        lote_counts={"PARENT": 0, "CHILD": 1},
+    )
+
+    assert lookups == [("PARENT", ("ID",), [("99",)], (True,))]
     assert rejected == set()
     assert reasons == {}
     assert missing is None
@@ -1977,13 +2151,23 @@ def test_phase_plan_freezes_adjusted_k_for_admitted_domain_deficit(spark, monkey
         assert kwargs["poda_cronograma_resgate"] is True
         assert kwargs["permitir_lote_menor"] is True
         return eng.TargetInstrumentSelection(
-            [20], None, {eng.TABELA_RAIZ: admitted_root}
+            [20], None, {eng.TABELA_RAIZ: admitted_root}, None,
+            {eng.TABELA_RAIZ: 1},
         )
 
     monkeypatch.setattr(eng, "seleciona_instrumentos_destino", select_admitted)
-    monkeypatch.setattr(eng, "_deriva_tipo_oracle", lambda *_: 49)
+    monkeypatch.setattr(
+        eng,
+        "_deriva_tipo_oracle",
+        lambda *_: pytest.fail("live admitted plan rescanned RAW for NUM_TIPO_IF"),
+    )
+    monkeypatch.setattr(eng, "_deriva_tipo_oracle_do_lote", lambda *_: 49)
     monkeypatch.setattr(eng, "_apply_oracle_pk_floors", lambda *_: None)
-    monkeypatch.setattr(eng, "_count_final_lotes", lambda *_: {eng.TABELA_RAIZ: 1})
+    monkeypatch.setattr(
+        eng,
+        "_count_final_lotes",
+        lambda *_: pytest.fail("live admitted plan recounted materialized lotes"),
+    )
 
     def snapshot(_spark, _uri, lotes, _missing, **kwargs):
         assert kwargs["selected_num_ifs"] == [20]
