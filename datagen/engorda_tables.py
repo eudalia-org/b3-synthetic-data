@@ -4370,6 +4370,28 @@ def _dominio_num_if_produto(spark, config, profile: ProductProfile,
 
     return base
 
+
+def _materializa_dominio_num_if(
+    spark,
+    config,
+    profile: ProductProfile,
+    query_path: Optional[str],
+) -> DataFrame:
+    """Recreate the read-only domain query after transient OCI failures."""
+
+    def query_and_checkpoint() -> DataFrame:
+        return (
+            _dominio_num_if_produto(spark, config, profile, query_path)
+            .select(COL_NUM_IF)
+            .dropDuplicates()
+            .localCheckpoint(eager=True)
+        )
+
+    return _retry_transient_oci_action(
+        f"dominio de NUM_IF do produto {profile.name}", query_and_checkpoint
+    )
+
+
 # ---------------------------------------------------------------------------
 # Poda de domínio (itens 1, 3 e 4) e duas políticas de anulação: drift integral
 # (item 2) e faltantes seletivos para a allowlist nullable.
@@ -5462,14 +5484,14 @@ def _dominio_instrumentos_elegiveis(
     poda_conta: bool = True,
     politica_estrita_operacao: bool = True,
 ) -> Tuple[DataFrame, DataFrame]:
-    fonte = (_dominio_num_if_produto(spark, config, profile, query_num_if_path)
-             .select(COL_NUM_IF).dropDuplicates())
-    # Checkpoint + contagem do domínio ANTES de qualquer poda. Sem esta linha,
+    fonte = _materializa_dominio_num_if(
+        spark, config, profile, query_num_if_path
+    )
+    # O helper faz checkpoint ANTES de qualquer poda. Sem esse corte,
     # "0 instrumento(s) válido(s)" é ambíguo entre "a query não devolveu nada" e
     # "as podas levaram tudo" — que pedem correções opostas. Também corta a
     # reexecução da query, que era refeita uma vez por poda (cada uma faz
     # left_semi contra `fonte`).
-    fonte = fonte.localCheckpoint(eager=True)
     domain_stats = fonte.agg(
         F.count(F.lit(1)).alias("row_count"),
         F.max(F.when(F.col(COL_NUM_IF).isNull(), F.lit(1)).otherwise(F.lit(0)))

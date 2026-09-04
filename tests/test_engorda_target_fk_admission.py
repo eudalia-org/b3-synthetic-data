@@ -122,6 +122,48 @@ def test_read_pk_max_recreates_transiently_failed_spark_action(
     assert waits == [35]
 
 
+def test_domain_checkpoint_recreates_query_after_transient_oci_failure(
+    spark, monkeypatch
+):
+    domain = spark.createDataFrame([(1,), (2,)], "NUM_IF long")
+    frame_class = type(domain)
+    original_checkpoint = frame_class.localCheckpoint
+    checkpoint_calls = 0
+    query_calls = 0
+    waits = []
+
+    def query(*_args, **_kwargs):
+        nonlocal query_calls
+        query_calls += 1
+        return domain
+
+    def flaky_checkpoint(frame, eager=True):
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
+        if checkpoint_calls == 1:
+            raise RuntimeError(
+                "Unable to fetch file status for ObjectStorage HeadObject; "
+                "status: 429; CircuitBreaker has been OPEN"
+            )
+        return original_checkpoint(frame, eager=eager)
+
+    monkeypatch.setattr(eng, "_dominio_num_if_produto", query)
+    monkeypatch.setattr(frame_class, "localCheckpoint", flaky_checkpoint)
+    monkeypatch.setattr(eng, "_sleep_before_transient_oci_retry", waits.append)
+
+    result = eng._materializa_dominio_num_if(
+        spark,
+        {},
+        eng.get_product_profile("cdb_simplificado"),
+        None,
+    )
+
+    assert [row.NUM_IF for row in result.orderBy("NUM_IF").collect()] == [1, 2]
+    assert query_calls == 2
+    assert checkpoint_calls == 2
+    assert waits == [35]
+
+
 class _ResultSet:
     def __init__(self, rows):
         self.rows = rows
