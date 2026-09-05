@@ -45,15 +45,15 @@ from __future__ import annotations
 import csv
 from collections import defaultdict
 from functools import reduce
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
-
 # ---------------------------------------------------------------------------
 # Leitura das constraints (CSVs locais no notebook)
 # ---------------------------------------------------------------------------
+
 
 def _norm(s: str) -> str:
     return (s or "").strip().upper()
@@ -63,9 +63,7 @@ def le_pks(caminho: str) -> Dict[str, List[str]]:
     acc: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
     with open(caminho, newline="", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
-            acc[_norm(row["TABLE_NAME"])].append(
-                (int(row["POSITION"]), _norm(row["COLUMN_NAME"]))
-            )
+            acc[_norm(row["TABLE_NAME"])].append((int(row["POSITION"]), _norm(row["COLUMN_NAME"])))
     return {t: [c for _, c in sorted(v)] for t, v in acc.items()}
 
 
@@ -79,15 +77,12 @@ def le_fks(caminho: str) -> Dict[str, List[FkRec]]:
     with open(caminho, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         if "CONSTRAINT_NAME" not in (reader.fieldnames or []):
-            raise ValueError(
-                "fk_real.csv precisa da coluna CONSTRAINT_NAME (use o SQL revisado)."
-            )
+            raise ValueError("fk_real.csv precisa da coluna CONSTRAINT_NAME (use o SQL revisado).")
         for row in reader:
             cn = _norm(row["CONSTRAINT_NAME"])
             meta[cn] = (_norm(row["CHILD_TABLE"]), _norm(row["PARENT_TABLE"]))
             cols[cn].append(
-                (int(row["COL_POSITION"]), _norm(row["CHILD_COLUMN"]),
-                 _norm(row["PARENT_COLUMN"]))
+                (int(row["COL_POSITION"]), _norm(row["CHILD_COLUMN"]), _norm(row["PARENT_COLUMN"]))
             )
     by_child: Dict[str, List[FkRec]] = defaultdict(list)
     for cn, (child, parent) in meta.items():
@@ -112,6 +107,7 @@ def le_notnull(caminho: str) -> Dict[str, List[str]]:
 # Leitura dos parquets (Spark, dados COMPLETOS)
 # ---------------------------------------------------------------------------
 
+
 def _read(spark: SparkSession, base: str, table: str) -> Optional[DataFrame]:
     """Lê o parquet de uma tabela; None se não existir/falhar."""
     path = f"{base.rstrip('/')}/{table}"
@@ -129,6 +125,7 @@ def _upper_cols(df: DataFrame) -> DataFrame:
 # ---------------------------------------------------------------------------
 # Checagens
 # ---------------------------------------------------------------------------
+
 
 def check_pk(df: DataFrame, pk_cols: List[str]) -> Tuple[int, int]:
     """Retorna (linhas_pk_nula, linhas_pk_duplicada)."""
@@ -153,8 +150,9 @@ def check_notnull(df: DataFrame, nn_cols: List[str]) -> List[Tuple[str, int]]:
     return out
 
 
-def check_fk(child_df: DataFrame, parent_df: DataFrame,
-             child_cols: List[str], parent_cols: List[str]) -> int:
+def check_fk(
+    child_df: DataFrame, parent_df: DataFrame, child_cols: List[str], parent_cols: List[str]
+) -> int:
     """
     Conta linhas-filha órfãs: FK não-nula sem PK correspondente no pai.
     Sob MATCH SIMPLE do Oracle, linha com QUALQUER coluna da FK nula é ignorada
@@ -165,10 +163,8 @@ def check_fk(child_df: DataFrame, parent_df: DataFrame,
     if len(cp) != len(child_cols) or len(pp) != len(parent_cols):
         return -1  # coluna ausente -> não verificável
 
-    not_null = reduce(lambda a, b: a & b,
-                      [F.col(c).isNotNull() for c in child_cols])
-    child_keys = (child_df.where(not_null)
-                  .select(*child_cols).dropDuplicates())
+    not_null = reduce(lambda a, b: a & b, [F.col(c).isNotNull() for c in child_cols])
+    child_keys = child_df.where(not_null).select(*child_cols).dropDuplicates()
 
     parent_keys = parent_df.select(
         *[F.col(pc).alias(cc) for cc, pc in zip(child_cols, parent_cols)]
@@ -180,6 +176,7 @@ def check_fk(child_df: DataFrame, parent_df: DataFrame,
 # ---------------------------------------------------------------------------
 # Orquestração
 # ---------------------------------------------------------------------------
+
 
 def run_check(
     spark: SparkSession,
@@ -246,10 +243,9 @@ def run_check(
                 print(f"  [PK] colunas {pk_cols} não estão no parquet — NÃO verificável.")
                 nao_verificaveis.append(f"{table} PK {pk_cols}")
             else:
-                ok = (n_null == 0 and n_dup == 0)
+                ok = n_null == 0 and n_dup == 0
                 flag = "OK" if ok else "FALHA"
-                print(f"  [PK] {flag}: nulas={n_null:,} duplicadas={n_dup:,} "
-                      f"(cols={pk_cols})")
+                print(f"  [PK] {flag}: nulas={n_null:,} duplicadas={n_dup:,} (cols={pk_cols})")
                 if not ok:
                     problemas += 1
 
@@ -258,8 +254,10 @@ def run_check(
         viol = check_notnull(df, nn) if nn else []
         if viol:
             for c, n in viol:
-                print(f"  [NOT NULL] FALHA: coluna `{c}` tem {n:,} nulo(s) "
-                      "(NOT NULL no banco -> ORA-01400)")
+                print(
+                    f"  [NOT NULL] FALHA: coluna `{c}` tem {n:,} nulo(s) "
+                    "(NOT NULL no banco -> ORA-01400)"
+                )
             problemas += 1
         else:
             print(f"  [NOT NULL] OK ({len(nn)} coluna(s) NOT NULL checada(s))")
@@ -272,21 +270,27 @@ def run_check(
                 pdf = prod(parent)
                 origem = "produção"
             if pdf is None:
-                print(f"  [FK {cn}] -> {parent}.{pcols}: NÃO verificável "
-                      f"(pai ausente em sintético e produção)")
+                print(
+                    f"  [FK {cn}] -> {parent}.{pcols}: NÃO verificável "
+                    f"(pai ausente em sintético e produção)"
+                )
                 nao_verificaveis.append(f"{table}.{ccols} -> {parent}.{pcols}")
                 continue
 
             orphans = check_fk(df, pdf, ccols, pcols)
             if orphans == -1:
-                print(f"  [FK {cn}] -> {parent}.{pcols}: NÃO verificável "
-                      "(coluna ausente em filha/pai)")
+                print(
+                    f"  [FK {cn}] -> {parent}.{pcols}: NÃO verificável "
+                    "(coluna ausente em filha/pai)"
+                )
                 nao_verificaveis.append(f"{table}.{ccols} -> {parent}.{pcols}")
             elif orphans == 0:
                 print(f"  [FK {cn}] OK (vs {origem}): {ccols} -> {parent}.{pcols}")
             else:
-                print(f"  [FK {cn}] FALHA (vs {origem}): {orphans:,} órfã(s) "
-                      f"{ccols} -> {parent}.{pcols} -> ORA-02291")
+                print(
+                    f"  [FK {cn}] FALHA (vs {origem}): {orphans:,} órfã(s) "
+                    f"{ccols} -> {parent}.{pcols} -> ORA-02291"
+                )
                 problemas += 1
 
     # ---- Resumo ----
@@ -295,7 +299,9 @@ def run_check(
         print("RESULTADO: nenhuma violação detectada nas checagens possíveis.")
         print("O append NÃO deve falhar por PK/FK/NOT NULL nas tabelas verificadas.")
     else:
-        print(f"RESULTADO: {problemas} tabela(s)/checagem(ns) com FALHA — corrigir antes do append.")
+        print(
+            f"RESULTADO: {problemas} tabela(s)/checagem(ns) com FALHA — corrigir antes do append."
+        )
     if nao_verificaveis:
         print(f"\nNÃO VERIFICÁVEIS OFFLINE ({len(nao_verificaveis)}) — confirmar em produção:")
         for x in nao_verificaveis:
@@ -304,22 +310,34 @@ def run_check(
     print("=" * 78)
 
 
-
-
+# SQL example for exporting cols_real.csv; execute separately in Oracle.
+COLS_EXPORT_SQL = """
 SELECT table_name, column_name, nullable
 FROM   all_tab_columns
 WHERE  owner = :OWNER
 ORDER BY table_name, column_id;
+"""
 
 
-
-from preappend_check import run_check
+# Notebook example: the caller provides an existing Spark session.
+spark: SparkSession = globals()["spark"]
 
 AS_15 = [
-    "INSTRUMENTO_FINANCEIRO", "CONDICAO_IF", "CARTEIRA_COMITENTE",
-    "CARTEIRA_PARTICIPANTE", "CREDITO", "DEPOSITO_AUTOMATICO_IF", "TITULO",
-    "JUROS_FLUTUANTE", "RESGATE", "EVENTO", "OPERACAO", "ESPECIFICACAO",
-    "LANCAMENTO", "DADO_OPERACAO", "ESPECIFICACAO_COMITENTE",
+    "INSTRUMENTO_FINANCEIRO",
+    "CONDICAO_IF",
+    "CARTEIRA_COMITENTE",
+    "CARTEIRA_PARTICIPANTE",
+    "CREDITO",
+    "DEPOSITO_AUTOMATICO_IF",
+    "TITULO",
+    "JUROS_FLUTUANTE",
+    "RESGATE",
+    "EVENTO",
+    "OPERACAO",
+    "ESPECIFICACAO",
+    "LANCAMENTO",
+    "DADO_OPERACAO",
+    "ESPECIFICACAO_COMITENTE",
 ]
 
 run_check(
@@ -329,5 +347,5 @@ run_check(
     cols_csv="cols_real.csv",
     synth_base="oci://oci-st-blc-engordai-qab-n@gr97zovfhcmu/synthetic",  # ajuste o prefixo
     tables_to_append=AS_15,
-    prod_base=None,   # ou o prefixo onprem-export quando o engenheiro terminar de subir
+    prod_base=None,  # ou o prefixo onprem-export quando o engenheiro terminar de subir
 )

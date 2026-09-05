@@ -34,9 +34,7 @@ def valid_resgate_tables(spark, mode="COM TABELA"):
             "NUM_IF long, NUM_TIPO_IF long, DAT_EXCLUSAO string, DAT_EMISSAO string, "
             "DAT_VENCIMENTO string, COD_SITUACAO_IF long",
         ),
-        "TITULO": spark.createDataFrame(
-            [(1, None)], "NUM_IF long, COD_TIPO_ESCALONAMENTO string"
-        ),
+        "TITULO": spark.createDataFrame([(1, None)], "NUM_IF long, COD_TIPO_ESCALONAMENTO string"),
         "CONDICAO_IF": spark.createDataFrame(
             [(11, 1, 3, None, None), (12, 1, 20, None, None)],
             "NUM_CONDICAO_IF long, NUM_IF long, COD_TIPO_CONDICAO_IF long, "
@@ -96,12 +94,13 @@ def valid_escalonamento_tables(spark):
 def test_variant_rules_are_full_cdb_only(spark):
     tables = valid_resgate_tables(spark)
 
-    assert validator.check_cdb_variant_rules(
-        tables, 5, validator.VALIDATION_PROFILES["cdb_simplificado"]
-    ) == []
-    assert validator.check_cdb_variant_rules(
-        tables, 5, validator.VALIDATION_PROFILES["rdb"]
-    ) == []
+    assert (
+        validator.check_cdb_variant_rules(
+            tables, 5, validator.VALIDATION_PROFILES["cdb_simplificado"]
+        )
+        == []
+    )
+    assert validator.check_cdb_variant_rules(tables, 5, validator.VALIDATION_PROFILES["rdb"]) == []
 
 
 def test_valid_com_tabela_resgate_passes(spark):
@@ -109,9 +108,7 @@ def test_valid_com_tabela_resgate_passes(spark):
     tables["CONDICAO_RESGATE"] = tables["CONDICAO_RESGATE"].withColumn(
         "VAL_PERCENTUAL", pyspark.sql.functions.lit(113.33)
     )
-    findings = validator.check_cdb_variant_rules(
-        tables, 5, validator.VALIDATION_PROFILES["cdb"]
-    )
+    findings = validator.check_cdb_variant_rules(tables, 5, validator.VALIDATION_PROFILES["cdb"])
 
     assert findings
     assert all(finding.passed for finding in findings)
@@ -120,31 +117,31 @@ def test_valid_com_tabela_resgate_passes(spark):
 def test_resgate_schedule_requires_table_rows_and_rejects_sem_tabela_children(spark):
     missing = valid_resgate_tables(spark)
     missing.pop("CONDICAO_RESGATE")
-    missing_findings = by_id(validator.check_cdb_variant_rules(
-        missing, 5, validator.VALIDATION_PROFILES["cdb"]
-    ))
+    missing_findings = by_id(
+        validator.check_cdb_variant_rules(missing, 5, validator.VALIDATION_PROFILES["cdb"])
+    )
     assert missing_findings["2b.resgate_schedule_coverage"].severity == validator.SEV_ERROR
 
     sem_tabela = valid_resgate_tables(spark, mode="SEM TABELA")
-    sem_findings = by_id(validator.check_cdb_variant_rules(
-        sem_tabela, 5, validator.VALIDATION_PROFILES["cdb"]
-    ))
+    sem_findings = by_id(
+        validator.check_cdb_variant_rules(sem_tabela, 5, validator.VALIDATION_PROFILES["cdb"])
+    )
     assert sem_findings["2b.resgate_schedule_parent"].severity == validator.SEV_ERROR
 
     excluded = valid_resgate_tables(spark, mode="SEM TABELA")
     excluded["CONDICAO_RESGATE"] = excluded["CONDICAO_RESGATE"].withColumn(
         "IND_EXCLUIDO", pyspark.sql.functions.lit("S")
     )
-    excluded_findings = by_id(validator.check_cdb_variant_rules(
-        excluded, 5, validator.VALIDATION_PROFILES["cdb"]
-    ))
+    excluded_findings = by_id(
+        validator.check_cdb_variant_rules(excluded, 5, validator.VALIDATION_PROFILES["cdb"])
+    )
     assert excluded_findings["2b.resgate_schedule_parent"].passed
 
     partial = valid_resgate_tables(spark, mode="SEM TABELA")
     partial["CONDICAO_RESGATE"] = partial["CONDICAO_RESGATE"].drop("VAL_PERCENTUAL")
-    partial_findings = by_id(validator.check_cdb_variant_rules(
-        partial, 5, validator.VALIDATION_PROFILES["cdb"]
-    ))
+    partial_findings = by_id(
+        validator.check_cdb_variant_rules(partial, 5, validator.VALIDATION_PROFILES["cdb"])
+    )
     assert partial_findings["2b.resgate_schedule_coverage"].severity == validator.SEV_ERROR
 
 
@@ -155,9 +152,9 @@ def test_resgate_schedule_rejects_non_finite_percentages(spark, percentage):
         "VAL_PERCENTUAL", pyspark.sql.functions.lit(percentage)
     )
 
-    findings = by_id(validator.check_cdb_variant_rules(
-        tables, 5, validator.VALIDATION_PROFILES["cdb"]
-    ))
+    findings = by_id(
+        validator.check_cdb_variant_rules(tables, 5, validator.VALIDATION_PROFILES["cdb"])
+    )
 
     assert findings["2b.resgate_schedule_values"].severity == validator.SEV_ERROR
 
@@ -174,9 +171,9 @@ def test_resgate_schedule_rejects_invalid_parent_values_dates_and_duplicates(spa
         tables["CONDICAO_RESGATE"].schema,
     )
 
-    findings = by_id(validator.check_cdb_variant_rules(
-        tables, 5, validator.VALIDATION_PROFILES["cdb"]
-    ))
+    findings = by_id(
+        validator.check_cdb_variant_rules(tables, 5, validator.VALIDATION_PROFILES["cdb"])
+    )
 
     assert findings["2b.resgate_schedule_parent"].severity == validator.SEV_ERROR
     assert findings["2b.resgate_schedule_values"].severity == validator.SEV_ERROR
@@ -185,9 +182,11 @@ def test_resgate_schedule_rejects_invalid_parent_values_dates_and_duplicates(spa
 
 
 def test_escalonamento_requires_valid_consistent_segments(spark):
-    valid = by_id(validator.check_cdb_variant_rules(
-        valid_escalonamento_tables(spark), 5, validator.VALIDATION_PROFILES["cdb"]
-    ))
+    valid = by_id(
+        validator.check_cdb_variant_rules(
+            valid_escalonamento_tables(spark), 5, validator.VALIDATION_PROFILES["cdb"]
+        )
+    )
     assert valid["2b.escalonamento_coverage"].passed
     assert valid["2b.escalonamento_dates"].passed
     assert valid["2b.escalonamento_consistency"].passed
@@ -207,9 +206,9 @@ def test_escalonamento_requires_valid_consistent_segments(spark):
             pyspark.sql.functions.col("NUM_CONDICAO_IF") == 13, 91.0
         ).otherwise(90.0),
     )
-    invalid = by_id(validator.check_cdb_variant_rules(
-        tables, 5, validator.VALIDATION_PROFILES["cdb"]
-    ))
+    invalid = by_id(
+        validator.check_cdb_variant_rules(tables, 5, validator.VALIDATION_PROFILES["cdb"])
+    )
 
     assert invalid["2b.escalonamento_dates"].severity == validator.SEV_ERROR
     assert invalid["2b.escalonamento_unique_dates"].severity == validator.SEV_ERROR
@@ -219,9 +218,9 @@ def test_escalonamento_requires_valid_consistent_segments(spark):
     no_segments["CONDICAO_IF"] = no_segments["CONDICAO_IF"].where(
         pyspark.sql.functions.col("COD_TIPO_CONDICAO_IF") == 20
     )
-    no_segment_findings = by_id(validator.check_cdb_variant_rules(
-        no_segments, 5, validator.VALIDATION_PROFILES["cdb"]
-    ))
+    no_segment_findings = by_id(
+        validator.check_cdb_variant_rules(no_segments, 5, validator.VALIDATION_PROFILES["cdb"])
+    )
     assert no_segment_findings["2b.escalonamento_coverage"].severity == validator.SEV_ERROR
 
 
@@ -229,9 +228,9 @@ def test_non_escalonado_does_not_require_escalonamento_columns(spark):
     tables = valid_resgate_tables(spark)
     tables["JUROS_FLUTUANTE"] = tables["JUROS_FLUTUANTE"].select("NUM_CONDICAO_IF")
 
-    findings = by_id(validator.check_cdb_variant_rules(
-        tables, 5, validator.VALIDATION_PROFILES["cdb"]
-    ))
+    findings = by_id(
+        validator.check_cdb_variant_rules(tables, 5, validator.VALIDATION_PROFILES["cdb"])
+    )
 
     assert "2b.escalonamento_consistency" not in findings
 
@@ -249,9 +248,9 @@ def test_pending_rules_are_warning_only(spark):
         "DAT_INICIO_PENDENCIA string, DAT_FIM_PENDENCIA string",
     )
 
-    findings = by_id(validator.check_cdb_variant_rules(
-        tables, 5, validator.VALIDATION_PROFILES["cdb"]
-    ))
+    findings = by_id(
+        validator.check_cdb_variant_rules(tables, 5, validator.VALIDATION_PROFILES["cdb"])
+    )
 
     assert findings["2b.pendencia_dates"].severity == validator.SEV_WARN
     assert findings["2b.pendencia_dates"].count == 2

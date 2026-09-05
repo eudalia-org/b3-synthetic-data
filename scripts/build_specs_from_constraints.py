@@ -36,16 +36,39 @@ from collections import defaultdict
 # OPERACAO, TITULO, EVENTO, CONDICAO_IF, CREDITO, DADO_OPERACAO,
 # DEPOSITO_AUTOMATICO_IF, JUROS_FLUTUANTE, RESGATE.
 STATIC_TABLES = {
-    "TIPO_DEBITO", "TIPO_POSICAO_CARTEIRA", "TIPO_IF", "TIPO_OPER_OBJETO_SERV",
-    "TIPO_OPER_PTA_CARTEIRA", "TIPO_DADO_OPERACAO", "NAT_ECO_TIPO_IF",
-    "NAT_ECON_TP_OPER_PONTA", "NATUREZA_ECONOMICA", "MODALIDADE_LIQUIDACAO",
-    "MOTIVO_SITUACAO_IF", "SITUACAO_CONTA", "FORMA_PAGAMENTO", "PAPEL_PARTICIPANTE",
-    "OBJETO_SERVICO", "OPCAO_RECOMPRA", "CERTIFICACAO_CETIP",
-    "PARAMETRIZACAO_REGIME_MERCADO", "PARAMETRIZACAO_TIPO_REGIME", "PARAMETRO_CONFIG",
-    "TCTPFEATURE_TOGGLE", "TCTPHABILITA_OPERACAO_SERVICO", "MALOTE",
+    "TIPO_DEBITO",
+    "TIPO_POSICAO_CARTEIRA",
+    "TIPO_IF",
+    "TIPO_OPER_OBJETO_SERV",
+    "TIPO_OPER_PTA_CARTEIRA",
+    "TIPO_DADO_OPERACAO",
+    "NAT_ECO_TIPO_IF",
+    "NAT_ECON_TP_OPER_PONTA",
+    "NATUREZA_ECONOMICA",
+    "MODALIDADE_LIQUIDACAO",
+    "MOTIVO_SITUACAO_IF",
+    "SITUACAO_CONTA",
+    "FORMA_PAGAMENTO",
+    "PAPEL_PARTICIPANTE",
+    "OBJETO_SERVICO",
+    "OPCAO_RECOMPRA",
+    "CERTIFICACAO_CETIP",
+    "PARAMETRIZACAO_REGIME_MERCADO",
+    "PARAMETRIZACAO_TIPO_REGIME",
+    "PARAMETRO_CONFIG",
+    "TCTPFEATURE_TOGGLE",
+    "TCTPHABILITA_OPERACAO_SERVICO",
+    "MALOTE",
     # Structural / entity / reference tables — copied 1:1, not transactions.
-    "BLOQUEIO_OPERACAO_IF", "COMITENTE_FATCA", "COMITENTE_INR", "CONTA_PARTICIPANTE",
-    "ENTIDADE", "PARTICIPANTE", "RELACAO", "TCTPCONTROLE_IF_DEPR", "USUARIO",
+    "BLOQUEIO_OPERACAO_IF",
+    "COMITENTE_FATCA",
+    "COMITENTE_INR",
+    "CONTA_PARTICIPANTE",
+    "ENTIDADE",
+    "PARTICIPANTE",
+    "RELACAO",
+    "TCTPCONTROLE_IF_DEPR",
+    "USUARIO",
 }
 
 # Audit "last updated by" columns (NUM_ID_ENTIDADE_ATUALIZ -> USUARIO/ENTIDADE).
@@ -177,11 +200,13 @@ def build_specs(
         parent_table = meta[ref]["table"]
         if parent_table == child:
             self_refs.append(f"{child}.{child_cols} (engorda nulls these on load)")
-        fks_by_table[child].append({
-            "columns": child_cols,
-            "parent_table": parent_table,
-            "parent_columns": parent_cols,
-        })
+        fks_by_table[child].append(
+            {
+                "columns": child_cols,
+                "parent_table": parent_table,
+                "parent_columns": parent_cols,
+            }
+        )
 
     for table, fks in fks_by_table.items():
         # deterministic order
@@ -224,11 +249,13 @@ def build_specs(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate specs.json from an Oracle constraint dump.")
+        description="Generate specs.json from an Oracle constraint dump."
+    )
     parser.add_argument("--constraints", required=True, help="CSV from extract_constraints.sql")
     parser.add_argument("--out", default="specs.json", help="Output specs.json path")
-    parser.add_argument("--current", default=None,
-                        help="Existing specs.json to carry over static / n_rows flags")
+    parser.add_argument(
+        "--current", default=None, help="Existing specs.json to carry over static / n_rows flags"
+    )
     args = parser.parse_args()
 
     overrides = {}
@@ -242,8 +269,10 @@ def main() -> None:
         json.dump(specs, handle, indent=2, ensure_ascii=False)
 
     report = build_specs.last_report  # type: ignore[attr-defined]
-    print(f"Wrote {args.out}: {report['tables']} tables, {report['fks']} FKs, "
-          f"{report['static']} static.")
+    print(
+        f"Wrote {args.out}: {report['tables']} tables, {report['fks']} FKs, "
+        f"{report['static']} static."
+    )
     if report["self_refs"]:
         print("Self-referencing FKs (engorda nulls orphans on load):")
         for item in report["self_refs"]:

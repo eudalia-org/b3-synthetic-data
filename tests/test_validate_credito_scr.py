@@ -37,8 +37,23 @@ def credito_scr_tables(spark):
         "CREDITO_SCR": spark.createDataFrame(
             [
                 (
-                    1000, "26H00032408", 100, 46, 505, "IPOC-1", "2026-07-17", None,
-                    143, "PF", "N", 17, 2, 100.0, 200.0, "2026-07-17", "2028-07-06",
+                    1000,
+                    "26H00032408",
+                    100,
+                    46,
+                    505,
+                    "IPOC-1",
+                    "2026-07-17",
+                    None,
+                    143,
+                    "PF",
+                    "N",
+                    17,
+                    2,
+                    100.0,
+                    200.0,
+                    "2026-07-17",
+                    "2028-07-06",
                 )
             ],
             "NUM_ID_CREDITO_SCR long, COD_CREDITO_SCR string, NUM_ID_LOTE long, "
@@ -51,8 +66,20 @@ def credito_scr_tables(spark):
         "HISTORICO_CREDITO_SCR": spark.createDataFrame(
             [
                 (
-                    5000, 1000, "26H00032408", 100, 10, "Inclus\u00e3o", 6, 143, "PF",
-                    "N", 100.0, 200.0, "2026-07-17", "2028-07-06",
+                    5000,
+                    1000,
+                    "26H00032408",
+                    100,
+                    10,
+                    "Inclus\u00e3o",
+                    6,
+                    143,
+                    "PF",
+                    "N",
+                    100.0,
+                    200.0,
+                    "2026-07-17",
+                    "2028-07-06",
                 )
             ],
             "NUM_ID_HISTORICO_CREDITO_SCR long, NUM_ID_CREDITO_SCR long, "
@@ -66,17 +93,19 @@ def credito_scr_tables(spark):
 
 
 def graph_findings(tables):
-    return by_id(validator.check_credito_scr_graph(
-        tables, sample=5, profile=validator.VALIDATION_PROFILES["credito_scr"]
-    ))
+    return by_id(
+        validator.check_credito_scr_graph(
+            tables, sample=5, profile=validator.VALIDATION_PROFILES["credito_scr"]
+        )
+    )
 
 
 def target_frames(spark):
     return (
-        spark.createDataFrame([(46, "0901")],
-                              "NUM_ID_MODALIDADE_CREDITO long, COD_MODALIDADE_CREDITO string"),
-        spark.createDataFrame([(10, 505)],
-                              "NUM_CONTA_PARTICIPANTE long, NUM_ID_BASE_CREDITO long"),
+        spark.createDataFrame(
+            [(46, "0901")], "NUM_ID_MODALIDADE_CREDITO long, COD_MODALIDADE_CREDITO string"
+        ),
+        spark.createDataFrame([(10, 505)], "NUM_CONTA_PARTICIPANTE long, NUM_ID_BASE_CREDITO long"),
         spark.createDataFrame(
             [("S", "2026-01-01", "2026-12-31")],
             "IND_FTRE_HAB string, DATA_INIC_VIG_FTRE string, DATA_FIM_VIG_FTRE string",
@@ -148,13 +177,9 @@ def test_credito_scr_treats_oracle_empty_exclusion_as_active(spark):
 def test_credito_scr_rejects_duplicate_active_lot_and_orphan_credit(spark):
     tables = credito_scr_tables(spark)
     tables["LOTE"] = tables["LOTE"].union(
-        spark.createDataFrame(
-            [(101, "LCI00010CAP", 10, 1, "N", None)], tables["LOTE"].schema
-        )
+        spark.createDataFrame([(101, "LCI00010CAP", 10, 1, "N", None)], tables["LOTE"].schema)
     )
-    tables["CREDITO_SCR"] = tables["CREDITO_SCR"].withColumn(
-        "NUM_ID_LOTE", validator.F.lit(999)
-    )
+    tables["CREDITO_SCR"] = tables["CREDITO_SCR"].withColumn("NUM_ID_LOTE", validator.F.lit(999))
 
     findings = graph_findings(tables)
 
@@ -167,12 +192,42 @@ def test_credito_scr_rejects_blank_or_duplicate_active_credit_codes(spark):
     duplicate = spark.createDataFrame(
         [
             (
-                1001, "26H00032408", 100, 46, 505, "IPOC-2", "2026-07-17", None,
-                143, "PF", "N", 17, 2, 100.0, 200.0, "2026-07-17", "2028-07-06",
+                1001,
+                "26H00032408",
+                100,
+                46,
+                505,
+                "IPOC-2",
+                "2026-07-17",
+                None,
+                143,
+                "PF",
+                "N",
+                17,
+                2,
+                100.0,
+                200.0,
+                "2026-07-17",
+                "2028-07-06",
             ),
             (
-                1002, " ", 100, 46, 505, "IPOC-3", "2026-07-17", None,
-                143, "PF", "N", 17, 2, 100.0, 200.0, "2026-07-17", "2028-07-06",
+                1002,
+                " ",
+                100,
+                46,
+                505,
+                "IPOC-3",
+                "2026-07-17",
+                None,
+                143,
+                "PF",
+                "N",
+                17,
+                2,
+                100.0,
+                200.0,
+                "2026-07-17",
+                "2028-07-06",
             ),
         ],
         tables["CREDITO_SCR"].schema,
@@ -187,9 +242,7 @@ def test_credito_scr_rejects_blank_or_duplicate_active_credit_codes(spark):
 
 def test_credito_scr_business_code_uniqueness_preserves_case_and_dot_zero(spark):
     tables = credito_scr_tables(spark)
-    first = tables["CREDITO_SCR"].withColumn(
-        "COD_CREDITO_SCR", validator.F.lit("credit.0")
-    )
+    first = tables["CREDITO_SCR"].withColumn("COD_CREDITO_SCR", validator.F.lit("credit.0"))
     second = first.withColumn("NUM_ID_CREDITO_SCR", validator.F.lit(1001)).withColumn(
         "COD_CREDITO_SCR", validator.F.lit("credit")
     )
@@ -207,8 +260,20 @@ def test_credito_scr_requires_one_normalized_inclusion_history(spark):
         spark.createDataFrame(
             [
                 (
-                    5001, 1000, "26H00032408", 100, 10, "INCLUSAO", 6, 143, "PF",
-                    "N", 100.0, 200.0, "2026-07-17", "2028-07-06",
+                    5001,
+                    1000,
+                    "26H00032408",
+                    100,
+                    10,
+                    "INCLUSAO",
+                    6,
+                    143,
+                    "PF",
+                    "N",
+                    100.0,
+                    200.0,
+                    "2026-07-17",
+                    "2028-07-06",
                 )
             ],
             tables["HISTORICO_CREDITO_SCR"].schema,
@@ -237,11 +302,17 @@ def test_credito_scr_target_checks_accept_lookup_eligible_credit(spark):
     tables = credito_scr_tables(spark)
     modalidade, bases, toggle, target_ipocs = target_frames(spark)
 
-    findings = by_id(validator.check_credito_scr_target_frames(
-        tables, modalidade, bases, toggle, 5,
-        validator.VALIDATION_PROFILES["credito_scr"],
-        existing_ipocs=target_ipocs,
-    ))
+    findings = by_id(
+        validator.check_credito_scr_target_frames(
+            tables,
+            modalidade,
+            bases,
+            toggle,
+            5,
+            validator.VALIDATION_PROFILES["credito_scr"],
+            existing_ipocs=target_ipocs,
+        )
+    )
 
     assert findings["6d.lookup.modalidade"].passed
     assert findings["6d.lookup.base_eligibility"].passed
@@ -258,11 +329,17 @@ def test_credito_scr_target_checks_reject_excluded_mode_and_ineligible_base(spar
         [(999, 505)], "NUM_CONTA_PARTICIPANTE long, NUM_ID_BASE_CREDITO long"
     )
 
-    findings = by_id(validator.check_credito_scr_target_frames(
-        tables, modalidade, bases, toggle, 5,
-        validator.VALIDATION_PROFILES["credito_scr"],
-        existing_ipocs=target_ipocs,
-    ))
+    findings = by_id(
+        validator.check_credito_scr_target_frames(
+            tables,
+            modalidade,
+            bases,
+            toggle,
+            5,
+            validator.VALIDATION_PROFILES["credito_scr"],
+            existing_ipocs=target_ipocs,
+        )
+    )
 
     assert findings["6d.lookup.modalidade"].severity == validator.SEV_ERROR
     assert findings["6d.lookup.base_eligibility"].severity == validator.SEV_ERROR
@@ -273,28 +350,53 @@ def test_credito_scr_ipoc_uniqueness_follows_feature_period(spark):
     duplicate = spark.createDataFrame(
         [
             (
-                1001, "26H00032409", 100, 46, 505, "IPOC-1", "2026-07-17", None,
-                143, "PF", "N", 17, 2, 100.0, 200.0, "2026-07-17", "2028-07-06",
+                1001,
+                "26H00032409",
+                100,
+                46,
+                505,
+                "IPOC-1",
+                "2026-07-17",
+                None,
+                143,
+                "PF",
+                "N",
+                17,
+                2,
+                100.0,
+                200.0,
+                "2026-07-17",
+                "2028-07-06",
             )
         ],
         tables["CREDITO_SCR"].schema,
     )
     tables["CREDITO_SCR"] = tables["CREDITO_SCR"].union(duplicate)
     modalidade, bases, enabled, target_ipocs = target_frames(spark)
-    disabled = spark.createDataFrame(
-        [("S", "2025-01-01", "2025-12-31")], enabled.schema
-    )
+    disabled = spark.createDataFrame([("S", "2025-01-01", "2025-12-31")], enabled.schema)
 
-    enabled_finding = by_id(validator.check_credito_scr_target_frames(
-        tables, modalidade, bases, enabled, 5,
-        validator.VALIDATION_PROFILES["credito_scr"],
-        existing_ipocs=target_ipocs,
-    ))["6d.lookup.ipoc_unique"]
-    disabled_finding = by_id(validator.check_credito_scr_target_frames(
-        tables, modalidade, bases, disabled, 5,
-        validator.VALIDATION_PROFILES["credito_scr"],
-        existing_ipocs=target_ipocs,
-    ))["6d.lookup.ipoc_unique"]
+    enabled_finding = by_id(
+        validator.check_credito_scr_target_frames(
+            tables,
+            modalidade,
+            bases,
+            enabled,
+            5,
+            validator.VALIDATION_PROFILES["credito_scr"],
+            existing_ipocs=target_ipocs,
+        )
+    )["6d.lookup.ipoc_unique"]
+    disabled_finding = by_id(
+        validator.check_credito_scr_target_frames(
+            tables,
+            modalidade,
+            bases,
+            disabled,
+            5,
+            validator.VALIDATION_PROFILES["credito_scr"],
+            existing_ipocs=target_ipocs,
+        )
+    )["6d.lookup.ipoc_unique"]
 
     assert enabled_finding.count == 2
     assert disabled_finding.passed
@@ -305,10 +407,17 @@ def test_credito_scr_ipoc_uniqueness_checks_existing_target(spark):
     modalidade, bases, enabled, _ = target_frames(spark)
     target_ipocs = spark.createDataFrame([("IPOC-1",)], "COD_IPOC string")
 
-    finding = by_id(validator.check_credito_scr_target_frames(
-        tables, modalidade, bases, enabled, 5,
-        validator.VALIDATION_PROFILES["credito_scr"], existing_ipocs=target_ipocs,
-    ))["6d.lookup.ipoc_unique"]
+    finding = by_id(
+        validator.check_credito_scr_target_frames(
+            tables,
+            modalidade,
+            bases,
+            enabled,
+            5,
+            validator.VALIDATION_PROFILES["credito_scr"],
+            existing_ipocs=target_ipocs,
+        )
+    )["6d.lookup.ipoc_unique"]
 
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 1
@@ -317,14 +426,19 @@ def test_credito_scr_ipoc_uniqueness_checks_existing_target(spark):
 def test_credito_scr_does_not_require_target_ipocs_when_toggle_is_disabled(spark):
     tables = credito_scr_tables(spark)
     modalidade, bases, enabled, _ = target_frames(spark)
-    disabled = spark.createDataFrame(
-        [("S", "2025-01-01", "2025-12-31")], enabled.schema
-    )
+    disabled = spark.createDataFrame([("S", "2025-01-01", "2025-12-31")], enabled.schema)
 
-    finding = by_id(validator.check_credito_scr_target_frames(
-        tables, modalidade, bases, disabled, 5,
-        validator.VALIDATION_PROFILES["credito_scr"], existing_ipocs=None,
-    ))["6d.lookup.ipoc_unique"]
+    finding = by_id(
+        validator.check_credito_scr_target_frames(
+            tables,
+            modalidade,
+            bases,
+            disabled,
+            5,
+            validator.VALIDATION_PROFILES["credito_scr"],
+            existing_ipocs=None,
+        )
+    )["6d.lookup.ipoc_unique"]
 
     assert finding.passed
     assert finding.severity == validator.SEV_INFO
@@ -335,12 +449,8 @@ def test_credito_scr_observed_profile_is_opt_in(spark):
     profile = validator.VALIDATION_PROFILES["credito_scr"]
 
     assert validator.check_credito_scr_registration_profile(tables, 5, False, profile) == []
-    tables["CREDITO_SCR"] = tables["CREDITO_SCR"].withColumn(
-        "NUM_TIPO_IF", validator.F.lit(999)
-    )
-    findings = by_id(validator.check_credito_scr_registration_profile(
-        tables, 5, True, profile
-    ))
+    tables["CREDITO_SCR"] = tables["CREDITO_SCR"].withColumn("NUM_TIPO_IF", validator.F.lit(999))
+    findings = by_id(validator.check_credito_scr_registration_profile(tables, 5, True, profile))
 
     assert findings["8d.profile.credit_constants"].severity == validator.SEV_WARN
     assert findings["8d.profile.credit_constants"].count == 1
@@ -355,11 +465,19 @@ def test_credito_scr_account_route_profile_is_advisory(spark):
         "COD_CONTA_PARTICIPANTE string, NUM_ID_AREA_ATUACAO long, COD_TIPO_ACESSO string",
     )
 
-    finding = by_id(validator.check_credito_scr_target_frames(
-        tables, modalidade, bases, toggle, 5,
-        validator.VALIDATION_PROFILES["credito_scr"], account_profile=account,
-        registration_profile=True, existing_ipocs=target_ipocs,
-    ))["8d.profile.account_eligibility"]
+    finding = by_id(
+        validator.check_credito_scr_target_frames(
+            tables,
+            modalidade,
+            bases,
+            toggle,
+            5,
+            validator.VALIDATION_PROFILES["credito_scr"],
+            account_profile=account,
+            registration_profile=True,
+            existing_ipocs=target_ipocs,
+        )
+    )["8d.profile.account_eligibility"]
 
     assert finding.severity == validator.SEV_WARN
     assert finding.count == 1
@@ -370,7 +488,9 @@ def test_credito_scr_metadata_requires_live_table_and_pk_inventory():
     meta = validator.Metadata(
         {"LOTE", "CREDITO_SCR", "HISTORICO_CREDITO_SCR"},
         {"LOTE": ["NUM_ID_LOTE"], "CREDITO_SCR": ["NUM_ID_CREDITO_SCR"]},
-        {}, {}, {},
+        {},
+        {},
+        {},
     )
 
     finding = validator.check_credito_scr_metadata(meta, False, profile)[0]

@@ -12,9 +12,13 @@ from datagen import shift_keys  # noqa: E402
 @pytest.fixture(scope="module")
 def spark():
     from pyspark.sql import SparkSession
-    session = (SparkSession.builder.appName("shift-keys-test")
-               .master("local[2]").config("spark.sql.shuffle.partitions", "2")
-               .getOrCreate())
+
+    session = (
+        SparkSession.builder.appName("shift-keys-test")
+        .master("local[2]")
+        .config("spark.sql.shuffle.partitions", "2")
+        .getOrCreate()
+    )
     yield session
     session.stop()
 
@@ -31,9 +35,10 @@ class TestComputeShiftColumns:
     def test_fk_to_nonstatic_parent_shifts(self):
         specs = {
             "INSTRUMENTO_FINANCEIRO": {"pk_cols": ["NUM_IF"]},
-            "OPERACAO": {"pk_cols": ["NUM_OPER"],
-                         "foreign_keys": [{"columns": ["NUM_IF"],
-                                           "parent_table": "INSTRUMENTO_FINANCEIRO"}]},
+            "OPERACAO": {
+                "pk_cols": ["NUM_OPER"],
+                "foreign_keys": [{"columns": ["NUM_IF"], "parent_table": "INSTRUMENTO_FINANCEIRO"}],
+            },
         }
         out = shift_keys.compute_shift_columns(specs)
         assert sorted(out["OPERACAO"]) == ["NUM_IF", "NUM_OPER"]
@@ -42,9 +47,10 @@ class TestComputeShiftColumns:
     def test_fk_to_static_parent_not_shifted(self):
         specs = {
             "TIPO_IF": {"pk_cols": ["NUM_TIPO_IF"], "static": True},
-            "OPERACAO": {"pk_cols": ["NUM_OPER"],
-                         "foreign_keys": [{"columns": ["NUM_TIPO_IF"],
-                                           "parent_table": "TIPO_IF"}]},
+            "OPERACAO": {
+                "pk_cols": ["NUM_OPER"],
+                "foreign_keys": [{"columns": ["NUM_TIPO_IF"], "parent_table": "TIPO_IF"}],
+            },
         }
         # NUM_TIPO_IF references a static parent -> not shifted; only NUM_OPER shifts
         assert shift_keys.compute_shift_columns(specs) == {"OPERACAO": ["NUM_OPER"]}
@@ -53,8 +59,10 @@ class TestComputeShiftColumns:
         # PK == FK to a static parent: FK-to-static wins, PK kept matched
         specs = {
             "CODE": {"pk_cols": ["COD"], "static": True},
-            "EXT": {"pk_cols": ["COD"],
-                    "foreign_keys": [{"columns": ["COD"], "parent_table": "CODE"}]},
+            "EXT": {
+                "pk_cols": ["COD"],
+                "foreign_keys": [{"columns": ["COD"], "parent_table": "CODE"}],
+            },
         }
         assert shift_keys.compute_shift_columns(specs) == {}
 
@@ -62,9 +70,10 @@ class TestComputeShiftColumns:
         # PK == FK to a non-static parent: shifts (deduped to one column)
         specs = {
             "CONDICAO_IF": {"pk_cols": ["NUM_CONDICAO_IF"]},
-            "RESGATE": {"pk_cols": ["NUM_CONDICAO_IF"],
-                        "foreign_keys": [{"columns": ["NUM_CONDICAO_IF"],
-                                          "parent_table": "CONDICAO_IF"}]},
+            "RESGATE": {
+                "pk_cols": ["NUM_CONDICAO_IF"],
+                "foreign_keys": [{"columns": ["NUM_CONDICAO_IF"], "parent_table": "CONDICAO_IF"}],
+            },
         }
         out = shift_keys.compute_shift_columns(specs)
         assert out["RESGATE"] == ["NUM_CONDICAO_IF"]
@@ -72,31 +81,68 @@ class TestComputeShiftColumns:
     def test_fk_to_static_pk_logs_warning_and_excludes(self, caplog):
         specs = {
             "CODE": {"pk_cols": ["COD"], "static": True},
-            "EXT": {"pk_cols": ["COD"],
-                    "foreign_keys": [{"columns": ["COD"], "parent_table": "CODE"}]},
+            "EXT": {
+                "pk_cols": ["COD"],
+                "foreign_keys": [{"columns": ["COD"], "parent_table": "CODE"}],
+            },
         }
         with caplog.at_level(logging.WARNING, logger="datagen.shift_keys"):
             out = shift_keys.compute_shift_columns(specs)
         assert out == {}  # column excluded from the shift set
-        assert any("EXT.COD" in r.getMessage() and "NOT shifting" in r.getMessage()
-                   for r in caplog.records)
+        assert any(
+            "EXT.COD" in r.getMessage() and "NOT shifting" in r.getMessage() for r in caplog.records
+        )
 
-    def test_real_specs_yields_31_columns(self):
+    def test_real_specs_yields_42_columns(self):
         import json
+
         specs = json.load(open(Path(__file__).resolve().parent.parent / "specs.json"))
         out = shift_keys.compute_shift_columns(specs)
         total = sum(len(v) for v in out.values())
-        assert total == 31
+        assert total == 42
+        assert out == {
+            "AGENTE_CALCULO": ["NUM_IF"],
+            "AMORTIZACAO": ["NUM_CONDICAO_IF"],
+            "ATUALIZACAO_POS": ["NUM_CONDICAO_IF"],
+            "ATUALIZACAO_PRE": ["NUM_CONDICAO_IF"],
+            "CARTEIRA_COMITENTE": ["NUM_CARTEIRA_COMITENTE", "NUM_IF"],
+            "CARTEIRA_PARTICIPANTE": ["NUM_CARTEIRA_PARTICIPANTE", "NUM_IF"],
+            "CONDICAO_IF": ["NUM_CONDICAO_IF", "NUM_IF"],
+            "CREDITO": ["NUM_IF"],
+            "DADO_OPERACAO": ["NUM_ID_DADO_OPERACAO", "NUM_ID_OPERACAO"],
+            "DEPOSITO_AUTOMATICO_IF": ["NUM_IF"],
+            "DESDOBRAMENTO": ["NUM_CONDICAO_IF"],
+            "ESPECIFICACAO": ["NUM_ID_ESPECIFICACAO", "NUM_ID_OPERACAO"],
+            "ESPECIFICACAO_COMITENTE": ["NUM_ID_ESPECIFICACAO", "NUM_ID_ESPECIFICACAO_COMITENTE"],
+            "EVENTO": ["NUM_CONDICAO_IF", "NUM_EVENTO", "NUM_IF"],
+            "HIST_MARCACAO_MERCADO": ["NUM_IF"],
+            "INSTRUMENTO_FINANCEIRO": ["NUM_IF", "NUM_IF_ORIGEM", "NUM_IF_PERTENCE"],
+            "JUROS_FIXO": ["NUM_CONDICAO_IF"],
+            "JUROS_FLUTUANTE": ["NUM_CONDICAO_IF"],
+            "LANCAMENTO": ["NUM_ID_LANCAMENTO", "NUM_ID_OPERACAO"],
+            "MARCACAO_MERCADO": ["NUM_IF"],
+            "OPERACAO": ["NUM_EVENTO", "NUM_ID_OPERACAO", "NUM_IF", "NUM_IF_PERTENCE"],
+            "PARAMETRO_PONTA": ["NUM_IF"],
+            "PARTICIPACAO_LUCROS": ["NUM_CONDICAO_IF"],
+            "RESET": ["NUM_CONDICAO_IF"],
+            "RESGATE": ["NUM_CONDICAO_IF"],
+            "SPREAD": ["NUM_CONDICAO_IF"],
+            "TCTPCRONOGRAMA_CCB": ["NUM_IF"],
+            "TITULO": ["NUM_IF"],
+        }
 
 
 class TestShiftTable:
     def test_shifts_listed_columns_and_preserves_others(self, spark):
         from pyspark.sql import types as T
-        schema = T.StructType([
-            T.StructField("NUM_OPER", T.LongType()),
-            T.StructField("NUM_IF", T.LongType()),
-            T.StructField("DESC", T.StringType()),
-        ])
+
+        schema = T.StructType(
+            [
+                T.StructField("NUM_OPER", T.LongType()),
+                T.StructField("NUM_IF", T.LongType()),
+                T.StructField("DESC", T.StringType()),
+            ]
+        )
         df = spark.createDataFrame([(1, 10, "a"), (2, 20, "b")], schema)
         out = shift_keys.shift_table(df, ["NUM_OPER", "NUM_IF"], 1000)
         rows = {r["DESC"]: (r["NUM_OPER"], r["NUM_IF"]) for r in out.collect()}
@@ -106,6 +152,7 @@ class TestShiftTable:
         from decimal import Decimal
 
         from pyspark.sql import types as T
+
         schema = T.StructType([T.StructField("K", T.DecimalType(38, 9))])
         df = spark.createDataFrame([(Decimal("1"),)], schema)
         out = shift_keys.shift_table(df, ["K"], 5)
@@ -114,6 +161,7 @@ class TestShiftTable:
 
     def test_null_fk_stays_null(self, spark):
         from pyspark.sql import types as T
+
         schema = T.StructType([T.StructField("FK", T.LongType())])
         df = spark.createDataFrame([(5,), (None,)], schema)
         out = shift_keys.shift_table(df, ["FK"], 100)
@@ -130,6 +178,7 @@ class TestCheckOverflow:
         from decimal import Decimal
 
         from pyspark.sql import types as T
+
         schema = T.StructType([T.StructField("K", T.DecimalType(38, 0))])
         self._write(spark, tmp_path, "T", schema, [(Decimal("10"),), (Decimal("20"),)])
         shift = {"T": ["K"]}
@@ -139,6 +188,7 @@ class TestCheckOverflow:
         from decimal import Decimal
 
         from pyspark.sql import types as T
+
         # Decimal(2,0) capacity = 99; max is 90, +20 = 110 > 99 -> overflow
         schema = T.StructType([T.StructField("K", T.DecimalType(2, 0))])
         self._write(spark, tmp_path, "T", schema, [(Decimal("90"),)])
@@ -152,12 +202,14 @@ class TestCheckOverflow:
         from decimal import Decimal
 
         from pyspark.sql import types as T
+
         # Parquet dtype Decimal(38,0) is huge, but the live Oracle capacity is 200;
         # max 150 + 100 = 250 > 200 -> overflow detected only via the override.
         schema = T.StructType([T.StructField("K", T.DecimalType(38, 0))])
         self._write(spark, tmp_path, "T", schema, [(Decimal("150"),)])
-        out = shift_keys.check_overflow(spark, str(tmp_path), {"T": ["K"]}, 100,
-                                        capacity_override={("T", "K"): 200})
+        out = shift_keys.check_overflow(
+            spark, str(tmp_path), {"T": ["K"]}, 100, capacity_override={("T", "K"): 200}
+        )
         assert out == [("T", "K", 150, 250, 200)]
 
 
@@ -176,7 +228,7 @@ class TestOraclePreflight:
         # rows mimic ALL_TAB_COLUMNS: (TABLE_NAME, COLUMN_NAME, DATA_PRECISION, DATA_SCALE)
         rows = [
             ("OPERACAO", "NUM_OPER", 12, 0),
-            ("OPERACAO", "IGNORED", 5, 0),      # not in shift set -> dropped
+            ("OPERACAO", "IGNORED", 5, 0),  # not in shift set -> dropped
             ("INSTRUMENTO_FINANCEIRO", "NUM_IF", None, None),  # unconstrained -> skipped
         ]
         shift = {"OPERACAO": ["NUM_OPER"], "INSTRUMENTO_FINANCEIRO": ["NUM_IF"]}
@@ -197,37 +249,45 @@ class TestOraclePreflight:
 class TestApplyShift:
     def test_in_place_shift_preserves_fk_integrity(self, spark, tmp_path):
         from pyspark.sql import types as T
+
         base = str(tmp_path / "syn")
         # CONDICAO_IF (non-static parent), RESGATE (shared-key child),
         # OPERACAO (child with FK to CONDICAO_IF), TIPO_IF (static)
-        spark.createDataFrame([(1,), (2,), (3,)],
-            T.StructType([T.StructField("NUM_CONDICAO_IF", T.LongType())])
+        spark.createDataFrame(
+            [(1,), (2,), (3,)], T.StructType([T.StructField("NUM_CONDICAO_IF", T.LongType())])
         ).write.parquet(f"{base}/CONDICAO_IF")
-        spark.createDataFrame([(1,), (2,)],
-            T.StructType([T.StructField("NUM_CONDICAO_IF", T.LongType())])
+        spark.createDataFrame(
+            [(1,), (2,)], T.StructType([T.StructField("NUM_CONDICAO_IF", T.LongType())])
         ).write.parquet(f"{base}/RESGATE")
-        spark.createDataFrame([(10, 1), (11, 2)],
-            T.StructType([T.StructField("NUM_OPER", T.LongType()),
-                          T.StructField("NUM_CONDICAO_IF", T.LongType())])
+        spark.createDataFrame(
+            [(10, 1), (11, 2)],
+            T.StructType(
+                [
+                    T.StructField("NUM_OPER", T.LongType()),
+                    T.StructField("NUM_CONDICAO_IF", T.LongType()),
+                ]
+            ),
         ).write.parquet(f"{base}/OPERACAO")
-        spark.createDataFrame([(46,)],
-            T.StructType([T.StructField("NUM_TIPO_IF", T.LongType())])
+        spark.createDataFrame(
+            [(46,)], T.StructType([T.StructField("NUM_TIPO_IF", T.LongType())])
         ).write.parquet(f"{base}/TIPO_IF")
 
         specs = {
             "TIPO_IF": {"pk_cols": ["NUM_TIPO_IF"], "static": True},
             "CONDICAO_IF": {"pk_cols": ["NUM_CONDICAO_IF"]},
-            "RESGATE": {"pk_cols": ["NUM_CONDICAO_IF"],
-                        "foreign_keys": [{"columns": ["NUM_CONDICAO_IF"],
-                                          "parent_table": "CONDICAO_IF"}]},
-            "OPERACAO": {"pk_cols": ["NUM_OPER"],
-                         "foreign_keys": [{"columns": ["NUM_CONDICAO_IF"],
-                                           "parent_table": "CONDICAO_IF"}]},
+            "RESGATE": {
+                "pk_cols": ["NUM_CONDICAO_IF"],
+                "foreign_keys": [{"columns": ["NUM_CONDICAO_IF"], "parent_table": "CONDICAO_IF"}],
+            },
+            "OPERACAO": {
+                "pk_cols": ["NUM_OPER"],
+                "foreign_keys": [{"columns": ["NUM_CONDICAO_IF"], "parent_table": "CONDICAO_IF"}],
+            },
         }
         shift = shift_keys.compute_shift_columns(specs)
-        failures = shift_keys.apply_shift(spark, base, shift, 1000,
-                                          continue_on_error=False,
-                                          reliable_checkpoint=False)
+        failures = shift_keys.apply_shift(
+            spark, base, shift, 1000, continue_on_error=False, reliable_checkpoint=False
+        )
         assert failures == []
 
         cond = spark.read.parquet(f"{base}/CONDICAO_IF")
@@ -247,12 +307,13 @@ class TestApplyShift:
 
     def _setup_good_and_bad(self, spark, tmp_path):
         from pyspark.sql import types as T
+
         base = str(tmp_path / "syn")
-        spark.createDataFrame([(1,), (2,)],
-            T.StructType([T.StructField("K", T.LongType())])
+        spark.createDataFrame(
+            [(1,), (2,)], T.StructType([T.StructField("K", T.LongType())])
         ).write.parquet(f"{base}/T_GOOD")
-        spark.createDataFrame([(7,)],
-            T.StructType([T.StructField("K", T.LongType())])
+        spark.createDataFrame(
+            [(7,)], T.StructType([T.StructField("K", T.LongType())])
         ).write.parquet(f"{base}/T_BAD")
         # T_BAD's shift targets a column that does not exist -> shift_table raises.
         shift = {"T_GOOD": ["K"], "T_BAD": ["NOPE"]}
@@ -260,9 +321,9 @@ class TestApplyShift:
 
     def test_continue_on_error_isolates_failure(self, spark, tmp_path):
         base, shift = self._setup_good_and_bad(spark, tmp_path)
-        failures = shift_keys.apply_shift(spark, base, shift, 100,
-                                          continue_on_error=True,
-                                          reliable_checkpoint=False)
+        failures = shift_keys.apply_shift(
+            spark, base, shift, 100, continue_on_error=True, reliable_checkpoint=False
+        )
         assert failures == ["T_BAD"]
         # The good table was still shifted in place.
         good = spark.read.parquet(f"{base}/T_GOOD")
@@ -271,9 +332,9 @@ class TestApplyShift:
     def test_stop_on_error_reraises(self, spark, tmp_path):
         base, shift = self._setup_good_and_bad(spark, tmp_path)
         with pytest.raises(Exception):
-            shift_keys.apply_shift(spark, base, shift, 100,
-                                   continue_on_error=False,
-                                   reliable_checkpoint=False)
+            shift_keys.apply_shift(
+                spark, base, shift, 100, continue_on_error=False, reliable_checkpoint=False
+            )
 
 
 class TestEnvAndCli:
@@ -310,8 +371,11 @@ class TestEnvAndCli:
             shift_keys.parse_arguments(["--offset", "-5"])
 
     def test_oracle_props_none_without_env(self, monkeypatch):
-        for k in ("DATAGEN_SOURCE_JDBC_URL", "DATAGEN_SOURCE_DB_USER",
-                  "DATAGEN_SOURCE_DB_PASSWORD"):
+        for k in (
+            "DATAGEN_SOURCE_JDBC_URL",
+            "DATAGEN_SOURCE_DB_USER",
+            "DATAGEN_SOURCE_DB_PASSWORD",
+        ):
             monkeypatch.delenv(k, raising=False)
         monkeypatch.setenv("DATAGEN_SYNTHETIC_BASE_URI", "oci://b@n/syn/")
         monkeypatch.setenv("DATAGEN_SPECS_URI", "oci://b@n/specs.json")

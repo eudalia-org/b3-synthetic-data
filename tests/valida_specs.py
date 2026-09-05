@@ -39,6 +39,7 @@ def _norm(s: str) -> str:
 
 # ---------- PK ----------
 
+
 def pks_do_specs(specs: dict) -> Dict[str, Tuple[str, ...]]:
     """tabela -> tupla ordenada de colunas de PK (como declarado no specs)."""
     out: Dict[str, Tuple[str, ...]] = {}
@@ -71,7 +72,7 @@ def fks_do_specs(specs: dict) -> Set[FkKey]:
     out: Set[FkKey] = set()
     for t, cfg in specs.items():
         child = _norm(t)
-        for fk in (cfg.get("foreign_keys") or cfg.get("fks") or []):
+        for fk in cfg.get("foreign_keys") or cfg.get("fks") or []:
             if not isinstance(fk, dict):
                 continue
             cols = tuple(_norm(c) for c in (fk.get("columns") or []))
@@ -92,7 +93,7 @@ def fks_do_banco(caminho_csv: str) -> Set[FkKey]:
     OPER_CTX_MSG_FK com P1,P2 -> CONTEXTO_MENSAGEM), que o agrupamento antigo
     por (child, parent) embaralhava, gerando falso-positivos "SÓ NO SPECS".
     """
-    por_constraint: Dict[str, Tuple[str, str]] = {}     # cname -> (child, parent)
+    por_constraint: Dict[str, Tuple[str, str]] = {}  # cname -> (child, parent)
     colunas: Dict[str, List[Tuple[int, str, str]]] = defaultdict(list)
 
     with open(caminho_csv, newline="", encoding="utf-8-sig") as f:
@@ -128,9 +129,7 @@ def _fmt_fk(fk: FkKey) -> str:
 
 def main() -> None:
     if len(sys.argv) != 4:
-        raise SystemExit(
-            "Uso: python valida_specs_vs_oracle.py specs.json pk_real.csv fk_real.csv"
-        )
+        raise SystemExit("Uso: python valida_specs_vs_oracle.py specs.json pk_real.csv fk_real.csv")
     specs_path, pk_csv, fk_csv = sys.argv[1], sys.argv[2], sys.argv[3]
 
     specs = carrega_specs(specs_path)
@@ -169,16 +168,14 @@ def main() -> None:
     no_specs_nao_banco = sorted(fk_specs - fk_db, key=_fmt_fk)
     no_banco_nao_specs = sorted(fk_db - fk_specs, key=_fmt_fk)
 
-    print("\n-- FKs declaradas no SPECS que NÃO existem no banco "
-          "(specs a mais / errado): --")
+    print("\n-- FKs declaradas no SPECS que NÃO existem no banco (specs a mais / errado): --")
     if no_specs_nao_banco:
         for fk in no_specs_nao_banco:
             print(f"  [SÓ NO SPECS] {_fmt_fk(fk)}")
     else:
         print("  (nenhuma)")
 
-    print("\n-- FKs que existem no BANCO mas NÃO estão no specs "
-          "(specs incompleto): --")
+    print("\n-- FKs que existem no BANCO mas NÃO estão no specs (specs incompleto): --")
     if no_banco_nao_specs:
         for fk in no_banco_nao_specs:
             print(f"  [SÓ NO BANCO] {_fmt_fk(fk)}")
@@ -196,7 +193,9 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    
+
+# Export examples for execution in Oracle, not as Python statements.
+CONSTRAINT_EXPORT_SQL = """
 -- ===== PKs reais (uma linha por coluna de PK, com posição) =====
 SELECT
     ac.table_name,
@@ -210,8 +209,6 @@ WHERE  ac.constraint_type = 'P'
 AND    ac.owner = :OWNER          -- << preencha o schema (ex.: 'BLC')
 AND    ac.table_name IN ( /* suas 47 tabelas, ou remova o IN p/ todas */ )
 ORDER BY ac.table_name, acc.position;
-
-
 
 -- ===== FKs reais (filha -> pai, com colunas pareadas por posição) =====
 SELECT
@@ -234,12 +231,6 @@ AND    ac.owner = :OWNER
 AND    ac.table_name IN ( /* suas 47 */ )
 ORDER BY ac.table_name, ac.constraint_name, acc.position;
 
-
-
-
-
-
-
 SELECT
     ac.constraint_name         AS constraint_name,
     ac.table_name              AS child_table,
@@ -259,3 +250,4 @@ JOIN   all_cons_columns rcc
 WHERE  ac.constraint_type = 'R'
 AND    ac.owner = :OWNER
 ORDER BY ac.table_name, ac.constraint_name, acc.position;
+"""

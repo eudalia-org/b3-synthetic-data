@@ -266,9 +266,9 @@ From a notebook (pass your own SparkSession):
 
 ```python
 from datagen.validate_tables import validate, load_manifests, render_summary
+
 specs, schema = load_manifests(spark, specs_uri, schema_uri)
-report = validate(spark, specs, schema, raw_base, synth_base,
-                  tables=["JUROS_FLUTUANTE"])
+report = validate(spark, specs, schema, raw_base, synth_base, tables=["JUROS_FLUTUANTE"])
 print(render_summary(report))
 report.findings  # inspect interactively
 ```
@@ -346,8 +346,11 @@ duration, and rough throughput so a small-table pilot can estimate large-table r
 Avoid table moves/shrinks/reorgs during the migration because those operations can change
 Oracle `ROWID` values.
 
-## Deployment
+## Continuous Integration
 
-The `datagen/` package is synced to S3 (`s3://eudalia-production-datagen-us-east-1/scripts/datagen/`)
-by `.github/workflows/deploy-eudalia-datagen-scripts-to-s3.yml` on every push to
-`main` that touches `datagen/`.
+`.github/workflows/ci.yml` runs on pull requests, pushes to `main`, and manual dispatch.
+It runs lint (`ruff check .`), formatting checks (`ruff format --check .`), and unit
+tests (`python -m pytest -q tests`) as separate steps. Formatting checks and tests
+still run if lint fails. Spark tests use Python 3.11 and Java 17.
+
+This workflow does not upload the `datagen/` package to S3 or require AWS credentials.

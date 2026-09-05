@@ -52,9 +52,7 @@ class TestValidateIdentifier:
 
 class TestBuildRowidPredicates:
     def test_formats_between_predicates(self):
-        predicates = save_tables.build_rowid_predicates(
-            [(ROWID_A, ROWID_B), (ROWID_C, ROWID_D)]
-        )
+        predicates = save_tables.build_rowid_predicates([(ROWID_A, ROWID_B), (ROWID_C, ROWID_D)])
         assert predicates == [
             f"ROWID BETWEEN '{ROWID_A}' AND '{ROWID_B}'",
             f"ROWID BETWEEN '{ROWID_C}' AND '{ROWID_D}'",
@@ -267,9 +265,7 @@ class TestFetchRowidPredicates:
 
     def test_rejects_bad_identifier(self):
         with pytest.raises(ValueError):
-            save_tables.fetch_rowid_predicates(
-                None, {}, "ADMIN", "ORDERS; DROP", num_partitions=4
-            )
+            save_tables.fetch_rowid_predicates(None, {}, "ADMIN", "ORDERS; DROP", num_partitions=4)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -346,9 +342,7 @@ def fetch_extents(
         try:
             rows = read_rows(spark, properties, query)
         except Exception as exc:
-            logger.debug(
-                "Extent query via %s failed for %s.%s: %s", view, owner, table_name, exc
-            )
+            logger.debug("Extent query via %s failed for %s.%s: %s", view, owner, table_name, exc)
             continue
         if rows:
             return [(row[0], row[1], int(row[2])) for row in rows]
@@ -423,9 +417,7 @@ def load_source_dataframe(
         return reader.load()
 
     owner, table_name = table_owner_and_name(source_user, table)
-    overrides = parse_partition_column_overrides(
-        config["DATAGEN_JDBC_PARTITION_COLUMNS"]
-    )
+    overrides = parse_partition_column_overrides(config["DATAGEN_JDBC_PARTITION_COLUMNS"])
     partition_column = overrides.get(f"{owner}.{table_name}") or overrides.get(table_name)
 
     if partition_column:
@@ -467,12 +459,8 @@ def load_source_dataframe(
         predicates = []
 
     if predicates:
-        logger.info(
-            "Reading %s in %d ROWID-range partitions", source_table, len(predicates)
-        )
-        jdbc_properties = {
-            key: value for key, value in properties.items() if key != "url"
-        }
+        logger.info("Reading %s in %d ROWID-range partitions", source_table, len(predicates))
+        jdbc_properties = {key: value for key, value in properties.items() if key != "url"}
         jdbc_properties["fetchsize"] = config["DATAGEN_JDBC_FETCH_SIZE"]
         return spark.read.jdbc(
             url=properties["url"],

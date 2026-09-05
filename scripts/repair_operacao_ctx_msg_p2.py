@@ -189,8 +189,7 @@ def validate_work_paths(paths: Mapping[str, str]) -> None:
             right = normalized[right_name]
             if left == right or _path_contains(left, right) or _path_contains(right, left):
                 raise ValueError(
-                    f"unsafe path overlap between {left_name}={left!r} and "
-                    f"{right_name}={right!r}"
+                    f"unsafe path overlap between {left_name}={left!r} and {right_name}={right!r}"
                 )
 
 
@@ -205,9 +204,7 @@ def _required_columns(df: DataFrame, required: Sequence[str], label: str) -> dic
         by_upper.setdefault(column.upper(), []).append(column)
     missing = [column for column in required if column not in by_upper]
     ambiguous = {
-        key: values
-        for key, values in by_upper.items()
-        if len(values) > 1 and key in required
+        key: values for key, values in by_upper.items() if len(values) > 1 and key in required
     }
     if missing or ambiguous:
         raise ValueError(
@@ -219,9 +216,7 @@ def _required_columns(df: DataFrame, required: Sequence[str], label: str) -> dic
 def relevant_keys(faltantes: DataFrame) -> DataFrame:
     columns = _required_columns(faltantes, ("TABELA", "COLUNA", "VALOR"), "faltantes")
     key = normalize_key(F.col(columns["VALOR"]))
-    normalized_table = F.element_at(
-        F.split(F.upper(F.trim(F.col(columns["TABELA"]))), r"\."), -1
-    )
+    normalized_table = F.element_at(F.split(F.upper(F.trim(F.col(columns["TABELA"]))), r"\."), -1)
     return (
         faltantes.where(
             (normalized_table == F.lit(TABLE))
@@ -229,8 +224,7 @@ def relevant_keys(faltantes: DataFrame) -> DataFrame:
         )
         .select(key.alias(NORMALIZED_KEY_COLUMN))
         .where(
-            F.col(NORMALIZED_KEY_COLUMN).isNotNull()
-            & (F.col(NORMALIZED_KEY_COLUMN) != F.lit(""))
+            F.col(NORMALIZED_KEY_COLUMN).isNotNull() & (F.col(NORMALIZED_KEY_COLUMN) != F.lit(""))
         )
         .dropDuplicates()
     )
@@ -267,9 +261,7 @@ def validate_source(source: DataFrame) -> dict[str, int]:
     null_pks = int(stats["null_pks"])
     if null_pks:
         raise ValueError(f"{TABLE}.{PK_COLUMN} contains {null_pks} null value(s)")
-    duplicate_groups = (
-        source.groupBy(PK_COLUMN).count().where(F.col("count") > 1).limit(1).count()
-    )
+    duplicate_groups = source.groupBy(PK_COLUMN).count().where(F.col("count") > 1).limit(1).count()
     if duplicate_groups:
         raise ValueError(f"{TABLE}.{PK_COLUMN} is not unique")
     return {"source_rows": rows, "source_pk_nulls": null_pks}
@@ -295,9 +287,7 @@ def normalize_specs(specs: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(raw_fk, Mapping):
                 continue
             fk = dict(raw_fk)
-            fk["columns"] = [
-                str(column).strip().upper() for column in (fk.get("columns") or [])
-            ]
+            fk["columns"] = [str(column).strip().upper() for column in (fk.get("columns") or [])]
             if fk.get("parent_table"):
                 fk["parent_table"] = str(fk["parent_table"]).strip().upper().split(".", 1)[-1]
             fks.append(fk)
@@ -346,9 +336,8 @@ def validate_specs(specs: Mapping[str, Any]) -> None:
 
 def _annotate_matches(source: DataFrame, keys: DataFrame) -> DataFrame:
     markers = keys.withColumn(MATCH_MARKER_COLUMN, F.lit(True))
-    return (
-        source.withColumn(NORMALIZED_KEY_COLUMN, normalize_key(F.col(TARGET_COLUMN)))
-        .join(markers, on=NORMALIZED_KEY_COLUMN, how="left")
+    return source.withColumn(NORMALIZED_KEY_COLUMN, normalize_key(F.col(TARGET_COLUMN))).join(
+        markers, on=NORMALIZED_KEY_COLUMN, how="left"
     )
 
 
@@ -512,8 +501,7 @@ def _restore_backup_paths(fs, backup, final, expected_manifest) -> None:
     backup_manifest = _manifest_if_present(fs, backup)
     if backup_manifest != expected_manifest:
         raise RuntimeError(
-            "CRITICAL: recovery backup changed before rollback; "
-            f"preserve and inspect {backup_text}"
+            f"CRITICAL: recovery backup changed before rollback; preserve and inspect {backup_text}"
         )
     if fs.exists(final):
         _delete_and_verify(
@@ -531,11 +519,7 @@ def _restore_backup_paths(fs, backup, final, expected_manifest) -> None:
     backup_absent = not bool(fs.exists(backup))
     final_exists = bool(fs.exists(final))
     restored_manifest = _manifest_if_present(fs, final)
-    if (
-        not backup_absent
-        or not final_exists
-        or restored_manifest != expected_manifest
-    ):
+    if not backup_absent or not final_exists or restored_manifest != expected_manifest:
         raise RuntimeError(
             "CRITICAL: rollback could not restore the exact previous destination; "
             f"recover backup manually from {backup_text} to {final_text}"
@@ -718,9 +702,7 @@ def run_repair(spark: SparkSession, options: Mapping[str, Any]) -> dict[str, Any
             )
 
         repaired = repair_dataframe(source, keys)
-        metrics = validate_integrity(
-            source, repaired, keys, source_rows, label="repaired"
-        )
+        metrics = validate_integrity(source, repaired, keys, source_rows, label="repaired")
         report.update(metrics)
         if metrics["matched_rows"] == 0:
             report["status"] = "no-op"
@@ -739,9 +721,7 @@ def run_repair(spark: SparkSession, options: Mapping[str, Any]) -> dict[str, Any
         report["stale_staging_deleted"] = delete_existing_staging(spark, paths["staging"])
         repaired.write.mode("append").parquet(paths["staging"])
         staged = spark.read.parquet(paths["staging"])
-        staged_metrics = validate_integrity(
-            source, staged, keys, source_rows, label="staged"
-        )
+        staged_metrics = validate_integrity(source, staged, keys, source_rows, label="staged")
         report.update(staged_metrics)
         logger.info(
             "%s",
@@ -759,9 +739,7 @@ def run_repair(spark: SparkSession, options: Mapping[str, Any]) -> dict[str, Any
                 sort_keys=True,
             ),
         )
-        promotion = publish_staging(
-            spark, paths["staging"], paths["final"], paths["backup"]
-        )
+        promotion = publish_staging(spark, paths["staging"], paths["final"], paths["backup"])
         previous_manifest = promotion.pop("previous_manifest")
         staging_manifest = promotion.pop("staging_manifest")
         report.update(promotion)

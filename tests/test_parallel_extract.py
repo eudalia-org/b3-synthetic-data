@@ -13,8 +13,10 @@ class TestJdbcUrlToDsn:
         assert P.jdbc_url_to_dsn("jdbc:oracle:thin:@dbhost:1521:ORCL") == "dbhost:1521/ORCL"
 
     def test_service_slashes_form(self):
-        assert P.jdbc_url_to_dsn(
-            "jdbc:oracle:thin:@//dbhost:1521/PROD.cetip") == "dbhost:1521/PROD.cetip"
+        assert (
+            P.jdbc_url_to_dsn("jdbc:oracle:thin:@//dbhost:1521/PROD.cetip")
+            == "dbhost:1521/PROD.cetip"
+        )
 
     def test_default_port_when_absent(self):
         assert P.jdbc_url_to_dsn("jdbc:oracle:thin:@dbhost:ORCL") == "dbhost:1521/ORCL"
@@ -62,9 +64,9 @@ class TestMergeSizeTiers:
 
     def test_missing_key_gets_median(self):
         keys = [("CETIP", "A"), ("CETIP", "B"), ("CETIP", "C")]
-        tiers = [{("CETIP", "A"): 10.0, ("CETIP", "B"): 30.0}]   # C unresolved
+        tiers = [{("CETIP", "A"): 10.0, ("CETIP", "B"): 30.0}]  # C unresolved
         out = P.merge_size_tiers(keys, tiers)
-        assert out[("CETIP", "C")] == 20.0          # median(10, 30)
+        assert out[("CETIP", "C")] == 20.0  # median(10, 30)
 
     def test_all_unresolved_default_one(self):
         keys = [("CETIP", "A")]
@@ -72,16 +74,27 @@ class TestMergeSizeTiers:
 
     def test_ignores_non_positive(self):
         keys = [("CETIP", "A"), ("CETIP", "B")]
-        tiers = [{("CETIP", "A"): 0.0, ("CETIP", "B"): 40.0}]    # 0 -> treat as unresolved
+        tiers = [{("CETIP", "A"): 0.0, ("CETIP", "B"): 40.0}]  # 0 -> treat as unresolved
         out = P.merge_size_tiers(keys, tiers)
-        assert out[("CETIP", "A")] == 40.0          # median of the single resolved value
+        assert out[("CETIP", "A")] == 40.0  # median of the single resolved value
 
 
 class TestParseArgs:
     def test_dry_run_and_defaults(self, monkeypatch):
-        monkeypatch.setattr(sys, "argv", [
-            "parallel_extract", "--application-id", "app", "--compartment-id", "cmp",
-            "--tables", "A,B", "--dry-run"])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "parallel_extract",
+                "--application-id",
+                "app",
+                "--compartment-id",
+                "cmp",
+                "--tables",
+                "A,B",
+                "--dry-run",
+            ],
+        )
         a = P.parse_arguments()
         assert a.dry_run is True and a.max_concurrent_runs == 4 and a.tables == "A,B"
 
@@ -102,9 +115,16 @@ class TestParseArgs:
 
 class TestPlanReport:
     def _opts(self):
-        return dict(application_id="app", compartment_id="cmp", num_executors=2,
-                    driver_shape="d", executor_shape="e", driver_shape_config=None,
-                    executor_shape_config=None, passthrough=[])
+        return dict(
+            application_id="app",
+            compartment_id="cmp",
+            num_executors=2,
+            driver_shape="d",
+            executor_shape="e",
+            driver_shape_config=None,
+            executor_shape_config=None,
+            passthrough=[],
+        )
 
     def test_plan_lists_buckets_commands_and_skew(self):
         weights = {("S", "A"): 9.0, ("S", "B"): 1.0}
@@ -112,16 +132,26 @@ class TestPlanReport:
         plan = P.build_plan(weights, num_buckets=2, opts=self._opts(), provenance=prov)
         assert len(plan["buckets"]) == 2
         assert all({"command", "tables", "weight"} <= set(b) for b in plan["buckets"])
-        assert any(b["tables"] == ["S.A"] for b in plan["buckets"])    # heaviest isolated
-        assert plan["balance_skew"] == 9.0                             # max/min bucket weight
+        assert any(b["tables"] == ["S.A"] for b in plan["buckets"])  # heaviest isolated
+        assert plan["balance_skew"] == 9.0  # max/min bucket weight
         assert plan["sizes_report"][("S", "A")] == {"weight": 9.0, "tier": "all_tables"}
 
 
 class TestLifecycleClassify:
-    @pytest.mark.parametrize("state,kind", [
-        ("SUCCEEDED", "success"), ("FAILED", "failure"), ("CANCELED", "failure"),
-        ("STOPPED", "failure"), ("ACCEPTED", "pending"), ("IN_PROGRESS", "pending"),
-        ("CANCELING", "pending"), ("STOPPING", "pending"), ("WAT", "pending")])
+    @pytest.mark.parametrize(
+        "state,kind",
+        [
+            ("SUCCEEDED", "success"),
+            ("FAILED", "failure"),
+            ("CANCELED", "failure"),
+            ("STOPPED", "failure"),
+            ("ACCEPTED", "pending"),
+            ("IN_PROGRESS", "pending"),
+            ("CANCELING", "pending"),
+            ("STOPPING", "pending"),
+            ("WAT", "pending"),
+        ],
+    )
     def test_classify(self, state, kind):
         assert P.classify_state(state) == kind
 
@@ -146,16 +176,23 @@ class TestRunBuckets:
             attempt[index] += 1
 
         results = P.run_buckets(
-            [[("S", "A")], [("S", "B")]], opts=dict(max_concurrent_runs=2, max_retries=2,
-            poll_seconds=0), submit=fake_submit, poll=fake_poll, _after_terminal=on_terminal)
+            [[("S", "A")], [("S", "B")]],
+            opts=dict(max_concurrent_runs=2, max_retries=2, poll_seconds=0),
+            submit=fake_submit,
+            poll=fake_poll,
+            _after_terminal=on_terminal,
+        )
         assert results[0]["state"] == "SUCCEEDED" and results[0]["retries"] == 1
         assert results[1]["state"] == "SUCCEEDED" and results[1]["retries"] == 0
-        assert calls["submit"] == 3                          # 2 + 1 retry
+        assert calls["submit"] == 3  # 2 + 1 retry
 
     def test_gives_up_after_max_retries(self):
         results = P.run_buckets(
-            [[("S", "A")]], opts=dict(max_concurrent_runs=1, max_retries=1, poll_seconds=0),
-            submit=lambda b, i, o: "r", poll=lambda r, o=None: "FAILED")
+            [[("S", "A")]],
+            opts=dict(max_concurrent_runs=1, max_retries=1, poll_seconds=0),
+            submit=lambda b, i, o: "r",
+            poll=lambda r, o=None: "FAILED",
+        )
         assert results[0]["state"] == "FAILED" and results[0]["retries"] == 1
 
 
@@ -182,24 +219,31 @@ class TestResolveSizes:
     def test_unreachable_without_flag_exits(self):
         def boom():
             raise RuntimeError("no route to host")
+
         with pytest.raises(SystemExit):
             P.resolve_sizes([("S", "A")], connect=boom, allow_fallback=False)
 
     def test_unreachable_with_flag_equal_weight(self):
         def boom():
             raise RuntimeError("no route to host")
-        weights, prov = P.resolve_sizes([("S", "A"), ("S", "B")], connect=boom,
-                                        allow_fallback=True)
+
+        weights, prov = P.resolve_sizes([("S", "A"), ("S", "B")], connect=boom, allow_fallback=True)
         assert weights == {("S", "A"): 1.0, ("S", "B"): 1.0}
         assert set(prov.values()) == {"equal-weight-fallback"}
 
 
 class TestBuildRunCreateCommand:
     def _opts(self, **kw):
-        base = dict(application_id="ocid1.dataflowapplication.x",
-                    compartment_id="ocid1.compartment.y", num_executors=2,
-                    driver_shape="VM.Standard.E4.Flex", executor_shape="VM.Standard.E4.Flex",
-                    driver_shape_config=None, executor_shape_config=None, passthrough=[])
+        base = dict(
+            application_id="ocid1.dataflowapplication.x",
+            compartment_id="ocid1.compartment.y",
+            num_executors=2,
+            driver_shape="VM.Standard.E4.Flex",
+            executor_shape="VM.Standard.E4.Flex",
+            driver_shape_config=None,
+            executor_shape_config=None,
+            passthrough=[],
+        )
         base.update(kw)
         return base
 
@@ -220,14 +264,14 @@ class TestBuildRunCreateCommand:
 
     def test_passthrough_flags_appended_to_arguments(self):
         cmd = P.build_run_create_command(
-            [("CETIP", "A")], 0, self._opts(passthrough=["--continue-on-error"]))
+            [("CETIP", "A")], 0, self._opts(passthrough=["--continue-on-error"])
+        )
         idx = cmd.index("--arguments")
         assert json.loads(cmd[idx + 1]) == ["--tables", "CETIP.A", "--continue-on-error"]
 
     def test_shape_config_included_when_present(self):
         cfg = '{"ocpus": 2, "memoryInGBs": 16}'
-        cmd = P.build_run_create_command(
-            [("CETIP", "A")], 0, self._opts(executor_shape_config=cfg))
+        cmd = P.build_run_create_command([("CETIP", "A")], 0, self._opts(executor_shape_config=cfg))
         assert cfg in cmd
 
 
@@ -238,9 +282,9 @@ class TestBinPack:
         buckets = P.bin_pack(weights, 2)
         assert len(buckets) == 2
         flat = sorted(k for b in buckets for k in b)
-        assert flat == sorted(weights)                       # disjoint + complete
+        assert flat == sorted(weights)  # disjoint + complete
         totals = sorted(sum(weights[k] for k in b) for b in buckets)
-        assert totals == [9.0, 9.0]                          # greedy LPT: A,D | B,C
+        assert totals == [9.0, 9.0]  # greedy LPT: A,D | B,C
 
     def test_deterministic_tie_break_by_name(self):
         weights = {("S", "A"): 5.0, ("S", "B"): 5.0}
@@ -249,8 +293,8 @@ class TestBinPack:
     def test_more_buckets_than_tables(self):
         weights = {("S", "A"): 1.0}
         buckets = P.bin_pack(weights, 3)
-        assert sum(len(b) for b in buckets) == 1             # no table duplicated
-        assert len(buckets) == 3                             # empty buckets preserved
+        assert sum(len(b) for b in buckets) == 1  # no table duplicated
+        assert len(buckets) == 3  # empty buckets preserved
 
     def test_single_bucket(self):
         weights = {("S", "A"): 1.0, ("S", "B"): 2.0}
@@ -260,15 +304,15 @@ class TestBinPack:
 class TestSizeProvenance:
     def test_reports_resolving_tier_index_else_median(self):
         keys = [("S", "A"), ("S", "B"), ("S", "C")]
-        tiers = [{("S", "A"): 10.0}, {("S", "B"): 20.0}]        # C unresolved
+        tiers = [{("S", "A"): 10.0}, {("S", "B"): 20.0}]  # C unresolved
         prov = P.size_provenance(keys, tiers, tier_labels=["dba_segments", "all_tables"])
-        assert prov == {("S", "A"): "dba_segments", ("S", "B"): "all_tables",
-                        ("S", "C"): "median"}
+        assert prov == {("S", "A"): "dba_segments", ("S", "B"): "all_tables", ("S", "C"): "median"}
 
 
 class TestTablesFromSpecs:
     def test_returns_all_keys_order_preserved(self, tmp_path):
         import json as _j
+
         f = tmp_path / "specs.json"
         f.write_text(_j.dumps({"OPERACAO": {"static": False}, "TIPO_IF": {"static": True}}))
         assert P.tables_from_specs(str(f)) == ["OPERACAO", "TIPO_IF"]
@@ -291,8 +335,7 @@ class TestSpecsSource:
     def test_specs_mutually_exclusive_with_tables(self, monkeypatch):
         monkeypatch.setenv("DATAGEN_DATAFLOW_APP_ID", "a")
         monkeypatch.setenv("DATAGEN_OCI_COMPARTMENT_ID", "c")
-        monkeypatch.setattr(sys, "argv",
-                            ["parallel_extract", "--specs", "s.json", "--tables", "A"])
+        monkeypatch.setattr(sys, "argv", ["parallel_extract", "--specs", "s.json", "--tables", "A"])
         with pytest.raises(SystemExit):
             P.parse_arguments()
 
@@ -308,7 +351,15 @@ class TestOciAuthFlags:
     def test_all_four(self):
         opts = dict(profile="P", config_file="/c", auth="api_key", cert_bundle="/b")
         assert P.oci_auth_flags(opts) == [
-            "--profile", "P", "--config-file", "/c", "--auth", "api_key", "--cert-bundle", "/b"]
+            "--profile",
+            "P",
+            "--config-file",
+            "/c",
+            "--auth",
+            "api_key",
+            "--cert-bundle",
+            "/b",
+        ]
 
 
 class TestAuthFlagsInCommands:
@@ -316,14 +367,23 @@ class TestAuthFlagsInCommands:
         monkeypatch.setattr(P, "oci_auth_flags", lambda opts: ["--profile", "PATCHED"])
         opts = dict(application_id="app", compartment_id="cmp", passthrough=[])
 
-        assert P.build_run_create_command([("S", "A")], 0, opts)[-2:] == [
-            "--profile", "PATCHED"]
+        assert P.build_run_create_command([("S", "A")], 0, opts)[-2:] == ["--profile", "PATCHED"]
 
     def test_run_create_includes_auth_flags(self):
-        opts = dict(application_id="app", compartment_id="cmp", num_executors=2,
-                    driver_shape="d", executor_shape="e", driver_shape_config=None,
-                    executor_shape_config=None, passthrough=[],
-                    profile="DEV", config_file=None, auth="security_token", cert_bundle=None)
+        opts = dict(
+            application_id="app",
+            compartment_id="cmp",
+            num_executors=2,
+            driver_shape="d",
+            executor_shape="e",
+            driver_shape_config=None,
+            executor_shape_config=None,
+            passthrough=[],
+            profile="DEV",
+            config_file=None,
+            auth="security_token",
+            cert_bundle=None,
+        )
         cmd = P.build_run_create_command([("S", "A")], 0, opts)
         assert cmd[-4:] == ["--profile", "DEV", "--auth", "security_token"]
 
@@ -350,13 +410,29 @@ class TestAuthFlagsInCommands:
 
         assert P.cancel_run("run-x", dict(profile="DEV")) == "CANCELING"
         assert captured["cmd"] == [
-            "oci", "data-flow", "run", "cancel", "--run-id", "run-x", "--profile", "DEV"]
+            "oci",
+            "data-flow",
+            "run",
+            "cancel",
+            "--run-id",
+            "run-x",
+            "--profile",
+            "DEV",
+        ]
 
 
 class TestDefaultOwner:
     def _argv(self, *extra):
-        return ["parallel_extract", "--application-id", "a", "--compartment-id", "c",
-                "--tables", "OPERACAO", *extra]
+        return [
+            "parallel_extract",
+            "--application-id",
+            "a",
+            "--compartment-id",
+            "c",
+            "--tables",
+            "OPERACAO",
+            *extra,
+        ]
 
     def test_owner_defaults_to_cetip(self, monkeypatch):
         monkeypatch.delenv("DATAGEN_SOURCE_SCHEMA", raising=False)
@@ -375,9 +451,16 @@ class TestDefaultOwner:
 
 class TestShapeOmitInherits:
     def _opts(self, **kw):
-        base = dict(application_id="app", compartment_id="cmp", num_executors=None,
-                    driver_shape=None, executor_shape=None, driver_shape_config=None,
-                    executor_shape_config=None, passthrough=[])
+        base = dict(
+            application_id="app",
+            compartment_id="cmp",
+            num_executors=None,
+            driver_shape=None,
+            executor_shape=None,
+            driver_shape_config=None,
+            executor_shape_config=None,
+            passthrough=[],
+        )
         base.update(kw)
         return base
 
@@ -389,15 +472,18 @@ class TestShapeOmitInherits:
 
     def test_set_shapes_present(self):
         cmd = P.build_run_create_command(
-            [("S", "A")], 0, self._opts(num_executors=3, driver_shape="VM.X",
-                                        executor_shape="VM.Y"))
+            [("S", "A")], 0, self._opts(num_executors=3, driver_shape="VM.X", executor_shape="VM.Y")
+        )
         assert cmd[cmd.index("--num-executors") + 1] == "3"
         assert "VM.X" in cmd
         assert "VM.Y" in cmd
 
     def test_parse_args_shapes_default_none(self, monkeypatch):
-        monkeypatch.setattr(sys, "argv", ["parallel_extract", "--application-id", "a",
-                                          "--compartment-id", "c", "--tables", "A"])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["parallel_extract", "--application-id", "a", "--compartment-id", "c", "--tables", "A"],
+        )
         a = P.parse_arguments()
         assert a.num_executors is None
         assert a.driver_shape is None
@@ -407,9 +493,11 @@ class TestShapeOmitInherits:
 class TestFkParents:
     def test_includes_direct_parents_only(self):
         seed = [("C", "OPERACAO")]
-        edges = [(("C", "OPERACAO"), ("C", "EVENTO")),       # direct parent -> included
-                 (("C", "EVENTO"), ("C", "CONDICAO_IF")),    # parent-of-parent -> excluded
-                 (("C", "UNRELATED"), ("C", "XYZ"))]
+        edges = [
+            (("C", "OPERACAO"), ("C", "EVENTO")),  # direct parent -> included
+            (("C", "EVENTO"), ("C", "CONDICAO_IF")),  # parent-of-parent -> excluded
+            (("C", "UNRELATED"), ("C", "XYZ")),
+        ]
         assert P.fk_parents(seed, edges) == {("C", "OPERACAO"), ("C", "EVENTO")}
 
     def test_self_reference(self):
@@ -424,12 +512,14 @@ class TestExpandFkParents:
         class FakeCur:
             def execute(self, sql, binds):
                 self.sql = sql
+
             def __iter__(self):
                 return iter([("C", "OPERACAO", "C", "EVENTO")])
 
         class FakeConn:
             def cursor(self):
                 return FakeCur()
+
             def close(self):
                 pass
 
@@ -439,14 +529,23 @@ class TestExpandFkParents:
     def test_exits_when_source_unreachable(self):
         def boom():
             raise RuntimeError("down")
+
         with pytest.raises(SystemExit):
             P.expand_fk_parents([("C", "A")], connect=boom)
 
 
 class TestFkParentsArg:
     def _argv(self, *extra):
-        return ["parallel_extract", "--application-id", "a", "--compartment-id", "c",
-                "--specs", "specs.json", *extra]
+        return [
+            "parallel_extract",
+            "--application-id",
+            "a",
+            "--compartment-id",
+            "c",
+            "--specs",
+            "specs.json",
+            *extra,
+        ]
 
     def test_flag_default_false(self, monkeypatch):
         monkeypatch.setattr(sys, "argv", self._argv())

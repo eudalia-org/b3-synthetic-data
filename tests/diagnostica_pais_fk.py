@@ -139,12 +139,13 @@ def diagnostica(
         print(f"{parent:<32} {b:<8} {p:<9} {acao}")
 
     print("-" * 90)
-    print(f"\nRESUMO:")
+    print("\nRESUMO:")
     print(f"  OK (bloco + parquet):            {len(ok)}")
-    print(f"  Falta só BLOCO (tem parquet):    {len(faltam_bloco_tem_parquet)} "
-          f"-> {faltam_bloco_tem_parquet}")
-    print(f"  Falta PARQUET:                   {len(faltam_parquet)} "
-          f"-> {faltam_parquet}")
+    print(
+        f"  Falta só BLOCO (tem parquet):    {len(faltam_bloco_tem_parquet)} "
+        f"-> {faltam_bloco_tem_parquet}"
+    )
+    print(f"  Falta PARQUET:                   {len(faltam_parquet)} -> {faltam_parquet}")
 
     if faltam_bloco_tem_parquet:
         print("\n>> Ação imediata: remover o filtro IN da query de PK e regerar o")
@@ -160,6 +161,7 @@ def diagnostica(
 
 if __name__ == "__main__":
     import sys
+
     if len(sys.argv) < 3:
         raise SystemExit(
             "Uso: python diagnostica_pais_fk.py fk_real.csv spec_config.json "

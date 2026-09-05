@@ -123,12 +123,8 @@ class TestGenAiPolicy:
             E.resolve_genai_policy(document, product="cdb_simplificado")
 
     def test_validates_targets_against_runtime_contracts(self):
-        policy = E.resolve_genai_policy(
-            genai_policy_document(), product="cdb_simplificado"
-        )
-        column_types = {
-            target.table: {target.column: "string"} for target in policy.targets
-        }
+        policy = E.resolve_genai_policy(genai_policy_document(), product="cdb_simplificado")
+        column_types = {target.table: {target.column: "string"} for target in policy.targets}
         specs = {
             target.table: {
                 "pk_cols": ["ID"],
@@ -156,12 +152,8 @@ class TestGenAiPolicy:
         ],
     )
     def test_rejects_runtime_target_conflicts(self, change, message):
-        policy = E.resolve_genai_policy(
-            genai_policy_document(), product="cdb_simplificado"
-        )
-        column_types = {
-            target.table: {target.column: "string"} for target in policy.targets
-        }
+        policy = E.resolve_genai_policy(genai_policy_document(), product="cdb_simplificado")
+        column_types = {target.table: {target.column: "string"} for target in policy.targets}
         specs = {
             target.table: {
                 "pk_cols": ["ID"],
@@ -206,9 +198,7 @@ class ScriptedAdapter:
 
 
 def resolved_policy():
-    return E.resolve_genai_policy(
-        genai_policy_document(), product="cdb_simplificado"
-    )
+    return E.resolve_genai_policy(genai_policy_document(), product="cdb_simplificado")
 
 
 def sample_instrument(root=10):
@@ -271,20 +261,26 @@ class TestGenAiGeneration:
             clone_factor=2,
             run_seed=42,
         )
-        adapter = ScriptedAdapter([
-            json.dumps({
-                "variants": [
-                    {"k": 1, "values": {"t0001": "Evento 1", "t0002": "X" * 773}},
-                    {"k": 2, "values": {"t0001": "Evento 2"}},
-                ]
-            }),
-            json.dumps({
-                "variants": [
-                    {"k": 1, "values": {"t0002": "Caracteristica 1"}},
-                ]
-            }),
-            json.dumps({"variants": []}),
-        ])
+        adapter = ScriptedAdapter(
+            [
+                json.dumps(
+                    {
+                        "variants": [
+                            {"k": 1, "values": {"t0001": "Evento 1", "t0002": "X" * 773}},
+                            {"k": 2, "values": {"t0001": "Evento 2"}},
+                        ]
+                    }
+                ),
+                json.dumps(
+                    {
+                        "variants": [
+                            {"k": 1, "values": {"t0002": "Caracteristica 1"}},
+                        ]
+                    }
+                ),
+                json.dumps({"variants": []}),
+            ]
+        )
 
         result = E.generate_genai_replacements([request], adapter=adapter)
 
@@ -303,9 +299,7 @@ class TestGenAiGeneration:
             "source_change_rate": 1.0,
             "sibling_uniqueness_rate": 1.0,
         }
-        assert result.metrics.diversity[
-            "INSTRUMENTO_FINANCEIRO.TXT_CARACT_COMPLEMENTARES"
-        ] == {
+        assert result.metrics.diversity["INSTRUMENTO_FINANCEIRO.TXT_CARACT_COMPLEMENTARES"] == {
             "source_change_rate": 0.5,
             "sibling_uniqueness_rate": 1.0,
         }
@@ -336,13 +330,10 @@ class TestGenAiGeneration:
             run_seed=42,
         )
         duplicate = (
-            '{"variants":[{"k":1,"values":'
-            '{"t0001":"first","t0001":"second","t0002":"value"}}]}'
+            '{"variants":[{"k":1,"values":{"t0001":"first","t0001":"second","t0002":"value"}}]}'
         )
 
-        result = E.generate_genai_replacements(
-            [request], adapter=ScriptedAdapter([duplicate] * 3)
-        )
+        result = E.generate_genai_replacements([request], adapter=ScriptedAdapter([duplicate] * 3))
 
         assert result.metrics.generated_cells == 0
         assert result.metrics.fallback_cells == 2
@@ -471,25 +462,41 @@ class TestGenAiJobContract:
         assert P.GENAI_MAX_FACTOR_K == E.GENAI_MAX_FACTOR_K
 
     def test_direct_plan_derives_sibling_genai_root(self):
-        assert E._default_genai_artifact_root(
-            "oci://bucket@ns/run/products/cdb/engorda/selection-plan.json"
-        ) == "oci://bucket@ns/run/products/cdb/genai"
+        assert (
+            E._default_genai_artifact_root(
+                "oci://bucket@ns/run/products/cdb/engorda/selection-plan.json"
+            )
+            == "oci://bucket@ns/run/products/cdb/genai"
+        )
 
     def test_cli_parses_enabled_plan_contract(self):
-        args = E.parse_arguments([
-            "--phase", "plan",
-            "--produto", "cdb_simplificado",
-            "--n-instrumentos", "10",
-            "--raw-uri", "oci://bucket@ns/raw",
-            "--output-uri", "oci://bucket@ns/synthetic",
-            "--plan-uri", "oci://bucket@ns/selection-plan.json",
-            "--enable-genai",
-            "--genai-policy", "oci://bucket@ns/genai-policy.json",
-            "--genai-endpoint-id", "ocid1.generativeaiendpoint.test",
-            "--genai-compartment-id", "ocid1.compartment.test",
-            "--genai-region", "sa-saopaulo-1",
-            "--genai-artifact-root", "oci://bucket@ns/genai",
-        ])
+        args = E.parse_arguments(
+            [
+                "--phase",
+                "plan",
+                "--produto",
+                "cdb_simplificado",
+                "--n-instrumentos",
+                "10",
+                "--raw-uri",
+                "oci://bucket@ns/raw",
+                "--output-uri",
+                "oci://bucket@ns/synthetic",
+                "--plan-uri",
+                "oci://bucket@ns/selection-plan.json",
+                "--enable-genai",
+                "--genai-policy",
+                "oci://bucket@ns/genai-policy.json",
+                "--genai-endpoint-id",
+                "ocid1.generativeaiendpoint.test",
+                "--genai-compartment-id",
+                "ocid1.compartment.test",
+                "--genai-region",
+                "sa-saopaulo-1",
+                "--genai-artifact-root",
+                "oci://bucket@ns/genai",
+            ]
+        )
 
         assert args.enable_genai is True
         assert args.genai_policy == "oci://bucket@ns/genai-policy.json"
@@ -523,24 +530,29 @@ class TestGenAiJobContract:
         with pytest.raises(ValueError, match="fator_k <= 5"):
             E._validate_engorda_job(E.EngordaJob(**{**configured, "fator_k": 6}))
         with pytest.raises(ValueError, match="endpoint OCID"):
-            E._validate_engorda_job(E.EngordaJob(**{
-                **configured, "genai_endpoint_id": "not-an-ocid",
-            }))
+            E._validate_engorda_job(
+                E.EngordaJob(
+                    **{
+                        **configured,
+                        "genai_endpoint_id": "not-an-ocid",
+                    }
+                )
+            )
 
     def test_materialize_needs_only_enabled_acknowledgement(self):
-        E._validate_engorda_job(E.EngordaJob(
-            produto="cdb_simplificado",
-            phase="materialize",
-            plan_uri="plan.json",
-            reservation_uri="reservation.json",
-            raw_uri="raw",
-            output_uri="synthetic",
-            enable_genai=True,
-        ))
+        E._validate_engorda_job(
+            E.EngordaJob(
+                produto="cdb_simplificado",
+                phase="materialize",
+                plan_uri="plan.json",
+                reservation_uri="reservation.json",
+                raw_uri="raw",
+                output_uri="synthetic",
+                enable_genai=True,
+            )
+        )
 
-    def test_direct_all_checks_artifact_absence_before_policy_read(
-        self, monkeypatch
-    ):
+    def test_direct_all_checks_artifact_absence_before_policy_read(self, monkeypatch):
         class ArtifactExists(RuntimeError):
             pass
 
@@ -549,15 +561,19 @@ class TestGenAiJobContract:
                 pass
 
         monkeypatch.setattr(E, "create_spark_session", lambda *_args: FakeSpark())
-        monkeypatch.setattr(E, "get_engorda_env", lambda *_args, **_kwargs: {
-            "DATAGEN_RAW_BASE_URI": "raw",
-            "DATAGEN_RAW_PREFIX": "",
-            "DATAGEN_SYNTHETIC_BASE_URI": "synthetic",
-            "DATAGEN_SYNTHETIC_PREFIX": "",
-            "DATAGEN_CLONE_PREFIX": "cdb",
-            "DATAGEN_OUTPUT_URI": "synthetic/cdb",
-            "DATAGEN_SPECS_URI": "spec.json",
-        })
+        monkeypatch.setattr(
+            E,
+            "get_engorda_env",
+            lambda *_args, **_kwargs: {
+                "DATAGEN_RAW_BASE_URI": "raw",
+                "DATAGEN_RAW_PREFIX": "",
+                "DATAGEN_SYNTHETIC_BASE_URI": "synthetic",
+                "DATAGEN_SYNTHETIC_PREFIX": "",
+                "DATAGEN_CLONE_PREFIX": "cdb",
+                "DATAGEN_OUTPUT_URI": "synthetic/cdb",
+                "DATAGEN_SPECS_URI": "spec.json",
+            },
+        )
         monkeypatch.setattr(
             E,
             "_assert_exact_output_absent",
@@ -570,18 +586,20 @@ class TestGenAiJobContract:
         )
 
         with pytest.raises(ArtifactExists, match="genai-root"):
-            E.executar_job(E.EngordaJob(
-                produto="cdb_simplificado",
-                num_ifs=(10,),
-                meu_numero_prefix="321",
-                no_oracle=True,
-                enable_genai=True,
-                genai_policy="policy.json",
-                genai_endpoint_id="ocid1.generativeaiendpoint.test",
-                genai_compartment_id="ocid1.compartment.test",
-                genai_region="sa-saopaulo-1",
-                genai_artifact_root="genai-root",
-            ))
+            E.executar_job(
+                E.EngordaJob(
+                    produto="cdb_simplificado",
+                    num_ifs=(10,),
+                    meu_numero_prefix="321",
+                    no_oracle=True,
+                    enable_genai=True,
+                    genai_policy="policy.json",
+                    genai_endpoint_id="ocid1.generativeaiendpoint.test",
+                    genai_compartment_id="ocid1.compartment.test",
+                    genai_region="sa-saopaulo-1",
+                    genai_artifact_root="genai-root",
+                )
+            )
 
 
 class TestGenAiSparkApplication:
@@ -608,9 +626,7 @@ class TestGenAiSparkApplication:
         )
 
         assert aggregates[0].root_num_if == "2253875817.0000000000"
-        assert aggregates[0].rows[0].source_pk == {
-            "NUM_IF": Decimal("2253875817.0000000000")
-        }
+        assert aggregates[0].rows[0].source_pk == {"NUM_IF": Decimal("2253875817.0000000000")}
 
     def test_materialize_rejects_enablement_mismatch_before_loading_tables(self, spark):
         with pytest.raises(ValueError, match="--enable-genai diverge"):
@@ -789,8 +805,7 @@ class TestGenAiSparkApplication:
         )
 
         assert [
-            (row.ID, row.TXT, row.OUTSIDE_ALLOWLIST)
-            for row in clones.orderBy("ID").collect()
+            (row.ID, row.TXT, row.OUTSIDE_ALLOWLIST) for row in clones.orderBy("ID").collect()
         ] == [
             (100, "generated", "keep-1"),
             (101, "original", "keep-1"),
@@ -803,12 +818,20 @@ class TestGenAiSparkApplication:
         request = E.build_genai_request(
             sample_instrument(), policy=policy, clone_factor=1, run_seed=42
         )
-        adapter = ScriptedAdapter([json.dumps({
-            "variants": [{
-                "k": 1,
-                "values": {"t0001": "Evento", "t0002": "Caracteristica"},
-            }],
-        })])
+        adapter = ScriptedAdapter(
+            [
+                json.dumps(
+                    {
+                        "variants": [
+                            {
+                                "k": 1,
+                                "values": {"t0001": "Evento", "t0002": "Caracteristica"},
+                            }
+                        ],
+                    }
+                )
+            ]
+        )
         result = E.generate_genai_replacements([request], adapter=adapter)
         root = str(tmp_path / "genai")
 
@@ -855,9 +878,7 @@ class TestGenAiSparkApplication:
                 region="sa-saopaulo-1",
             )
 
-    def test_enabled_plan_freezes_generated_replacements(
-        self, spark, tmp_path, monkeypatch
-    ):
+    def test_enabled_plan_freezes_generated_replacements(self, spark, tmp_path, monkeypatch):
         root = spark.createDataFrame(
             [(10, 49, "original")],
             "NUM_IF long, NUM_TIPO_IF long, TXT_CARACT_COMPLEMENTARES string",
@@ -867,10 +888,11 @@ class TestGenAiSparkApplication:
             "NUM_ID_EVENTO long, NUM_IF long, TXT_OBSERVACAO string",
         )
         operation = spark.createDataFrame(
-            [(30, 10, "old", "1", "2")],
+            [(30, 10, "old", "1", "2", 4509)],
             (
                 "NUM_ID_OPERACAO long, NUM_IF long, TXT_HISTORICO string, "
-                "NUM_CONTA_PARTICIPANTE_P1 string, NUM_CONTA_PARTICIPANTE_P2 string"
+                "NUM_CONTA_PARTICIPANTE_P1 string, NUM_CONTA_PARTICIPANTE_P2 string, "
+                "NUM_ID_TIPO_OPER_OBJETO_SERV long"
             ),
         )
         lotes = {
@@ -895,22 +917,26 @@ class TestGenAiSparkApplication:
             "INSTRUMENTO_FINANCEIRO": spark.createDataFrame(
                 [(10, 10)], "NUM_IF long, __root_num_if long"
             ),
-            "EVENTO": spark.createDataFrame(
-                [(20, 10)], "NUM_ID_EVENTO long, __root_num_if long"
-            ),
+            "EVENTO": spark.createDataFrame([(20, 10)], "NUM_ID_EVENTO long, __root_num_if long"),
             "OPERACAO": spark.createDataFrame(
                 [(30, 10)], "NUM_ID_OPERACAO long, __root_num_if long"
             ),
         }
         spec = {
             "INSTRUMENTO_FINANCEIRO": {
-                "pk_cols": ["NUM_IF"], "foreign_keys": [], "static": False,
+                "pk_cols": ["NUM_IF"],
+                "foreign_keys": [],
+                "static": False,
             },
             "EVENTO": {
-                "pk_cols": ["NUM_ID_EVENTO"], "foreign_keys": [], "static": False,
+                "pk_cols": ["NUM_ID_EVENTO"],
+                "foreign_keys": [],
+                "static": False,
             },
             "OPERACAO": {
-                "pk_cols": ["NUM_ID_OPERACAO"], "foreign_keys": [], "static": False,
+                "pk_cols": ["NUM_ID_OPERACAO"],
+                "foreign_keys": [],
+                "static": False,
             },
         }
         monkeypatch.setitem(
@@ -933,16 +959,24 @@ class TestGenAiSparkApplication:
             return lotes
 
         monkeypatch.setattr(E, "calcula_lotes", calculate)
-        adapter = ScriptedAdapter([json.dumps({
-            "variants": [{
-                "k": 1,
-                "values": {
-                    "t0001": "Evento",
-                    "t0002": "Caracteristica",
-                    "t0003": "Historico",
-                },
-            }],
-        })])
+        adapter = ScriptedAdapter(
+            [
+                json.dumps(
+                    {
+                        "variants": [
+                            {
+                                "k": 1,
+                                "values": {
+                                    "t0001": "Evento",
+                                    "t0002": "Caracteristica",
+                                    "t0003": "Historico",
+                                },
+                            }
+                        ],
+                    }
+                )
+            ]
+        )
         plan_uri = str(tmp_path / "selection-plan.json")
         artifact_root = str(tmp_path / "genai")
         config = {
@@ -979,8 +1013,9 @@ class TestGenAiSparkApplication:
 
         assert result["plan"]["genai"]["enabled"] is True
         assert result["plan"]["genai"]["replacements"]["row_count"] == 3
-        assert json.loads((tmp_path / "selection-plan.json").read_text())["plan_id"] == (
-            result["plan"]["plan_id"]
+        assert (
+            json.loads((tmp_path / "selection-plan.json").read_text())["plan_id"]
+            == (result["plan"]["plan_id"])
         )
         assert len(adapter.calls) == 1
 
@@ -994,9 +1029,7 @@ class TestGenAiSparkApplication:
             [(10, 49, "old")],
             "NUM_IF long, NUM_TIPO_IF long, TXT_CARACT_COMPLEMENTARES string",
         )
-        provenance = spark.createDataFrame(
-            [(10, 10)], "NUM_IF long, __root_num_if long"
-        )
+        provenance = spark.createDataFrame([(10, 10)], "NUM_IF long, __root_num_if long")
         plan = E.PlanoTabela(
             E.TABELA_RAIZ,
             (E.COL_NUM_IF,),

@@ -1,6 +1,5 @@
 from engorda_instrumentos_multiproduto import EngordaJob, executar_job
 
-
 # As regras e o SQL de cada produto ficam em REGRAS_PRODUTO, dentro de
 # engorda_instrumentos_multiproduto.py. Escolha um produto abaixo e execute
 # este arquivo. Cada exemplo usa o SQL correspondente automaticamente:
@@ -23,7 +22,7 @@ JOBS_EXEMPLO = {
         produto="cdb",
         n_instrumentos=500000,
         fator_k=2,
-        clone_prefix="clones_instrumentos/cdb_completo"
+        clone_prefix="clones_instrumentos/cdb_completo",
     ),
     "rdb": EngordaJob(
         produto="rdb",
@@ -41,8 +40,9 @@ JOB = JOBS_EXEMPLO[PRODUTO_A_EXECUTAR]
 # Para escolher NUM_IFs específicos, substitua n_instrumentos no exemplo por:
 # num_ifs=(123, 456),
 #
-# Exemplo de execução com Spark (PowerShell, em uma única linha):
-# spark-submit --py-files engorda_instrumentos_multiproduto.py --files cdb_simplificado.sql,cdb.sql,rdb.sql executar_engorda_multiproduto.py
+# Exemplo de execução com Spark (PowerShell, continuação com backtick):
+# spark-submit --py-files engorda_instrumentos_multiproduto.py `
+#   --files cdb_simplificado.sql,cdb.sql,rdb.sql executar_engorda_multiproduto.py
 
 
 if __name__ == "__main__":

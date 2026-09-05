@@ -67,11 +67,21 @@ def _write_csv(tmp_path, name, header, rows):
 class TestParseColumnsCsv:
     def test_parses_and_normalizes_header_case(self, tmp_path):
         path = _write_csv(
-            tmp_path, "columns.csv",
-            ["TABLE_NAME", "COLUMN_NAME", "DATA_TYPE", "DATA_PRECISION",
-             "DATA_SCALE", "CHAR_LENGTH", "NULLABLE"],
-            [["CETIP.JUROS_FLUTUANTE", "NUM_CONDICAO_IF", "NUMBER", 38, 0, 0, "N"],
-             ["CETIP.JUROS_FLUTUANTE", "COD_X", "VARCHAR2", "", "", 20, "Y"]],
+            tmp_path,
+            "columns.csv",
+            [
+                "TABLE_NAME",
+                "COLUMN_NAME",
+                "DATA_TYPE",
+                "DATA_PRECISION",
+                "DATA_SCALE",
+                "CHAR_LENGTH",
+                "NULLABLE",
+            ],
+            [
+                ["CETIP.JUROS_FLUTUANTE", "NUM_CONDICAO_IF", "NUMBER", 38, 0, 0, "N"],
+                ["CETIP.JUROS_FLUTUANTE", "COD_X", "VARCHAR2", "", "", 20, "Y"],
+            ],
         )
         rows = bsd.parse_columns_csv(path)
         assert len(rows) == 2
@@ -112,6 +122,7 @@ Usage:
     python scripts/build_schema_from_dump.py \
         --columns columns.csv --constraints constraints.csv --out schema.json
 """
+
 from __future__ import annotations
 
 import argparse
@@ -122,8 +133,7 @@ from collections import defaultdict
 
 def _norm_row(raw: dict) -> dict:
     return {
-        (k or "").strip().upper(): (v.strip() if isinstance(v, str) else v)
-        for k, v in raw.items()
+        (k or "").strip().upper(): (v.strip() if isinstance(v, str) else v) for k, v in raw.items()
     }
 
 
@@ -167,10 +177,24 @@ Note the table-name stripping (`CETIP.JUROS_FLUTUANTE` → `JUROS_FLUTUANTE`), i
 class TestBuildSchemaColumns:
     def test_columns_typed_and_table_stripped(self):
         col_rows = [
-            {"TABLE_NAME": "CETIP.T", "COLUMN_NAME": "ID", "DATA_TYPE": "NUMBER",
-             "DATA_PRECISION": "38", "DATA_SCALE": "0", "CHAR_LENGTH": "0", "NULLABLE": "N"},
-            {"TABLE_NAME": "CETIP.T", "COLUMN_NAME": "NAME", "DATA_TYPE": "VARCHAR2",
-             "DATA_PRECISION": "", "DATA_SCALE": "", "CHAR_LENGTH": "20", "NULLABLE": "Y"},
+            {
+                "TABLE_NAME": "CETIP.T",
+                "COLUMN_NAME": "ID",
+                "DATA_TYPE": "NUMBER",
+                "DATA_PRECISION": "38",
+                "DATA_SCALE": "0",
+                "CHAR_LENGTH": "0",
+                "NULLABLE": "N",
+            },
+            {
+                "TABLE_NAME": "CETIP.T",
+                "COLUMN_NAME": "NAME",
+                "DATA_TYPE": "VARCHAR2",
+                "DATA_PRECISION": "",
+                "DATA_SCALE": "",
+                "CHAR_LENGTH": "20",
+                "NULLABLE": "Y",
+            },
         ]
         schema = bsd.build_schema(col_rows, constraint_rows=[])
         assert set(schema.keys()) == {"T"}
@@ -254,26 +278,63 @@ Reuses the same constraint-row shape as `build_specs_from_constraints` (`CONSTRA
 class TestBuildSchemaUnique:
     def test_composite_unique_paired_by_position(self):
         col_rows = [
-            {"TABLE_NAME": "T", "COLUMN_NAME": "A", "DATA_TYPE": "NUMBER",
-             "DATA_PRECISION": "5", "DATA_SCALE": "0", "CHAR_LENGTH": "0", "NULLABLE": "N"},
-            {"TABLE_NAME": "T", "COLUMN_NAME": "B", "DATA_TYPE": "NUMBER",
-             "DATA_PRECISION": "5", "DATA_SCALE": "0", "CHAR_LENGTH": "0", "NULLABLE": "N"},
+            {
+                "TABLE_NAME": "T",
+                "COLUMN_NAME": "A",
+                "DATA_TYPE": "NUMBER",
+                "DATA_PRECISION": "5",
+                "DATA_SCALE": "0",
+                "CHAR_LENGTH": "0",
+                "NULLABLE": "N",
+            },
+            {
+                "TABLE_NAME": "T",
+                "COLUMN_NAME": "B",
+                "DATA_TYPE": "NUMBER",
+                "DATA_PRECISION": "5",
+                "DATA_SCALE": "0",
+                "CHAR_LENGTH": "0",
+                "NULLABLE": "N",
+            },
         ]
         constraint_rows = [
-            {"CONSTRAINT_TYPE": "U", "CONSTRAINT_NAME": "T_UK", "TABLE_NAME": "T",
-             "COLUMN_NAME": "B", "COL_POSITION": "2"},
-            {"CONSTRAINT_TYPE": "U", "CONSTRAINT_NAME": "T_UK", "TABLE_NAME": "T",
-             "COLUMN_NAME": "A", "COL_POSITION": "1"},
-            {"CONSTRAINT_TYPE": "P", "CONSTRAINT_NAME": "T_PK", "TABLE_NAME": "T",
-             "COLUMN_NAME": "A", "COL_POSITION": "1"},  # ignored
+            {
+                "CONSTRAINT_TYPE": "U",
+                "CONSTRAINT_NAME": "T_UK",
+                "TABLE_NAME": "T",
+                "COLUMN_NAME": "B",
+                "COL_POSITION": "2",
+            },
+            {
+                "CONSTRAINT_TYPE": "U",
+                "CONSTRAINT_NAME": "T_UK",
+                "TABLE_NAME": "T",
+                "COLUMN_NAME": "A",
+                "COL_POSITION": "1",
+            },
+            {
+                "CONSTRAINT_TYPE": "P",
+                "CONSTRAINT_NAME": "T_PK",
+                "TABLE_NAME": "T",
+                "COLUMN_NAME": "A",
+                "COL_POSITION": "1",
+            },  # ignored
         ]
         schema = bsd.build_schema(col_rows, constraint_rows)
         assert schema["T"]["unique"] == [["A", "B"]]  # ordered by position
 
     def test_no_unique_key_omits_field(self):
-        col_rows = [{"TABLE_NAME": "T", "COLUMN_NAME": "A", "DATA_TYPE": "NUMBER",
-                     "DATA_PRECISION": "5", "DATA_SCALE": "0", "CHAR_LENGTH": "0",
-                     "NULLABLE": "N"}]
+        col_rows = [
+            {
+                "TABLE_NAME": "T",
+                "COLUMN_NAME": "A",
+                "DATA_TYPE": "NUMBER",
+                "DATA_PRECISION": "5",
+                "DATA_SCALE": "0",
+                "CHAR_LENGTH": "0",
+                "NULLABLE": "N",
+            }
+        ]
         schema = bsd.build_schema(col_rows, constraint_rows=[])
         assert "unique" not in schema["T"]
 ```
@@ -345,10 +406,12 @@ def _emit(schema: dict) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate schema.json from Oracle column + constraint dumps.")
+        description="Generate schema.json from Oracle column + constraint dumps."
+    )
     parser.add_argument("--columns", required=True, help="CSV from extract_schema.sql")
-    parser.add_argument("--constraints", required=True,
-                        help="CSV from extract_constraints.sql (U rows reused)")
+    parser.add_argument(
+        "--constraints", required=True, help="CSV from extract_constraints.sql (U rows reused)"
+    )
     parser.add_argument("--out", default="schema.json", help="Output schema.json path")
     args = parser.parse_args()
 
@@ -444,36 +507,63 @@ import validate_tables as vt  # noqa: E402
 
 class TestReport:
     def test_has_violations_and_summary(self):
-        report = vt.Report(findings=[
-            vt.Finding(table="T", check="not_null", target="A",
-                       violation_count=3, sample=[{"A": None}], ok=False),
-            vt.Finding(table="T", check="pk_unique", target="ID",
-                       violation_count=0, sample=[], ok=True),
-        ])
+        report = vt.Report(
+            findings=[
+                vt.Finding(
+                    table="T",
+                    check="not_null",
+                    target="A",
+                    violation_count=3,
+                    sample=[{"A": None}],
+                    ok=False,
+                ),
+                vt.Finding(
+                    table="T", check="pk_unique", target="ID", violation_count=0, sample=[], ok=True
+                ),
+            ]
+        )
         assert report.has_violations is True
         assert report.summary_counts == {"ok": 1, "violations": 1}
 
     def test_clean_report_has_no_violations(self):
-        report = vt.Report(findings=[
-            vt.Finding(table="T", check="not_null", target="A",
-                       violation_count=0, sample=[], ok=True)])
+        report = vt.Report(
+            findings=[
+                vt.Finding(
+                    table="T", check="not_null", target="A", violation_count=0, sample=[], ok=True
+                )
+            ]
+        )
         assert report.has_violations is False
 
     def test_report_to_json_roundtrips(self):
-        report = vt.Report(findings=[
-            vt.Finding(table="T", check="fk", target="FK1",
-                       violation_count=2, sample=[{"FK": 9}], ok=False)])
+        report = vt.Report(
+            findings=[
+                vt.Finding(
+                    table="T",
+                    check="fk",
+                    target="FK1",
+                    violation_count=2,
+                    sample=[{"FK": 9}],
+                    ok=False,
+                )
+            ]
+        )
         blob = vt.report_to_json(report)
         assert blob["has_violations"] is True
         assert blob["findings"][0]["table"] == "T"
         assert blob["findings"][0]["violation_count"] == 2
 
     def test_render_summary_lists_violations_first(self):
-        report = vt.Report(findings=[
-            vt.Finding(table="A", check="not_null", target="X",
-                       violation_count=0, sample=[], ok=True),
-            vt.Finding(table="B", check="fk", target="Y",
-                       violation_count=5, sample=[], ok=False)])
+        report = vt.Report(
+            findings=[
+                vt.Finding(
+                    table="A", check="not_null", target="X", violation_count=0, sample=[], ok=True
+                ),
+                vt.Finding(
+                    table="B", check="fk", target="Y", violation_count=5, sample=[], ok=False
+                ),
+            ]
+        )
         text = vt.render_summary(report)
         assert text.index("B") < text.index("A")  # violations first
         assert "5" in text
@@ -496,6 +586,7 @@ notebook (pass your own SparkSession); `main()` is the Data Flow CLI wrapper.
 
 Design: docs/plans/2026-06-18-validate-tables-design.md
 """
+
 from __future__ import annotations
 
 import argparse
@@ -520,8 +611,10 @@ SAMPLE_LIMIT = 10  # offending rows captured per finding
 @dataclass
 class Finding:
     table: str
-    check: str            # not_null | decimal_domain | varchar_domain | pk_unique | pk_collision | fk | unique
-    target: str           # column or constraint label
+    check: (
+        str  # not_null | decimal_domain | varchar_domain | pk_unique | pk_collision | fk | unique
+    )
+    target: str  # column or constraint label
     violation_count: int
     sample: list
     ok: bool
@@ -547,8 +640,12 @@ def report_to_json(report: Report) -> dict:
         "summary": report.summary_counts,
         "findings": [
             {
-                "table": f.table, "check": f.check, "target": f.target,
-                "violation_count": f.violation_count, "sample": f.sample, "ok": f.ok,
+                "table": f.table,
+                "check": f.check,
+                "target": f.target,
+                "violation_count": f.violation_count,
+                "sample": f.sample,
+                "ok": f.ok,
             }
             for f in report.findings
         ],
@@ -557,12 +654,13 @@ def report_to_json(report: Report) -> dict:
 
 def render_summary(report: Report) -> str:
     rows = sorted(report.findings, key=lambda f: (f.ok, f.table, f.check))
-    lines = [f"Validation: {report.summary_counts['violations']} violation(s), "
-             f"{report.summary_counts['ok']} ok"]
+    lines = [
+        f"Validation: {report.summary_counts['violations']} violation(s), "
+        f"{report.summary_counts['ok']} ok"
+    ]
     for f in rows:
         mark = "OK " if f.ok else "FAIL"
-        lines.append(f"  [{mark}] {f.table}.{f.check}({f.target}) "
-                     f"-> {f.violation_count} bad")
+        lines.append(f"  [{mark}] {f.table}.{f.check}({f.target}) -> {f.violation_count} bad")
     return "\n".join(lines)
 ```
 
@@ -596,7 +694,7 @@ class TestPureHelpers:
         assert vt.decimal_overflow_threshold(3, 0) == 1000  # Decimal(3,0): max 999
         assert vt.decimal_overflow_threshold(5, 2) == 1000  # 999.99 accepted, 1000 overflows
         assert vt.decimal_overflow_threshold(2, 0) == 100
-        assert vt.decimal_overflow_threshold(2, 2) == 1     # max 0.99; >=1 overflows int part
+        assert vt.decimal_overflow_threshold(2, 2) == 1  # max 0.99; >=1 overflows int part
 
     def test_normalize_schema_strips_owner(self):
         schema = {"CETIP.T": {"columns": {"A": {"type": "NUMBER", "nullable": False}}}}
@@ -604,9 +702,14 @@ class TestPureHelpers:
         assert "T" in out and "CETIP.T" not in out
 
     def test_normalize_specs_strips_owner_and_parent(self):
-        specs = {"CETIP.CHILD": {"pk_cols": ["ID"], "foreign_keys": [
-            {"columns": ["PID"], "parent_table": "CETIP.PARENT",
-             "parent_columns": ["ID"]}]}}
+        specs = {
+            "CETIP.CHILD": {
+                "pk_cols": ["ID"],
+                "foreign_keys": [
+                    {"columns": ["PID"], "parent_table": "CETIP.PARENT", "parent_columns": ["ID"]}
+                ],
+            }
+        }
         out = vt.normalize_specs(specs)
         assert "CHILD" in out
         assert out["CHILD"]["foreign_keys"][0]["parent_table"] == "PARENT"
@@ -634,7 +737,7 @@ def decimal_overflow_threshold(precision: int, scale: int) -> int:
     scale rather than rejecting, so only the integer part can overflow.
     """
     int_digits = max(precision - scale, 0)
-    return 10 ** int_digits
+    return 10**int_digits
 
 
 def normalize_schema(schema: dict) -> dict:
@@ -704,37 +807,44 @@ def _sample(df, cols, limit=SAMPLE_LIMIT) -> list:
 
 def check_not_null(df, table, not_null_cols) -> list:
     from pyspark.sql import functions as F
+
     findings = []
     for col in not_null_cols:
         if col not in df.columns:
             continue
         bad = df.filter(F.col(col).isNull())
         count = bad.count()
-        findings.append(Finding(table, "not_null", col, count,
-                                _sample(bad, [col]) if count else [], count == 0))
+        findings.append(
+            Finding(table, "not_null", col, count, _sample(bad, [col]) if count else [], count == 0)
+        )
     return findings
 
 
 def check_decimal_domain(df, table, col, precision, scale) -> Finding:
     from pyspark.sql import functions as F
+
     threshold = decimal_overflow_threshold(precision, scale)
     bad = df.filter(F.col(col).isNotNull() & (F.abs(F.col(col)) >= F.lit(threshold)))
     count = bad.count()
-    return Finding(table, "decimal_domain", col, count,
-                   _sample(bad, [col]) if count else [], count == 0)
+    return Finding(
+        table, "decimal_domain", col, count, _sample(bad, [col]) if count else [], count == 0
+    )
 
 
 def check_varchar_domain(df, table, col, length) -> Finding:
     from pyspark.sql import functions as F
+
     bad = df.filter(F.col(col).isNotNull() & (F.length(F.col(col)) > F.lit(length)))
     count = bad.count()
-    return Finding(table, "varchar_domain", col, count,
-                   _sample(bad, [col]) if count else [], count == 0)
+    return Finding(
+        table, "varchar_domain", col, count, _sample(bad, [col]) if count else [], count == 0
+    )
 
 
 def check_pk(synth_df, raw_df, table, pk_cols) -> list:
     """PK not-null + internal uniqueness + no collision with existing (raw) keys."""
     from pyspark.sql import functions as F
+
     findings = []
     # not-null: any pk column null
     null_cond = None
@@ -743,51 +853,85 @@ def check_pk(synth_df, raw_df, table, pk_cols) -> list:
         null_cond = c if null_cond is None else (null_cond | c)
     bad_null = synth_df.filter(null_cond)
     n_null = bad_null.count()
-    findings.append(Finding(table, "pk_not_null", ",".join(pk_cols), n_null,
-                            _sample(bad_null, pk_cols) if n_null else [], n_null == 0))
+    findings.append(
+        Finding(
+            table,
+            "pk_not_null",
+            ",".join(pk_cols),
+            n_null,
+            _sample(bad_null, pk_cols) if n_null else [],
+            n_null == 0,
+        )
+    )
     # internal uniqueness
-    dups = (synth_df.groupBy(*pk_cols).count().filter(F.col("count") > 1))
+    dups = synth_df.groupBy(*pk_cols).count().filter(F.col("count") > 1)
     n_dup = dups.count()
-    findings.append(Finding(table, "pk_unique", ",".join(pk_cols), n_dup,
-                            _sample(dups, pk_cols) if n_dup else [], n_dup == 0))
+    findings.append(
+        Finding(
+            table,
+            "pk_unique",
+            ",".join(pk_cols),
+            n_dup,
+            _sample(dups, pk_cols) if n_dup else [],
+            n_dup == 0,
+        )
+    )
     # collision with existing real keys (raw)
     if raw_df is not None:
         synth_keys = synth_df.select(*pk_cols).distinct()
         raw_keys = raw_df.select(*pk_cols).distinct()
         collide = synth_keys.join(raw_keys, on=list(pk_cols), how="inner")
         n_col = collide.count()
-        findings.append(Finding(table, "pk_collision", ",".join(pk_cols), n_col,
-                                _sample(collide, pk_cols) if n_col else [], n_col == 0))
+        findings.append(
+            Finding(
+                table,
+                "pk_collision",
+                ",".join(pk_cols),
+                n_col,
+                _sample(collide, pk_cols) if n_col else [],
+                n_col == 0,
+            )
+        )
     return findings
 
 
 def check_fk(child_df, parent_universe_df, table, child_cols, parent_cols, label) -> Finding:
     """Non-null child FK tuples must exist in (raw union synthetic) parent keys."""
     from pyspark.sql import functions as F
+
     cond = None
     for col in child_cols:  # only rows where every FK col is non-null are enforced
         c = F.col(col).isNotNull()
         cond = c if cond is None else (cond & c)
     child = child_df.filter(cond).select(*child_cols).distinct()
     parent = parent_universe_df.select(
-        *[F.col(p).alias(c) for p, c in zip(parent_cols, child_cols)]).distinct()
+        *[F.col(p).alias(c) for p, c in zip(parent_cols, child_cols)]
+    ).distinct()
     orphans = child.join(parent, on=list(child_cols), how="left_anti")
     count = orphans.count()
-    return Finding(table, "fk", label, count,
-                   _sample(orphans, list(child_cols)) if count else [], count == 0)
+    return Finding(
+        table, "fk", label, count, _sample(orphans, list(child_cols)) if count else [], count == 0
+    )
 
 
 def check_unique(df, table, cols) -> Finding:
     """Duplicate non-null unique tuples (Oracle ignores rows with any null)."""
     from pyspark.sql import functions as F
+
     cond = None
     for col in cols:
         c = F.col(col).isNotNull()
         cond = c if cond is None else (cond & c)
     dups = df.filter(cond).groupBy(*cols).count().filter(F.col("count") > 1)
     count = dups.count()
-    return Finding(table, "unique", ",".join(cols), count,
-                   _sample(dups, list(cols)) if count else [], count == 0)
+    return Finding(
+        table,
+        "unique",
+        ",".join(cols),
+        count,
+        _sample(dups, list(cols)) if count else [],
+        count == 0,
+    )
 ```
 
 - [ ] **Step 3: Run the (pure) tests — confirm nothing broke and the module still imports without Spark**
@@ -821,30 +965,41 @@ class TestPlanChecks:
     def test_lists_checks_and_fk_parents(self):
         specs = {
             "PARENT": {"pk_cols": ["ID"]},
-            "CHILD": {"pk_cols": ["CID"], "foreign_keys": [
-                {"columns": ["PID"], "parent_table": "PARENT", "parent_columns": ["ID"]}]},
+            "CHILD": {
+                "pk_cols": ["CID"],
+                "foreign_keys": [
+                    {"columns": ["PID"], "parent_table": "PARENT", "parent_columns": ["ID"]}
+                ],
+            },
         }
         schema = {
-            "PARENT": {"columns": {"ID": {"type": "NUMBER", "precision": 5,
-                                          "scale": 0, "nullable": False}}},
-            "CHILD": {"columns": {"CID": {"type": "NUMBER", "precision": 5,
-                                          "scale": 0, "nullable": False},
-                                  "PID": {"type": "NUMBER", "precision": 5,
-                                          "scale": 0, "nullable": True}},
-                      "unique": [["PID"]]},
+            "PARENT": {
+                "columns": {"ID": {"type": "NUMBER", "precision": 5, "scale": 0, "nullable": False}}
+            },
+            "CHILD": {
+                "columns": {
+                    "CID": {"type": "NUMBER", "precision": 5, "scale": 0, "nullable": False},
+                    "PID": {"type": "NUMBER", "precision": 5, "scale": 0, "nullable": True},
+                },
+                "unique": [["PID"]],
+            },
         }
         plan = vt.plan_checks(specs, schema, tables=None)
         child = next(p for p in plan if p["table"] == "CHILD")
-        assert child["not_null"] == ["CID"]          # PID nullable -> not enforced
+        assert child["not_null"] == ["CID"]  # PID nullable -> not enforced
         assert ["PID"] in child["unique"]
         assert child["fks"][0]["parent_table"] == "PARENT"
 
     def test_tables_subset_filters(self):
         specs = {"A": {"pk_cols": ["X"]}, "B": {"pk_cols": ["Y"]}}
-        schema = {"A": {"columns": {"X": {"type": "NUMBER", "precision": 5,
-                                          "scale": 0, "nullable": False}}},
-                  "B": {"columns": {"Y": {"type": "NUMBER", "precision": 5,
-                                          "scale": 0, "nullable": False}}}}
+        schema = {
+            "A": {
+                "columns": {"X": {"type": "NUMBER", "precision": 5, "scale": 0, "nullable": False}}
+            },
+            "B": {
+                "columns": {"Y": {"type": "NUMBER", "precision": 5, "scale": 0, "nullable": False}}
+            },
+        }
         plan = vt.plan_checks(specs, schema, tables=["A"])
         assert {p["table"] for p in plan} == {"A"}
 ```
@@ -864,19 +1019,22 @@ def plan_checks(specs: dict, schema: dict, tables=None) -> list:
     for table in sorted(t for t in schema if t in chosen):
         cols = schema[table].get("columns", {})
         not_null = [c for c, meta in cols.items() if not meta.get("nullable", True)]
-        decimals = [(c, m["precision"], m.get("scale", 0))
-                    for c, m in cols.items() if "precision" in m]
+        decimals = [
+            (c, m["precision"], m.get("scale", 0)) for c, m in cols.items() if "precision" in m
+        ]
         varchars = [(c, m["length"]) for c, m in cols.items() if "length" in m]
         spec = specs.get(table, {})
-        plan.append({
-            "table": table,
-            "pk_cols": spec.get("pk_cols") or [],
-            "not_null": sorted(not_null),
-            "decimals": decimals,
-            "varchars": varchars,
-            "unique": schema[table].get("unique", []),
-            "fks": [fk for fk in (spec.get("foreign_keys") or []) if isinstance(fk, dict)],
-        })
+        plan.append(
+            {
+                "table": table,
+                "pk_cols": spec.get("pk_cols") or [],
+                "not_null": sorted(not_null),
+                "decimals": decimals,
+                "varchars": varchars,
+                "unique": schema[table].get("unique", []),
+                "fks": [fk for fk in (spec.get("foreign_keys") or []) if isinstance(fk, dict)],
+            }
+        )
     return plan
 
 
@@ -911,8 +1069,7 @@ def validate(spark, specs, schema, raw_base, synth_base, tables=None) -> Report:
         raw = _read_parquet_opt(spark, _raw_path(raw_base, table))
         # column/domain checks
         present = set(synth.columns)
-        findings += check_not_null(synth, table,
-                                   [c for c in item["not_null"] if c in present])
+        findings += check_not_null(synth, table, [c for c in item["not_null"] if c in present])
         for col, p, s in item["decimals"]:
             if col in present:
                 findings.append(check_decimal_domain(synth, table, col, p, s))
@@ -936,12 +1093,12 @@ def validate(spark, specs, schema, raw_base, synth_base, tables=None) -> Report:
                 continue
             universe = _parent_universe(spark, raw_base, synth_base, parent, parent_cols)
             if universe is None:
-                logger.warning("No parent data for %s.%s -> %s; skipping FK",
-                               table, child_cols, parent)
+                logger.warning(
+                    "No parent data for %s.%s -> %s; skipping FK", table, child_cols, parent
+                )
                 continue
             label = f"{','.join(child_cols)}->{parent}"
-            findings.append(check_fk(synth, universe, table,
-                                     child_cols, parent_cols, label))
+            findings.append(check_fk(synth, universe, table, child_cols, parent_cols, label))
     return Report(findings=findings)
 
 
@@ -1029,10 +1186,12 @@ def parse_arguments(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate synthetic Parquet vs DB constraints.")
     parser.add_argument("--specs", default=None, help="Override DATAGEN_SPECS_URI.")
     parser.add_argument("--schema", default=None, help="Override DATAGEN_SCHEMA_URI.")
-    parser.add_argument("--report-uri", default=None,
-                        help="Where to write the JSON report (object storage).")
-    parser.add_argument("--tables", default=None,
-                        help="Comma-separated subset of tables to validate.")
+    parser.add_argument(
+        "--report-uri", default=None, help="Where to write the JSON report (object storage)."
+    )
+    parser.add_argument(
+        "--tables", default=None, help="Comma-separated subset of tables to validate."
+    )
     return parser.parse_args(argv)
 
 
@@ -1066,6 +1225,7 @@ def _write_report(spark, report: Report, uri: str) -> None:
 
 def create_spark_session(app_name: str):
     from pyspark.sql import SparkSession
+
     builder = SparkSession.builder.appName(app_name)
     builder = builder.config("spark.sql.parquet.aggregatePushdown", "true")
     return builder.getOrCreate()
@@ -1081,9 +1241,14 @@ def main() -> None:
 
     spark = create_spark_session("validate_tables")
     specs, schema = load_manifests(spark, specs_uri, schema_uri)
-    report = validate(spark, specs, schema,
-                      config["DATAGEN_RAW_BASE_URI"],
-                      config["DATAGEN_SYNTHETIC_BASE_URI"], tables=tables)
+    report = validate(
+        spark,
+        specs,
+        schema,
+        config["DATAGEN_RAW_BASE_URI"],
+        config["DATAGEN_SYNTHETIC_BASE_URI"],
+        tables=tables,
+    )
     summary = render_summary(report)
     print(summary)
     logger.info("%s", summary)

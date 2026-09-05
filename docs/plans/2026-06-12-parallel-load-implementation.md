@@ -376,8 +376,7 @@ class TestNameAndPathHelpers:
             "DATAGEN_LOAD_PREFIX": "synthetic",
         }
         assert (
-            load_tables.build_load_path(config, "ORDERS")
-            == "oci://bucket@ns/load/synthetic/ORDERS"
+            load_tables.build_load_path(config, "ORDERS") == "oci://bucket@ns/load/synthetic/ORDERS"
         )
 
     def test_build_load_path_without_prefix(self):
@@ -548,7 +547,7 @@ class TestSqlBuilders:
         query = load_tables.build_constraint_discovery_query("ADMIN", "ORDERS")
         assert "all_constraints" in query
         assert "p.owner = 'ADMIN' AND p.table_name = 'ORDERS'" in query  # incoming
-        assert "owner = 'ADMIN' AND table_name = 'ORDERS'" in query      # outgoing
+        assert "owner = 'ADMIN' AND table_name = 'ORDERS'" in query  # outgoing
         assert "UNION" in query
 
     def test_builders_reject_bad_identifiers(self):

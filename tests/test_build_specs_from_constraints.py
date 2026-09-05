@@ -7,8 +7,12 @@ import build_specs_from_constraints as bsc  # noqa: E402
 
 def _row(name, ctype, table, ref, col, pos):
     return {
-        "CONSTRAINT_NAME": name, "CONSTRAINT_TYPE": ctype, "TABLE_NAME": table,
-        "R_CONSTRAINT_NAME": ref, "COLUMN_NAME": col, "COL_POSITION": str(pos),
+        "CONSTRAINT_NAME": name,
+        "CONSTRAINT_TYPE": ctype,
+        "TABLE_NAME": table,
+        "R_CONSTRAINT_NAME": ref,
+        "COLUMN_NAME": col,
+        "COL_POSITION": str(pos),
     }
 
 
@@ -51,15 +55,21 @@ class TestBuildSpecs:
         specs = bsc.build_specs(rows)
         assert specs["JUROS_FLUTUANTE"]["pk_cols"] == ["NUM_CONDICAO_IF"]
         assert specs["JUROS_FLUTUANTE"]["foreign_keys"] == [
-            {"columns": ["NUM_CONDICAO_IF"], "parent_table": "CONDICAO_IF",
-             "parent_columns": ["NUM_CONDICAO_IF"]}
+            {
+                "columns": ["NUM_CONDICAO_IF"],
+                "parent_table": "CONDICAO_IF",
+                "parent_columns": ["NUM_CONDICAO_IF"],
+            }
         ]
 
     def test_static_from_set_and_overrides(self):
-        rows = [_row("T_PK", "P", "TIPO_DEBITO", "", "COD", 1),
-                _row("O_PK", "P", "OPERACAO", "", "OID", 1)]
-        specs = bsc.build_specs(rows, static_tables={"TIPO_DEBITO"},
-                                overrides={"OPERACAO": {"n_rows": 5000}})
+        rows = [
+            _row("T_PK", "P", "TIPO_DEBITO", "", "COD", 1),
+            _row("O_PK", "P", "OPERACAO", "", "OID", 1),
+        ]
+        specs = bsc.build_specs(
+            rows, static_tables={"TIPO_DEBITO"}, overrides={"OPERACAO": {"n_rows": 5000}}
+        )
         assert specs["TIPO_DEBITO"]["static"] is True
         assert specs["OPERACAO"].get("static") is None
         assert specs["OPERACAO"]["n_rows"] == 5000
@@ -86,8 +96,11 @@ class TestBuildSpecs:
         ]
         specs = bsc.build_specs(rows)
         assert specs["USUARIO"]["foreign_keys"] == [
-            {"columns": ["NUM_ID_ENTIDADE"], "parent_table": "ENTIDADE",
-             "parent_columns": ["NUM_ID_ENTIDADE"]}
+            {
+                "columns": ["NUM_ID_ENTIDADE"],
+                "parent_table": "ENTIDADE",
+                "parent_columns": ["NUM_ID_ENTIDADE"],
+            }
         ]
         assert "foreign_keys" not in specs["ENTIDADE"]  # only had the audit FK
         assert any("ATUALIZ" in item for item in bsc.build_specs.last_report["audit_fks"])
@@ -110,8 +123,9 @@ class TestBuildSpecs:
         ]
         specs = bsc.build_specs(rows)
         assert "foreign_keys" not in specs["PARTICIPANTE"]  # only had the back-ref
-        cp_parents = {fk["parent_table"]
-                      for fk in specs["CONTA_PARTICIPANTE"].get("foreign_keys", [])}
+        cp_parents = {
+            fk["parent_table"] for fk in specs["CONTA_PARTICIPANTE"].get("foreign_keys", [])
+        }
         assert cp_parents == {"PARTICIPANTE"}  # malote back-ref dropped
         assert specs["MALOTE"]["foreign_keys"][0]["parent_table"] == "CONTA_PARTICIPANTE"
         assert bsc.build_specs.last_report["cycle_breaks"]

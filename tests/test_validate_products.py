@@ -42,25 +42,20 @@ def domain_tables(spark, product="cdb_simplificado"):
         ),
         "CONDICAO_IF": spark.createDataFrame(
             [(11, 1, 20, None), (12, 1, 3, None)],
-            "NUM_CONDICAO_IF long, NUM_IF long, COD_TIPO_CONDICAO_IF long, "
-            "DAT_EXCLUSAO string",
+            "NUM_CONDICAO_IF long, NUM_IF long, COD_TIPO_CONDICAO_IF long, DAT_EXCLUSAO string",
         ),
         "RESGATE": spark.createDataFrame(
             [(11, "SEM TABELA" if simplified else "OUTRA", None)],
             "NUM_CONDICAO_IF long, COD_COND_RESGATE string, DAT_EXCLUSAO string",
         ),
         "DEPOSITO_AUTOMATICO_IF": spark.createDataFrame([(1,)], "NUM_IF long"),
-        "OPERACAO": spark.createDataFrame(
-            [(101, 1)], "NUM_ID_OPERACAO long, NUM_IF long"
-        ),
+        "OPERACAO": spark.createDataFrame([(101, 1)], "NUM_ID_OPERACAO long, NUM_IF long"),
         "DADO_OPERACAO": spark.createDataFrame([(101,)], "NUM_ID_OPERACAO long"),
         "LANCAMENTO": spark.createDataFrame([(101,)], "NUM_ID_OPERACAO long"),
         "ESPECIFICACAO": spark.createDataFrame(
             [(101, 1001)], "NUM_ID_OPERACAO long, NUM_ID_ESPECIFICACAO long"
         ),
-        "ESPECIFICACAO_COMITENTE": spark.createDataFrame(
-            [(1001,)], "NUM_ID_ESPECIFICACAO long"
-        ),
+        "ESPECIFICACAO_COMITENTE": spark.createDataFrame([(1001,)], "NUM_ID_ESPECIFICACAO long"),
     }
 
 
@@ -71,7 +66,9 @@ def test_profiles_are_explicit_and_rdb_does_not_inherit_cdb_defaults():
 
     assert (simplificado.num_tipo_if, cdb.num_tipo_if, rdb.num_tipo_if) == (49, 49, 50)
     assert (simplificado.object_service_id, cdb.object_service_id, rdb.object_service_id) == (
-        44, 44, 45,
+        44,
+        44,
+        45,
     )
     assert rdb.object_service_code is None
     assert rdb.cod_if_pattern == r"^[A-Z0-9 -]{1,14}$"
@@ -91,12 +88,42 @@ def test_profiles_are_explicit_and_rdb_does_not_inherit_cdb_defaults():
 
 def test_condition_type_inventory_matches_application_constants():
     assert set(validator.EXPECTED_CONDICAO_TYPE_CODES) == {
-        "1", "2", "3", "4", "5", "6", "7", "8", "14", "15", "16", "17",
-        "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28",
-        "29", "30",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "14",
+        "15",
+        "16",
+        "17",
+        "18",
+        "19",
+        "20",
+        "21",
+        "22",
+        "23",
+        "24",
+        "25",
+        "26",
+        "27",
+        "28",
+        "29",
+        "30",
     }
     assert set(validator.UNMAPPED_CONDICAO_TYPE_CODES) == {
-        "8", "18", "19", "25", "26", "27", "28", "29", "30",
+        "8",
+        "18",
+        "19",
+        "25",
+        "26",
+        "27",
+        "28",
+        "29",
+        "30",
     }
 
 
@@ -105,16 +132,19 @@ def test_input_resolution_is_product_aware(monkeypatch):
     monkeypatch.delenv("DATAGEN_CLONE_PREFIX", raising=False)
     monkeypatch.delenv("DATAGEN_SYNTHETIC_PREFIX", raising=False)
 
-    assert validator.resolve_input_base(
-        validator.VALIDATION_PROFILES["rdb"], None
-    ) == "oci://bucket/root/sintetizacao_multiproduto/rdb_completo"
+    assert (
+        validator.resolve_input_base(validator.VALIDATION_PROFILES["rdb"], None)
+        == "oci://bucket/root/sintetizacao_multiproduto/rdb_completo"
+    )
     monkeypatch.setenv("DATAGEN_CLONE_PREFIX", "/custom/run/")
-    assert validator.resolve_input_base(
-        validator.VALIDATION_PROFILES["cdb"], None
-    ) == "oci://bucket/root/custom/run"
-    assert validator.resolve_input_base(
-        validator.VALIDATION_PROFILES["cdb"], " /explicit/input/ "
-    ) == "/explicit/input"
+    assert (
+        validator.resolve_input_base(validator.VALIDATION_PROFILES["cdb"], None)
+        == "oci://bucket/root/custom/run"
+    )
+    assert (
+        validator.resolve_input_base(validator.VALIDATION_PROFILES["cdb"], " /explicit/input/ ")
+        == "/explicit/input"
+    )
 
 
 def test_legacy_input_prefix_is_rejected_for_rdb(monkeypatch):
@@ -131,9 +161,7 @@ def test_validator_cli_requires_product(monkeypatch):
     with pytest.raises(SystemExit):
         validator.parse_args()
 
-    monkeypatch.setattr(
-        sys, "argv", ["validate_products.py", "--product", "rdb"]
-    )
+    monkeypatch.setattr(sys, "argv", ["validate_products.py", "--product", "rdb"])
     args = validator.parse_args()
     assert args.product == "rdb"
     assert not args.allow_partial
@@ -149,9 +177,11 @@ def test_identity_rejects_foreign_and_mixed_root_types(spark):
         [(1, 50, None), (2, 49, None)],
         "NUM_IF long, NUM_TIPO_IF long, DAT_EXCLUSAO string",
     )
-    findings = by_id(validator.check_product_identity(
-        {"INSTRUMENTO_FINANCEIRO": root}, validator.VALIDATION_PROFILES["rdb"], 5
-    ))
+    findings = by_id(
+        validator.check_product_identity(
+            {"INSTRUMENTO_FINANCEIRO": root}, validator.VALIDATION_PROFILES["rdb"], 5
+        )
+    )
 
     assert findings["0.identity.type"].passed
     assert findings["0.identity.mixed"].severity == validator.SEV_ERROR
@@ -246,18 +276,18 @@ def test_primary_key_and_clone_map_checks_detect_duplicates_and_dangling_rows(sp
             [(1, 101, 1), (2, 103, 1)], "NUM_IF_ORIG long, NUM_IF_NOVO long, K long"
         ),
     }
-    clone = by_id(validator.check_clone_map(
-        clone_tables, validator.VALIDATION_PROFILES["cdb_simplificado"], 5
-    ))
+    clone = by_id(
+        validator.check_clone_map(
+            clone_tables, validator.VALIDATION_PROFILES["cdb_simplificado"], 5
+        )
+    )
     assert clone["3c.clone_map_covers_roots"].count == 1
     assert clone["3c.clone_map_no_dangling"].count == 1
 
 
 def test_historico_pu_curva_without_oracle_pk_is_warn_only(spark):
     tables = {
-        "HISTORICO_PU_CURVA": spark.createDataFrame(
-            [(1,)], "NUM_HISTORICO_PU_CURVA long"
-        ),
+        "HISTORICO_PU_CURVA": spark.createDataFrame([(1,)], "NUM_HISTORICO_PU_CURVA long"),
         "OTHER_TABLE": spark.createDataFrame([(1,)], "ID long"),
     }
     meta = validator.Metadata(set(tables), {}, {}, {}, {})
@@ -277,45 +307,76 @@ def test_report_exit_codes_distinguish_pass_partial_and_fail(capsys, tmp_path):
         "0.identity", "Product identity", validator.SEV_ERROR, "ROOT", False
     )
     unavailable = validator.Finding(
-        "2.domain.availability", "Domain conformance", validator.SEV_WARN, "TITULO", False,
+        "2.domain.availability",
+        "Domain conformance",
+        validator.SEV_WARN,
+        "TITULO",
+        False,
         message="Domain eligibility unavailable.",
     )
 
     assert validator.emit_report(None, [], None, "error", simplificado, "/input", [], []) == 0
     assert validator.emit_report(None, [], None, "error", rdb, "/input", [], []) == 1
     report_path = tmp_path / "partial.json"
-    assert validator.emit_report(
-        None,
-        [],
-        str(report_path),
-        "error",
-        rdb,
-        "/input",
-        [],
-        [],
-        allow_partial=True,
-        no_oracle=True,
-    ) == 0
+    assert (
+        validator.emit_report(
+            None,
+            [],
+            str(report_path),
+            "error",
+            rdb,
+            "/input",
+            [],
+            [],
+            allow_partial=True,
+            no_oracle=True,
+        )
+        == 0
+    )
     report = json.loads(report_path.read_text())
     assert report["schema_version"] == 2
     assert report["verdict"] == "PARTIAL"
     assert report["failed"] is False
     assert report["oracle_access"] == "disabled"
     assert report["load_eligible"] is False
-    assert validator.emit_report(
-        None, [unavailable], None, "error", simplificado, "/input", [], []
-    ) == 1
-    assert validator.emit_report(
-        None, [unavailable], None, "error", simplificado, "/input", [], [],
-        allow_partial=True,
-    ) == 0
-    assert validator.emit_report(
-        None, [unavailable], None, "warn", simplificado, "/input", [], [],
-        allow_partial=True,
-    ) == 1
-    assert validator.emit_report(
-        None, [failure], None, "error", simplificado, "/input", [], [], allow_partial=True
-    ) == 1
+    assert (
+        validator.emit_report(None, [unavailable], None, "error", simplificado, "/input", [], [])
+        == 1
+    )
+    assert (
+        validator.emit_report(
+            None,
+            [unavailable],
+            None,
+            "error",
+            simplificado,
+            "/input",
+            [],
+            [],
+            allow_partial=True,
+        )
+        == 0
+    )
+    assert (
+        validator.emit_report(
+            None,
+            [unavailable],
+            None,
+            "warn",
+            simplificado,
+            "/input",
+            [],
+            [],
+            allow_partial=True,
+        )
+        == 1
+    )
+    assert (
+        validator.emit_report(
+            None, [failure], None, "error", simplificado, "/input", [], [], allow_partial=True
+        )
+        == 1
+    )
     output = capsys.readouterr().out
     assert "VERDICT=PASS" in output
     assert "VERDICT=PARTIAL" in output
@@ -335,11 +396,19 @@ def test_fully_skipped_group_is_not_executed():
 
 
 def test_required_lookup_group_skip_avoids_frame_access():
-    assert validator.check_required_lookup_frames(
-        {}, None, None, None, None, 5,
-        validator.VALIDATION_PROFILES["cdb_simplificado"],
-        skip_prefixes=["6.required"],
-    ) == []
+    assert (
+        validator.check_required_lookup_frames(
+            {},
+            None,
+            None,
+            None,
+            None,
+            5,
+            validator.VALIDATION_PROFILES["cdb_simplificado"],
+            skip_prefixes=["6.required"],
+        )
+        == []
+    )
 
 
 def test_supplied_baseline_contract_is_non_skippable(monkeypatch):

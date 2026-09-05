@@ -36,8 +36,7 @@ def _source(spark, rows=None):
     ]
     return spark.createDataFrame(
         rows,
-        f"{repair.PK_COLUMN} long, {repair.TARGET_COLUMN} decimal(38,9), "
-        "PAYLOAD string, OTHER int",
+        f"{repair.PK_COLUMN} long, {repair.TARGET_COLUMN} decimal(38,9), PAYLOAD string, OTHER int",
     )
 
 
@@ -99,8 +98,7 @@ def test_normalization_accepts_schema_qualified_table_and_dedupes_decimals(spark
         ],
     )
     values = {
-        row[repair.NORMALIZED_KEY_COLUMN]
-        for row in repair.relevant_keys(faltantes).collect()
+        row[repair.NORMALIZED_KEY_COLUMN] for row in repair.relevant_keys(faltantes).collect()
     }
     assert values == {"10", "11", "20.500"}
 
@@ -201,9 +199,7 @@ def test_invalid_source_schema_or_pk_fails(spark, source, message):
         (lambda specs: specs["OPERACAO"].update(pk_cols=["WRONG"]), "pk_cols"),
         (lambda specs: specs["OPERACAO"].update(foreign_keys=[]), "child foreign key"),
         (
-            lambda specs: specs["OPERACAO"].update(
-                not_null_cols=[repair.TARGET_COLUMN]
-            ),
+            lambda specs: specs["OPERACAO"].update(not_null_cols=[repair.TARGET_COLUMN]),
             "NOT NULL",
         ),
     ],
@@ -239,9 +235,7 @@ def test_run_repair_requires_specs_before_transformation(spark, tmp_path, monkey
     assert failure.value.report.get("specs_validated") is not True
 
 
-def test_relevant_keys_without_source_match_are_noop_and_never_write(
-    spark, tmp_path, monkeypatch
-):
+def test_relevant_keys_without_source_match_are_noop_and_never_write(spark, tmp_path, monkeypatch):
     source = _source(spark)
     faltantes = _faltantes(spark, [("OPERACAO", "NUM_ID_CTX_MSG_P2", "999")])
     base, _, missing, specs = _write_inputs(spark, tmp_path, source, faltantes)
@@ -285,9 +279,7 @@ def test_dry_run_performs_all_in_memory_gates_without_filesystem_mutation(
                 AssertionError("dry run must not mutate/check work paths")
             ),
         )
-        report = repair.run_repair(
-            spark, _options(base, missing, specs, dry_run=True)
-        )
+        report = repair.run_repair(spark, _options(base, missing, specs, dry_run=True))
 
     assert report["status"] == "dry-run"
     assert report["matched_rows"] == 2
@@ -306,9 +298,7 @@ def test_local_parquet_publish_integration(spark, tmp_path):
         _options(base, missing, specs, run_id="local-publish-integration"),
     )
     output = spark.read.parquet(str(final)).orderBy(repair.PK_COLUMN).collect()
-    paths = repair.build_paths(
-        str(base), repair.DEFAULT_PREFIX, "local-publish-integration"
-    )
+    paths = repair.build_paths(str(base), repair.DEFAULT_PREFIX, "local-publish-integration")
 
     assert report["status"] == "published"
     assert report["source_rows"] == report["repaired_rows"] == report["staged_rows"] == 4
@@ -324,9 +314,7 @@ def test_local_parquet_publish_integration(spark, tmp_path):
     assert not Path(paths["backup"]).exists()
 
 
-def test_postpublish_validation_failure_restores_full_previous_output(
-    spark, tmp_path, monkeypatch
-):
+def test_postpublish_validation_failure_restores_full_previous_output(spark, tmp_path, monkeypatch):
     source = _source(spark)
     faltantes = _faltantes(spark, [("OPERACAO", "NUM_ID_CTX_MSG_P2", "10")])
     base, final, missing, specs = _write_inputs(spark, tmp_path, source, faltantes)
@@ -449,13 +437,9 @@ class FakePublicationFs:
 
 
 def test_fake_promotion_success_retains_backup_until_final_validation():
-    fs = FakePublicationFs(
-        {"staging": {"new.parquet": 3}, "final": {"old.parquet": 3}}
-    )
+    fs = FakePublicationFs({"staging": {"new.parquet": 3}, "final": {"old.parquet": 3}})
     backup = "final.__previous_run"
-    result = repair.promote_staging_paths(
-        fs, "staging", "final", backup
-    )
+    result = repair.promote_staging_paths(fs, "staging", "final", backup)
     assert fs.entries == {
         "final": {"new.parquet": 3},
         backup: {"old.parquet": 3},
@@ -616,9 +600,7 @@ def test_failure_stdout_retains_context_and_reached_metrics(monkeypatch, capsys)
     monkeypatch.setattr(
         repair,
         "run_repair",
-        lambda *_args: (_ for _ in ()).throw(
-            repair.RepairFailure(report, ValueError("injected"))
-        ),
+        lambda *_args: (_ for _ in ()).throw(repair.RepairFailure(report, ValueError("injected"))),
     )
     assert repair.main([]) == 1
     payload = json.loads(capsys.readouterr().out)

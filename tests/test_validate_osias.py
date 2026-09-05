@@ -29,25 +29,17 @@ def by_id(findings):
 
 
 def test_osias_is_opt_in_and_does_not_apply_to_sibling_profiles():
-    assert validator.check_osias(
-        {}, 5, validator.VALIDATION_PROFILES["cdb"], False
-    ) == []
-    assert validator.check_osias(
-        {}, 5, validator.VALIDATION_PROFILES["cdb_simplificado"], True
-    ) == []
-    assert validator.check_osias(
-        {}, 5, validator.VALIDATION_PROFILES["lca"], True
-    ) == []
-    assert validator.check_osias(
-        {}, 5, validator.VALIDATION_PROFILES["rdb_inclusao"], True
-    ) == []
+    assert validator.check_osias({}, 5, validator.VALIDATION_PROFILES["cdb"], False) == []
+    assert (
+        validator.check_osias({}, 5, validator.VALIDATION_PROFILES["cdb_simplificado"], True) == []
+    )
+    assert validator.check_osias({}, 5, validator.VALIDATION_PROFILES["lca"], True) == []
+    assert validator.check_osias({}, 5, validator.VALIDATION_PROFILES["rdb_inclusao"], True) == []
 
 
 @pytest.mark.parametrize("product", ["cdb", "ccb", "gravame", "lci", "rdb_resgate"])
 def test_osias_fails_closed_when_required_evidence_is_missing(product):
-    finding = validator.check_osias(
-        {}, 5, validator.VALIDATION_PROFILES[product], True
-    )[0]
+    finding = validator.check_osias({}, 5, validator.VALIDATION_PROFILES[product], True)[0]
 
     assert finding.check_id == f"9.osias.{product}.availability"
     assert finding.severity == validator.SEV_ERROR
@@ -77,14 +69,13 @@ def test_osias_rdb_resgate_requires_only_route_5177_and_zero_quantity(spark):
 
     tables = rdb_resgate_tables(spark)
     tables["OPERACAO"] = tables["OPERACAO"].unionByName(
-        spark.createDataFrame(
-            [(1, "7549")], "NUM_IF long, NUM_ID_TIPO_OPER_OBJETO_SERV string"
-        )
+        spark.createDataFrame([(1, "7549")], "NUM_IF long, NUM_ID_TIPO_OPER_OBJETO_SERV string")
     )
     tables["TITULO"] = tables["TITULO"].withColumn(
         "QTD_RESGATADA",
-        validator.F.when(validator.F.col("NUM_IF") == 1, "1")
-        .otherwise(validator.F.col("QTD_RESGATADA")),
+        validator.F.when(validator.F.col("NUM_IF") == 1, "1").otherwise(
+            validator.F.col("QTD_RESGATADA")
+        ),
     )
     findings = by_id(validator.check_osias(tables, 5, profile, True))
 
@@ -104,12 +95,10 @@ def cdb_tables(spark):
         ),
         "CONDICAO_IF": spark.createDataFrame(
             [(11, 1, 20, None), (12, 2, 20, None), (13, 3, 20, None)],
-            "NUM_CONDICAO_IF long, NUM_IF long, COD_TIPO_CONDICAO_IF long, "
-            "DAT_EXCLUSAO string",
+            "NUM_CONDICAO_IF long, NUM_IF long, COD_TIPO_CONDICAO_IF long, DAT_EXCLUSAO string",
         ),
         "RESGATE": spark.createDataFrame(
-            [(11, "COM TABELA", None), (12, "SEM TABELA", None),
-             (13, "SEM TABELA", None)],
+            [(11, "COM TABELA", None), (12, "SEM TABELA", None), (13, "SEM TABELA", None)],
             "NUM_CONDICAO_IF long, COD_COND_RESGATE string, DAT_EXCLUSAO string",
         ),
         "OPERACAO": spark.createDataFrame(
@@ -134,8 +123,9 @@ def test_osias_cdb_checks_only_resgate_and_escalonamento_roots(spark):
     )
     tables["TITULO"] = tables["TITULO"].withColumn(
         "QTD_RESGATADA",
-        validator.F.when(validator.F.col("NUM_IF") == 2, "not-zero")
-        .otherwise(validator.F.col("QTD_RESGATADA")),
+        validator.F.when(validator.F.col("NUM_IF") == 2, "not-zero").otherwise(
+            validator.F.col("QTD_RESGATADA")
+        ),
     )
     findings = by_id(validator.check_osias(tables, 5, profile, True))
 
@@ -148,9 +138,7 @@ def test_osias_missing_required_column_is_error(spark):
     tables = cdb_tables(spark)
     tables["TITULO"] = tables["TITULO"].drop("QTD_RESGATADA")
 
-    finding = validator.check_osias(
-        tables, 5, validator.VALIDATION_PROFILES["cdb"], True
-    )[0]
+    finding = validator.check_osias(tables, 5, validator.VALIDATION_PROFILES["cdb"], True)[0]
 
     assert finding.check_id == "9.osias.cdb.availability"
     assert finding.severity == validator.SEV_ERROR
@@ -160,8 +148,13 @@ def test_osias_missing_required_column_is_error(spark):
 def ccb_tables(spark):
     return {
         "INSTRUMENTO_FINANCEIRO": spark.createDataFrame(
-            [(1, 53, None, None), (2, 53, None, None), (3, 53, None, None),
-             (4, 53, None, None), (5, 53, None, None)],
+            [
+                (1, 53, None, None),
+                (2, 53, None, None),
+                (3, 53, None, None),
+                (4, 53, None, None),
+                (5, 53, None, None),
+            ],
             "NUM_IF long, NUM_TIPO_IF long, NUM_IF_PERTENCE long, DAT_EXCLUSAO string",
         ),
         "ACTPCCB_CONDICAO_IF": spark.createDataFrame(
@@ -175,10 +168,8 @@ def ccb_tables(spark):
             "NUM_IF long, RENT_INDEXADOR_TAXA_FLU string, FORMA_PAGAMENTO string",
         ),
         "OPERACAO": spark.createDataFrame(
-            [(1, "871.0", 99), (2, "871", 99), (3, "871", 43), (4, "999", 99),
-             (5, "999", 99)],
-            "NUM_IF long, NUM_ID_TIPO_OPER_OBJETO_SERV string, "
-            "COD_SITUACAO_OPERACAO long",
+            [(1, "871.0", 99), (2, "871", 99), (3, "871", 43), (4, "999", 99), (5, "999", 99)],
+            "NUM_IF long, NUM_ID_TIPO_OPER_OBJETO_SERV string, COD_SITUACAO_OPERACAO long",
         ),
     }
 
@@ -190,14 +181,20 @@ def test_osias_ccb_uses_exact_variant_discriminators_and_pppre_status_only(spark
     assert all(finding.passed for finding in findings.values())
 
     tables = ccb_tables(spark)
-    tables["OPERACAO"] = tables["OPERACAO"].withColumn(
-        "NUM_ID_TIPO_OPER_OBJETO_SERV",
-        validator.F.when(validator.F.col("NUM_IF") == 1, 872)
-        .otherwise(validator.F.col("NUM_ID_TIPO_OPER_OBJETO_SERV")),
-    ).withColumn(
-        "COD_SITUACAO_OPERACAO",
-        validator.F.when(validator.F.col("NUM_IF") == 3, 42)
-        .otherwise(validator.F.col("COD_SITUACAO_OPERACAO")),
+    tables["OPERACAO"] = (
+        tables["OPERACAO"]
+        .withColumn(
+            "NUM_ID_TIPO_OPER_OBJETO_SERV",
+            validator.F.when(validator.F.col("NUM_IF") == 1, 872).otherwise(
+                validator.F.col("NUM_ID_TIPO_OPER_OBJETO_SERV")
+            ),
+        )
+        .withColumn(
+            "COD_SITUACAO_OPERACAO",
+            validator.F.when(validator.F.col("NUM_IF") == 3, 42).otherwise(
+                validator.F.col("COD_SITUACAO_OPERACAO")
+            ),
+        )
     )
     findings = by_id(validator.check_osias(tables, 5, profile, True))
 
@@ -224,8 +221,9 @@ def test_osias_gravame_checks_only_owned_routes(spark):
 
     tables["OPERACAO"] = tables["OPERACAO"].withColumn(
         "NUM_ID_TIPO_OPER_OBJETO_SERV",
-        validator.F.when(validator.F.col("NUM_IF") == 1, 15395)
-        .otherwise(validator.F.col("NUM_ID_TIPO_OPER_OBJETO_SERV")),
+        validator.F.when(validator.F.col("NUM_IF") == 1, 15395).otherwise(
+            validator.F.col("NUM_ID_TIPO_OPER_OBJETO_SERV")
+        ),
     )
     assert validator.check_osias(tables, 5, profile, True)[0].count == 2
 
@@ -275,23 +273,21 @@ def test_osias_fails_unclassifiable_cdb_and_ccb_roots(spark):
     cdb = cdb_tables(spark)
     cdb["RESGATE"] = cdb["RESGATE"].withColumn(
         "COD_COND_RESGATE",
-        validator.F.when(validator.F.col("NUM_CONDICAO_IF") == 12, "UNKNOWN")
-        .otherwise(validator.F.col("COD_COND_RESGATE")),
+        validator.F.when(validator.F.col("NUM_CONDICAO_IF") == 12, "UNKNOWN").otherwise(
+            validator.F.col("COD_COND_RESGATE")
+        ),
     )
-    cdb_findings = by_id(validator.check_osias(
-        cdb, 5, validator.VALIDATION_PROFILES["cdb"], True
-    ))
+    cdb_findings = by_id(validator.check_osias(cdb, 5, validator.VALIDATION_PROFILES["cdb"], True))
     assert cdb_findings["9.osias.cdb.scenario"].count == 1
 
     ccb = ccb_tables(spark)
     ccb["ACTPCCB_CONDICAO_IF"] = ccb["ACTPCCB_CONDICAO_IF"].withColumn(
         "FORMA_PAGAMENTO",
-        validator.F.when(validator.F.col("NUM_IF") == 3, "UNKNOWN")
-        .otherwise(validator.F.col("FORMA_PAGAMENTO")),
+        validator.F.when(validator.F.col("NUM_IF") == 3, "UNKNOWN").otherwise(
+            validator.F.col("FORMA_PAGAMENTO")
+        ),
     )
-    ccb_findings = by_id(validator.check_osias(
-        ccb, 5, validator.VALIDATION_PROFILES["ccb"], True
-    ))
+    ccb_findings = by_id(validator.check_osias(ccb, 5, validator.VALIDATION_PROFILES["ccb"], True))
     assert ccb_findings["9.osias.ccb.scenario"].count == 1
 
 
@@ -301,7 +297,14 @@ def test_osias_cli_and_report_metadata(monkeypatch, tmp_path):
 
     report_path = tmp_path / "report.json"
     validator.emit_report(
-        None, [], str(report_path), "error", validator.VALIDATION_PROFILES["cdb_simplificado"],
-        "/input", [], [], osias=True,
+        None,
+        [],
+        str(report_path),
+        "error",
+        validator.VALIDATION_PROFILES["cdb_simplificado"],
+        "/input",
+        [],
+        [],
+        osias=True,
     )
     assert json.loads(report_path.read_text())["osias"] is True

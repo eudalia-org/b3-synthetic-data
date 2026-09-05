@@ -152,11 +152,13 @@ class TestPositiveInt:
 
     def test_rejects_non_integer(self):
         import argparse
+
         with pytest.raises(argparse.ArgumentTypeError):
             load_tables.positive_int("abc")
 
     def test_rejects_zero_and_negative(self):
         import argparse
+
         with pytest.raises(argparse.ArgumentTypeError):
             load_tables.positive_int("0")
         with pytest.raises(argparse.ArgumentTypeError):
@@ -310,14 +312,11 @@ class TestBuildExistingKeysQuery:
     def test_builds_bounded_subquery(self):
         q = load_tables.build_existing_keys_query("ADMIN", "LANCAMENTO", "NUM_ID", 10, 99)
         assert q == (
-            "(SELECT NUM_ID FROM ADMIN.LANCAMENTO "
-            "WHERE NUM_ID BETWEEN 10 AND 99) DATAGEN_KEYS"
+            "(SELECT NUM_ID FROM ADMIN.LANCAMENTO WHERE NUM_ID BETWEEN 10 AND 99) DATAGEN_KEYS"
         )
 
     def test_accepts_decimal_bounds(self):
-        q = load_tables.build_existing_keys_query(
-            "ADMIN", "T", "PK", Decimal("5"), Decimal("9")
-        )
+        q = load_tables.build_existing_keys_query("ADMIN", "T", "PK", Decimal("5"), Decimal("9"))
         assert "BETWEEN 5 AND 9" in q
 
     def test_rejects_non_numeric_bounds(self):
@@ -350,9 +349,7 @@ def guard_applies(pk_cols: list[str], pk_is_numeric: bool) -> bool:
     return len(pk_cols) == 1 and pk_is_numeric
 
 
-def build_existing_keys_query(
-    owner: str, table_name: str, pk_col: str, lo, hi
-) -> str:
+def build_existing_keys_query(owner: str, table_name: str, pk_col: str, lo, hi) -> str:
     owner = validate_identifier(owner)
     table_name = validate_identifier(table_name)
     pk_col = validate_identifier(pk_col)
@@ -668,14 +665,16 @@ def apply_pk_guard(
     col_map = {c.upper(): c for c in df.columns}
     pk_actual = col_map.get(pk_cols[0].upper()) if len(pk_cols) == 1 else None
     pk_is_numeric = bool(
-        pk_actual is not None
-        and isinstance(df.schema[pk_actual].dataType, NumericType)
+        pk_actual is not None and isinstance(df.schema[pk_actual].dataType, NumericType)
     )
 
     if not guard_applies(pk_cols, pk_is_numeric) or pk_actual is None:
         logger.info(
             "[%d/%d] %s: no PK guard (pk_cols=%s) -> appending all rows",
-            index, total, table, pk_cols,
+            index,
+            total,
+            table,
+            pk_cols,
         )
         return df, 0
 
@@ -685,14 +684,24 @@ def apply_pk_guard(
         return df, 0
 
     existing = read_existing_keys(
-        spark, properties, resolve_num_partitions(config),
-        owner, table_name, pk_actual, lo, hi,
+        spark,
+        properties,
+        resolve_num_partitions(config),
+        owner,
+        table_name,
+        pk_actual,
+        lo,
+        hi,
     )
     existing = existing.withColumnRenamed(existing.columns[0], pk_actual)
     if not existing.take(1):
         logger.info(
             "[%d/%d] %s: 0 existing keys in PK range [%s, %s] -> appending all rows",
-            index, total, table, lo, hi,
+            index,
+            total,
+            table,
+            lo,
+            hi,
         )
         return df, 0
 
@@ -701,7 +710,13 @@ def apply_pk_guard(
     skipped = df.count() - appended
     logger.info(
         "[%d/%d] %s: %s existing keys in PK range [%s, %s] -> skipping %s already-loaded",
-        index, total, table, f"{skipped:,}", lo, hi, f"{skipped:,}",
+        index,
+        total,
+        table,
+        f"{skipped:,}",
+        lo,
+        hi,
+        f"{skipped:,}",
     )
     return to_append, skipped
 ```
@@ -712,32 +727,30 @@ In `load_table`, replace the block from `appended = df.count()` through the
 end of the `df.write...save()` call with:
 
 ```python
-    df, _ = apply_pk_guard(
-        spark, properties, config, df, specs, owner, table_name, table, index, total
-    )
+df, _ = apply_pk_guard(spark, properties, config, df, specs, owner, table_name, table, index, total)
 
-    appended = df.count()
-    limit_note = f" (limit {limit})" if limit is not None else ""
-    logger.info(
-        "[%d/%d] %s: appending %s rows%s to %s in %d partitions",
-        index,
-        total,
-        table,
-        f"{appended:,}",
-        limit_note,
-        dbtable,
-        num_partitions,
-    )
-    (
-        df.write.format("jdbc")
-        .options(**properties)
-        .option("dbtable", dbtable)
-        .option("batchsize", batch_size)
-        .option("isolationLevel", DEFAULT_ISOLATION_LEVEL)
-        .mode("append")
-        .save()
-    )
-    return appended
+appended = df.count()
+limit_note = f" (limit {limit})" if limit is not None else ""
+logger.info(
+    "[%d/%d] %s: appending %s rows%s to %s in %d partitions",
+    index,
+    total,
+    table,
+    f"{appended:,}",
+    limit_note,
+    dbtable,
+    num_partitions,
+)
+(
+    df.write.format("jdbc")
+    .options(**properties)
+    .option("dbtable", dbtable)
+    .option("batchsize", batch_size)
+    .option("isolationLevel", DEFAULT_ISOLATION_LEVEL)
+    .mode("append")
+    .save()
+)
+return appended
 ```
 
 (The earlier `df = df.repartition(num_partitions)` line stays; the guard
@@ -837,9 +850,7 @@ def capture_manifest_entries(
         pk_cols = pk_cols_for(specs, table)
         pk_col, max_before, rollbackable = None, None, False
         if len(pk_cols) == 1:
-            schema = spark.read.parquet(
-                build_load_path(config, table_path_name(table))
-            ).schema
+            schema = spark.read.parquet(build_load_path(config, table_path_name(table))).schema
             col_map = {f.name.upper(): f for f in schema.fields}
             field = col_map.get(pk_cols[0].upper())
             if field is not None and isinstance(field.dataType, NumericType):
@@ -904,9 +915,7 @@ def main() -> None:
         run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         target_user = config["DATAGEN_TARGET_DB_USER"]
         properties = build_connection_properties(config)
-        entries = capture_manifest_entries(
-            spark, properties, config, specs, target_user, tables
-        )
+        entries = capture_manifest_entries(spark, properties, config, specs, target_user, tables)
         manifest = build_manifest(
             run_id, datetime.now(timezone.utc).isoformat(), target_user, entries
         )
@@ -1196,7 +1205,12 @@ def rollback_table(spark, properties, entry, chunk_size, index, total) -> int:
         return 0
     logger.info(
         "[%d/%d] %s: deleting PK (%s, %s] in %d chunk(s)",
-        index, total, entry["table"], lower_exclusive, current_max, len(ranges),
+        index,
+        total,
+        entry["table"],
+        lower_exclusive,
+        current_max,
+        len(ranges),
     )
     for lo, hi in ranges:
         execute_statement(spark, properties, delete_above_sql(owner, name, pk_col, lo, hi))

@@ -55,9 +55,13 @@ def topo_sort_for_load(specs, tables):
     while remaining:
         for i, t in enumerate(remaining):
             if parents[t] <= emitted:
-                result.append(t); emitted.add(norm[t]); remaining.pop(i); break
+                result.append(t)
+                emitted.add(norm[t])
+                remaining.pop(i)
+                break
         else:
-            result.extend(remaining); break
+            result.extend(remaining)
+            break
     return result
 ```
 

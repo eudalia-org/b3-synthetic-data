@@ -13,42 +13,59 @@
 # =====================================================================
 import math
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+from IPython.display import display
 from matplotlib.lines import Line2D
 from matplotlib.ticker import FuncFormatter, MaxNLocator
-from IPython.display import display
+from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
+# Required inputs from the preceding notebook cell; reuse them without defaults.
+spark: SparkSession = globals()["spark"]
+tabelas_para_validar: list[str] = globals()["tabelas_para_validar"]
+original_path: str = globals()["original_path"]
+synthetic_path: str = globals()["synthetic_path"]
+
 # ---------------- configuração ----------------
-MAX_COLUNAS_POR_TABELA = 6        # colunas numéricas por tabela no gráfico de ranges
+MAX_COLUNAS_POR_TABELA = 6  # colunas numéricas por tabela no gráfico de ranges
 PREFIXOS_MEDIDA = ("VAL", "QTD", "TAX", "PCT", "PRC", "FATOR", "SALDO")  # priorizadas
-PRECISAO_PERCENTIL = 10000        # accuracy do approx_percentile
+PRECISAO_PERCENTIL = 10000  # accuracy do approx_percentile
 
 # ---------------- paleta ----------------
-COR_ORIGINAL  = "#2a78d6"   # azul       — Original
-COR_SINTETICO = "#1baf7a"   # verde-água — Sintético
-SUPERFICIE    = "#fcfcfb"
-TINTA         = "#0b0b0b"
-TINTA_2       = "#52514e"
-TINTA_MUTED   = "#898781"
-COR_EIXO      = "#c3c2b7"
-COR_GRADE     = "#e1e0d9"
+COR_ORIGINAL = "#2a78d6"  # azul       — Original
+COR_SINTETICO = "#1baf7a"  # verde-água — Sintético
+SUPERFICIE = "#fcfcfb"
+TINTA = "#0b0b0b"
+TINTA_2 = "#52514e"
+TINTA_MUTED = "#898781"
+COR_EIXO = "#c3c2b7"
+COR_GRADE = "#e1e0d9"
 
 ESTILO = {
-    "figure.facecolor": SUPERFICIE, "axes.facecolor": SUPERFICIE,
+    "figure.facecolor": SUPERFICIE,
+    "axes.facecolor": SUPERFICIE,
     "savefig.facecolor": SUPERFICIE,
     "font.family": "sans-serif",
     "font.sans-serif": ["Segoe UI", "DejaVu Sans", "Arial"],
-    "text.color": TINTA, "axes.labelcolor": TINTA_2,
-    "xtick.color": TINTA_MUTED, "ytick.color": TINTA_2,
+    "text.color": TINTA,
+    "axes.labelcolor": TINTA_2,
+    "xtick.color": TINTA_MUTED,
+    "ytick.color": TINTA_2,
     "axes.edgecolor": COR_EIXO,
 }
 
-_TIPOS_NUMERICOS = (T.ByteType, T.ShortType, T.IntegerType, T.LongType,
-                    T.FloatType, T.DoubleType, T.DecimalType)
+_TIPOS_NUMERICOS = (
+    T.ByteType,
+    T.ShortType,
+    T.IntegerType,
+    T.LongType,
+    T.FloatType,
+    T.DoubleType,
+    T.DecimalType,
+)
 
 
 def _fmt(v, casas=1):
@@ -76,11 +93,13 @@ def _colunas_numericas(df):
 
 def _prioriza(cols):
     """Colunas de medida (VAL_, QTD_, ...) antes de códigos/chaves."""
+
     def chave(c):
         for i, p in enumerate(PREFIXOS_MEDIDA):
             if c.startswith(p):
                 return (0, i, c)
         return (1, 0, c)
+
     return sorted(cols, key=chave)
 
 
@@ -94,17 +113,23 @@ def _estatisticas(df, cols):
             F.max(d).alias(f"{i}__max"),
             F.mean(d).alias(f"{i}__media"),
             F.stddev(d).alias(f"{i}__dp"),
-            F.expr(f"approx_percentile(CAST(`{c}` AS DOUBLE), "
-                   f"array(0.05, 0.5, 0.95), {PRECISAO_PERCENTIL})").alias(f"{i}__pct"),
+            F.expr(
+                f"approx_percentile(CAST(`{c}` AS DOUBLE), "
+                f"array(0.05, 0.5, 0.95), {PRECISAO_PERCENTIL})"
+            ).alias(f"{i}__pct"),
         ]
     row = df.agg(*aggs).first().asDict()
     saida = {"linhas": row["__n"], "cols": {}}
     for i, c in enumerate(cols):
         pct = row[f"{i}__pct"] or [None, None, None]
         saida["cols"][c] = {
-            "min": row[f"{i}__min"], "max": row[f"{i}__max"],
-            "media": row[f"{i}__media"], "dp": row[f"{i}__dp"],
-            "p05": pct[0], "p50": pct[1], "p95": pct[2],
+            "min": row[f"{i}__min"],
+            "max": row[f"{i}__max"],
+            "media": row[f"{i}__media"],
+            "dp": row[f"{i}__dp"],
+            "p05": pct[0],
+            "p50": pct[1],
+            "p95": pct[2],
         }
     return saida
 
@@ -137,10 +162,17 @@ for tabela in tabelas_para_validar:
     df_s = _le_parquet(f"{synthetic_path}/{tabela}")
     if df_o is None or df_s is None:
         faltando = "original" if df_o is None else "sintético"
-        resumo.append({"tabela": tabela, "status": f"sem parquet {faltando}",
-                       "linhas_original": None, "linhas_sintetico": None,
-                       "pct_do_original": None, "colunas_comparadas": 0,
-                       "cobertura_media_range_pct": None})
+        resumo.append(
+            {
+                "tabela": tabela,
+                "status": f"sem parquet {faltando}",
+                "linhas_original": None,
+                "linhas_sintetico": None,
+                "pct_do_original": None,
+                "colunas_comparadas": 0,
+                "cobertura_media_range_pct": None,
+            }
+        )
         print(f"✗ {tabela}: sem parquet {faltando}")
         continue
 
@@ -151,38 +183,60 @@ for tabela in tabelas_para_validar:
 
     cobs = [_cobertura(est_o["cols"][c], est_s["cols"][c]) for c in escolhidas]
     cobs = [c for c in cobs if c is not None]
-    resultados[tabela] = {"orig": est_o, "sint": est_s,
-                          "colunas": escolhidas, "n_comuns": len(comuns)}
-    resumo.append({
-        "tabela": tabela, "status": "ok",
-        "linhas_original": est_o["linhas"], "linhas_sintetico": est_s["linhas"],
-        "pct_do_original": round(est_s["linhas"] / est_o["linhas"] * 100, 2)
-                           if est_o["linhas"] else None,
-        "colunas_comparadas": len(escolhidas),
-        "cobertura_media_range_pct": round(float(np.mean(cobs)), 1) if cobs else None,
-    })
-    print(f"✓ {tabela}: orig {_fmt(est_o['linhas'])} × sint {_fmt(est_s['linhas'])}"
-          f" · {len(escolhidas)}/{len(comuns)} colunas numéricas")
+    resultados[tabela] = {
+        "orig": est_o,
+        "sint": est_s,
+        "colunas": escolhidas,
+        "n_comuns": len(comuns),
+    }
+    resumo.append(
+        {
+            "tabela": tabela,
+            "status": "ok",
+            "linhas_original": est_o["linhas"],
+            "linhas_sintetico": est_s["linhas"],
+            "pct_do_original": round(est_s["linhas"] / est_o["linhas"] * 100, 2)
+            if est_o["linhas"]
+            else None,
+            "colunas_comparadas": len(escolhidas),
+            "cobertura_media_range_pct": round(float(np.mean(cobs)), 1) if cobs else None,
+        }
+    )
+    print(
+        f"✓ {tabela}: orig {_fmt(est_o['linhas'])} × sint {_fmt(est_s['linhas'])}"
+        f" · {len(escolhidas)}/{len(comuns)} colunas numéricas"
+    )
 
 ok = [t for t in tabelas_para_validar if t in resultados]
 df_resumo = pd.DataFrame(resumo)
 if not ok:
     display(df_resumo)
-    raise RuntimeError("Nenhuma tabela pôde ser lida nos dois caminhos — "
-                       "verifique original_path / synthetic_path.")
+    raise RuntimeError(
+        "Nenhuma tabela pôde ser lida nos dois caminhos — verifique original_path / synthetic_path."
+    )
 
 # tabela detalhada por coluna (fica disponível para consulta)
 _linhas = []
 for t in ok:
     for c in resultados[t]["colunas"]:
         o, s = resultados[t]["orig"]["cols"][c], resultados[t]["sint"]["cols"][c]
-        _linhas.append({"tabela": t, "coluna": c,
-                        "min_orig": o["min"], "min_sint": s["min"],
-                        "max_orig": o["max"], "max_sint": s["max"],
-                        "media_orig": o["media"], "media_sint": s["media"],
-                        "dp_orig": o["dp"], "dp_sint": s["dp"],
-                        "p50_orig": o["p50"], "p50_sint": s["p50"],
-                        "cobertura_range_pct": _cobertura(o, s)})
+        _linhas.append(
+            {
+                "tabela": t,
+                "coluna": c,
+                "min_orig": o["min"],
+                "min_sint": s["min"],
+                "max_orig": o["max"],
+                "max_sint": s["max"],
+                "media_orig": o["media"],
+                "media_sint": s["media"],
+                "dp_orig": o["dp"],
+                "dp_sint": s["dp"],
+                "p50_orig": o["p50"],
+                "p50_sint": s["p50"],
+                "cobertura_range_pct": _cobertura(o, s),
+            }
+        )
 df_estatisticas = pd.DataFrame(_linhas)
 
 # ---------------- gráficos ----------------
@@ -191,24 +245,41 @@ with plt.rc_context(ESTILO):
     tot_o = sum(resultados[t]["orig"]["linhas"] for t in ok)
     tot_s = sum(resultados[t]["sint"]["linhas"] for t in ok)
     n_cols = int(df_resumo.loc[df_resumo["status"] == "ok", "colunas_comparadas"].sum())
-    cob_geral = (df_estatisticas["cobertura_range_pct"].dropna()
-                 if "cobertura_range_pct" in df_estatisticas
-                 else pd.Series(dtype=float))
+    cob_geral = (
+        df_estatisticas["cobertura_range_pct"].dropna()
+        if "cobertura_range_pct" in df_estatisticas
+        else pd.Series(dtype=float)
+    )
     kpis = [
-        ("TABELAS COMPARADAS", f"{len(ok)}/{len(tabelas_para_validar)}",
-         "com parquet nos dois lados"),
+        (
+            "TABELAS COMPARADAS",
+            f"{len(ok)}/{len(tabelas_para_validar)}",
+            "com parquet nos dois lados",
+        ),
         ("LINHAS — ORIGINAL", _fmt(tot_o), "soma das tabelas comparadas"),
-        ("LINHAS — SINTÉTICO", _fmt(tot_s),
-         f"{tot_s / tot_o * 100:.1f}% do original".replace(".", ",")
-         if tot_o else ""),
+        (
+            "LINHAS — SINTÉTICO",
+            _fmt(tot_s),
+            f"{tot_s / tot_o * 100:.1f}% do original".replace(".", ",") if tot_o else "",
+        ),
         ("COLUNAS NUMÉRICAS", f"{n_cols}", "comparadas nos ranges"),
-        ("COBERTURA DE RANGE", f"{cob_geral.mean():.0f}%" if len(cob_geral) else "—",
-         "média · range original coberto"),
+        (
+            "COBERTURA DE RANGE",
+            f"{cob_geral.mean():.0f}%" if len(cob_geral) else "—",
+            "média · range original coberto",
+        ),
     ]
     fig, eixos = plt.subplots(1, len(kpis), figsize=(3.2 * len(kpis), 2.1))
     fig.subplots_adjust(left=0.005, right=0.995, top=0.80, bottom=0.05)
-    fig.suptitle("Sintético vs Original — visão estatística", x=0.005, y=0.97,
-                 ha="left", fontsize=13, fontweight="bold", color=TINTA)
+    fig.suptitle(
+        "Sintético vs Original — visão estatística",
+        x=0.005,
+        y=0.97,
+        ha="left",
+        fontsize=13,
+        fontweight="bold",
+        color=TINTA,
+    )
     for ax, (rotulo, valor, sub) in zip(eixos, kpis):
         ax.axis("off")
         ax.text(0, 0.80, rotulo, fontsize=8.5, color=TINTA_2)
@@ -224,9 +295,13 @@ with plt.rc_context(ESTILO):
     y = np.arange(len(ordem))
 
     fig, (ax1, ax2) = plt.subplots(
-        1, 2, figsize=(14, 0.52 * len(ordem) + 1.8), sharey=True,
+        1,
+        2,
+        figsize=(14, 0.52 * len(ordem) + 1.8),
+        sharey=True,
         gridspec_kw={"width_ratios": [3, 1], "wspace": 0.06},
-        constrained_layout=True)
+        constrained_layout=True,
+    )
     ax1.barh(y + 0.20, n_o, height=0.36, color=COR_ORIGINAL, label="Original")
     ax1.barh(y - 0.20, n_s, height=0.36, color=COR_SINTETICO, label="Sintético")
     desloc = n_o.max() * 0.012
@@ -242,8 +317,13 @@ with plt.rc_context(ESTILO):
     ax1.grid(axis="x", color=COR_GRADE, linewidth=0.6)
     ax1.set_axisbelow(True)
     ax1.legend(loc="lower right", frameon=False, fontsize=9)
-    ax1.set_title("Volume de linhas — Original vs Sintético",
-                  loc="left", fontsize=11, fontweight="bold", color=TINTA)
+    ax1.set_title(
+        "Volume de linhas — Original vs Sintético",
+        loc="left",
+        fontsize=11,
+        fontweight="bold",
+        color=TINTA,
+    )
     _limpa_eixos(ax1)
 
     ax2.barh(y, razao, height=0.5, color=COR_SINTETICO)
@@ -251,13 +331,18 @@ with plt.rc_context(ESTILO):
     lim2 = max(120.0, np.nanmax(razao) * 1.30) if np.isfinite(razao).any() else 120.0
     for yi, v in zip(y, razao):
         if math.isfinite(v):
-            ax2.text(v + lim2 * 0.02, yi, f"{v:.1f}%".replace(".", ","),
-                     fontsize=8, color=TINTA_2, va="center")
+            ax2.text(
+                v + lim2 * 0.02,
+                yi,
+                f"{v:.1f}%".replace(".", ","),
+                fontsize=8,
+                color=TINTA_2,
+                va="center",
+            )
     ax2.set_xlim(0, lim2)
     ax2.set_xticks([0, 100])
     ax2.set_xticklabels(["0", "100%"], fontsize=8)
-    ax2.set_title("Sintético como % do original",
-                  loc="left", fontsize=10, color=TINTA_2)
+    ax2.set_title("Sintético como % do original", loc="left", fontsize=10, color=TINTA_2)
     _limpa_eixos(ax2)
     plt.show()
 
@@ -266,70 +351,122 @@ with plt.rc_context(ESTILO):
     if tabs_rng:
         NCOLS_GRID = 3
         nlin = math.ceil(len(tabs_rng) / NCOLS_GRID)
-        fig, eixos = plt.subplots(nlin, NCOLS_GRID,
-                                  figsize=(15.5, 2.9 * nlin), squeeze=False)
-        fig.suptitle("Ranges por coluna numérica — escala normalizada por coluna",
-                     x=0.005, y=0.99, ha="left", va="top",
-                     fontsize=13, fontweight="bold", color=TINTA)
-        fig.text(0.005, 0.99 - 0.22 / fig.get_figheight(),
-                 "linha fina = mín–máx · barra grossa = p5–p95 · ponto = mediana · "
-                 "% à direita = cobertura do range original pelo sintético",
-                 fontsize=8.5, color=TINTA_MUTED, va="top")
-        fig.legend(handles=[Line2D([], [], color=COR_ORIGINAL, lw=5, label="Original"),
-                            Line2D([], [], color=COR_SINTETICO, lw=5, label="Sintético")],
-                   loc="upper right", bbox_to_anchor=(0.995, 0.998),
-                   frameon=False, fontsize=9, ncol=2)
+        fig, eixos = plt.subplots(nlin, NCOLS_GRID, figsize=(15.5, 2.9 * nlin), squeeze=False)
+        fig.suptitle(
+            "Ranges por coluna numérica — escala normalizada por coluna",
+            x=0.005,
+            y=0.99,
+            ha="left",
+            va="top",
+            fontsize=13,
+            fontweight="bold",
+            color=TINTA,
+        )
+        fig.text(
+            0.005,
+            0.99 - 0.22 / fig.get_figheight(),
+            "linha fina = mín–máx · barra grossa = p5–p95 · ponto = mediana · "
+            "% à direita = cobertura do range original pelo sintético",
+            fontsize=8.5,
+            color=TINTA_MUTED,
+            va="top",
+        )
+        fig.legend(
+            handles=[
+                Line2D([], [], color=COR_ORIGINAL, lw=5, label="Original"),
+                Line2D([], [], color=COR_SINTETICO, lw=5, label="Sintético"),
+            ],
+            loc="upper right",
+            bbox_to_anchor=(0.995, 0.998),
+            frameon=False,
+            fontsize=9,
+            ncol=2,
+        )
 
         for ax, tabela in zip(eixos.flat, tabs_rng):
             cols = resultados[tabela]["colunas"]
             for ypos, c in enumerate(reversed(cols)):
                 o = resultados[tabela]["orig"]["cols"][c]
                 s = resultados[tabela]["sint"]["cols"][c]
-                vals = [v for v in (o["min"], o["max"], s["min"], s["max"])
-                        if v is not None]
+                vals = [v for v in (o["min"], o["max"], s["min"], s["max"]) if v is not None]
                 if not vals:
-                    ax.text(0.5, ypos, "sem dados", fontsize=7.5,
-                            color=TINTA_MUTED, va="center", ha="center")
+                    ax.text(
+                        0.5,
+                        ypos,
+                        "sem dados",
+                        fontsize=7.5,
+                        color=TINTA_MUTED,
+                        va="center",
+                        ha="center",
+                    )
                     continue
                 lo, span = min(vals), max(vals) - min(vals)
 
                 def _nrm(v, lo=lo, span=span):
                     return 0.5 if span == 0 else (v - lo) / span
 
-                for est, cor, dy, nome in ((o, COR_ORIGINAL, +0.18, "original"),
-                                           (s, COR_SINTETICO, -0.18, "sintético")):
+                for est, cor, dy, nome in (
+                    (o, COR_ORIGINAL, +0.18, "original"),
+                    (s, COR_SINTETICO, -0.18, "sintético"),
+                ):
                     if est["min"] is None and est["max"] is None:
-                        ax.text(0.0, ypos + dy, f"{nome}: sem valores",
-                                fontsize=6.5, color=TINTA_MUTED, va="center")
+                        ax.text(
+                            0.0,
+                            ypos + dy,
+                            f"{nome}: sem valores",
+                            fontsize=6.5,
+                            color=TINTA_MUTED,
+                            va="center",
+                        )
                         continue
                     if est["min"] is not None and est["max"] is not None:
-                        ax.plot([_nrm(est["min"]), _nrm(est["max"])],
-                                [ypos + dy] * 2, color=cor, linewidth=1.4,
-                                alpha=0.55, solid_capstyle="round")
+                        ax.plot(
+                            [_nrm(est["min"]), _nrm(est["max"])],
+                            [ypos + dy] * 2,
+                            color=cor,
+                            linewidth=1.4,
+                            alpha=0.55,
+                            solid_capstyle="round",
+                        )
                     if est["p05"] is not None and est["p95"] is not None:
-                        ax.plot([_nrm(est["p05"]), _nrm(est["p95"])],
-                                [ypos + dy] * 2, color=cor, linewidth=5,
-                                solid_capstyle="round")
+                        ax.plot(
+                            [_nrm(est["p05"]), _nrm(est["p95"])],
+                            [ypos + dy] * 2,
+                            color=cor,
+                            linewidth=5,
+                            solid_capstyle="round",
+                        )
                     if est["p50"] is not None:
-                        ax.plot(_nrm(est["p50"]), ypos + dy, "o", markersize=5.5,
-                                color=cor, markeredgecolor=SUPERFICIE,
-                                markeredgewidth=1.2)
+                        ax.plot(
+                            _nrm(est["p50"]),
+                            ypos + dy,
+                            "o",
+                            markersize=5.5,
+                            color=cor,
+                            markeredgecolor=SUPERFICIE,
+                            markeredgewidth=1.2,
+                        )
                 cob = _cobertura(o, s)
-                ax.text(1.03, ypos,
-                        f"{cob:.0f}%" if cob is not None else "—",
-                        fontsize=7.5, color=TINTA_2, va="center")
+                ax.text(
+                    1.03,
+                    ypos,
+                    f"{cob:.0f}%" if cob is not None else "—",
+                    fontsize=7.5,
+                    color=TINTA_2,
+                    va="center",
+                )
 
-            ax.set_title(tabela, loc="left", fontsize=10,
-                         fontweight="bold", color=TINTA)
+            ax.set_title(tabela, loc="left", fontsize=10, fontweight="bold", color=TINTA)
             ax.set_yticks(range(len(cols)))
-            ax.set_yticklabels([c if len(c) <= 22 else c[:20] + "…"
-                                for c in reversed(cols)], fontsize=8)
+            ax.set_yticklabels(
+                [c if len(c) <= 22 else c[:20] + "…" for c in reversed(cols)], fontsize=8
+            )
             ax.set_xticks([])
             ax.set_xlim(-0.03, 1.18)
             ax.set_ylim(-0.65, len(cols) - 0.35)
             _limpa_eixos(ax, esconde=("top", "right", "left", "bottom"))
 
-        for ax in eixos.flat[len(tabs_rng):]:
+        for ax in eixos.flat[len(tabs_rng) :]:
             ax.axis("off")
         plt.tight_layout(rect=[0, 0, 1, 1 - 0.55 / fig.get_figheight()])
         plt.show()

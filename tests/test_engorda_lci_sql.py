@@ -74,10 +74,7 @@ def test_pppre_rejects_any_nonapproved_operation_status():
 
 
 def test_cdb_escalonamento_requires_numeric_nonnull_zero_redeemed_quantity():
-    assert (
-        "TRY_CAST(TIT.QTD_RESGATADA AS DECIMAL(38, 18)) = 0"
-        in _query_block("cdb_escalonamento")
-    )
+    assert "TRY_CAST(TIT.QTD_RESGATADA AS DECIMAL(38, 18)) = 0" in _query_block("cdb_escalonamento")
 
 
 def test_rdb_resgate_requires_zero_redeemed_quantity_and_only_route_5177():
@@ -159,11 +156,7 @@ def test_live_selection_forwards_product_and_lateral_cap(spark, monkeypatch):
         n_instrumentos=None,
         seed=42,
         profile=eng.get_product_profile("lci"),
-        planos={
-            eng.TABELA_RAIZ: eng.PlanoTabela(
-                eng.TABELA_RAIZ, (eng.COL_NUM_IF,)
-            )
-        },
+        planos={eng.TABELA_RAIZ: eng.PlanoTabela(eng.TABELA_RAIZ, (eng.COL_NUM_IF,))},
         ordem=[eng.TABELA_RAIZ],
         max_passadas=6,
         existing_key_lookup=lambda *_args: set(),
@@ -178,13 +171,9 @@ def test_live_selection_forwards_product_and_lateral_cap(spark, monkeypatch):
         frame.unpersist(blocking=False)
 
 
-def test_lci_lateral_cap_ignores_incomplete_master_and_keeps_all_histories(
-    spark, monkeypatch
-):
+def test_lci_lateral_cap_ignores_incomplete_master_and_keeps_all_histories(spark, monkeypatch):
     sources = {
-        eng.TABELA_RAIZ: spark.createDataFrame(
-            [(1, 100)], "NUM_IF long, NUM_ID_LOTE long"
-        ),
+        eng.TABELA_RAIZ: spark.createDataFrame([(1, 100)], "NUM_IF long, NUM_ID_LOTE long"),
         "CREDITO_SCR": spark.createDataFrame(
             [
                 (10, 100, "INCOMPLETE", None),
@@ -199,9 +188,7 @@ def test_lci_lateral_cap_ignores_incomplete_master_and_keeps_all_histories(
             "NUM_ID_HISTORICO_CREDITO_SCR long, NUM_ID_CREDITO_SCR long",
         ),
     }
-    monkeypatch.setattr(
-        eng, "_read_source", lambda _spark, _config, table: sources[table]
-    )
+    monkeypatch.setattr(eng, "_read_source", lambda _spark, _config, table: sources[table])
     original_broadcast = eng.F.broadcast
 
     def reject_global_history_broadcast(frame):
@@ -211,12 +198,8 @@ def test_lci_lateral_cap_ignores_incomplete_master_and_keeps_all_histories(
 
     monkeypatch.setattr(eng.F, "broadcast", reject_global_history_broadcast)
     plans = {
-        eng.TABELA_RAIZ: eng.PlanoTabela(
-            eng.TABELA_RAIZ, (eng.COL_NUM_IF,)
-        ),
-        "CREDITO_SCR": eng.PlanoTabela(
-            "CREDITO_SCR", ("NUM_ID_CREDITO_SCR",)
-        ),
+        eng.TABELA_RAIZ: eng.PlanoTabela(eng.TABELA_RAIZ, (eng.COL_NUM_IF,)),
+        "CREDITO_SCR": eng.PlanoTabela("CREDITO_SCR", ("NUM_ID_CREDITO_SCR",)),
         "HISTORICO_CREDITO_SCR": eng.PlanoTabela(
             "HISTORICO_CREDITO_SCR",
             ("NUM_ID_HISTORICO_CREDITO_SCR",),
@@ -245,12 +228,10 @@ def test_lci_lateral_cap_ignores_incomplete_master_and_keeps_all_histories(
 
     assert [row.NUM_ID_CREDITO_SCR for row in lots["CREDITO_SCR"].collect()] == [11]
     assert {
-        row.NUM_ID_HISTORICO_CREDITO_SCR
-        for row in lots["HISTORICO_CREDITO_SCR"].collect()
+        row.NUM_ID_HISTORICO_CREDITO_SCR for row in lots["HISTORICO_CREDITO_SCR"].collect()
     } == {101, 102}
     assert {
-        row.NUM_ID_HISTORICO_CREDITO_SCR
-        for row in provenances["HISTORICO_CREDITO_SCR"].collect()
+        row.NUM_ID_HISTORICO_CREDITO_SCR for row in provenances["HISTORICO_CREDITO_SCR"].collect()
     } == {101, 102}
     for frame in (*lots.values(), *provenances.values()):
         frame.unpersist(blocking=False)
@@ -269,12 +250,8 @@ def test_lateral_plan_without_product_fails_before_source_reads(spark, monkeypat
             {},
             {},
             {
-                eng.TABELA_RAIZ: eng.PlanoTabela(
-                    eng.TABELA_RAIZ, (eng.COL_NUM_IF,)
-                ),
-                "CREDITO_SCR": eng.PlanoTabela(
-                    "CREDITO_SCR", ("NUM_ID_CREDITO_SCR",)
-                ),
+                eng.TABELA_RAIZ: eng.PlanoTabela(eng.TABELA_RAIZ, (eng.COL_NUM_IF,)),
+                "CREDITO_SCR": eng.PlanoTabela("CREDITO_SCR", ("NUM_ID_CREDITO_SCR",)),
             },
             [eng.TABELA_RAIZ, "CREDITO_SCR"],
             [1],
@@ -284,23 +261,17 @@ def test_lateral_plan_without_product_fails_before_source_reads(spark, monkeypat
 
 def test_lca_uses_code_linked_history_without_requiring_an_id_fk(spark, monkeypatch):
     sources = {
-        eng.TABELA_RAIZ: spark.createDataFrame(
-            [(1, 200)], "NUM_IF long, NUM_ID_LOTE long"
-        ),
+        eng.TABELA_RAIZ: spark.createDataFrame([(1, 200)], "NUM_IF long, NUM_ID_LOTE long"),
         "CREDITO_DC": spark.createDataFrame(
             [(30, 200, "DC-30", None)],
-            "NUM_ID_CREDITO_DC long, NUM_ID_LOTE long, COD_CREDITO_DC string, "
-            "DAT_EXCLUSAO string",
+            "NUM_ID_CREDITO_DC long, NUM_ID_LOTE long, COD_CREDITO_DC string, DAT_EXCLUSAO string",
         ),
         "HISTORICO_CREDITO_DC": spark.createDataFrame(
             [(301, 200, "DC-30")],
-            "NUM_ID_HISTORICO_CREDITO_DC long, NUM_ID_LOTE long, "
-            "COD_CREDITO_DC string",
+            "NUM_ID_HISTORICO_CREDITO_DC long, NUM_ID_LOTE long, COD_CREDITO_DC string",
         ),
     }
-    monkeypatch.setattr(
-        eng, "_read_source", lambda _spark, _config, table: sources[table]
-    )
+    monkeypatch.setattr(eng, "_read_source", lambda _spark, _config, table: sources[table])
     plans = {
         eng.TABELA_RAIZ: eng.PlanoTabela(eng.TABELA_RAIZ, (eng.COL_NUM_IF,)),
         "CREDITO_DC": eng.PlanoTabela("CREDITO_DC", ("NUM_ID_CREDITO_DC",)),
@@ -310,15 +281,21 @@ def test_lca_uses_code_linked_history_without_requiring_an_id_fk(spark, monkeypa
     }
 
     lots, provenances = eng._calcula_lotes_com_proveniencia(
-        spark, {}, {}, plans, list(plans), [1], max_passadas=2,
-        produto="lca", lastros_por_lote=1,
+        spark,
+        {},
+        {},
+        plans,
+        list(plans),
+        [1],
+        max_passadas=2,
+        produto="lca",
+        lastros_por_lote=1,
     )
 
     assert [row.NUM_ID_CREDITO_DC for row in lots["CREDITO_DC"].collect()] == [30]
-    assert [
-        row.NUM_ID_HISTORICO_CREDITO_DC
-        for row in lots["HISTORICO_CREDITO_DC"].collect()
-    ] == [301]
+    assert [row.NUM_ID_HISTORICO_CREDITO_DC for row in lots["HISTORICO_CREDITO_DC"].collect()] == [
+        301
+    ]
     for frame in (*lots.values(), *provenances.values()):
         frame.unpersist(blocking=False)
 

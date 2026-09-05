@@ -3,6 +3,7 @@
 Adds a uniform +N to every generated (non-static) key, in place, preserving FK
 integrity. See docs/plans/2026-06-28-shift-synthetic-keys-design.md.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -17,8 +18,7 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -104,7 +104,7 @@ def _pk_capacity(spark, path: str, pk_col: str):
     dt = read_parquet(spark, path).schema[pk_col].dataType
     if isinstance(dt, T.DecimalType):
         int_digits = dt.precision - dt.scale
-        return (10 ** int_digits) - 1 if int_digits > 0 else 0
+        return (10**int_digits) - 1 if int_digits > 0 else 0
     if isinstance(dt, T.ByteType):
         return 127
     if isinstance(dt, T.ShortType):
@@ -173,6 +173,7 @@ def read_single_value(spark: SparkSession, properties: dict, query: str):
     )
     return rows[0] if rows else None
 
+
 # --- end vendored helpers ---
 
 
@@ -206,7 +207,8 @@ def compute_shift_columns(specs: dict) -> Dict[str, List[str]]:
                     logger.warning(
                         "%s.%s: non-static PK that is also an FK to a static "
                         "parent; NOT shifting (kept matched to reference data).",
-                        t, pk,
+                        t,
+                        pk,
                     )
                 else:
                     cols.add(pk)
@@ -230,7 +232,7 @@ def capacity_from_precision_scale(precision, scale):
     if precision is None:
         return None
     int_digits = int(precision) - int(scale or 0)
-    return (10 ** int_digits) - 1 if int_digits > 0 else 0
+    return (10**int_digits) - 1 if int_digits > 0 else 0
 
 
 def oracle_column_capacities(rows, shift: Dict[str, List[str]]) -> Dict[Tuple[str, str], int]:
@@ -248,8 +250,9 @@ def oracle_column_capacities(rows, shift: Dict[str, List[str]]) -> Dict[Tuple[st
     return out
 
 
-def find_collisions(prod_max: Dict[str, int], synth_min: Dict[str, int],
-                    offset: int) -> List[Tuple[str, int, int]]:
+def find_collisions(
+    prod_max: Dict[str, int], synth_min: Dict[str, int], offset: int
+) -> List[Tuple[str, int, int]]:
     """Flag (table, prod_max, synth_min+offset) where the shifted synthetic key
     range does NOT clear current production (synth_min + offset <= prod_max)."""
     flagged: List[Tuple[str, int, int]] = []
@@ -269,8 +272,10 @@ def read_oracle_capacities(spark, props: dict, owner: str):
         "SELECT TABLE_NAME, COLUMN_NAME, DATA_PRECISION, DATA_SCALE "
         f"FROM ALL_TAB_COLUMNS WHERE OWNER = '{owner}'"
     )
-    return [(r["TABLE_NAME"], r["COLUMN_NAME"], r["DATA_PRECISION"], r["DATA_SCALE"])
-            for r in read_rows(spark, props, query)]
+    return [
+        (r["TABLE_NAME"], r["COLUMN_NAME"], r["DATA_PRECISION"], r["DATA_SCALE"])
+        for r in read_rows(spark, props, query)
+    ]
 
 
 def read_oracle_max(spark, props: dict, owner: str, table: str, col: str):
@@ -329,14 +334,12 @@ def get_shift_env() -> dict:
         logger.error("Missing required env var(s): %s", ", ".join(missing))
         sys.exit(1)
     # Optional prefix — must match what engorda used so we hit the same paths.
-    config["DATAGEN_SYNTHETIC_PREFIX"] = os.environ.get(
-        "DATAGEN_SYNTHETIC_PREFIX", "").strip("/")
+    config["DATAGEN_SYNTHETIC_PREFIX"] = os.environ.get("DATAGEN_SYNTHETIC_PREFIX", "").strip("/")
     chk = os.environ.get(CHECKPOINT_ENV)
     if chk:
         config[CHECKPOINT_ENV] = chk.rstrip("/")
     # Optional Oracle pre-flight: URL + user + password travel as a set.
-    for name in ("DATAGEN_SOURCE_JDBC_URL", "DATAGEN_SOURCE_DB_USER",
-                 "DATAGEN_SOURCE_DB_PASSWORD"):
+    for name in ("DATAGEN_SOURCE_JDBC_URL", "DATAGEN_SOURCE_DB_USER", "DATAGEN_SOURCE_DB_PASSWORD"):
         val = os.environ.get(name)
         if val:
             config[name] = val
@@ -350,9 +353,10 @@ def get_shift_env() -> dict:
 
 def oracle_props_or_none(config: dict):
     """Build JDBC connection properties iff the full Oracle env set is present."""
-    if all(config.get(k) for k in
-           ("DATAGEN_SOURCE_JDBC_URL", "DATAGEN_SOURCE_DB_USER",
-            "DATAGEN_SOURCE_DB_PASSWORD")):
+    if all(
+        config.get(k)
+        for k in ("DATAGEN_SOURCE_JDBC_URL", "DATAGEN_SOURCE_DB_USER", "DATAGEN_SOURCE_DB_PASSWORD")
+    ):
         return build_connection_properties(config)
     return None
 
@@ -367,13 +371,24 @@ def _positive_offset(value: str) -> int:
 
 def parse_arguments(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Add a uniform +N to generated PK/FK values in the synthetic output.")
-    parser.add_argument("--offset", type=_positive_offset, required=True,
-                        help="Uniform amount (> 0) added to every shifted key.")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Pre-flight only: report shift columns + overflow, write nothing.")
-    parser.add_argument("--continue-on-error", action="store_true",
-                        help="Continue to remaining tables if one fails (default: stop).")
+        description="Add a uniform +N to generated PK/FK values in the synthetic output."
+    )
+    parser.add_argument(
+        "--offset",
+        type=_positive_offset,
+        required=True,
+        help="Uniform amount (> 0) added to every shifted key.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Pre-flight only: report shift columns + overflow, write nothing.",
+    )
+    parser.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Continue to remaining tables if one fails (default: stop).",
+    )
     return parser.parse_args(argv)
 
 
@@ -424,8 +439,9 @@ def apply_shift(
             # Sever lineage: the next step deletes `path`, so a lazy read of the
             # source files would corrupt the output. Checkpoint replaces the plan
             # with a materialized RDD leaf.
-            df = (df.checkpoint(eager=True) if reliable_checkpoint
-                  else df.localCheckpoint(eager=True))
+            df = (
+                df.checkpoint(eager=True) if reliable_checkpoint else df.localCheckpoint(eager=True)
+            )
             write_synthetic_table(spark, df, path)
             logger.info("[%d/%d] shifted %s (%s)", i, total, table, ",".join(shift[table]))
         except Exception as exc:  # noqa: BLE001
@@ -450,8 +466,9 @@ def main() -> None:
         base = synthetic_base_path(config)  # base URI + optional prefix
         owner = config["DATAGEN_ORACLE_OWNER"]
         total_cols = sum(len(v) for v in shift.values())
-        logger.info("Shifting %d column(s) across %d table(s) by +%d",
-                    total_cols, len(shift), args.offset)
+        logger.info(
+            "Shifting %d column(s) across %d table(s) by +%d", total_cols, len(shift), args.offset
+        )
 
         # Live Oracle pre-flight when DB env is configured; else Parquet fallback.
         props = oracle_props_or_none(config)
@@ -460,7 +477,8 @@ def main() -> None:
         if props is not None:
             logger.info("Oracle pre-flight against OWNER=%s", owner)
             capacity_override = oracle_column_capacities(
-                read_oracle_capacities(spark, props, owner), shift)
+                read_oracle_capacities(spark, props, owner), shift
+            )
             prod_max: Dict[str, int] = {}
             synth_min: Dict[str, int] = {}
             for table in shift:
@@ -480,18 +498,33 @@ def main() -> None:
                 synth_min[table] = None if row is None or row["m"] is None else int(row["m"])
             collisions = find_collisions(prod_max, synth_min, args.offset)
         else:
-            logger.warning("No Oracle env -> Parquet-schema capacity; production "
-                           "COLLISION was NOT verified for offset %d.", args.offset)
+            logger.warning(
+                "No Oracle env -> Parquet-schema capacity; production "
+                "COLLISION was NOT verified for offset %d.",
+                args.offset,
+            )
 
         overflows = check_overflow(spark, base, shift, args.offset, capacity_override)
         if overflows or collisions:
             logger.error("Pre-flight FAILED — aborting, nothing written.")
             for table, col, mx, shifted, cap in overflows:
-                logger.error("  overflow %s.%s: max=%d +%d=%d > capacity %d",
-                             table, col, mx, args.offset, shifted, cap)
+                logger.error(
+                    "  overflow %s.%s: max=%d +%d=%d > capacity %d",
+                    table,
+                    col,
+                    mx,
+                    args.offset,
+                    shifted,
+                    cap,
+                )
             for table, pmax, shifted_min in collisions:
-                logger.error("  collision %s: synthetic min+%d=%d <= production max %d",
-                             table, args.offset, shifted_min, pmax)
+                logger.error(
+                    "  collision %s: synthetic min+%d=%d <= production max %d",
+                    table,
+                    args.offset,
+                    shifted_min,
+                    pmax,
+                )
             print_deployment_summary(config)
             sys.exit(1)
 
@@ -506,11 +539,17 @@ def main() -> None:
                 "No %s set: using localCheckpoint (NON-reliable). In-place writes are "
                 "IRRECOVERABLE if an executor is lost mid-table — the source files are "
                 "deleted before append. Set %s to a durable path for production safety.",
-                CHECKPOINT_ENV, CHECKPOINT_ENV,
+                CHECKPOINT_ENV,
+                CHECKPOINT_ENV,
             )
-        failures = apply_shift(spark, base, shift, args.offset,
-                               continue_on_error=args.continue_on_error,
-                               reliable_checkpoint=reliable)
+        failures = apply_shift(
+            spark,
+            base,
+            shift,
+            args.offset,
+            continue_on_error=args.continue_on_error,
+            reliable_checkpoint=reliable,
+        )
         if failures:
             logger.error("Failed table(s): %s", ", ".join(failures))
             print_deployment_summary(config)

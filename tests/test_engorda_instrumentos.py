@@ -15,10 +15,12 @@ import engorda_instrumentos as eng  # noqa: E402
 
 @pytest.fixture(scope="module")
 def spark():
-    session = (SparkSession.builder.master("local[2]")
-               .appName("engorda-instrumentos-test")
-               .config("spark.sql.shuffle.partitions", "2")
-               .getOrCreate())
+    session = (
+        SparkSession.builder.master("local[2]")
+        .appName("engorda-instrumentos-test")
+        .config("spark.sql.shuffle.partitions", "2")
+        .getOrCreate()
+    )
     session.sparkContext.setLogLevel("ERROR")
     yield session
     session.stop()
@@ -33,8 +35,14 @@ def test_k2_business_codes_are_unique_and_mapping_is_repartition_stable(spark):
     def mapping(df):
         slots = eng._code_slots(df, "NUM_IF", "COD_IF", "NUM_IF_NOVO", "COD_IF_ORIG")
         return eng._materialize_code_map(
-            spark, slots, code_kind="COD_IF", generated_alias="COD_IF_GERADO",
-            out_path=None, dry_run=True, credentials=None, batch_size=2,
+            spark,
+            slots,
+            code_kind="COD_IF",
+            generated_alias="COD_IF_GERADO",
+            out_path=None,
+            dry_run=True,
+            credentials=None,
+            batch_size=2,
             engorda_date=date(2026, 7, 19),
         )
 
@@ -49,19 +57,33 @@ def test_k2_business_codes_are_unique_and_mapping_is_repartition_stable(spark):
 def test_clone_helper_regenerates_k1_and_k2_rows(spark, factor):
     lote = spark.createDataFrame([(7, "OLD")], "NUM_IF long, COD_IF string")
     plano = eng.PlanoTabela(
-        name=eng.TABELA_RAIZ, pk_cols=("NUM_IF",), pk_regra="OFFSET_PROPRIO",
-        pk_start=100, pk_passo=1,
+        name=eng.TABELA_RAIZ,
+        pk_cols=("NUM_IF",),
+        pk_regra="OFFSET_PROPRIO",
+        pk_start=100,
+        pk_passo=1,
     )
     clones, _ = eng.clona_tabela(spark, plano, lote, factor, {})
     slots = eng._code_slots(clones, "NUM_IF", "COD_IF", "NUM_IF_NOVO", "COD_IF_ORIG")
     mapping = eng._materialize_code_map(
-        spark, slots, code_kind="COD_IF", generated_alias="COD_IF_GERADO",
-        out_path=None, dry_run=True, credentials=None, batch_size=50,
+        spark,
+        slots,
+        code_kind="COD_IF",
+        generated_alias="COD_IF_GERADO",
+        out_path=None,
+        dry_run=True,
+        credentials=None,
+        batch_size=50,
         engorda_date=date(2026, 7, 19),
     )
     out = eng._attach_generated_code(
-        clones, mapping, pk_col="NUM_IF", new_pk_alias="NUM_IF_NOVO",
-        code_col="COD_IF", generated_alias="COD_IF_GERADO")
+        clones,
+        mapping,
+        pk_col="NUM_IF",
+        new_pk_alias="NUM_IF_NOVO",
+        code_col="COD_IF",
+        generated_alias="COD_IF_GERADO",
+    )
     rows = out.orderBy("NUM_IF").collect()
     assert [r.NUM_IF for r in rows] == list(range(100, 100 + factor))
     assert len({r.COD_IF for r in rows}) == factor
@@ -71,23 +93,41 @@ def test_clone_helper_regenerates_k1_and_k2_rows(spark, factor):
 def test_dry_run_placeholders_have_valid_formats_without_jdbc_or_paths(spark, monkeypatch):
     path_calls = []
     monkeypatch.setattr(
-        eng, "_iter_oracle_code_batches",
+        eng,
+        "_iter_oracle_code_batches",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("JDBC called")),
     )
     monkeypatch.setattr(eng, "_delete_path", lambda *args: path_calls.append(("delete", args)))
     monkeypatch.setattr(eng, "escreve_tabela", lambda *args: path_calls.append(("write", args)))
-    slots = spark.createDataFrame([(1, 10, "OLD"), (2, 11, "OLD")],
-                                  "ORDINAL long, PK long, OLD string")
+    slots = spark.createDataFrame(
+        [(1, 10, "OLD"), (2, 11, "OLD")], "ORDINAL long, PK long, OLD string"
+    )
     cod_if = eng._materialize_code_map(
-        spark, slots, code_kind="COD_IF", generated_alias="CODE", out_path=None,
-        dry_run=True, credentials=None, batch_size=1, engorda_date=date(2026, 7, 19))
+        spark,
+        slots,
+        code_kind="COD_IF",
+        generated_alias="CODE",
+        out_path=None,
+        dry_run=True,
+        credentials=None,
+        batch_size=1,
+        engorda_date=date(2026, 7, 19),
+    )
     cod_op = eng._materialize_code_map(
-        spark, slots, code_kind="COD_OPERACAO", generated_alias="CODE", out_path=None,
-        dry_run=True, credentials=None, batch_size=1, engorda_date=date(2026, 7, 19))
-    assert all(__import__("re").fullmatch(eng.COD_IF_PATTERN, r.CODE)
-               for r in cod_if.collect())
-    assert all(__import__("re").fullmatch(eng.COD_OPERACAO_PATTERN, r.CODE)
-               for r in cod_op.collect())
+        spark,
+        slots,
+        code_kind="COD_OPERACAO",
+        generated_alias="CODE",
+        out_path=None,
+        dry_run=True,
+        credentials=None,
+        batch_size=1,
+        engorda_date=date(2026, 7, 19),
+    )
+    assert all(__import__("re").fullmatch(eng.COD_IF_PATTERN, r.CODE) for r in cod_if.collect())
+    assert all(
+        __import__("re").fullmatch(eng.COD_OPERACAO_PATTERN, r.CODE) for r in cod_op.collect()
+    )
     assert path_calls == []
 
 
@@ -189,53 +229,76 @@ def test_open_oracle_connection_uses_spark_context_classloader_not_driver_manage
         def getConnection(*_):
             raise AssertionError("DriverManager must not be used")
 
-    jvm = SimpleNamespace(java=SimpleNamespace(
-        lang=SimpleNamespace(Thread=Thread),
-        util=SimpleNamespace(Properties=Properties),
-        sql=SimpleNamespace(DriverManager=DriverManager),
-    ))
+    jvm = SimpleNamespace(
+        java=SimpleNamespace(
+            lang=SimpleNamespace(Thread=Thread),
+            util=SimpleNamespace(Properties=Properties),
+            sql=SimpleNamespace(DriverManager=DriverManager),
+        )
+    )
 
-    assert eng._open_oracle_connection(
-        jvm, "jdbc:oracle:thin:@target", "alice", "secret"
-    ) is expected
+    assert (
+        eng._open_oracle_connection(jvm, "jdbc:oracle:thin:@target", "alice", "secret") is expected
+    )
 
 
 def test_oracle_allocator_batches_and_uses_exact_function_sql(monkeypatch):
-    connection = FakeConnection([
-        [(1, "CDB10000001"), (2, "CDB10000002")],
-        [(1, "CDB10000003")],
-    ])
+    connection = FakeConnection(
+        [
+            [(1, "CDB10000001"), (2, "CDB10000002")],
+            [(1, "CDB10000003")],
+        ]
+    )
     calls = []
     monkeypatch.setattr(
-        eng, "_open_oracle_connection",
+        eng,
+        "_open_oracle_connection",
         lambda *args: calls.append(args) or connection,
     )
-    batches = list(eng._iter_oracle_code_batches(
-        object(), "jdbc-secret", "user", "password", code_kind="COD_IF",
-        total=3, batch_size=2, engorda_date=date(2026, 7, 19)))
-    assert batches == [[(1, "CDB10000001"), (2, "CDB10000002")],
-                       [(3, "CDB10000003")]]
+    batches = list(
+        eng._iter_oracle_code_batches(
+            object(),
+            "jdbc-secret",
+            "user",
+            "password",
+            code_kind="COD_IF",
+            total=3,
+            batch_size=2,
+            engorda_date=date(2026, 7, 19),
+        )
+    )
+    assert batches == [[(1, "CDB10000001"), (2, "CDB10000002")], [(3, "CDB10000003")]]
     assert len(calls) == 1
     assert connection.statements[0].sql == (
         "SELECT LEVEL ordinal, "
         "CETIP.PKG_CODIGO.F_GETCODIGONOVOIF21(49, TO_DATE(?, 'YYYY-MM-DD')) code "
-        "FROM dual CONNECT BY LEVEL <= 2")
+        "FROM dual CONNECT BY LEVEL <= 2"
+    )
     assert connection.statements[1].sql.endswith("CONNECT BY LEVEL <= 1")
     assert all(s.binds == {1: "2026-07-19"} and s.closed for s in connection.statements)
     assert connection.closed
     assert eng._allocation_sql("COD_OPERACAO", 5) == (
-        "SELECT LEVEL ordinal, CETIP.GET_COD_OPERACAO code FROM dual "
-        "CONNECT BY LEVEL <= 5")
+        "SELECT LEVEL ordinal, CETIP.GET_COD_OPERACAO code FROM dual CONNECT BY LEVEL <= 5"
+    )
 
 
 def test_preflight_oracle_query_streams_timestamp_and_tos(spark, tmp_path, monkeypatch):
-    connection = FakeConnection([[
-        ("2026-07-19 12:34:56", "10", "3210000001", "4509"),
-    ]])
+    connection = FakeConnection(
+        [
+            [
+                ("2026-07-19 12:34:56", "10", "3210000001", "4509"),
+            ]
+        ]
+    )
     monkeypatch.setattr(eng, "_open_oracle_connection", lambda *args: connection)
     rows = eng._read_existing_meu_tuples(
-        spark, ("url", "user", "password"), engorda_date=date(2026, 7, 19),
-        prefix="321", temp_path=str(tmp_path / "preflight"), chunk_size=1)
+        spark,
+        ("url", "user", "password"),
+        engorda_date=date(2026, 7, 19),
+        prefix="321",
+        temp_path=str(tmp_path / "preflight"),
+        chunk_size=1,
+    )
     assert rows.first().DAT_OPERACAO == "2026-07-19 12:34:56"
     assert rows.first().NUM_ID_TIPO_OPER_OBJETO_SERV == "4509"
     statement = connection.statements[0]
@@ -243,40 +306,65 @@ def test_preflight_oracle_query_streams_timestamp_and_tos(spark, tmp_path, monke
     assert statement.fetch_size == 1 and statement.closed and connection.closed
 
 
-@pytest.mark.parametrize("rows", [
-    [(1, "bad")],
-    [(1, "0000000000000001"), (2, "0000000000000001")],
-    [(1, "0000000000000001")],
-])
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [(1, "bad")],
+        [(1, "0000000000000001"), (2, "0000000000000001")],
+        [(1, "0000000000000001")],
+    ],
+)
 def test_oracle_allocator_aborts_malformed_duplicate_or_short_without_retry(monkeypatch, rows):
     connection = FakeConnection([rows])
     opened = []
     monkeypatch.setattr(
-        eng, "_open_oracle_connection",
+        eng,
+        "_open_oracle_connection",
         lambda *args: opened.append(1) or connection,
     )
     with pytest.raises(ValueError):
-        list(eng._iter_oracle_code_batches(
-            object(), "url", "user", "password", code_kind="COD_OPERACAO",
-            total=2 if len(rows) != 1 or rows[0][1] != "bad" else 1,
-            batch_size=2, engorda_date=date(2026, 7, 19)))
+        list(
+            eng._iter_oracle_code_batches(
+                object(),
+                "url",
+                "user",
+                "password",
+                code_kind="COD_OPERACAO",
+                total=2 if len(rows) != 1 or rows[0][1] != "bad" else 1,
+                batch_size=2,
+                engorda_date=date(2026, 7, 19),
+            )
+        )
     assert opened == [1]
     assert connection.closed
 
 
 def test_materialized_map_rejects_cross_batch_duplicate(spark, tmp_path, monkeypatch):
-    slots = spark.createDataFrame([(1, 10, "OLD"), (2, 11, "OLD")],
-                                  "ORDINAL long, PK long, OLD string")
-    monkeypatch.setattr(eng, "_iter_oracle_code_batches", lambda *args, **kwargs: iter([
-        [(1, "0000000000000001")],
-        [(2, "0000000000000001")],
-    ]))
+    slots = spark.createDataFrame(
+        [(1, 10, "OLD"), (2, 11, "OLD")], "ORDINAL long, PK long, OLD string"
+    )
+    monkeypatch.setattr(
+        eng,
+        "_iter_oracle_code_batches",
+        lambda *args, **kwargs: iter(
+            [
+                [(1, "0000000000000001")],
+                [(2, "0000000000000001")],
+            ]
+        ),
+    )
     with pytest.raises(ValueError, match="mapa Parquet"):
         eng._materialize_code_map(
-            spark, slots, code_kind="COD_OPERACAO", generated_alias="CODE",
-            out_path=str(tmp_path / "map"), dry_run=False,
-            credentials=("url", "user", "password"), batch_size=1,
-            engorda_date=date(2026, 7, 19))
+            spark,
+            slots,
+            code_kind="COD_OPERACAO",
+            generated_alias="CODE",
+            out_path=str(tmp_path / "map"),
+            dry_run=False,
+            credentials=("url", "user", "password"),
+            batch_size=1,
+            engorda_date=date(2026, 7, 19),
+        )
 
 
 def test_multiple_batches_join_slots_once(spark, tmp_path, monkeypatch):
@@ -284,11 +372,17 @@ def test_multiple_batches_join_slots_once(spark, tmp_path, monkeypatch):
         [(i, 100 + i, "OLD") for i in range(1, 6)],
         "ORDINAL long, PK long, OLD string",
     )
-    monkeypatch.setattr(eng, "_iter_oracle_code_batches", lambda *args, **kwargs: iter([
-        [(1, "0000000000000001"), (2, "0000000000000002")],
-        [(3, "0000000000000003"), (4, "0000000000000004")],
-        [(5, "0000000000000005")],
-    ]))
+    monkeypatch.setattr(
+        eng,
+        "_iter_oracle_code_batches",
+        lambda *args, **kwargs: iter(
+            [
+                [(1, "0000000000000001"), (2, "0000000000000002")],
+                [(3, "0000000000000003"), (4, "0000000000000004")],
+                [(5, "0000000000000005")],
+            ]
+        ),
+    )
     joins = []
     original_join = eng._join_code_chunks
 
@@ -298,31 +392,61 @@ def test_multiple_batches_join_slots_once(spark, tmp_path, monkeypatch):
 
     monkeypatch.setattr(eng, "_join_code_chunks", counted_join)
     mapping = eng._materialize_code_map(
-        spark, slots, code_kind="COD_OPERACAO", generated_alias="CODE",
-        out_path=str(tmp_path / "map"), dry_run=False,
-        credentials=("url", "user", "password"), batch_size=2,
-        engorda_date=date(2026, 7, 19))
+        spark,
+        slots,
+        code_kind="COD_OPERACAO",
+        generated_alias="CODE",
+        out_path=str(tmp_path / "map"),
+        dry_run=False,
+        credentials=("url", "user", "password"),
+        batch_size=2,
+        engorda_date=date(2026, 7, 19),
+    )
     assert mapping.count() == 5
     assert joins == [1]
 
 
 def _operation_df(spark):
-    return spark.createDataFrame([
-        (20, "2020-01-01", "old1", "old2", "keep1", "keep2", "1", "2", "4509",
-         1, "CDB10000001"),
-        (10, "2020-01-01", "old3", "old4", "keep3", "keep4", "3", "3", "4509",
-         1, "CDB10000001"),
-    ], """NUM_ID_OPERACAO long, DAT_OPERACAO string,
+    return spark.createDataFrame(
+        [
+            (
+                20,
+                "2020-01-01",
+                "old1",
+                "old2",
+                "keep1",
+                "keep2",
+                "1",
+                "2",
+                "4509",
+                1,
+                "CDB10000001",
+            ),
+            (
+                10,
+                "2020-01-01",
+                "old3",
+                "old4",
+                "keep3",
+                "keep4",
+                "3",
+                "3",
+                "4509",
+                1,
+                "CDB10000001",
+            ),
+        ],
+        """NUM_ID_OPERACAO long, DAT_OPERACAO string,
            NUM_CONTROLE_LANCAMENTO_P1 string, NUM_CONTROLE_LANCAMENTO_P2 string,
            NUM_CONTROLE_LANCAMENTO_P1_ORIGINAL string,
            NUM_CONTROLE_LANCAMENTO_P2_ORIGINAL string,
            NUM_CONTA_PARTICIPANTE_P1 string, NUM_CONTA_PARTICIPANTE_P2 string,
-           NUM_ID_TIPO_OPER_OBJETO_SERV string, NUM_IF long, COD_IF string""")
+           NUM_ID_TIPO_OPER_OBJETO_SERV string, NUM_IF long, COD_IF string""",
+    )
 
 
 @pytest.mark.parametrize("factor", [1, 2])
-def test_operation_cod_if_is_propagated_by_normalized_num_if_and_preserves_rows(
-        spark, factor):
+def test_operation_cod_if_is_propagated_by_normalized_num_if_and_preserves_rows(spark, factor):
     instrumentos = spark.createDataFrame(
         [(index, f"CDB{index:08d}", None) for index in range(1, factor + 1)],
         "NUM_IF long, COD_IF string, DAT_EXCLUSAO string",
@@ -337,31 +461,32 @@ def test_operation_cod_if_is_propagated_by_normalized_num_if_and_preserves_rows(
         "COD_ANTIGO_IF string, PAYLOAD long",
     )
 
-    rows = eng._propagate_root_cod_if(instrumentos, operacoes).orderBy(
-        "NUM_ID_OPERACAO"
-    ).collect()
+    rows = eng._propagate_root_cod_if(instrumentos, operacoes).orderBy("NUM_ID_OPERACAO").collect()
 
     assert [row.COD_IF for row in rows] == [
         f"CDB{index:08d}" for index in range(1, factor + 1) for _ in (1, 2)
     ]
     assert [(row.COD_ANTIGO_IF, row.PAYLOAD) for row in rows] == [
-        ("LEGACY", suffix)
-        for _ in range(1, factor + 1)
-        for suffix in (1, 2)
+        ("LEGACY", suffix) for _ in range(1, factor + 1) for suffix in (1, 2)
     ]
-    assert eng._propagate_root_cod_if(
-        instrumentos.repartition(2), operacoes.repartition(2)
-    ).orderBy("NUM_ID_OPERACAO").collect() == rows
+    assert (
+        eng._propagate_root_cod_if(instrumentos.repartition(2), operacoes.repartition(2))
+        .orderBy("NUM_ID_OPERACAO")
+        .collect()
+        == rows
+    )
 
 
 @pytest.mark.parametrize(
     "failure", ["missing", "operation_missing", "duplicate", "blank", "inactive", "unmatched"]
 )
 def test_operation_cod_if_propagation_rejects_invalid_root_mapping(spark, failure):
-    instrumentos = spark.createDataFrame([(1, "CDB10000001", None)],
-                                         "NUM_IF long, COD_IF string, DAT_EXCLUSAO string")
-    operacoes = spark.createDataFrame([(10, 1, "OLD")],
-                                      "NUM_ID_OPERACAO long, NUM_IF long, COD_IF string")
+    instrumentos = spark.createDataFrame(
+        [(1, "CDB10000001", None)], "NUM_IF long, COD_IF string, DAT_EXCLUSAO string"
+    )
+    operacoes = spark.createDataFrame(
+        [(10, 1, "OLD")], "NUM_ID_OPERACAO long, NUM_IF long, COD_IF string"
+    )
     if failure == "missing":
         instrumentos = instrumentos.drop("COD_IF")
     elif failure == "operation_missing":
@@ -412,14 +537,17 @@ def test_meu_generation_share_differ_same_account_separate_and_preserve_original
         same.NUM_CONTROLE_LANCAMENTO_P1,
         same.NUM_CONTROLE_LANCAMENTO_P2,
     }
-    assert all(len(value) == 10 and value.startswith("321") and value.isdigit()
-               for value in controls)
+    assert all(
+        len(value) == 10 and value.startswith("321") and value.isdigit() for value in controls
+    )
     assert len(controls) == 3
     assert same.NUM_CONTROLE_LANCAMENTO_P1_ORIGINAL == "keep3"
     assert different.NUM_CONTROLE_LANCAMENTO_P2_ORIGINAL == "keep2"
     assert {r.DAT_OPERACAO for r in rows.values()} == {"2026-07-19"}
-    assert eng._flatten_meu_tuples(out).count() == eng._flatten_meu_tuples(
-        out).dropDuplicates().count()
+    assert (
+        eng._flatten_meu_tuples(out).count()
+        == eng._flatten_meu_tuples(out).dropDuplicates().count()
+    )
 
 
 def test_meu_ordinals_are_repartition_stable(spark):
@@ -427,8 +555,7 @@ def test_meu_ordinals_are_repartition_stable(spark):
 
     def controls(df):
         return {
-            (r.NUM_ID_OPERACAO, r.NUM_CONTROLE_LANCAMENTO_P1,
-             r.NUM_CONTROLE_LANCAMENTO_P2)
+            (r.NUM_ID_OPERACAO, r.NUM_CONTROLE_LANCAMENTO_P1, r.NUM_CONTROLE_LANCAMENTO_P2)
             for r in eng._generate_meu_numeros(df, "321", date(2026, 7, 19)).collect()
         }
 
@@ -456,11 +583,18 @@ def test_target_preflight_catches_collision_and_accepts_empty(spark):
 def test_target_preflight_normalizes_numeric_account_representations(spark):
     generated = eng._generate_meu_numeros(_operation_df(spark), "321", date(2026, 7, 19))
     first = eng._flatten_meu_tuples(generated).first()
-    existing = spark.createDataFrame([
-        (str(first.DAT_OPERACAO), Decimal(first.NUM_CONTA_PARTICIPANTE + ".000"),
-         first.NUM_CONTROLE_LANCAMENTO, Decimal(first.NUM_ID_TIPO_OPER_OBJETO_SERV + ".000")),
-    ], "DAT_OPERACAO string, NUM_CONTA_PARTICIPANTE decimal(38,9), "
-       "NUM_CONTROLE_LANCAMENTO string, NUM_ID_TIPO_OPER_OBJETO_SERV decimal(38,9)")
+    existing = spark.createDataFrame(
+        [
+            (
+                str(first.DAT_OPERACAO),
+                Decimal(first.NUM_CONTA_PARTICIPANTE + ".000"),
+                first.NUM_CONTROLE_LANCAMENTO,
+                Decimal(first.NUM_ID_TIPO_OPER_OBJETO_SERV + ".000"),
+            ),
+        ],
+        "DAT_OPERACAO string, NUM_CONTA_PARTICIPANTE decimal(38,9), "
+        "NUM_CONTROLE_LANCAMENTO string, NUM_ID_TIPO_OPER_OBJETO_SERV decimal(38,9)",
+    )
     with pytest.raises(ValueError, match="colisão"):
         eng._assert_no_meu_collisions(generated, existing)
 
@@ -468,22 +602,45 @@ def test_target_preflight_normalizes_numeric_account_representations(spark):
 def test_target_preflight_distinguishes_tos_and_exact_timestamp(spark):
     generated = eng._generate_meu_numeros(_operation_df(spark), "321", date(2026, 7, 19))
     first = eng._flatten_meu_tuples(generated).first()
-    schema = ("DAT_OPERACAO string, NUM_CONTA_PARTICIPANTE string, "
-              "NUM_CONTROLE_LANCAMENTO string, NUM_ID_TIPO_OPER_OBJETO_SERV string")
-    different_tos = spark.createDataFrame([(
-        str(first.DAT_OPERACAO), first.NUM_CONTA_PARTICIPANTE,
-        first.NUM_CONTROLE_LANCAMENTO, "4510",
-    )], schema)
-    different_time = spark.createDataFrame([(
-        "2026-07-19 12:00:00", first.NUM_CONTA_PARTICIPANTE,
-        first.NUM_CONTROLE_LANCAMENTO, first.NUM_ID_TIPO_OPER_OBJETO_SERV,
-    )], schema)
+    schema = (
+        "DAT_OPERACAO string, NUM_CONTA_PARTICIPANTE string, "
+        "NUM_CONTROLE_LANCAMENTO string, NUM_ID_TIPO_OPER_OBJETO_SERV string"
+    )
+    different_tos = spark.createDataFrame(
+        [
+            (
+                str(first.DAT_OPERACAO),
+                first.NUM_CONTA_PARTICIPANTE,
+                first.NUM_CONTROLE_LANCAMENTO,
+                "4510",
+            )
+        ],
+        schema,
+    )
+    different_time = spark.createDataFrame(
+        [
+            (
+                "2026-07-19 12:00:00",
+                first.NUM_CONTA_PARTICIPANTE,
+                first.NUM_CONTROLE_LANCAMENTO,
+                first.NUM_ID_TIPO_OPER_OBJETO_SERV,
+            )
+        ],
+        schema,
+    )
     eng._assert_no_meu_collisions(generated, different_tos)
     eng._assert_no_meu_collisions(generated, different_time)
-    exact = spark.createDataFrame([(
-        str(first.DAT_OPERACAO), first.NUM_CONTA_PARTICIPANTE,
-        first.NUM_CONTROLE_LANCAMENTO, first.NUM_ID_TIPO_OPER_OBJETO_SERV,
-    )], schema)
+    exact = spark.createDataFrame(
+        [
+            (
+                str(first.DAT_OPERACAO),
+                first.NUM_CONTA_PARTICIPANTE,
+                first.NUM_CONTROLE_LANCAMENTO,
+                first.NUM_ID_TIPO_OPER_OBJETO_SERV,
+            )
+        ],
+        schema,
+    )
     with pytest.raises(ValueError, match="colisão"):
         eng._assert_no_meu_collisions(generated, exact)
 
@@ -492,8 +649,7 @@ def test_business_validation_rejects_composite_collision(spark):
     instrumentos = spark.createDataFrame(
         [(1, "CDB10000001", None)], "NUM_IF long, COD_IF string, DAT_EXCLUSAO string"
     )
-    op = _operation_df(spark).withColumn(
-        "COD_OPERACAO", F.lpad(F.col("NUM_ID_OPERACAO"), 16, "0"))
+    op = _operation_df(spark).withColumn("COD_OPERACAO", F.lpad(F.col("NUM_ID_OPERACAO"), 16, "0"))
     generated = eng._generate_meu_numeros(op, "321", date(2026, 7, 19))
     eng._validate_business_keys(instrumentos, generated)
     duplicate = generated.withColumn(
@@ -512,9 +668,11 @@ def test_business_validation_rejects_invalid_operation_root_cod_if_mapping(spark
     instrumentos = spark.createDataFrame(
         [(1, "CDB10000001", None)], "NUM_IF long, COD_IF string, DAT_EXCLUSAO string"
     )
-    op = (_operation_df(spark)
-          .withColumn("COD_OPERACAO", F.lpad(F.col("NUM_ID_OPERACAO"), 16, "0"))
-          .withColumn("COD_IF", F.lit("CDB10000001")))
+    op = (
+        _operation_df(spark)
+        .withColumn("COD_OPERACAO", F.lpad(F.col("NUM_ID_OPERACAO"), 16, "0"))
+        .withColumn("COD_IF", F.lit("CDB10000001"))
+    )
     if failure == "mismatch":
         op = op.withColumn("COD_IF", F.lit("CDB20000002"))
     elif failure == "missing":
@@ -531,64 +689,80 @@ def test_business_validation_rejects_invalid_operation_root_cod_if_mapping(spark
 
 def test_strict_domain_excludes_any_invalid_operation_and_optional_account_refs(spark):
     candidates = spark.createDataFrame([(str(i),) for i in range(1, 15)], "NUM_IF string")
-    operations = spark.createDataFrame([
-        ("1", "100", "10", "11"),
-        ("2", "100", "10", "11"), ("2", "101", "10", "11"),
-        ("3", "102", "10", "11"),
-        ("4", "103", "10", "11"),
-        ("5", "100", "12", "11"),
-        ("6", "100", "13", "11"),
-        ("7", None, "10", "11"),
-        ("8", "100", None, "11"),
-        ("9", "100", "10", "11"),
-        ("10", "100", "10", "11"),
-        ("11", "100", "10", "11"),
-        ("12", "100", "10", "999"),
-        ("13", "", "", "11"),
-        ("14", "100", "10", "11"),
-    ], "NUM_IF string, NUM_ID_TIPO_OPER_OBJETO_SERV string, "
-       "NUM_CONTA_PARTICIPANTE_P1 string, NUM_CONTA_PARTICIPANTE_P2 string")
-    tos = spark.createDataFrame([
-        ("100", "200", "44", " S "),
-        ("101", "201", "44", "S"),
-        ("102", "200", "45", "S"),
-        ("103", "200", "44", "N"),
-    ], "NUM_ID_TIPO_OPER_OBJETO_SERV string, NUM_ID_TIPO_OPERACAO string, "
-       "NUM_ID_OBJETO_SERVICO string, IND_DISPONIVEL_IDENTIFICACAO string")
-    top = spark.createDataFrame([("200", "1"), ("201", "2")],
-                                "NUM_ID_TIPO_OPERACAO string, COD_TIPO_OPERACAO string")
-    accounts = spark.createDataFrame([
-        ("10", "1", "12345.40-1"),
-        ("11", "1", "54321.10-9"),
-        ("12", "2", "12345.40-2"),
-        ("13", "1", "MALFORMED"),
-    ], "NUM_CONTA_PARTICIPANTE string, NUM_ID_SITUACAO_CONTA string, "
-       "COD_CONTA_PARTICIPANTE string")
-    titulo = spark.createDataFrame([("9", "999"), ("11", None)],
-                                   "NUM_IF string, NUM_CONTA_PARTICIPANTE string")
+    operations = spark.createDataFrame(
+        [
+            ("1", "100", "10", "11"),
+            ("2", "100", "10", "11"),
+            ("2", "101", "10", "11"),
+            ("3", "102", "10", "11"),
+            ("4", "103", "10", "11"),
+            ("5", "100", "12", "11"),
+            ("6", "100", "13", "11"),
+            ("7", None, "10", "11"),
+            ("8", "100", None, "11"),
+            ("9", "100", "10", "11"),
+            ("10", "100", "10", "11"),
+            ("11", "100", "10", "11"),
+            ("12", "100", "10", "999"),
+            ("13", "", "", "11"),
+            ("14", "100", "10", "11"),
+        ],
+        "NUM_IF string, NUM_ID_TIPO_OPER_OBJETO_SERV string, "
+        "NUM_CONTA_PARTICIPANTE_P1 string, NUM_CONTA_PARTICIPANTE_P2 string",
+    )
+    tos = spark.createDataFrame(
+        [
+            ("100", "200", "44", " S "),
+            ("101", "201", "44", "S"),
+            ("102", "200", "45", "S"),
+            ("103", "200", "44", "N"),
+        ],
+        "NUM_ID_TIPO_OPER_OBJETO_SERV string, NUM_ID_TIPO_OPERACAO string, "
+        "NUM_ID_OBJETO_SERVICO string, IND_DISPONIVEL_IDENTIFICACAO string",
+    )
+    top = spark.createDataFrame(
+        [("200", "1"), ("201", "2")], "NUM_ID_TIPO_OPERACAO string, COD_TIPO_OPERACAO string"
+    )
+    accounts = spark.createDataFrame(
+        [
+            ("10", "1", "12345.40-1"),
+            ("11", "1", "54321.10-9"),
+            ("12", "2", "12345.40-2"),
+            ("13", "1", "MALFORMED"),
+        ],
+        "NUM_CONTA_PARTICIPANTE string, NUM_ID_SITUACAO_CONTA string, "
+        "COD_CONTA_PARTICIPANTE string",
+    )
+    titulo = spark.createDataFrame(
+        [("9", "999"), ("11", None)], "NUM_IF string, NUM_CONTA_PARTICIPANTE string"
+    )
     deposito = spark.createDataFrame(
-        [(str(i), "12" if i == 10 else None) for i in range(1, 14)]
-        + [("1", None), (None, None)],
+        [(str(i), "12" if i == 10 else None) for i in range(1, 14)] + [("1", None), (None, None)],
         "NUM_IF string, NUM_CONTA_PARTICIPANTE string",
     )
     result = eng._strict_lookup_eligible_domain(
-        candidates, operations, tos, top, accounts, titulo, deposito)
+        candidates, operations, tos, top, accounts, titulo, deposito
+    )
     assert {r.NUM_IF for r in result.collect()} == {"1", "11"}
     assert result.count() == 2
 
-    deposito_com_14 = deposito.unionByName(
-        spark.createDataFrame([("14", None)], deposito.schema)
-    )
+    deposito_com_14 = deposito.unionByName(spark.createDataFrame([("14", None)], deposito.schema))
     result_com_14 = eng._strict_lookup_eligible_domain(
-        candidates, operations, tos, top, accounts, titulo, deposito_com_14)
+        candidates, operations, tos, top, accounts, titulo, deposito_com_14
+    )
     assert {r.NUM_IF for r in result_com_14.collect()} == {"1", "11", "14"}
     assert result_com_14.count() == 3
 
     numeric_columns = {
-        "NUM_ID_TIPO_OPER_OBJETO_SERV", "NUM_CONTA_PARTICIPANTE_P1",
-        "NUM_CONTA_PARTICIPANTE_P2", "NUM_ID_TIPO_OPERACAO",
-        "NUM_ID_OBJETO_SERVICO", "COD_TIPO_OPERACAO",
-        "NUM_CONTA_PARTICIPANTE", "NUM_ID_SITUACAO_CONTA", "NUM_IF",
+        "NUM_ID_TIPO_OPER_OBJETO_SERV",
+        "NUM_CONTA_PARTICIPANTE_P1",
+        "NUM_CONTA_PARTICIPANTE_P2",
+        "NUM_ID_TIPO_OPERACAO",
+        "NUM_ID_OBJETO_SERVICO",
+        "COD_TIPO_OPERACAO",
+        "NUM_CONTA_PARTICIPANTE",
+        "NUM_ID_SITUACAO_CONTA",
+        "NUM_IF",
     }
 
     def decimalize(df):
@@ -597,10 +771,18 @@ def test_strict_domain_excludes_any_invalid_operation_and_optional_account_refs(
         return df
 
     decimal_result = eng._strict_lookup_eligible_domain(
-        decimalize(candidates), decimalize(operations), decimalize(tos), decimalize(top),
-        decimalize(accounts), decimalize(titulo), decimalize(deposito_com_14))
+        decimalize(candidates),
+        decimalize(operations),
+        decimalize(tos),
+        decimalize(top),
+        decimalize(accounts),
+        decimalize(titulo),
+        decimalize(deposito_com_14),
+    )
     assert {r.NUM_IF for r in decimal_result.collect()} == {
-        Decimal("1.000000000"), Decimal("11.000000000"), Decimal("14.000000000")
+        Decimal("1.000000000"),
+        Decimal("11.000000000"),
+        Decimal("14.000000000"),
     }
     assert decimal_result.count() == 3
 
@@ -617,38 +799,43 @@ def test_required_deposit_survives_k2_clone_seam_with_qdep_equal_qife(spark):
         "NUM_ID_TIPO_OPER_OBJETO_SERV long, NUM_ID_TIPO_OPERACAO long, "
         "NUM_ID_OBJETO_SERVICO long, IND_DISPONIVEL_IDENTIFICACAO string",
     )
-    top = spark.createDataFrame([(200, 1)],
-                                "NUM_ID_TIPO_OPERACAO long, COD_TIPO_OPERACAO long")
+    top = spark.createDataFrame([(200, 1)], "NUM_ID_TIPO_OPERACAO long, COD_TIPO_OPERACAO long")
     accounts = spark.createDataFrame(
         [(10, 1, "12345.40-1"), (11, 1, "54321.10-9")],
-        "NUM_CONTA_PARTICIPANTE long, NUM_ID_SITUACAO_CONTA long, "
-        "COD_CONTA_PARTICIPANTE string",
+        "NUM_CONTA_PARTICIPANTE long, NUM_ID_SITUACAO_CONTA long, COD_CONTA_PARTICIPANTE string",
     )
-    titulo = spark.createDataFrame([(7, None)],
-                                   "NUM_IF long, NUM_CONTA_PARTICIPANTE long")
-    deposito = spark.createDataFrame([(7, None)],
-                                     "NUM_IF long, NUM_CONTA_PARTICIPANTE long")
+    titulo = spark.createDataFrame([(7, None)], "NUM_IF long, NUM_CONTA_PARTICIPANTE long")
+    deposito = spark.createDataFrame([(7, None)], "NUM_IF long, NUM_CONTA_PARTICIPANTE long")
     selected = eng._strict_lookup_eligible_domain(
-        candidates, operations, tos, top, accounts, titulo, deposito)
+        candidates, operations, tos, top, accounts, titulo, deposito
+    )
     assert [row.NUM_IF for row in selected.collect()] == [7]
 
     root_source = selected.withColumn("COD_IF", F.lit("OLD"))
     root_plan = eng.PlanoTabela(
-        name=eng.TABELA_RAIZ, pk_cols=("NUM_IF",), pk_regra="OFFSET_PROPRIO",
-        pk_start=100, pk_passo=1,
+        name=eng.TABELA_RAIZ,
+        pk_cols=("NUM_IF",),
+        pk_regra="OFFSET_PROPRIO",
+        pk_start=100,
+        pk_passo=1,
     )
     root_clones, root_map = eng.clona_tabela(spark, root_plan, root_source, 2, {})
     deposit_plan = eng.PlanoTabela(
         name="DEPOSITO_AUTOMATICO_IF",
         pk_cols=("NUM_IF",),
-        fks_remap=[eng.FkRemap(
-            columns=("NUM_IF",), parent_table=eng.TABELA_RAIZ,
-            parent_columns=("NUM_IF",), principal=True,
-        )],
+        fks_remap=[
+            eng.FkRemap(
+                columns=("NUM_IF",),
+                parent_table=eng.TABELA_RAIZ,
+                parent_columns=("NUM_IF",),
+                principal=True,
+            )
+        ],
         pk_regra="VIA_PAI",
     )
     deposit_clones, _ = eng.clona_tabela(
-        spark, deposit_plan, deposito, 2, {eng.TABELA_RAIZ: root_map})
+        spark, deposit_plan, deposito, 2, {eng.TABELA_RAIZ: root_map}
+    )
 
     qife = root_clones.select("NUM_IF").distinct().count()
     qdep = deposit_clones.select("NUM_IF").distinct().count()
@@ -658,17 +845,20 @@ def test_required_deposit_survives_k2_clone_seam_with_qdep_equal_qife(spark):
 
 
 def test_filter_reference_contains_strict_instrument_level_policy():
-    text = (Path(__file__).with_name("filtro.txt").read_text(encoding="utf-8").upper())
+    text = Path(__file__).with_name("filtro.txt").read_text(encoding="utf-8").upper()
     assert "NOT EXISTS" in text
     assert "NUM_CONTA_PARTICIPANTE_P2" in text
     assert "CETIP.TITULO" in text and "CETIP.DEPOSITO_AUTOMATICO_IF" in text
-    assert """AND EXISTS (
+    assert (
+        """AND EXISTS (
     -- HARD REQUIREMENT: AO MENOS UM DEPÓSITO DO MESMO NUM_IF FÍSICO.
     SELECT 1
     FROM CETIP.DEPOSITO_AUTOMATICO_IF DEP_REQUIRED
     WHERE DEP_REQUIRED.NUM_IF = F.NUM_IF
       AND DEP_REQUIRED.NUM_IF IS NOT NULL
-)""" in text
+)"""
+        in text
+    )
     assert "NUM_ID_SITUACAO_CONTA <> 1" in text
     assert "NUM_ID_SITUACAO_CONTA IN (1, 2)" not in text
     assert "NUM_ID_OBJETO_SERVICO <> 44" in text
@@ -677,19 +867,28 @@ def test_filter_reference_contains_strict_instrument_level_policy():
 
 
 def _selective_faltantes_spec(not_null=(), foreign_key=True):
-    fks = ([{"columns": ["NUM_ID_CTX_MSG_P2"],
-             "parent_table": "CONTEXTO_MENSAGEM",
-             "parent_columns": ["NUM_ID_CTX_MSG"]}]
-           if foreign_key else [])
-    return {"OPERACAO": {"pk_cols": ["NUM_ID_OPERACAO"],
-                          "foreign_keys": fks,
-                          "not_null_cols": list(not_null)}}
+    fks = (
+        [
+            {
+                "columns": ["NUM_ID_CTX_MSG_P2"],
+                "parent_table": "CONTEXTO_MENSAGEM",
+                "parent_columns": ["NUM_ID_CTX_MSG"],
+            }
+        ]
+        if foreign_key
+        else []
+    )
+    return {
+        "OPERACAO": {
+            "pk_cols": ["NUM_ID_OPERACAO"],
+            "foreign_keys": fks,
+            "not_null_cols": list(not_null),
+        }
+    }
 
 
 def test_selective_faltantes_contract_accepts_only_nullable_child_fk():
-    assert eng.FALTANTES_NULIFICACAO_SELETIVA == {
-        ("OPERACAO", "NUM_ID_CTX_MSG_P2")
-    }
+    assert eng.FALTANTES_NULIFICACAO_SELETIVA == {("OPERACAO", "NUM_ID_CTX_MSG_P2")}
     eng._valida_contrato_nulificacao_seletiva(_selective_faltantes_spec())
 
 
@@ -751,23 +950,21 @@ def test_selective_faltantes_nulls_only_normalized_matches_and_preserves_k2(spar
         "TABELA string, COLUNA string, VALOR string",
     )
 
-    out, anuladas, metrics = eng.aplica_nulificacao_faltantes(
-        clones, "OPERACAO", faltantes
-    )
+    out, anuladas, metrics = eng.aplica_nulificacao_faltantes(clones, "OPERACAO", faltantes)
     rows = out.orderBy("ID").collect()
 
     assert out.schema == clones.schema
     assert out.columns == clones.columns
     assert len(rows) == 4
-    assert [row.NUM_ID_CTX_MSG_P2 for row in rows] == [
-        None, None, None, Decimal("20.000000000")
-    ]
+    assert [row.NUM_ID_CTX_MSG_P2 for row in rows] == [None, None, None, Decimal("20.000000000")]
     assert [(row.K, row.PAYLOAD) for row in rows[:2]] == [(1, "copy-1"), (2, "copy-2")]
     assert anuladas == ["NUM_ID_CTX_MSG_P2"]
-    assert metrics == {"NUM_ID_CTX_MSG_P2": {
-        "chaves_distintas_listadas": 2,
-        "linhas_clone_casadas": 2,
-    }}
+    assert metrics == {
+        "NUM_ID_CTX_MSG_P2": {
+            "chaves_distintas_listadas": 2,
+            "linhas_clone_casadas": 2,
+        }
+    }
 
 
 def test_selective_faltantes_no_relevant_keys_is_noop(spark):
@@ -777,9 +974,7 @@ def test_selective_faltantes_no_relevant_keys_is_noop(spark):
         "TABELA string, COLUNA string, VALOR string",
     )
 
-    out, anuladas, metrics = eng.aplica_nulificacao_faltantes(
-        clones, "OPERACAO", faltantes
-    )
+    out, anuladas, metrics = eng.aplica_nulificacao_faltantes(clones, "OPERACAO", faltantes)
 
     assert out.schema == clones.schema and out.collect() == clones.collect()
     assert anuladas == [] and metrics == {}
@@ -817,9 +1012,7 @@ def test_selective_faltantes_64k_keys_never_collects_values(spark, monkeypatch):
                 AssertionError("faltantes values must stay distributed")
             ),
         )
-        out, anuladas, metrics = eng.aplica_nulificacao_faltantes(
-            clones, "OPERACAO", faltantes
-        )
+        out, anuladas, metrics = eng.aplica_nulificacao_faltantes(clones, "OPERACAO", faltantes)
         assert out.count() == 3
 
     assert anuladas == ["NUM_ID_CTX_MSG_P2"]
@@ -827,9 +1020,7 @@ def test_selective_faltantes_64k_keys_never_collects_values(spark, monkeypatch):
         "chaves_distintas_listadas": 64_000,
         "linhas_clone_casadas": 2,
     }
-    assert [row.NUM_ID_CTX_MSG_P2 for row in out.orderBy("ID").collect()] == [
-        None, None, 64_000
-    ]
+    assert [row.NUM_ID_CTX_MSG_P2 for row in out.orderBy("ID").collect()] == [None, None, 64_000]
 
 
 def test_selective_faltantes_summary_only_lists_matched_column_once():
@@ -902,40 +1093,55 @@ def test_promotion_and_restore_failure_retains_and_reports_backup():
 
 @pytest.mark.parametrize("failure_phase", ["allocator", "preflight"])
 def test_prepublication_failure_preserves_existing_final_output(
-        spark, tmp_path, monkeypatch, failure_phase):
+    spark, tmp_path, monkeypatch, failure_phase
+):
     final_path = tmp_path / "final"
     final_path.mkdir()
     marker = final_path / "previous.marker"
     marker.write_text("previous-output", encoding="utf-8")
 
     if failure_phase == "allocator":
+
         def failing_batches(*args, **kwargs):
             yield [(1, "0000000000000001")]
             raise RuntimeError("allocator failed")
 
         monkeypatch.setattr(
-            eng, "_iter_oracle_code_batches",
+            eng,
+            "_iter_oracle_code_batches",
             failing_batches,
         )
-        slots = spark.createDataFrame([(1, 10, "OLD"), (2, 11, "OLD")],
-                                      "ORDINAL long, PK long, OLD string")
+        slots = spark.createDataFrame(
+            [(1, 10, "OLD"), (2, 11, "OLD")], "ORDINAL long, PK long, OLD string"
+        )
 
         def prepare(staging):
             eng._materialize_code_map(
-                spark, slots, code_kind="COD_OPERACAO", generated_alias="CODE",
-                out_path=f"{staging}/map", dry_run=False,
-                credentials=("url", "user", "password"), batch_size=1,
-                engorda_date=date(2026, 7, 19))
+                spark,
+                slots,
+                code_kind="COD_OPERACAO",
+                generated_alias="CODE",
+                out_path=f"{staging}/map",
+                dry_run=False,
+                credentials=("url", "user", "password"),
+                batch_size=1,
+                engorda_date=date(2026, 7, 19),
+            )
     else:
         monkeypatch.setattr(
-            eng, "_read_existing_meu_tuples",
+            eng,
+            "_read_existing_meu_tuples",
             lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("preflight failed")),
         )
 
         def prepare(staging):
             eng._read_existing_meu_tuples(
-                spark, ("url", "user", "password"), engorda_date=date(2026, 7, 19),
-                prefix="321", temp_path=f"{staging}/preflight")
+                spark,
+                ("url", "user", "password"),
+                engorda_date=date(2026, 7, 19),
+                prefix="321",
+                temp_path=f"{staging}/preflight",
+            )
 
     with pytest.raises(RuntimeError, match=failure_phase):
         eng._stage_and_publish(spark, str(final_path), prepare)
@@ -943,13 +1149,18 @@ def test_prepublication_failure_preserves_existing_final_output(
 
 
 def test_zero_row_table_and_mapping_are_schema_correct_and_readable(spark, tmp_path):
-    schema = T.StructType([
-        T.StructField("ID", T.LongType(), False),
-        T.StructField("VALUE", T.StringType(), True),
-    ])
+    schema = T.StructType(
+        [
+            T.StructField("ID", T.LongType(), False),
+            T.StructField("VALUE", T.StringType(), True),
+        ]
+    )
     lote = spark.createDataFrame([], schema)
     plano = eng.PlanoTabela(
-        name="EMPTY", pk_cols=("ID",), pk_regra="OFFSET_PROPRIO", pk_start=10,
+        name="EMPTY",
+        pk_cols=("ID",),
+        pk_regra="OFFSET_PROPRIO",
+        pk_start=10,
     )
     clones, mapping = eng.clona_tabela(spark, plano, lote, 2, {})
     assert clones.count() == 0 and mapping.count() == 0
@@ -958,4 +1169,5 @@ def test_zero_row_table_and_mapping_are_schema_correct_and_readable(spark, tmp_p
     readback = spark.read.parquet(path)
     assert readback.count() == 0
     assert [(field.name, field.dataType) for field in readback.schema] == [
-        (field.name, field.dataType) for field in clones.schema]
+        (field.name, field.dataType) for field in clones.schema
+    ]

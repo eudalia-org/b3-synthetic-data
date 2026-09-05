@@ -13,6 +13,7 @@ Publication is immutable: each successful run is written under
 ``<output-base>/runs/<run-id>`` and ``LATEST.json`` is updated only after
 readback validation. Prior runs are never renamed or deleted.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -154,11 +155,7 @@ def excluded_key_columns(specs: dict, table: str) -> tuple[set[str], set[str]]:
     if not isinstance(spec, dict):
         return set(), set()
     pk = {str(c).upper() for c in (spec.get("pk_cols") or [])}
-    fk = {
-        str(c).upper()
-        for item in _fk_list(spec)
-        for c in (item.get("columns") or [])
-    }
+    fk = {str(c).upper() for item in _fk_list(spec) for c in (item.get("columns") or [])}
     return pk, fk
 
 
@@ -288,9 +285,7 @@ def _profile_columns(
     )
     aggregates = values.groupBy("table", "column", "type_json").agg(
         F.coalesce(F.sum(F.col("is_valid").cast("long")), F.lit(0)).alias("valid_count"),
-        F.coalesce(F.sum(F.col("is_invalid").cast("long")), F.lit(0)).alias(
-            "invalid_count"
-        ),
+        F.coalesce(F.sum(F.col("is_invalid").cast("long")), F.lit(0)).alias("invalid_count"),
         F.countDistinct(F.when(F.col("is_valid"), F.col("value"))).alias("distinct_count"),
     )
     profile = metadata.join(aggregates, ["table", "column", "type_json"], "left")
@@ -358,9 +353,7 @@ def _sketch_profiles(pairs: DataFrame, config: Config) -> DataFrame:
 def _jaccard_values(
     values: DataFrame, columns: DataFrame, pairs: DataFrame, config: Config
 ) -> DataFrame:
-    selected = columns.where(F.col("route") == "jaccard").select(
-        "table", "column", "type_json"
-    )
+    selected = columns.where(F.col("route") == "jaccard").select("table", "column", "type_json")
     distinct = (
         values.where(F.col("is_valid"))
         .select("table", "column", "type_json", "value")
@@ -370,9 +363,7 @@ def _jaccard_values(
     sketch_values = distinct.join(
         _sketch_profiles(pairs, config), ["table", "column", "type_json"], "inner"
     ).withColumn("sha256_rank", F.sha2(F.col("value"), 256))
-    window = Window.partitionBy("table", "column", "type_json").orderBy(
-        "sha256_rank", "value"
-    )
+    window = Window.partitionBy("table", "column", "type_json").orderBy("sha256_rank", "value")
     ranked = sketch_values.withColumn("sketch_rank", F.row_number().over(window))
     return distinct.join(
         ranked,
@@ -389,9 +380,7 @@ def _psi_native_types(
         if not plan.included or plan.kind not in {"numeric", "date", "timestamp"}:
             continue
         physical = tables[plan.table].schema[plan.column].dataType
-        native[plan.type_json] = (
-            T.LongType() if plan.kind in {"date", "timestamp"} else physical
-        )
+        native[plan.type_json] = T.LongType() if plan.kind in {"date", "timestamp"} else physical
     return native
 
 
@@ -429,9 +418,9 @@ def _psi_edges(
         ranked = typed.withColumn("native_rank", F.row_number().over(ordered)).withColumn(
             "native_count", F.count(F.lit(1)).over(partition)
         )
-        groups = ranked.select(
-            "table", "column", "type_json", "native_count"
-        ).dropDuplicates(["table", "column", "type_json"])
+        groups = ranked.select("table", "column", "type_json", "native_count").dropDuplicates(
+            ["table", "column", "type_json"]
+        )
         representative_indexes = values.sparkSession.range(config.psi_representatives).select(
             F.col("id").alias("representative_index")
         )
@@ -469,9 +458,7 @@ def _psi_edges(
         )
         cut_targets = pooled_size.crossJoin(cut_indexes).withColumn(
             "target_rank",
-            F.ceil(
-                F.col("cut_index") * F.col("point_count") / F.lit(config.psi_bins)
-            ).cast("int"),
+            F.ceil(F.col("cut_index") * F.col("point_count") / F.lit(config.psi_bins)).cast("int"),
         )
         cut_alias, pooled_alias = cut_targets.alias("target"), pooled.alias("pooled")
         native_cuts = (
@@ -519,16 +506,13 @@ def _psi_bins(
             )
             .join(selected, ["table", "column", "type_json"], "inner")
             .join(type_edges, "type_json", "inner")
-            .withColumn(
-                "native_cuts", F.transform("cuts", lambda value: value.cast(native_type))
-            )
+            .withColumn("native_cuts", F.transform("cuts", lambda value: value.cast(native_type)))
             .withColumn(
                 "bin_index",
                 F.aggregate(
                     "native_cuts",
                     F.lit(0),
-                    lambda total, cut: total
-                    + F.when(F.col("native_value") > cut, 1).otherwise(0),
+                    lambda total, cut: total + F.when(F.col("native_value") > cut, 1).otherwise(0),
                 ),
             )
         )
@@ -540,15 +524,14 @@ def _psi_bins(
             .withColumn("bin_index", F.explode(F.sequence(F.lit(0), F.size("cuts"))))
         )
         frames.append(
-            grid.join(counts, ["table", "column", "type_json", "bin_index"], "left")
-            .select(
+            grid.join(counts, ["table", "column", "type_json", "bin_index"], "left").select(
                 "table",
                 "column",
                 "type_json",
                 "bin_index",
-                F.when(
-                    F.col("bin_index") > 0, F.element_at("cuts", F.col("bin_index"))
-                ).alias("lower_edge"),
+                F.when(F.col("bin_index") > 0, F.element_at("cuts", F.col("bin_index"))).alias(
+                    "lower_edge"
+                ),
                 F.when(
                     F.col("bin_index") < F.size("cuts"),
                     F.element_at("cuts", F.col("bin_index") + 1),
@@ -681,23 +664,20 @@ def _exact_jaccard(
         & (F.col("distinct_count_b") <= config.exact_distinct_threshold)
     )
     intersections = _inverted_exact_intersections(jvalues, columns, config)
-    return (
-        exact.join(intersections, "pair_id", "left")
-        .select(
-            "pair_id",
-            F.lit("exact").alias("mode"),
-            (
-                F.coalesce(F.col("intersection_count"), F.lit(0))
-                / (
-                    F.col("distinct_count_a")
-                    + F.col("distinct_count_b")
-                    - F.coalesce(F.col("intersection_count"), F.lit(0))
-                )
-            ).alias("jaccard"),
-            F.lit(None).cast("long").alias("sketch_sample_size"),
-            F.lit(None).cast("double").alias("jaccard_interval_low"),
-            F.lit(None).cast("double").alias("jaccard_interval_high"),
-        )
+    return exact.join(intersections, "pair_id", "left").select(
+        "pair_id",
+        F.lit("exact").alias("mode"),
+        (
+            F.coalesce(F.col("intersection_count"), F.lit(0))
+            / (
+                F.col("distinct_count_a")
+                + F.col("distinct_count_b")
+                - F.coalesce(F.col("intersection_count"), F.lit(0))
+            )
+        ).alias("jaccard"),
+        F.lit(None).cast("long").alias("sketch_sample_size"),
+        F.lit(None).cast("double").alias("jaccard_interval_low"),
+        F.lit(None).cast("double").alias("jaccard_interval_high"),
     )
 
 
@@ -725,26 +705,22 @@ def _sketch_jaccard(pairs: DataFrame, jvalues: DataFrame, config: Config) -> Dat
         )
     )
     kept = jvalues.where(F.col("sketch_rank") <= config.sketch_size)
-    a = (
-        sketch.join(
-            kept,
-            (F.col("table_a") == F.col("table"))
-            & (F.col("column_a") == F.col("column"))
-            & (sketch.type_json == kept.type_json),
-        )
-        .select("pair_id", "value", "sha256_rank", F.lit(1).alias("in_a"), F.lit(0).alias("in_b"))
-    )
-    b = (
-        sketch.join(
-            kept,
-            (F.col("table_b") == F.col("table"))
-            & (F.col("column_b") == F.col("column"))
-            & (sketch.type_json == kept.type_json),
-        )
-        .select("pair_id", "value", "sha256_rank", F.lit(0).alias("in_a"), F.lit(1).alias("in_b"))
-    )
-    union = a.unionByName(b).groupBy("pair_id", "value", "sha256_rank").agg(
-        F.max("in_a").alias("in_a"), F.max("in_b").alias("in_b")
+    a = sketch.join(
+        kept,
+        (F.col("table_a") == F.col("table"))
+        & (F.col("column_a") == F.col("column"))
+        & (sketch.type_json == kept.type_json),
+    ).select("pair_id", "value", "sha256_rank", F.lit(1).alias("in_a"), F.lit(0).alias("in_b"))
+    b = sketch.join(
+        kept,
+        (F.col("table_b") == F.col("table"))
+        & (F.col("column_b") == F.col("column"))
+        & (sketch.type_json == kept.type_json),
+    ).select("pair_id", "value", "sha256_rank", F.lit(0).alias("in_a"), F.lit(1).alias("in_b"))
+    union = (
+        a.unionByName(b)
+        .groupBy("pair_id", "value", "sha256_rank")
+        .agg(F.max("in_a").alias("in_a"), F.max("in_b").alias("in_b"))
     )
     window = Window.partitionBy("pair_id").orderBy("sha256_rank", "value")
     sample = union.withColumn("union_rank", F.row_number().over(window)).where(
@@ -787,20 +763,17 @@ def _psi_scores(pairs: DataFrame, bins: DataFrame) -> DataFrame:
         F.col("bin_index").alias("pb_bin_index"),
         F.col("count").alias("count_b"),
     )
-    joined = (
-        selected.join(
-            a,
-            (F.col("table_a") == F.col("pa_table"))
-            & (F.col("column_a") == F.col("pa_column"))
-            & (selected.type_json == F.col("pa_type")),
-        )
-        .join(
-            b,
-            (F.col("table_b") == F.col("pb_table"))
-            & (F.col("column_b") == F.col("pb_column"))
-            & (selected.type_json == F.col("pb_type"))
-            & (F.col("bin_index") == F.col("pb_bin_index")),
-        )
+    joined = selected.join(
+        a,
+        (F.col("table_a") == F.col("pa_table"))
+        & (F.col("column_a") == F.col("pa_column"))
+        & (selected.type_json == F.col("pa_type")),
+    ).join(
+        b,
+        (F.col("table_b") == F.col("pb_table"))
+        & (F.col("column_b") == F.col("pb_column"))
+        & (selected.type_json == F.col("pb_type"))
+        & (F.col("bin_index") == F.col("pb_bin_index")),
     )
     p = (F.col("count_a") + F.lit(0.5)) / (
         F.col("valid_count_a") + F.lit(0.5) * F.col("effective_bins")
@@ -1136,9 +1109,7 @@ def _profile_record(
     }
 
 
-def _append_rows(
-    spark: SparkSession, rows: list[dict], schema: T.StructType, path: str
-) -> None:
+def _append_rows(spark: SparkSession, rows: list[dict], schema: T.StructType, path: str) -> None:
     if rows:
         spark.createDataFrame(rows, schema).write.mode("append").parquet(path)
 
@@ -1215,9 +1186,7 @@ def _production_psi_samples(
     workspace: str,
     config: Config,
 ) -> tuple[DataFrame, dict[str, DataFrame], list[dict]]:
-    profile_rows = {
-        (row["table"], row["column"]): row for row in profiles.collect()
-    }
+    profile_rows = {(row["table"], row["column"]): row for row in profiles.collect()}
     samples: dict[str, DataFrame] = {}
     records: list[dict] = []
     for table, df in tables.items():
@@ -1273,19 +1242,23 @@ def _production_psi_samples(
         "table string, psi_sample_rows long, psi_sample_fraction double, "
         "psi_sample_seed long, psi_sample_actual_count long"
     )
-    metadata = spark.createDataFrame(
-        [
-            (
-                record["table"],
-                record["requested_max_rows"],
-                record["actual_fraction"],
-                record["seed"],
-                record["actual_sample_count"],
-            )
-            for record in records
-        ],
-        metadata_schema,
-    ) if records else spark.createDataFrame([], metadata_schema)
+    metadata = (
+        spark.createDataFrame(
+            [
+                (
+                    record["table"],
+                    record["requested_max_rows"],
+                    record["actual_fraction"],
+                    record["seed"],
+                    record["actual_sample_count"],
+                )
+                for record in records
+            ],
+            metadata_schema,
+        )
+        if records
+        else spark.createDataFrame([], metadata_schema)
+    )
     base = profiles.drop(
         "psi_sample_rows",
         "psi_sample_fraction",
@@ -1300,9 +1273,7 @@ def _production_psi_samples(
     ):
         base = base.withColumn(
             name,
-            F.when(F.col("route") == "psi", F.col(name)).otherwise(
-                F.lit(None).cast(data_type)
-            ),
+            F.when(F.col("route") == "psi", F.col(name)).otherwise(F.lit(None).cast(data_type)),
         )
     path = f"{workspace}/profiles/columns_sampled"
     base.select(*[field.name for field in _column_profile_schema().fields]).write.mode(
@@ -1348,17 +1319,13 @@ def _production_jaccard_values(
 ) -> tuple[DataFrame, str]:
     eligible = {
         (row["table"], row["column"])
-        for row in profiles.where(F.col("route") == "jaccard")
-        .select("table", "column")
-        .collect()
+        for row in profiles.where(F.col("route") == "jaccard").select("table", "column").collect()
     }
     raw_path = f"{workspace}/profiles/jaccard_raw"
     wrote = False
     for table, df in tables.items():
         selected = [
-            plan
-            for plan in plans
-            if plan.table == table and (plan.table, plan.column) in eligible
+            plan for plan in plans if plan.table == table and (plan.table, plan.column) in eligible
         ]
         for batch_id, batch in _batches(selected, config.column_batch_size):
             values = _batch_jaccard_values(df, batch)
@@ -1376,12 +1343,10 @@ def _production_jaccard_values(
         spark.createDataFrame([], raw_schema).write.mode("append").parquet(raw_path)
     raw = spark.read.parquet(raw_path)
     needs_sketch = _sketch_profiles(candidates, config)
-    ranked_source = raw.join(
-        needs_sketch, ["table", "column", "type_json"], "inner"
-    ).withColumn("sha256_rank", F.sha2("value", 256))
-    window = Window.partitionBy("table", "column", "type_json").orderBy(
-        "sha256_rank", "value"
+    ranked_source = raw.join(needs_sketch, ["table", "column", "type_json"], "inner").withColumn(
+        "sha256_rank", F.sha2("value", 256)
     )
+    window = Window.partitionBy("table", "column", "type_json").orderBy("sha256_rank", "value")
     ranked = ranked_source.withColumn("sketch_rank", F.row_number().over(window))
     output = raw.join(
         ranked,
@@ -1659,16 +1624,16 @@ def _exact_jaccard_pair_batch(pair_batch: DataFrame, jvalues: DataFrame) -> Data
         F.col("column_b").alias("column"),
         "type_json",
     )
-    left_values = left_requests.join(
-        values, ["table", "column", "type_json"], "inner"
-    ).select("pair_id", "value")
-    right_values = right_requests.join(
-        values, ["table", "column", "type_json"], "inner"
-    ).select("pair_id", "value")
-    intersections = left_values.join(
-        right_values, ["pair_id", "value"], "inner"
-    ).groupBy("pair_id").agg(
-        F.count(F.lit(1)).alias("intersection_count")
+    left_values = left_requests.join(values, ["table", "column", "type_json"], "inner").select(
+        "pair_id", "value"
+    )
+    right_values = right_requests.join(values, ["table", "column", "type_json"], "inner").select(
+        "pair_id", "value"
+    )
+    intersections = (
+        left_values.join(right_values, ["pair_id", "value"], "inner")
+        .groupBy("pair_id")
+        .agg(F.count(F.lit(1)).alias("intersection_count"))
     )
     return pair_batch.join(intersections, "pair_id", "left").select(
         "pair_id",
@@ -1717,13 +1682,9 @@ def _read_exact_batch_jvalues(
     batch_id: int,
 ) -> DataFrame:
     identities = (
-        pair_batch.select(
-            F.col("table_a").alias("table"), F.col("column_a").alias("column")
-        )
+        pair_batch.select(F.col("table_a").alias("table"), F.col("column_a").alias("column"))
         .unionByName(
-            pair_batch.select(
-                F.col("table_b").alias("table"), F.col("column_b").alias("column")
-            )
+            pair_batch.select(F.col("table_b").alias("table"), F.col("column_b").alias("column"))
         )
         .dropDuplicates(["table", "column"])
         .collect()
@@ -1732,9 +1693,7 @@ def _read_exact_batch_jvalues(
         raise RuntimeError(f"Exact pair batch {batch_id} requested more than 200 profiles")
     predicate = None
     for identity in identities:
-        term = (F.col("table") == identity["table"]) & (
-            F.col("column") == identity["column"]
-        )
+        term = (F.col("table") == identity["table"]) & (F.col("column") == identity["column"])
         predicate = term if predicate is None else predicate | term
     values = spark.read.parquet(jvalues_path)
     filtered = values.where(predicate) if predicate is not None else values.limit(0)
@@ -1744,9 +1703,7 @@ def _read_exact_batch_jvalues(
         profiles=len(identities),
         partition_filter=True,
     )
-    return filtered.select(
-        "table", "column", "type_json", "value", "sha256_rank", "sketch_rank"
-    )
+    return filtered.select("table", "column", "type_json", "value", "sha256_rank", "sketch_rank")
 
 
 def _production_scores(
@@ -1764,9 +1721,9 @@ def _production_scores(
         & (F.col("distinct_count_b") <= config.exact_distinct_threshold)
     )
     assigned_path = f"{workspace}/exact_pairs_batched"
-    _assign_exact_pair_batches(exact, config.exact_pair_batch_size).write.mode(
-        "append"
-    ).parquet(assigned_path)
+    _assign_exact_pair_batches(exact, config.exact_pair_batch_size).write.mode("append").parquet(
+        assigned_path
+    )
     exact = spark.read.parquet(assigned_path)
     assignment = exact.agg(
         F.max("pair_batch_id").alias("maximum"), F.count(F.lit(1)).alias("pairs")
@@ -1786,9 +1743,7 @@ def _production_scores(
         pair_count = pair_batch.count()
         if pair_count > config.exact_pair_batch_size:
             raise RuntimeError(f"Exact pair batch {batch_id} exceeded configured bound")
-        batch_jvalues = _read_exact_batch_jvalues(
-            spark, jvalues_path, pair_batch, batch_id
-        )
+        batch_jvalues = _read_exact_batch_jvalues(spark, jvalues_path, pair_batch, batch_id)
         scores = _exact_jaccard_pair_batch(pair_batch, batch_jvalues)
         scores.write.mode("append").parquet(score_path)
         wrote = True
@@ -1798,11 +1753,7 @@ def _production_scores(
     )
     sketch = _sketch_jaccard(candidates, all_jvalues, config)
     sketch.write.mode("append").parquet(score_path)
-    sketch_count = (
-        spark.read.parquet(score_path)
-        .where(F.col("mode") == "bottom_k")
-        .count()
-    )
+    sketch_count = spark.read.parquet(score_path).where(F.col("mode") == "bottom_k").count()
     _perf_log("sketch_scores", pairs=sketch_count)
     wrote = True
     if not wrote:
@@ -1865,9 +1816,7 @@ def _build_scalable_analysis(
         workspace,
         config,
     )
-    pairs = _production_scores(
-        spark, candidates, jvalues_path, bins, workspace, config
-    )
+    pairs = _production_scores(spark, candidates, jvalues_path, bins, workspace, config)
     integrity = _integrity_checks(profiles, jvalues, bins, pairs)
     skips = [
         {
@@ -1881,9 +1830,7 @@ def _build_scalable_analysis(
     ]
     spec_tables = {_table_name(name).upper() for name in (specs or {})}
     absent = sorted(table for table in tables if _table_name(table).upper() not in spec_tables)
-    return Analysis(
-        profiles, jvalues, bins, pairs, integrity, skips, absent, psi_sampling
-    )
+    return Analysis(profiles, jvalues, bins, pairs, integrity, skips, absent, psi_sampling)
 
 
 def run_production(
@@ -1904,9 +1851,7 @@ def run_production(
     _delete_path(spark, workspace)
     started = datetime.now(timezone.utc)
     try:
-        analysis = _build_scalable_analysis(
-            spark, tables, specs, extra_excludes, config, workspace
-        )
+        analysis = _build_scalable_analysis(spark, tables, specs, extra_excludes, config, workspace)
         report = build_report(
             analysis, list(tables), base_uri, prefix, specs_uri, output_base, config
         )
@@ -2046,8 +1991,7 @@ def _validate_output_readback(
         actual_count = actual.count()
         if actual_count != expected_count:
             raise RuntimeError(
-                f"Readback count mismatch at {root}/{relative}: "
-                f"{actual_count} != {expected_count}"
+                f"Readback count mismatch at {root}/{relative}: {actual_count} != {expected_count}"
             )
     report = json.loads(read_text(spark, f"{root}/report.json"))
     if report.get("summary", {}).get("integrity") != integrity or any(integrity.values()):
@@ -2201,9 +2145,7 @@ def execute_from_tables(
 ) -> Analysis:
     validate_output_base(output_base, input_paths)
     analysis = analyze_tables(spark, tables, specs, extra_excludes, config)
-    report = build_report(
-        analysis, list(tables), base_uri, prefix, specs_uri, output_base, config
-    )
+    report = build_report(analysis, list(tables), base_uri, prefix, specs_uri, output_base, config)
     write_outputs(spark, analysis, output_base, report)
     return analysis
 
@@ -2278,10 +2220,7 @@ def run_selftest(spark: SparkSession) -> None:
         analysis = execute_from_tables(
             spark, tables, output, specs=specs, config=config, base_uri="in-memory"
         )
-        pairs = {
-            (row["column_a"], row["column_b"]): row
-            for row in analysis.pairs.collect()
-        }
+        pairs = {(row["column_a"], row["column_b"]): row for row in analysis.pairs.collect()}
         code = pairs[("code", "code")]
         assert code["mode"] == "exact" and math.isclose(code["jaccard"], 0.5), code
         measure = pairs[("measure", "measure")]

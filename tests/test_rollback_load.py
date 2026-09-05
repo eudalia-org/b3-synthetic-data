@@ -48,7 +48,10 @@ class TestRollbackOrder:
         # manifest lists tables parent-first (load order); rollback deletes children first
         entries = [{"table": "PARENT"}, {"table": "MID"}, {"table": "CHILD"}]
         assert [e["table"] for e in rollback_load.rollback_order(entries)] == [
-            "CHILD", "MID", "PARENT"]
+            "CHILD",
+            "MID",
+            "PARENT",
+        ]
 
     def test_empty(self):
         assert rollback_load.rollback_order([]) == []
@@ -66,9 +69,9 @@ class TestDryRunArg:
         assert args.dry_run is False
 
     def test_explicit_manifest_is_mutually_exclusive_with_run_id(self, monkeypatch):
-        monkeypatch.setattr(sys, "argv", [
-            "rollback_load", "--manifest-uri", "m.json", "--run-id", "R1"
-        ])
+        monkeypatch.setattr(
+            sys, "argv", ["rollback_load", "--manifest-uri", "m.json", "--run-id", "R1"]
+        )
         with pytest.raises(SystemExit):
             rollback_load.parse_arguments()
 
@@ -78,9 +81,7 @@ class TestExplicitManifest:
         path = tmp_path / "manifest.json"
         expected = {"schema_version": 1, "kind": "load-attempt", "tables": []}
         path.write_text(json.dumps(expected))
-        assert rollback_load.read_manifest(
-            None, {}, manifest_uri=str(path)
-        ) == expected
+        assert rollback_load.read_manifest(None, {}, manifest_uri=str(path)) == expected
 
     def test_explicit_uri_does_not_require_load_base(self, monkeypatch):
         for name in list(os.environ):
@@ -92,11 +93,15 @@ class TestExplicitManifest:
         assert "DATAGEN_LOAD_BASE_URI" not in config
 
     def test_legacy_run_id_still_reads_text_directory(self):
-        context = type("Context", (), {
-            "textFile": lambda _self, path: type(
-                "RDD", (), {"collect": lambda _self: ['{"run_id":"R1","tables":[]}']}
-            )()
-        })()
+        context = type(
+            "Context",
+            (),
+            {
+                "textFile": lambda _self, path: type(
+                    "RDD", (), {"collect": lambda _self: ['{"run_id":"R1","tables":[]}']}
+                )()
+            },
+        )()
         spark = type("Spark", (), {"sparkContext": context})()
         manifest = rollback_load.read_manifest(
             spark, {"DATAGEN_LOAD_BASE_URI": "oci://bucket/load"}, run_id="R1"
@@ -105,9 +110,7 @@ class TestExplicitManifest:
 
     def test_legacy_manifest_cannot_execute_unsafe_rollback(self):
         with pytest.raises(ValueError, match="cannot be rolled back safely"):
-            rollback_load.require_exact_load_manifest(
-                {"run_id": "R1", "tables": []}
-            )
+            rollback_load.require_exact_load_manifest({"run_id": "R1", "tables": []})
 
     def test_rejects_malformed_new_manifest(self):
         with pytest.raises(ValueError, match="schema or kind"):
@@ -136,11 +139,13 @@ class TestExactRangeRollback:
     def test_deletes_only_recorded_range_without_querying_current_max(self, monkeypatch):
         statements = []
         monkeypatch.setattr(
-            rollback_load, "read_rows",
+            rollback_load,
+            "read_rows",
             lambda *_args, **_kwargs: pytest.fail("exact rollback queried Oracle MAX/MIN"),
         )
         monkeypatch.setattr(
-            rollback_load, "execute_statement",
+            rollback_load,
+            "execute_statement",
             lambda _spark, _properties, sql: statements.append(sql),
         )
         chunks = rollback_load.rollback_table(
@@ -155,9 +160,8 @@ class TestExactRangeRollback:
 
     def test_dry_run_executes_no_delete(self, monkeypatch):
         monkeypatch.setattr(
-            rollback_load, "execute_statement",
+            rollback_load,
+            "execute_statement",
             lambda *_args: pytest.fail("dry run executed DELETE"),
         )
-        assert rollback_load.rollback_table(
-            object(), {}, self.ENTRY, 5, 1, 1, dry_run=True
-        ) == 3
+        assert rollback_load.rollback_table(object(), {}, self.ENTRY, 5, 1, 1, dry_run=True) == 3

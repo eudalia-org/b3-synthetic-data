@@ -154,6 +154,7 @@ def test_duplicate_pattern_ambiguity_accumulates_sources_and_has_zero_count():
         ]
     )
     contract = validator.parse_application_capacity_contract({"rows": rows})
+
     class ColumnsOnly:
         columns = ["ID", "VALUE"]
 

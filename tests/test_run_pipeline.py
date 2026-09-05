@@ -207,8 +207,7 @@ class FakeAdapter:
                 call
                 for call in self.created.values()
                 if "--manifest-uri" in call["arguments"]
-                and call["arguments"][call["arguments"].index("--manifest-uri") + 1]
-                == uri
+                and call["arguments"][call["arguments"].index("--manifest-uri") + 1] == uri
             )
             arguments = load_call["arguments"]
 
@@ -226,16 +225,18 @@ class FakeAdapter:
                 "pipeline_manifest_uri": value("--pipeline-manifest-uri"),
                 "target_schema": value("--expected-target-schema"),
                 "ordered_tables": ["INSTRUMENTO_FINANCEIRO"],
-                "tables": [{
-                    "table": "INSTRUMENTO_FINANCEIRO",
-                    "owner": "CETIP",
-                    "name": "INSTRUMENTO_FINANCEIRO",
-                    "expected_rows": 1,
-                    "pk_col": "NUM_IF",
-                    "synthetic_pk_min": 100,
-                    "synthetic_pk_max": 100,
-                    "rollbackable": True,
-                }],
+                "tables": [
+                    {
+                        "table": "INSTRUMENTO_FINANCEIRO",
+                        "owner": "CETIP",
+                        "name": "INSTRUMENTO_FINANCEIRO",
+                        "expected_rows": 1,
+                        "pk_col": "NUM_IF",
+                        "synthetic_pk_min": 100,
+                        "synthetic_pk_max": 100,
+                        "rollbackable": True,
+                    }
+                ],
                 "transformations": [],
             }
             if "--previous-load-manifest" in arguments:
@@ -257,8 +258,7 @@ class FakeAdapter:
                 call
                 for call in self.created.values()
                 if "--report-path" in call["arguments"]
-                and call["arguments"][call["arguments"].index("--report-path") + 1]
-                == uri
+                and call["arguments"][call["arguments"].index("--report-path") + 1] == uri
             ),
             None,
         )
@@ -338,9 +338,7 @@ class PollingAdapter(FakeAdapter):
 
 
 def read_run_manifest(tmp_path, run_id="run-001"):
-    return json.loads(
-        (tmp_path / "local-runs" / "qab" / run_id / "manifest.json").read_text()
-    )
+    return json.loads((tmp_path / "local-runs" / "qab" / run_id / "manifest.json").read_text())
 
 
 def test_click_cli_reports_submission_and_each_mocked_poll(tmp_path):
@@ -387,8 +385,11 @@ def test_render_run_summary_reports_mixed_products_retries_and_failure():
         "products": ["ok", "bad", "blocked", "cancelled"],
         "nodes": {
             "ok.plan": {
-                "id": "ok.plan", "product": "ok", "operation": "plan",
-                "state": "SUCCEEDED", "started_at": "2026-08-31T00:00:00Z",
+                "id": "ok.plan",
+                "product": "ok",
+                "operation": "plan",
+                "state": "SUCCEEDED",
+                "started_at": "2026-08-31T00:00:00Z",
                 "finished_at": "2026-08-31T00:00:30Z",
                 "attempts": [
                     {"run_id": "df-1", "state": "FAILED"},
@@ -396,30 +397,47 @@ def test_render_run_summary_reports_mixed_products_retries_and_failure():
                 ],
             },
             "ok.validate": {
-                "id": "ok.validate", "product": "ok", "operation": "validate",
-                "state": "SUCCEEDED", "started_at": "2026-08-31T00:00:30Z",
-                "finished_at": "2026-08-31T00:01:05Z", "attempts": [],
+                "id": "ok.validate",
+                "product": "ok",
+                "operation": "validate",
+                "state": "SUCCEEDED",
+                "started_at": "2026-08-31T00:00:30Z",
+                "finished_at": "2026-08-31T00:01:05Z",
+                "attempts": [],
             },
             "bad.plan": {
-                "id": "bad.plan", "product": "bad", "operation": "plan",
-                "state": "SUCCEEDED", "started_at": "2026-08-31T00:00:00Z",
+                "id": "bad.plan",
+                "product": "bad",
+                "operation": "plan",
+                "state": "SUCCEEDED",
+                "started_at": "2026-08-31T00:00:00Z",
                 "finished_at": "2026-08-31T00:00:05Z",
                 "attempts": [{"run_id": "df-9", "state": "SUCCEEDED"}],
             },
             "bad.reserve": {
-                "id": "bad.reserve", "product": "bad", "operation": "reserve",
-                "state": "FAILED", "started_at": "2026-08-31T00:00:05Z",
-                "finished_at": "2026-08-31T00:00:10Z", "attempts": [],
+                "id": "bad.reserve",
+                "product": "bad",
+                "operation": "reserve",
+                "state": "FAILED",
+                "started_at": "2026-08-31T00:00:05Z",
+                "finished_at": "2026-08-31T00:00:10Z",
+                "attempts": [],
                 "error": "reservation CAS failed",
             },
             "blocked.plan": {
-                "id": "blocked.plan", "product": "blocked", "operation": "plan",
-                "state": "BLOCKED", "finished_at": "2026-08-31T00:00:10Z",
+                "id": "blocked.plan",
+                "product": "blocked",
+                "operation": "plan",
+                "state": "BLOCKED",
+                "finished_at": "2026-08-31T00:00:10Z",
                 "attempts": [],
             },
             "cancelled.plan": {
-                "id": "cancelled.plan", "product": "cancelled", "operation": "plan",
-                "state": "CANCELLED", "started_at": "2026-08-31T00:00:00Z",
+                "id": "cancelled.plan",
+                "product": "cancelled",
+                "operation": "plan",
+                "state": "CANCELLED",
+                "started_at": "2026-08-31T00:00:00Z",
                 "finished_at": "2026-08-31T00:00:02Z",
                 "attempts": [{"run_id": "df-10", "state": "CANCELLED"}],
             },
@@ -440,8 +458,7 @@ def test_render_run_summary_reports_mixed_products_retries_and_failure():
         for line in lines
     )
     assert any(
-        "failure product=bad node=bad.reserve run_id=df-9 "
-        "error=reservation CAS failed" in line
+        "failure product=bad node=bad.reserve run_id=df-9 error=reservation CAS failed" in line
         for line in lines
     )
     assert any("product=cancelled status=CANCELLED" in line for line in lines)
@@ -478,9 +495,7 @@ def test_scheduler_exception_finalizes_uploads_and_summarizes(tmp_path, monkeypa
     monkeypatch.setattr(
         P,
         "execute_plan",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            P.PipelineError("scheduler stalled")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(P.PipelineError("scheduler stalled")),
     )
 
     result = CliRunner().invoke(
@@ -583,11 +598,14 @@ def test_live_wrapper_matches_shared_oci_dataflow_operation_signatures():
     auth = {"profile": "QAB"}
 
     opts = {"application_id": "app", "compartment_id": "cmp", **auth}
-    assert adapter.create_run(
-        ["--product", "cdb"],
-        "name",
-        opts,
-    ) == "df-1"
+    assert (
+        adapter.create_run(
+            ["--product", "cdb"],
+            "name",
+            opts,
+        )
+        == "df-1"
+    )
     assert adapter.get_run_state("df-1", auth) == "SUCCEEDED"
     assert adapter.cancel_run("df-1", auth) == "CANCELING"
     assert calls == [
@@ -620,9 +638,7 @@ def test_manifest_upload_is_create_once_not_force_overwrite(tmp_path):
     adapter = P.ModuleAdapter.__new__(P.ModuleAdapter)
     adapter.module = SharedModule()
 
-    adapter.upload_file(
-        str(manifest), "oci://bucket@namespace/manifests/run.json", auth={}
-    )
+    adapter.upload_file(str(manifest), "oci://bucket@namespace/manifests/run.json", auth={})
 
     assert "--no-overwrite" in commands[0]
     assert "--force" not in commands[0]
@@ -712,9 +728,7 @@ def test_object_json_download_does_not_use_unsupported_force_flag():
     adapter = P.ModuleAdapter.__new__(P.ModuleAdapter)
     adapter.module = SharedModule()
 
-    assert adapter.read_json(
-        "oci://bucket@namespace/path/report.json", auth={}
-    ) == {"ok": True}
+    assert adapter.read_json("oci://bucket@namespace/path/report.json", auth={}) == {"ok": True}
     assert "--force" not in commands[0]
 
 
@@ -758,9 +772,7 @@ def test_single_copied_script_adopts_inputs_without_sibling_modules(tmp_path):
     fake_bin.mkdir()
     fake_oci = fake_bin / "oci"
     fake_oci.write_text(
-        "#!/bin/sh\n"
-        "printf '%s\\n' '{\"data\":[{\"name\":\"part-0\","
-        "\"etag\":\"etag-1\",\"size\":42}]}'\n"
+        '#!/bin/sh\nprintf \'%s\\n\' \'{"data":[{"name":"part-0","etag":"etag-1","size":42}]}\'\n'
     )
     fake_oci.chmod(0o755)
     environment = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"}
@@ -811,10 +823,16 @@ def test_security_token_subprocess_declines_hidden_cli_prompt(monkeypatch):
         return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
 
     monkeypatch.setattr(P.subprocess, "run", run)
-    P._run([
-        "oci", "data-flow", "application", "get",
-        "--auth", "security_token",
-    ])
+    P._run(
+        [
+            "oci",
+            "data-flow",
+            "application",
+            "get",
+            "--auth",
+            "security_token",
+        ]
+    )
 
     assert options["input"] == "n\n"
     assert options["capture_output"] is True
@@ -855,9 +873,7 @@ def test_security_token_refresh_has_visible_feedback(monkeypatch):
     def run(command, *, timeout_seconds=None):
         calls.append(list(command))
         if len(calls) == 1:
-            raise subprocess.CalledProcessError(
-                1, command, stderr="status: 401 NotAuthenticated"
-            )
+            raise subprocess.CalledProcessError(1, command, stderr="status: 401 NotAuthenticated")
         stdout = '{"data": []}' if len(calls) == 3 else ""
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
@@ -889,9 +905,7 @@ def test_mid_poll_401_uses_runner_reauthentication_callback(monkeypatch):
     def run(command, *, timeout_seconds=None, interactive=False):
         calls.append(list(command))
         if len(calls) == 1:
-            raise subprocess.CalledProcessError(
-                1, command, stderr="status: 401 NotAuthenticated"
-            )
+            raise subprocess.CalledProcessError(1, command, stderr="status: 401 NotAuthenticated")
         return subprocess.CompletedProcess(
             command, 0, stdout='{"data": {"lifecycle-state": "IN_PROGRESS"}}', stderr=""
         )
@@ -915,9 +929,7 @@ def test_invalid_data_flow_auth_probe_prompts_refresh(monkeypatch):
     def run(command, *, timeout_seconds=None):
         calls.append(list(command))
         if command[1:4] == ["data-flow", "application", "get"] and len(calls) == 1:
-            raise subprocess.CalledProcessError(
-                1, command, stderr="status: 401 NotAuthenticated"
-            )
+            raise subprocess.CalledProcessError(1, command, stderr="status: 401 NotAuthenticated")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     class Progress:
@@ -978,9 +990,7 @@ def test_valid_session_is_refreshed_before_submitting_long_run(monkeypatch):
 
 def test_auth_refresh_interval_triggers_during_polling(monkeypatch):
     adapter = P.ModuleAdapter(auth_refresh_seconds=1800)
-    adapter._auth_context = (
-        {"auth": "security_token"}, True, lambda _message: True, "app"
-    )
+    adapter._auth_context = ({"auth": "security_token"}, True, lambda _message: True, "app")
     adapter._last_auth_refresh = 100
     refreshed = []
     monkeypatch.setattr(P.time, "monotonic", lambda: 2000)
@@ -1027,9 +1037,7 @@ def test_non_auth_data_flow_probe_error_does_not_prompt(monkeypatch):
 
 def test_auth_prompt_can_be_disabled(monkeypatch):
     def invalid(command, *, timeout_seconds=None):
-        raise subprocess.CalledProcessError(
-            1, command, stderr="status: 401 NotAuthenticated"
-        )
+        raise subprocess.CalledProcessError(1, command, stderr="status: 401 NotAuthenticated")
 
     monkeypatch.setattr(P, "_run", invalid)
     adapter = P.ModuleAdapter(timeout_seconds=5)
@@ -1079,19 +1087,21 @@ def test_failed_refresh_prompts_browser_authentication(monkeypatch, tmp_path):
         application_id="ocid1.dataflowapplication.test",
     )
 
-    authenticate = next(
-        command for command in calls if command[1:3] == ["session", "authenticate"]
-    )
+    authenticate = next(command for command in calls if command[1:3] == ["session", "authenticate"])
     assert prompts == [
         "OCI security-token session is invalid. Refresh it now?",
         "OCI session refresh failed. Start browser authentication now?",
     ]
     assert authenticate[authenticate.index("--region") + 1] == "sa-saopaulo-1"
     assert authenticate[authenticate.index("--profile-name") + 1] == "QAB"
-    assert next(
-        interactive for command, interactive in interactive_calls
-        if command[1:3] == ["session", "authenticate"]
-    ) is True
+    assert (
+        next(
+            interactive
+            for command, interactive in interactive_calls
+            if command[1:3] == ["session", "authenticate"]
+        )
+        is True
+    )
 
 
 def test_refresh_that_leaves_session_invalid_falls_back_to_browser(monkeypatch):
@@ -1122,9 +1132,7 @@ def test_refresh_that_leaves_session_invalid_falls_back_to_browser(monkeypatch):
         application_id="ocid1.dataflowapplication.test",
     )
 
-    assert any(
-        command[1:3] == ["session", "authenticate"] for command in calls
-    )
+    assert any(command[1:3] == ["session", "authenticate"] for command in calls)
     assert validations == 3
 
 
@@ -1155,9 +1163,7 @@ def test_dry_run_is_offline_and_prints_resolved_argv(tmp_path, capsys):
     assert plan_argv[plan_argv.index("--query-num-if-sql") + 1] == (
         "oci://source@namespace/queries_produtos.sql"
     )
-    materialize_argv = output["nodes"][
-        "cdb_simplificado.engorda.materialize"
-    ]["arguments"]
+    materialize_argv = output["nodes"]["cdb_simplificado.engorda.materialize"]["arguments"]
     assert "--reservation-uri" in materialize_argv
     assert "--faltantes-parquet" in materialize_argv
     assert materialize_argv[materialize_argv.index("--query-num-if-sql") + 1] == (
@@ -1174,23 +1180,24 @@ def test_osias_is_forwarded_only_to_every_validator_data_flow_argv(tmp_path, cap
     config = write_config(tmp_path)
     upstream = write_upstream(tmp_path, products=("cdb_simplificado", "lci"))
 
-    assert P.main(
-        run_args(
-            tmp_path,
-            config,
-            upstream,
-            "--product",
-            "lci",
-            "--dry-run",
-            "--osias",
-        ),
-        adapter=NoCallsAdapter(),
-    ) == 0
+    assert (
+        P.main(
+            run_args(
+                tmp_path,
+                config,
+                upstream,
+                "--product",
+                "lci",
+                "--dry-run",
+                "--osias",
+            ),
+            adapter=NoCallsAdapter(),
+        )
+        == 0
+    )
 
     plan = json.loads(capsys.readouterr().out)
-    validator_nodes = [
-        node for node in plan["nodes"].values() if node["operation"] == "validate"
-    ]
+    validator_nodes = [node for node in plan["nodes"].values() if node["operation"] == "validate"]
     other_data_flow_nodes = [
         node
         for node in plan["nodes"].values()
@@ -1208,23 +1215,24 @@ def test_osias_has_no_product_config_or_set_support(tmp_path, capsys):
     payload["products"]["cdb_simplificado"]["validate"] = {"osias": True}
     config.write_text(json.dumps(payload))
 
-    assert P.main(
-        run_args(tmp_path, config, upstream, "--dry-run"), adapter=NoCallsAdapter()
-    ) == 2
+    assert P.main(run_args(tmp_path, config, upstream, "--dry-run"), adapter=NoCallsAdapter()) == 2
     assert "contains unsupported option(s): osias" in capsys.readouterr().err
 
     config = write_config(tmp_path)
-    assert P.main(
-        run_args(
-            tmp_path,
-            config,
-            upstream,
-            "--dry-run",
-            "--set",
-            "cdb_simplificado.validate.osias=true",
-        ),
-        adapter=NoCallsAdapter(),
-    ) == 2
+    assert (
+        P.main(
+            run_args(
+                tmp_path,
+                config,
+                upstream,
+                "--dry-run",
+                "--set",
+                "cdb_simplificado.validate.osias=true",
+            ),
+            adapter=NoCallsAdapter(),
+        )
+        == 2
+    )
     assert "--set option is not allowed" in capsys.readouterr().err
 
 
@@ -1243,7 +1251,9 @@ def test_validation_gate_attests_requested_osias_mode():
     assert ordinary["osias_matches"]
 
     required = P._validation_gate(
-        report, expected_product="lci", expected_input="oci://bucket/input",
+        report,
+        expected_product="lci",
+        expected_input="oci://bucket/input",
         require_osias=True,
     )
     assert not required["accepted"]
@@ -1251,7 +1261,9 @@ def test_validation_gate_attests_requested_osias_mode():
 
     report["osias"] = True
     required = P._validation_gate(
-        report, expected_product="lci", expected_input="oci://bucket/input",
+        report,
+        expected_product="lci",
+        expected_input="oci://bucket/input",
         require_osias=True,
     )
     assert required["accepted"]
@@ -1272,10 +1284,13 @@ def test_genai_dry_run_resolves_conditional_plan_contract(tmp_path, capsys):
     config.write_text(json.dumps(payload))
     upstream = write_upstream(tmp_path)
 
-    assert P.main(
-        run_args(tmp_path, config, upstream, "--dry-run", "--enable-genai"),
-        adapter=NoCallsAdapter(),
-    ) == 0
+    assert (
+        P.main(
+            run_args(tmp_path, config, upstream, "--dry-run", "--enable-genai"),
+            adapter=NoCallsAdapter(),
+        )
+        == 0
+    )
 
     plan = json.loads(capsys.readouterr().out)
     plan_node = plan["nodes"]["cdb_simplificado.engorda.plan"]
@@ -1357,20 +1372,14 @@ def test_load_dry_run_needs_no_approval_and_uses_exact_artifacts(tmp_path, capsy
     assert plan["load_contract"]["approval_required"] is True
     assert plan["load_contract"]["approved"] is False
     assert node["input_uri"] == "oci://source@namespace/synthetic/cdb_simplificado"
-    assert node["validation_report_uri"].endswith(
-        "/validation/cdb_simplificado/report.json"
-    )
-    assert node["output_uri"].endswith(
-        "/products/cdb_simplificado/load/manifest.json"
-    )
+    assert node["validation_report_uri"].endswith("/validation/cdb_simplificado/report.json")
+    assert node["output_uri"].endswith("/products/cdb_simplificado/load/manifest.json")
     assert node["arguments"][node["arguments"].index("--run-id") + 1] == "run-001"
     assert "--skip-validation" in node["arguments"]
     assert "--continue-on-error" not in node["arguments"]
 
 
-def test_no_oracle_propagates_to_both_engorda_phases_and_marks_artifact(
-    tmp_path, capsys
-):
+def test_no_oracle_propagates_to_both_engorda_phases_and_marks_artifact(tmp_path, capsys):
     config = write_config(tmp_path)
     upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
     args = run_args(tmp_path, config, upstream, "--dry-run", "--no-oracle")
@@ -1378,21 +1387,13 @@ def test_no_oracle_propagates_to_both_engorda_phases_and_marks_artifact(
     assert P.main(args, adapter=NoCallsAdapter()) == 0
 
     plan = json.loads(capsys.readouterr().out)
-    assert "--no-oracle" in plan["nodes"][
-        "cdb_simplificado.engorda.plan"
-    ]["arguments"]
-    assert "--no-oracle" in plan["nodes"][
-        "cdb_simplificado.engorda.materialize"
-    ]["arguments"]
-    assert "--no-oracle" in plan["nodes"][
-        "cdb_simplificado.validate"
-    ]["arguments"]
+    assert "--no-oracle" in plan["nodes"]["cdb_simplificado.engorda.plan"]["arguments"]
+    assert "--no-oracle" in plan["nodes"]["cdb_simplificado.engorda.materialize"]["arguments"]
+    assert "--no-oracle" in plan["nodes"]["cdb_simplificado.validate"]["arguments"]
     synthetic = plan["artifacts"]["products"]["cdb_simplificado"]["synthetic"]
     assert synthetic["oracle_access"] == "disabled"
     assert synthetic["load_eligible"] is False
-    report = plan["artifacts"]["products"]["cdb_simplificado"][
-        "validation_report"
-    ]
+    report = plan["artifacts"]["products"]["cdb_simplificado"]["validation_report"]
     assert report["oracle_access"] == "disabled"
     assert report["load_eligible"] is False
 
@@ -1407,18 +1408,18 @@ def test_validate_only_no_oracle_propagates_without_engorda(tmp_path, capsys):
     assert P.main(args, adapter=NoCallsAdapter()) == 0
     plan = json.loads(capsys.readouterr().out)
     assert set(plan["nodes"]) == {"cdb_simplificado.validate"}
-    assert "--no-oracle" in plan["nodes"]["cdb_simplificado.validate"][
-        "arguments"
-    ]
+    assert "--no-oracle" in plan["nodes"]["cdb_simplificado.validate"]["arguments"]
 
 
 def test_global_no_oracle_cannot_be_disabled_by_product_config_or_set(tmp_path, capsys):
     config = write_config(tmp_path)
     payload = json.loads(config.read_text())
-    payload["products"]["cdb_simplificado"].update({
-        "engorda": {"no_oracle": False},
-        "validate": {"no_oracle": False},
-    })
+    payload["products"]["cdb_simplificado"].update(
+        {
+            "engorda": {"no_oracle": False},
+            "validate": {"no_oracle": False},
+        }
+    )
     config.write_text(json.dumps(payload))
     upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
     args = run_args(
@@ -1435,22 +1436,20 @@ def test_global_no_oracle_cannot_be_disabled_by_product_config_or_set(tmp_path, 
 
     assert P.main(args, adapter=NoCallsAdapter()) == 0
     plan = json.loads(capsys.readouterr().out)
-    assert "--no-oracle" in plan["nodes"][
-        "cdb_simplificado.engorda.plan"
-    ]["arguments"]
-    assert "--no-oracle" in plan["nodes"]["cdb_simplificado.validate"][
-        "arguments"
-    ]
+    assert "--no-oracle" in plan["nodes"]["cdb_simplificado.engorda.plan"]["arguments"]
+    assert "--no-oracle" in plan["nodes"]["cdb_simplificado.validate"]["arguments"]
 
 
 def test_validate_only_inherits_no_oracle_from_upstream_synthetic(tmp_path, capsys):
     config = write_config(tmp_path)
     upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
     payload = json.loads(upstream.read_text())
-    payload["artifacts"]["products"]["cdb_simplificado"]["synthetic"].update({
-        "oracle_access": "disabled",
-        "load_eligible": False,
-    })
+    payload["artifacts"]["products"]["cdb_simplificado"]["synthetic"].update(
+        {
+            "oracle_access": "disabled",
+            "load_eligible": False,
+        }
+    )
     upstream.write_text(json.dumps(payload))
     args = run_args(tmp_path, config, upstream, "--dry-run")
     args[args.index("--from") + 1] = "validate"
@@ -1458,12 +1457,8 @@ def test_validate_only_inherits_no_oracle_from_upstream_synthetic(tmp_path, caps
 
     assert P.main(args, adapter=NoCallsAdapter()) == 0
     plan = json.loads(capsys.readouterr().out)
-    assert "--no-oracle" in plan["nodes"]["cdb_simplificado.validate"][
-        "arguments"
-    ]
-    report = plan["artifacts"]["products"]["cdb_simplificado"][
-        "validation_report"
-    ]
+    assert "--no-oracle" in plan["nodes"]["cdb_simplificado.validate"]["arguments"]
+    report = plan["artifacts"]["products"]["cdb_simplificado"]["validation_report"]
     assert report["oracle_access"] == "disabled"
     assert report["load_eligible"] is False
 
@@ -1480,9 +1475,7 @@ def test_no_oracle_interval_cannot_include_load(tmp_path, capsys):
 
 def test_per_product_no_oracle_override_only_changes_target_branch(tmp_path, capsys):
     config = write_config(tmp_path)
-    upstream = write_upstream(
-        tmp_path, products=("cdb_simplificado", "lci")
-    )
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado", "lci"))
     args = run_args(
         tmp_path,
         config,
@@ -1496,25 +1489,17 @@ def test_per_product_no_oracle_override_only_changes_target_branch(tmp_path, cap
 
     assert P.main(args, adapter=NoCallsAdapter()) == 0
     plan = json.loads(capsys.readouterr().out)
-    assert "--no-oracle" in plan["nodes"][
-        "cdb_simplificado.engorda.plan"
-    ]["arguments"]
+    assert "--no-oracle" in plan["nodes"]["cdb_simplificado.engorda.plan"]["arguments"]
     assert "--no-oracle" not in plan["nodes"]["lci.engorda.plan"]["arguments"]
     assert "--no-oracle" in plan["nodes"]["cdb_simplificado.validate"]["arguments"]
     assert "--no-oracle" not in plan["nodes"]["lci.validate"]["arguments"]
-    assert plan["artifacts"]["products"]["cdb_simplificado"]["synthetic"][
-        "load_eligible"
-    ] is False
-    assert plan["artifacts"]["products"]["lci"]["synthetic"][
-        "load_eligible"
-    ] is True
+    assert plan["artifacts"]["products"]["cdb_simplificado"]["synthetic"]["load_eligible"] is False
+    assert plan["artifacts"]["products"]["lci"]["synthetic"]["load_eligible"] is True
 
 
 def test_mixed_product_load_rejects_one_offline_override(tmp_path, capsys):
     config = write_config(tmp_path)
-    upstream = write_upstream(
-        tmp_path, products=("cdb_simplificado", "lci")
-    )
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado", "lci"))
     args = run_args(
         tmp_path,
         config,
@@ -1553,10 +1538,12 @@ def test_load_only_rejects_offline_upstream_metadata(tmp_path, capsys):
     config = write_config(tmp_path)
     upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
     payload = json.loads(upstream.read_text())
-    payload["artifacts"]["products"]["cdb_simplificado"]["synthetic"].update({
-        "oracle_access": "disabled",
-        "load_eligible": False,
-    })
+    payload["artifacts"]["products"]["cdb_simplificado"]["synthetic"].update(
+        {
+            "oracle_access": "disabled",
+            "load_eligible": False,
+        }
+    )
     upstream.write_text(json.dumps(payload))
     args = run_args(tmp_path, config, upstream, "--dry-run")
     args[args.index("--from") + 1] = "load"
@@ -1570,12 +1557,12 @@ def test_load_only_rejects_offline_validation_report_metadata(tmp_path, capsys):
     config = write_config(tmp_path)
     upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
     payload = json.loads(upstream.read_text())
-    payload["artifacts"]["products"]["cdb_simplificado"][
-        "validation_report"
-    ].update({
-        "oracle_access": "disabled",
-        "load_eligible": False,
-    })
+    payload["artifacts"]["products"]["cdb_simplificado"]["validation_report"].update(
+        {
+            "oracle_access": "disabled",
+            "load_eligible": False,
+        }
+    )
     upstream.write_text(json.dumps(payload))
     args = run_args(tmp_path, config, upstream, "--dry-run")
     args[args.index("--from") + 1] = "load"
@@ -1589,18 +1576,14 @@ def test_reused_synthetic_descriptor_becomes_upstream_producer(tmp_path, capsys)
     config = write_config(tmp_path)
     upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
     payload = json.loads(upstream.read_text())
-    payload["artifacts"]["products"]["cdb_simplificado"]["synthetic"][
-        "producer"
-    ] = "current_run"
+    payload["artifacts"]["products"]["cdb_simplificado"]["synthetic"]["producer"] = "current_run"
     upstream.write_text(json.dumps(payload))
     args = run_args(tmp_path, config, upstream, "--dry-run")
     args[args.index("--from") + 1] = "validate"
 
     assert P.main(args, adapter=NoCallsAdapter()) == 0
     plan = json.loads(capsys.readouterr().out)
-    assert plan["artifacts"]["products"]["cdb_simplificado"]["synthetic"][
-        "producer"
-    ] == "upstream"
+    assert plan["artifacts"]["products"]["cdb_simplificado"]["synthetic"]["producer"] == "upstream"
 
 
 def test_live_load_requires_explicit_approval_before_remote_calls(tmp_path, capsys):
@@ -1640,17 +1623,19 @@ def test_synthetic_output_uri_is_exact_across_plan_materialize_validator_and_art
         validator_node = plan["nodes"][f"{product}.validate"]
         output_uris.append(artifact_uri)
 
-        assert plan_node["arguments"][
-            plan_node["arguments"].index("--output-uri") + 1
-        ] == artifact_uri
-        assert materialize_node["arguments"][
-            materialize_node["arguments"].index("--output-uri") + 1
-        ] == artifact_uri
+        assert (
+            plan_node["arguments"][plan_node["arguments"].index("--output-uri") + 1] == artifact_uri
+        )
+        assert (
+            materialize_node["arguments"][materialize_node["arguments"].index("--output-uri") + 1]
+            == artifact_uri
+        )
         assert materialize_node["output_uri"] == artifact_uri
         assert validator_node["input_uri"] == artifact_uri
-        assert validator_node["arguments"][
-            validator_node["arguments"].index("--input-base") + 1
-        ] == artifact_uri
+        assert (
+            validator_node["arguments"][validator_node["arguments"].index("--input-base") + 1]
+            == artifact_uri
+        )
 
     assert len(set(output_uris)) == 2
 
@@ -1767,9 +1752,7 @@ def test_validated_set_applies_only_to_target_product_and_stage(tmp_path, capsys
     assert "option is not allowed" in capsys.readouterr().err
 
 
-def test_product_config_overrides_global_size_and_set_overrides_product_config(
-    tmp_path, capsys
-):
+def test_product_config_overrides_global_size_and_set_overrides_product_config(tmp_path, capsys):
     config = write_config(tmp_path)
     payload = json.loads(config.read_text())
     payload["products"]["lci"]["engorda"] = {
@@ -1826,9 +1809,7 @@ def test_config_is_one_environment_and_rejects_unsupported_registry_entries(tmp_
 def test_legacy_product_subset_config_remains_valid(tmp_path):
     config = write_config(tmp_path)
     payload = json.loads(config.read_text())
-    payload["products"] = {
-        product: payload["products"][product] for product in LEGACY_PRODUCTS
-    }
+    payload["products"] = {product: payload["products"][product] for product in LEGACY_PRODUCTS}
     config.write_text(json.dumps(payload))
 
     loaded = P.load_config(config)
@@ -1872,14 +1853,10 @@ def test_config_rejects_invalid_product_stage_options(tmp_path, engorda, error):
 
 
 @pytest.mark.parametrize("command", ["run", "adopt-inputs"])
-def test_selected_registry_product_must_be_enabled_in_config(
-    tmp_path, capsys, command
-):
+def test_selected_registry_product_must_be_enabled_in_config(tmp_path, capsys, command):
     config = write_config(tmp_path)
     payload = json.loads(config.read_text())
-    payload["products"] = {
-        product: payload["products"][product] for product in LEGACY_PRODUCTS
-    }
+    payload["products"] = {product: payload["products"][product] for product in LEGACY_PRODUCTS}
     config.write_text(json.dumps(payload))
 
     if command == "run":
@@ -1957,18 +1934,21 @@ def test_adopt_inputs_dry_run_is_offline_and_normal_mode_validates_uris(tmp_path
     assert all(call[2] == {"profile": "QAB"} for call in adapter.calls)
 
 
-def test_adopt_validate_only_product_requires_and_records_synthetic_uri(
-    tmp_path, capsys
-):
+def test_adopt_validate_only_product_requires_and_records_synthetic_uri(tmp_path, capsys):
     config = write_config(tmp_path)
     output = tmp_path / "lastro-inputs.json"
     argv = [
         "adopt-inputs",
-        "--config", str(config),
-        "--product", "lastro",
-        "--raw-uri", "oci://source@namespace/raw",
-        "--faltantes-uri", "oci://source@namespace/faltantes",
-        "--output-manifest", str(output),
+        "--config",
+        str(config),
+        "--product",
+        "lastro",
+        "--raw-uri",
+        "oci://source@namespace/raw",
+        "--faltantes-uri",
+        "oci://source@namespace/faltantes",
+        "--output-manifest",
+        str(output),
     ]
 
     assert P.main([*argv, "--dry-run"], adapter=NoCallsAdapter()) == 2
@@ -1980,16 +1960,16 @@ def test_adopt_validate_only_product_requires_and_records_synthetic_uri(
     dry = json.loads(capsys.readouterr().out)
     assert dry["artifacts"]["products"]["lastro"]["synthetic"]["uri"] == synthetic
 
-    adapter = FakeAdapter(existing=(
-        "oci://source@namespace/raw",
-        "oci://source@namespace/faltantes",
-        synthetic,
-    ))
+    adapter = FakeAdapter(
+        existing=(
+            "oci://source@namespace/raw",
+            "oci://source@namespace/faltantes",
+            synthetic,
+        )
+    )
     assert P.main(argv, adapter=adapter) == 0
     adopted = json.loads(output.read_text())
-    assert adopted["artifacts"]["products"]["lastro"]["synthetic"][
-        "producer"
-    ] == "external"
+    assert adopted["artifacts"]["products"]["lastro"]["synthetic"]["producer"] == "external"
 
 
 def test_dependency_execution_is_concurrent_and_isolates_failed_branch(tmp_path):
@@ -2025,9 +2005,7 @@ def test_dependency_execution_is_concurrent_and_isolates_failed_branch(tmp_path)
 
 def test_loads_are_serial_in_product_order_and_failure_does_not_block_next(tmp_path):
     config = write_config(tmp_path)
-    upstream = write_upstream(
-        tmp_path, products=("cdb_simplificado", "lci")
-    )
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado", "lci"))
     args = run_args(
         tmp_path,
         config,
@@ -2076,9 +2054,10 @@ def test_load_claim_blocks_unmarked_second_attempt(tmp_path):
         call for call in adapter.created.values() if "--manifest-uri" in call["arguments"]
     ]
     assert len(load_calls) == 1
-    assert "already exists" in read_run_manifest(tmp_path, run_id="run-002")["nodes"][
-        "cdb_simplificado.load"
-    ]["error"]
+    assert (
+        "already exists"
+        in read_run_manifest(tmp_path, run_id="run-002")["nodes"]["cdb_simplificado.load"]["error"]
+    )
 
 
 def test_resume_rejects_a_load_known_to_have_succeeded(tmp_path):
@@ -2090,10 +2069,7 @@ def test_resume_rejects_a_load_known_to_have_succeeded(tmp_path):
     first[first.index("engorda")] = "load"
     first[first.index("validate")] = "load"
     assert P.main(first, adapter=adapter) == 0
-    prior = (
-        "oci://bucket@namespace/runs/qab/run-001/products/"
-        "cdb_simplificado/load/manifest.json"
-    )
+    prior = "oci://bucket@namespace/runs/qab/run-001/products/cdb_simplificado/load/manifest.json"
 
     second = run_args(
         tmp_path,
@@ -2108,9 +2084,7 @@ def test_resume_rejects_a_load_known_to_have_succeeded(tmp_path):
     second[second.index("run-001")] = "run-002"
 
     assert P.main(second, adapter=adapter) == 1
-    error = read_run_manifest(tmp_path, "run-002")["nodes"][
-        "cdb_simplificado.load"
-    ]["error"]
+    error = read_run_manifest(tmp_path, "run-002")["nodes"]["cdb_simplificado.load"]["error"]
     assert "known to have succeeded" in error
 
 
@@ -2120,17 +2094,13 @@ def test_failed_current_validation_blocks_dependent_load(tmp_path):
     args = run_args(tmp_path, config, upstream, "--approve-load")
     args[args.index("--from") + 1] = "validate"
     args[args.index("--to") + 1] = "load"
-    adapter = FakeAdapter(
-        reports={"cdb_simplificado": {"verdict": "FAIL", "counts": {"error": 1}}}
-    )
+    adapter = FakeAdapter(reports={"cdb_simplificado": {"verdict": "FAIL", "counts": {"error": 1}}})
 
     assert P.main(args, adapter=adapter) == 1
     manifest = read_run_manifest(tmp_path)
     assert manifest["nodes"]["cdb_simplificado.validate"]["state"] == "FAILED"
     assert manifest["nodes"]["cdb_simplificado.load"]["state"] == "BLOCKED"
-    assert not [
-        call for call in adapter.created.values() if "--manifest-uri" in call["arguments"]
-    ]
+    assert not [call for call in adapter.created.values() if "--manifest-uri" in call["arguments"]]
 
 
 def test_load_rejects_noncanonical_report_before_creating_claim(tmp_path):
@@ -2151,8 +2121,7 @@ def test_load_rejects_noncanonical_report_before_creating_claim(tmp_path):
 
     assert P.main(args, adapter=adapter) == 1
     assert not [
-        payload for payload in adapter.objects.values()
-        if payload.get("kind") == "load-claim"
+        payload for payload in adapter.objects.values() if payload.get("kind") == "load-claim"
     ]
     assert not adapter.created
 
@@ -2163,17 +2132,20 @@ def test_load_rejects_no_oracle_report_before_creating_claim(tmp_path):
     args = run_args(tmp_path, config, upstream, "--approve-load")
     args[args.index("--from") + 1] = "load"
     args[args.index("--to") + 1] = "load"
-    adapter = FakeAdapter(reports={"cdb_simplificado": {
-        "verdict": "PARTIAL",
-        "counts": {"error": 0},
-        "oracle_access": "disabled",
-        "load_eligible": False,
-    }})
+    adapter = FakeAdapter(
+        reports={
+            "cdb_simplificado": {
+                "verdict": "PARTIAL",
+                "counts": {"error": 0},
+                "oracle_access": "disabled",
+                "load_eligible": False,
+            }
+        }
+    )
 
     assert P.main(args, adapter=adapter) == 1
     assert not [
-        payload for payload in adapter.objects.values()
-        if payload.get("kind") == "load-claim"
+        payload for payload in adapter.objects.values() if payload.get("kind") == "load-claim"
     ]
     assert not adapter.created
 
@@ -2184,19 +2156,19 @@ def test_load_detects_offline_marker_before_creating_claim(tmp_path):
     args = run_args(tmp_path, config, upstream, "--approve-load")
     args[args.index("--from") + 1] = "load"
     args[args.index("--to") + 1] = "load"
-    marker_uri = (
-        "oci://source@namespace/synthetic/cdb_simplificado/"
-        f"{P.OFFLINE_ARTIFACT_MARKER}"
+    marker_uri = f"oci://source@namespace/synthetic/cdb_simplificado/{P.OFFLINE_ARTIFACT_MARKER}"
+    adapter = FakeAdapter(
+        objects={
+            marker_uri: {
+                "artifact_type": "datagen_offline_synthetic",
+                "load_eligible": False,
+            }
+        }
     )
-    adapter = FakeAdapter(objects={marker_uri: {
-        "artifact_type": "datagen_offline_synthetic",
-        "load_eligible": False,
-    }})
 
     assert P.main(args, adapter=adapter) == 1
     assert not [
-        payload for payload in adapter.objects.values()
-        if payload.get("kind") == "load-claim"
+        payload for payload in adapter.objects.values() if payload.get("kind") == "load-claim"
     ]
     assert not adapter.created
 
@@ -2214,10 +2186,7 @@ def test_ambiguous_submit_failure_retains_load_claim(tmp_path):
 
     adapter = SubmitFailureAdapter()
     assert P.main(args, adapter=adapter) == 1
-    assert [
-        payload for payload in adapter.objects.values()
-        if payload.get("kind") == "load-claim"
-    ]
+    assert [payload for payload in adapter.objects.values() if payload.get("kind") == "load-claim"]
     assert adapter.load_lease_releases == 0
     assert adapter.load_lease_quarantines
 
@@ -2262,19 +2231,19 @@ def test_validation_report_must_match_product_and_exact_input(tmp_path):
     args = run_args(tmp_path, config, upstream)
     args[args.index("cdb_simplificado")] = "cdb_resgate"
     args[args.index("engorda")] = "validate"
-    adapter = FakeAdapter(reports={
-        "cdb_resgate": {
-            "verdict": "PASS",
-            "counts": {"error": 0},
-            "product": "rdb",
-            "resolved_input": "oci://wrong@namespace/output",
+    adapter = FakeAdapter(
+        reports={
+            "cdb_resgate": {
+                "verdict": "PASS",
+                "counts": {"error": 0},
+                "product": "rdb",
+                "resolved_input": "oci://wrong@namespace/output",
+            }
         }
-    })
+    )
 
     assert P.main(args, adapter=adapter) == 1
-    validation = read_run_manifest(tmp_path)["nodes"]["cdb_resgate.validate"][
-        "validation"
-    ]
+    validation = read_run_manifest(tmp_path)["nodes"]["cdb_resgate.validate"]["validation"]
     assert validation["accepted"] is False
     assert validation["product_matches"] is False
     assert validation["input_matches"] is False
@@ -2324,21 +2293,16 @@ def test_existing_local_or_remote_run_path_is_rejected(tmp_path, capsys):
 
     local.rmdir()
     remote = "oci://bucket@namespace/runs/qab/run-001"
-    assert P.main(
-        run_args(tmp_path, config, upstream), adapter=FakeAdapter(existing=(remote,))
-    ) == 2
+    assert (
+        P.main(run_args(tmp_path, config, upstream), adapter=FakeAdapter(existing=(remote,))) == 2
+    )
     assert "immutable OCI run path already exists" in capsys.readouterr().err
 
 
-def test_existing_materialize_output_fails_before_manifest_submit_or_reserve(
-    tmp_path, capsys
-):
+def test_existing_materialize_output_fails_before_manifest_submit_or_reserve(tmp_path, capsys):
     config = write_config(tmp_path)
     upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
-    synthetic = (
-        "oci://bucket@namespace/runs/qab/run-001/products/"
-        "cdb_simplificado/synthetic"
-    )
+    synthetic = "oci://bucket@namespace/runs/qab/run-001/products/cdb_simplificado/synthetic"
     adapter = FakeAdapter(existing=(synthetic,))
 
     assert P.main(run_args(tmp_path, config, upstream), adapter=adapter) == 2

@@ -4,6 +4,7 @@ Fans datagen/save_tables.py out across N size-balanced, concurrent OCI Data Flow
 runs of one Application. Standalone local driver (no datagen.* import); oracledb is
 lazy-imported only for the live size fetch.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -24,7 +25,7 @@ logger = logging.getLogger("parallel_extract")
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Z][A-Z0-9_$#]*$")
 DEFAULT_ORACLE_PORT = "1521"
-DEFAULT_SOURCE_SCHEMA = "CETIP"   # source tables live in CETIP; the login user may differ
+DEFAULT_SOURCE_SCHEMA = "CETIP"  # source tables live in CETIP; the login user may differ
 
 
 def valid_identifier(name: str) -> str:
@@ -51,6 +52,7 @@ def parse_tables(tables: str | None, tables_file: str | None) -> list[str]:
         parsed = [t.strip() for t in tables.split(",")]
     else:
         from pathlib import Path
+
         lines = Path(tables_file or "").read_text().splitlines()
         parsed = [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
     deduped = list(dict.fromkeys(t for t in parsed if t))
@@ -78,13 +80,13 @@ def jdbc_url_to_dsn(jdbc_url: str) -> str:
     prefix = "jdbc:oracle:thin:@"
     if not jdbc_url.startswith(prefix):
         raise ValueError(f"Not an Oracle thin JDBC URL: {jdbc_url!r}")
-    body = jdbc_url[len(prefix):]
-    if body.startswith("//"):                       # //host:port/service
+    body = jdbc_url[len(prefix) :]
+    if body.startswith("//"):  # //host:port/service
         host_port, _, service = body[2:].partition("/")
         host, _, port = host_port.partition(":")
         port = port or DEFAULT_ORACLE_PORT
         return f"{host}:{port}/{service}"
-    parts = body.split(":")                          # host[:port]:sid
+    parts = body.split(":")  # host[:port]:sid
     if len(parts) == 3:
         host, port, sid = parts
     elif len(parts) == 2:
@@ -95,57 +97,91 @@ def jdbc_url_to_dsn(jdbc_url: str) -> str:
 
 
 def parse_arguments():
-    p = argparse.ArgumentParser(description="Fan save_tables.py out across concurrent "
-                                            "OCI Data Flow runs, size-balanced.")
+    p = argparse.ArgumentParser(
+        description="Fan save_tables.py out across concurrent OCI Data Flow runs, size-balanced."
+    )
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--tables", help="Comma-separated source table list (OWNER.TABLE or TABLE).")
     src.add_argument("--tables-file", help="Local file, one table per line (# comments ok).")
-    src.add_argument("--specs", help="specs.json path; extracts every table in it "
-                                     "(static and non-static).")
+    src.add_argument(
+        "--specs", help="specs.json path; extracts every table in it (static and non-static)."
+    )
     # env-or-flag: default from env, validated after parse (required=True would ignore the env)
     p.add_argument("--application-id", default=os.environ.get("DATAGEN_DATAFLOW_APP_ID"))
     p.add_argument("--compartment-id", default=os.environ.get("DATAGEN_OCI_COMPARTMENT_ID"))
-    p.add_argument("--owner", default=os.environ.get("DATAGEN_SOURCE_SCHEMA",
-                                                      DEFAULT_SOURCE_SCHEMA),
-                   help="Default schema/owner for unqualified table names (default CETIP; "
-                        "env DATAGEN_SOURCE_SCHEMA). The connecting user may differ.")
+    p.add_argument(
+        "--owner",
+        default=os.environ.get("DATAGEN_SOURCE_SCHEMA", DEFAULT_SOURCE_SCHEMA),
+        help="Default schema/owner for unqualified table names (default CETIP; "
+        "env DATAGEN_SOURCE_SCHEMA). The connecting user may differ.",
+    )
     p.add_argument("--max-concurrent-runs", type=int, default=4)
-    p.add_argument("--num-buckets", type=int, default=None,
-                   help="Default = --max-concurrent-runs.")
+    p.add_argument("--num-buckets", type=int, default=None, help="Default = --max-concurrent-runs.")
     p.add_argument("--max-retries", type=int, default=1)
     p.add_argument("--poll-seconds", type=int, default=30)
     # Shape flags default to None -> omitted -> the run inherits the Application's config.
-    p.add_argument("--num-executors", type=int, default=None,
-                   help="Override executor count (default: inherit from the Application).")
-    p.add_argument("--driver-shape", default=None,
-                   help="Override driver shape (default: inherit from the Application).")
-    p.add_argument("--executor-shape", default=None,
-                   help="Override executor shape (default: inherit from the Application).")
+    p.add_argument(
+        "--num-executors",
+        type=int,
+        default=None,
+        help="Override executor count (default: inherit from the Application).",
+    )
+    p.add_argument(
+        "--driver-shape",
+        default=None,
+        help="Override driver shape (default: inherit from the Application).",
+    )
+    p.add_argument(
+        "--executor-shape",
+        default=None,
+        help="Override executor shape (default: inherit from the Application).",
+    )
     p.add_argument("--driver-shape-config", default=None)
     p.add_argument("--executor-shape-config", default=None)
     p.add_argument("--profile", default=None, help="OCI CLI profile name.")
     p.add_argument("--config-file", default=None, help="OCI CLI config file path.")
-    p.add_argument("--auth", default=None,
-                   help="OCI CLI auth mode (e.g. security_token, api_key, instance_principal).")
-    p.add_argument("--cert-bundle", default=None,
-                   help="CA bundle path passed to OCI CLI (corporate/VDI SSL inspection).")
-    p.add_argument("--passthrough", default="",
-                   help="Extra save_tables flags appended to run arguments, e.g. "
-                        "'--continue-on-error'.")
-    p.add_argument("--allow-equal-weight-fallback", action="store_true",
-                   help="If the source is unreachable, bucket on equal weights instead of "
-                        "failing.")
-    p.add_argument("--include-fk-parents", action="store_true",
-                   help="Expand the table set with the direct (1-level) FK parents of the "
-                        "seed tables, read from the live source ALL_CONSTRAINTS graph. "
-                        "Requires a reachable source.")
-    p.add_argument("--sizes-report", default=None,
-                   help="Write the per-table resolved-tier + weight report to this JSON path.")
-    p.add_argument("--dry-run", action="store_true",
-                   help="Plan (sizes + buckets + commands) and exit without submitting.")
+    p.add_argument(
+        "--auth",
+        default=None,
+        help="OCI CLI auth mode (e.g. security_token, api_key, instance_principal).",
+    )
+    p.add_argument(
+        "--cert-bundle",
+        default=None,
+        help="CA bundle path passed to OCI CLI (corporate/VDI SSL inspection).",
+    )
+    p.add_argument(
+        "--passthrough",
+        default="",
+        help="Extra save_tables flags appended to run arguments, e.g. '--continue-on-error'.",
+    )
+    p.add_argument(
+        "--allow-equal-weight-fallback",
+        action="store_true",
+        help="If the source is unreachable, bucket on equal weights instead of failing.",
+    )
+    p.add_argument(
+        "--include-fk-parents",
+        action="store_true",
+        help="Expand the table set with the direct (1-level) FK parents of the "
+        "seed tables, read from the live source ALL_CONSTRAINTS graph. "
+        "Requires a reachable source.",
+    )
+    p.add_argument(
+        "--sizes-report",
+        default=None,
+        help="Write the per-table resolved-tier + weight report to this JSON path.",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Plan (sizes + buckets + commands) and exit without submitting.",
+    )
     args = p.parse_args()
-    env_for = {"application_id": "DATAGEN_DATAFLOW_APP_ID",
-               "compartment_id": "DATAGEN_OCI_COMPARTMENT_ID"}
+    env_for = {
+        "application_id": "DATAGEN_DATAFLOW_APP_ID",
+        "compartment_id": "DATAGEN_OCI_COMPARTMENT_ID",
+    }
     for name, env in env_for.items():
         if not getattr(args, name):
             p.error(f"--{name.replace('_', '-')} is required (flag or env {env}).")
@@ -153,14 +189,23 @@ def parse_arguments():
 
 
 def _opts_from_args(a) -> dict:
-    return dict(application_id=a.application_id, compartment_id=a.compartment_id,
-                num_executors=a.num_executors, driver_shape=a.driver_shape,
-                executor_shape=a.executor_shape, driver_shape_config=a.driver_shape_config,
-                executor_shape_config=a.executor_shape_config,
-                passthrough=a.passthrough.split() if a.passthrough else [],
-                max_concurrent_runs=a.max_concurrent_runs, max_retries=a.max_retries,
-                poll_seconds=a.poll_seconds, profile=a.profile, config_file=a.config_file,
-                auth=a.auth, cert_bundle=a.cert_bundle)
+    return dict(
+        application_id=a.application_id,
+        compartment_id=a.compartment_id,
+        num_executors=a.num_executors,
+        driver_shape=a.driver_shape,
+        executor_shape=a.executor_shape,
+        driver_shape_config=a.driver_shape_config,
+        executor_shape_config=a.executor_shape_config,
+        passthrough=a.passthrough.split() if a.passthrough else [],
+        max_concurrent_runs=a.max_concurrent_runs,
+        max_retries=a.max_retries,
+        poll_seconds=a.poll_seconds,
+        profile=a.profile,
+        config_file=a.config_file,
+        auth=a.auth,
+        cert_bundle=a.cert_bundle,
+    )
 
 
 def oci_auth_flags(opts) -> list:
@@ -172,37 +217,45 @@ def build_plan(weights: dict, num_buckets: int, opts: dict, provenance: dict) ->
     buckets = bin_pack(weights, num_buckets)
     plan_buckets = []
     for i, bucket in enumerate(buckets):
-        plan_buckets.append({
-            "index": i,
-            "keys": bucket,                          # raw (owner, table) tuples
-            "tables": [f"{o}.{t}" for o, t in bucket],
-            "weight": sum(weights[k] for k in bucket),
-            "command": build_run_create_command(bucket, i, opts) if bucket else None,
-        })
+        plan_buckets.append(
+            {
+                "index": i,
+                "keys": bucket,  # raw (owner, table) tuples
+                "tables": [f"{o}.{t}" for o, t in bucket],
+                "weight": sum(weights[k] for k in bucket),
+                "command": build_run_create_command(bucket, i, opts) if bucket else None,
+            }
+        )
     nonempty = [b["weight"] for b in plan_buckets if b["weight"] > 0]
     skew = (max(nonempty) / min(nonempty)) if nonempty else 1.0
-    sizes_report = {k: {"weight": weights[k], "tier": provenance.get(k, "median")}
-                    for k in weights}
+    sizes_report = {k: {"weight": weights[k], "tier": provenance.get(k, "median")} for k in weights}
     return {"buckets": plan_buckets, "balance_skew": skew, "sizes_report": sizes_report}
 
 
 def main():
     args = parse_arguments()
-    raw_tables = (tables_from_specs(args.specs) if args.specs
-                  else parse_tables(args.tables, args.tables_file))
+    raw_tables = (
+        tables_from_specs(args.specs) if args.specs else parse_tables(args.tables, args.tables_file)
+    )
     keys = [split_owner_table(t, args.owner) for t in raw_tables]
     if args.include_fk_parents:
         before = len(keys)
         keys = expand_fk_parents(keys)
-        logger.info("FK parents: %d seed table(s) -> %d total (+%d parents)",
-                    before, len(keys), len(keys) - before)
+        logger.info(
+            "FK parents: %d seed table(s) -> %d total (+%d parents)",
+            before,
+            len(keys),
+            len(keys) - before,
+        )
     opts = _opts_from_args(args)
     weights, provenance = resolve_sizes(
-        keys, connect=connect_source, allow_fallback=args.allow_equal_weight_fallback)
+        keys, connect=connect_source, allow_fallback=args.allow_equal_weight_fallback
+    )
     num_buckets = args.num_buckets or args.max_concurrent_runs
     plan = build_plan(weights, num_buckets, opts, provenance)
     if args.sizes_report:
         from pathlib import Path
+
         str_report = {f"{o}.{t}": v for (o, t), v in plan["sizes_report"].items()}
         Path(args.sizes_report).write_text(json.dumps(str_report, indent=2))
         logger.info("Sizes report written to %s", args.sizes_report)
@@ -210,14 +263,15 @@ def main():
         logger.info("DRY RUN — balance_skew=%.2f", plan["balance_skew"])
         for b in plan["buckets"]:
             cmd = shlex.join(b["command"]) if b["command"] else "(empty bucket)"
-            logger.info("bucket %d  tables=%s  weight=%.0f\n  %s",
-                        b["index"], b["tables"], b["weight"], cmd)
+            logger.info(
+                "bucket %d  tables=%s  weight=%.0f\n  %s", b["index"], b["tables"], b["weight"], cmd
+            )
         sys.exit(0)
     buckets = [b["keys"] for b in plan["buckets"]]
     results = run_buckets(buckets, opts)
-    manifest = {"results": [
-        {**r, "tables": [f"{o}.{t}" for o, t in (r["tables"] or [])]}
-        for r in results]}
+    manifest = {
+        "results": [{**r, "tables": [f"{o}.{t}" for o, t in (r["tables"] or [])]} for r in results]
+    }
     print(json.dumps(manifest, indent=2))
     if any(r["state"] == "FAILED" for r in results):
         sys.exit(1)
@@ -268,10 +322,13 @@ def run_buckets(buckets, opts, submit=submit_run, poll=poll_run, _after_terminal
     submit/poll are injectable for tests. With poll_seconds==0 no sleeping occurs.
     """
     results = [dict(tables=b, run_id=None, state=None, retries=0) for b in buckets]
-    pending = [i for i, b in enumerate(buckets) if b]    # skip empty buckets
-    in_flight: dict = {}                                 # index -> run_id
-    cap, max_retries, wait = (opts["max_concurrent_runs"], opts["max_retries"],
-                              opts["poll_seconds"])
+    pending = [i for i, b in enumerate(buckets) if b]  # skip empty buckets
+    in_flight: dict = {}  # index -> run_id
+    cap, max_retries, wait = (
+        opts["max_concurrent_runs"],
+        opts["max_retries"],
+        opts["poll_seconds"],
+    )
     while pending or in_flight:
         while pending and len(in_flight) < cap:
             i = pending.pop(0)
@@ -288,7 +345,7 @@ def run_buckets(buckets, opts, submit=submit_run, poll=poll_run, _after_terminal
                 results[i]["state"] = "SUCCEEDED"
             elif results[i]["retries"] < max_retries:
                 results[i]["retries"] += 1
-                pending.append(i)                        # retry
+                pending.append(i)  # retry
             else:
                 results[i]["state"] = "FAILED"
         if wait and in_flight:
@@ -296,7 +353,7 @@ def run_buckets(buckets, opts, submit=submit_run, poll=poll_run, _after_terminal
     return results
 
 
-NOMINAL_AVG_ROW_LEN = 100   # bytes/row; tier-1 only needs relative ordering (soft constant)
+NOMINAL_AVG_ROW_LEN = 100  # bytes/row; tier-1 only needs relative ordering (soft constant)
 
 
 def tier4_count_sql(owner: str, table: str) -> str:
@@ -317,11 +374,12 @@ def _owners_in_clause(owners):
 def connect_source():
     """Lazy-import oracledb; connect to the on-prem source. Raises on failure."""
     import oracledb  # lazy: not needed for unit tests
+
     dsn = jdbc_url_to_dsn(os.environ["DATAGEN_SOURCE_JDBC_URL"])
     user = os.environ.get("DATAGEN_SOURCE_DB_USER", "")
     password = os.environ["DATAGEN_SOURCE_DB_PASSWORD"]
     conn = oracledb.connect(user=user, password=password, dsn=dsn)
-    conn.cursor().execute("SELECT 1 FROM dual").fetchone()   # tier-0 probe
+    conn.cursor().execute("SELECT 1 FROM dual").fetchone()  # tier-0 probe
     return conn
 
 
@@ -345,22 +403,34 @@ def fetch_size_tiers(conn, keys) -> list:
                 key, val = row_to_kv(row)
                 if key in wanted and val is not None:
                     out[key] = float(val)
-        except Exception as exc:                              # noqa: BLE001 - tier fallthrough
+        except Exception as exc:  # noqa: BLE001 - tier fallthrough
             logger.warning("size tier %s failed (fallthrough): %s", label, exc)
         return out
 
-    tiers.append(run("dba_segments",
-        f"SELECT OWNER, SEGMENT_NAME, SUM(BYTES) FROM DBA_SEGMENTS "
-        f"WHERE OWNER IN ({placeholders}) AND SEGMENT_TYPE LIKE 'TABLE%' "
-        f"GROUP BY OWNER, SEGMENT_NAME",
-        lambda r: ((r[0], r[1]), bytes_to_rows(r[2]) if r[2] else None)))
-    tiers.append(run("all_tables",
-        f"SELECT OWNER, TABLE_NAME, NUM_ROWS FROM ALL_TABLES WHERE OWNER IN ({placeholders})",
-        lambda r: ((r[0], r[1]), r[2])))
-    tiers.append(run("all_tab_statistics",
-        f"SELECT OWNER, TABLE_NAME, NUM_ROWS FROM ALL_TAB_STATISTICS "
-        f"WHERE OWNER IN ({placeholders}) AND PARTITION_NAME IS NULL",
-        lambda r: ((r[0], r[1]), r[2])))
+    tiers.append(
+        run(
+            "dba_segments",
+            f"SELECT OWNER, SEGMENT_NAME, SUM(BYTES) FROM DBA_SEGMENTS "
+            f"WHERE OWNER IN ({placeholders}) AND SEGMENT_TYPE LIKE 'TABLE%' "
+            f"GROUP BY OWNER, SEGMENT_NAME",
+            lambda r: ((r[0], r[1]), bytes_to_rows(r[2]) if r[2] else None),
+        )
+    )
+    tiers.append(
+        run(
+            "all_tables",
+            f"SELECT OWNER, TABLE_NAME, NUM_ROWS FROM ALL_TABLES WHERE OWNER IN ({placeholders})",
+            lambda r: ((r[0], r[1]), r[2]),
+        )
+    )
+    tiers.append(
+        run(
+            "all_tab_statistics",
+            f"SELECT OWNER, TABLE_NAME, NUM_ROWS FROM ALL_TAB_STATISTICS "
+            f"WHERE OWNER IN ({placeholders}) AND PARTITION_NAME IS NULL",
+            lambda r: ((r[0], r[1]), r[2]),
+        )
+    )
 
     # tier 4: per still-missing key (after merging 1-3), sampled count
     resolved = set()
@@ -372,8 +442,8 @@ def fetch_size_tiers(conn, keys) -> list:
             cur = conn.cursor()
             n = cur.execute(tier4_count_sql(owner, table)).fetchone()[0]
             if n:
-                tier4[(owner, table)] = float(n) * 1000.0     # 0.1% sample -> scale up
-        except Exception as exc:                              # noqa: BLE001
+                tier4[(owner, table)] = float(n) * 1000.0  # 0.1% sample -> scale up
+        except Exception as exc:  # noqa: BLE001
             logger.warning("size tier sample(%s.%s) failed: %s", owner, table, exc)
     tiers.append(tier4)
     return tiers
@@ -397,11 +467,13 @@ def fetch_fk_edges(conn, owners) -> list:
     parent table. Owners are bound as values.
     """
     placeholders, binds = _owners_in_clause(owners)
-    sql = (f"SELECT c.OWNER, c.TABLE_NAME, r.OWNER, r.TABLE_NAME "
-           f"FROM ALL_CONSTRAINTS c "
-           f"JOIN ALL_CONSTRAINTS r ON c.R_OWNER = r.OWNER "
-           f"AND c.R_CONSTRAINT_NAME = r.CONSTRAINT_NAME "
-           f"WHERE c.CONSTRAINT_TYPE = 'R' AND c.OWNER IN ({placeholders})")
+    sql = (
+        f"SELECT c.OWNER, c.TABLE_NAME, r.OWNER, r.TABLE_NAME "
+        f"FROM ALL_CONSTRAINTS c "
+        f"JOIN ALL_CONSTRAINTS r ON c.R_OWNER = r.OWNER "
+        f"AND c.R_CONSTRAINT_NAME = r.CONSTRAINT_NAME "
+        f"WHERE c.CONSTRAINT_TYPE = 'R' AND c.OWNER IN ({placeholders})"
+    )
     cur = conn.cursor()
     cur.execute(sql, binds)
     return [((row[0], row[1]), (row[2], row[3])) for row in cur]
@@ -416,9 +488,10 @@ def expand_fk_parents(keys, connect=connect_source) -> list:
     owners = {o for o, _ in keys}
     try:
         conn = connect()
-    except Exception as exc:                                  # noqa: BLE001
-        logger.error("--include-fk-parents needs a reachable source to read the FK "
-                     "graph (%s).", exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "--include-fk-parents needs a reachable source to read the FK graph (%s).", exc
+        )
         sys.exit(2)
     try:
         edges = fetch_fk_edges(conn, owners)
@@ -439,10 +512,13 @@ def resolve_sizes(keys, connect=connect_source, allow_fallback=False):
     """
     try:
         conn = connect()
-    except Exception as exc:                                  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         if not allow_fallback:
-            logger.error("Source unreachable (%s). Pass --allow-equal-weight-fallback to "
-                         "bucket on equal weights instead.", exc)
+            logger.error(
+                "Source unreachable (%s). Pass --allow-equal-weight-fallback to "
+                "bucket on equal weights instead.",
+                exc,
+            )
             sys.exit(2)
         logger.warning("Source unreachable (%s); falling back to equal weights.", exc)
         return ({k: 1.0 for k in keys}, {k: "equal-weight-fallback" for k in keys})
@@ -461,10 +537,14 @@ def build_run_create_command(bucket: list, index: int, opts: dict) -> list:
     """Build the argv for `oci data-flow run create` for one bucket. Pure."""
     tables = ",".join(f"{owner}.{name}" for owner, name in bucket)
     arguments = ["--tables", tables, *opts["passthrough"]]
-    adapter_opts = {key: value for key, value in opts.items()
-                    if key not in {"profile", "config_file", "auth", "cert_bundle"}}
+    adapter_opts = {
+        key: value
+        for key, value in opts.items()
+        if key not in {"profile", "config_file", "auth", "cert_bundle"}
+    }
     command = oci_dataflow.build_run_create_command(
-        arguments, f"extract-bucket-{index}", adapter_opts)
+        arguments, f"extract-bucket-{index}", adapter_opts
+    )
     return command + oci_auth_flags(opts)
 
 
@@ -502,8 +582,7 @@ def merge_size_tiers(keys, tier_dicts) -> dict:
     if resolved:
         ordered = sorted(resolved.values())
         mid = len(ordered) // 2
-        median = (ordered[mid] if len(ordered) % 2
-                  else (ordered[mid - 1] + ordered[mid]) / 2)
+        median = ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
     else:
         median = 1.0
     return {key: resolved.get(key, median) for key in keys}

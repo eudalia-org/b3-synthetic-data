@@ -44,14 +44,28 @@ from __future__ import annotations
 import csv
 import json
 from collections import defaultdict
-from typing import Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+
+if TYPE_CHECKING:
+    from pyspark.sql import SparkSession
 
 
 TABELAS_ALVO = {
-    "INSTRUMENTO_FINANCEIRO", "CONDICAO_IF", "CARTEIRA_COMITENTE",
-    "CARTEIRA_PARTICIPANTE", "CREDITO", "DEPOSITO_AUTOMATICO_IF", "TITULO",
-    "JUROS_FLUTUANTE", "RESGATE", "EVENTO", "OPERACAO", "ESPECIFICACAO",
-    "LANCAMENTO", "DADO_OPERACAO", "ESPECIFICACAO_COMITENTE",
+    "INSTRUMENTO_FINANCEIRO",
+    "CONDICAO_IF",
+    "CARTEIRA_COMITENTE",
+    "CARTEIRA_PARTICIPANTE",
+    "CREDITO",
+    "DEPOSITO_AUTOMATICO_IF",
+    "TITULO",
+    "JUROS_FLUTUANTE",
+    "RESGATE",
+    "EVENTO",
+    "OPERACAO",
+    "ESPECIFICACAO",
+    "LANCAMENTO",
+    "DADO_OPERACAO",
+    "ESPECIFICACAO_COMITENTE",
 }
 
 
@@ -61,12 +75,12 @@ def _norm(s: str) -> str:
 
 # ---- fontes de verdade (banco) ----
 
+
 def _pks_banco(caminho: str) -> Dict[str, Tuple[str, ...]]:
     acc: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
     with open(caminho, newline="", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
-            acc[_norm(row["TABLE_NAME"])].append(
-                (int(row["POSITION"]), _norm(row["COLUMN_NAME"])))
+            acc[_norm(row["TABLE_NAME"])].append((int(row["POSITION"]), _norm(row["COLUMN_NAME"])))
     return {t: tuple(c for _, c in sorted(v)) for t, v in acc.items()}
 
 
@@ -83,13 +97,13 @@ def _fks_banco(caminho: str) -> Set[FkKey]:
         for row in reader:
             cn = _norm(row["CONSTRAINT_NAME"])
             meta[cn] = (_norm(row["CHILD_TABLE"]), _norm(row["PARENT_TABLE"]))
-            cols[cn].append((int(row["COL_POSITION"]),
-                             _norm(row["CHILD_COLUMN"]), _norm(row["PARENT_COLUMN"])))
+            cols[cn].append(
+                (int(row["COL_POSITION"]), _norm(row["CHILD_COLUMN"]), _norm(row["PARENT_COLUMN"]))
+            )
     out: Set[FkKey] = set()
     for cn, (child, parent) in meta.items():
         trips = sorted(cols[cn])
-        out.add((child, tuple(c for _, c, _ in trips),
-                 parent, tuple(p for _, _, p in trips)))
+        out.add((child, tuple(c for _, c, _ in trips), parent, tuple(p for _, _, p in trips)))
     return out
 
 
@@ -104,11 +118,12 @@ def _notnull_banco(caminho: str) -> Set[Tuple[str, str]]:
 
 # ---- specs ----
 
+
 def _fks_specs(specs: dict) -> Set[FkKey]:
     out: Set[FkKey] = set()
     for t, cfg in specs.items():
         child = _norm(t)
-        for fk in (cfg.get("foreign_keys") or cfg.get("fks") or []):
+        for fk in cfg.get("foreign_keys") or cfg.get("fks") or []:
             if not isinstance(fk, dict):
                 continue
             cols = tuple(_norm(c) for c in (fk.get("columns") or []))
@@ -126,6 +141,7 @@ def _fmt_fk(fk: FkKey) -> str:
 
 # ---- parquet ----
 
+
 def _tem_parquet(spark, bases, table, disp) -> Optional[bool]:
     if disp is not None:
         return table in disp
@@ -141,6 +157,7 @@ def _tem_parquet(spark, bases, table, disp) -> Optional[bool]:
 
 
 # ---- orquestração ----
+
 
 def valida(
     *,
@@ -175,6 +192,7 @@ def valida(
     disp = {_norm(x) for x in parquet_disponivel} if parquet_disponivel else None
 
     parq_cache: Dict[str, Optional[bool]] = {}
+
     def tem_parquet(t: str) -> Optional[bool]:
         if t not in parq_cache:
             parq_cache[t] = _tem_parquet(spark, parquet_bases, t, disp)
@@ -189,7 +207,7 @@ def valida(
 
     # C3 — pai referenciado sem bloco
     for t, cfg in specs.items():
-        for fk in (cfg.get("foreign_keys") or []):
+        for fk in cfg.get("foreign_keys") or []:
             p = _norm(fk.get("parent_table"))
             if p and p not in specs:
                 criticos.append(f"C3: FK {t}.{fk.get('columns')} -> `{p}` sem bloco no specs.")
@@ -205,7 +223,7 @@ def valida(
     # C5 — FK NOT NULL cujo pai não tem parquet -> ORA-01400
     # C7 — FK (nullable) cujo pai não tem parquet -> órfã anulada (alerta)
     for t, cfg in specs.items():
-        for fk in (cfg.get("foreign_keys") or []):
+        for fk in cfg.get("foreign_keys") or []:
             p = _norm(fk.get("parent_table"))
             cols = [_norm(c) for c in (fk.get("columns") or [])]
             if not p or p not in specs:
@@ -219,11 +237,13 @@ def valida(
             if nn_cols:
                 criticos.append(
                     f"C5: FK NOT NULL {t}.{nn_cols} -> `{p}` ({estado}). "
-                    "Coluna será anulada -> ORA-01400 no append.")
+                    "Coluna será anulada -> ORA-01400 no append."
+                )
             else:
                 alertas.append(
                     f"C7: FK {t}.{cols} -> `{p}` ({estado}). Nullable: "
-                    "será anulada se órfã (não quebra append).")
+                    "será anulada se órfã (não quebra append)."
+                )
 
     # C6 — PK specs vs banco
     for t, cfg in specs.items():
@@ -268,18 +288,24 @@ def _print_resultado(criticos: List[str], alertas: List[str]) -> bool:
 
 if __name__ == "__main__":
     import sys
+
     if len(sys.argv) < 5:
         raise SystemExit(
             "Uso: python valida_spec_final.py spec_config.json pk_real.csv "
-            "fk_real.csv cols_real.csv [parquet_disp,sep,virgula]")
+            "fk_real.csv cols_real.csv [parquet_disp,sep,virgula]"
+        )
     disp = set(sys.argv[5].split(",")) if len(sys.argv) > 5 else None
-    valida(spec_json=sys.argv[1], pk_csv=sys.argv[2], fk_csv=sys.argv[3],
-           cols_csv=sys.argv[4], parquet_disponivel=disp)
+    valida(
+        spec_json=sys.argv[1],
+        pk_csv=sys.argv[2],
+        fk_csv=sys.argv[3],
+        cols_csv=sys.argv[4],
+        parquet_disponivel=disp,
+    )
 
 
-
-
-from valida_spec_final import valida
+# Notebook example: the caller provides an existing Spark session.
+spark: SparkSession = globals()["spark"]
 
 valida(
     spec_json="spec_config.json",

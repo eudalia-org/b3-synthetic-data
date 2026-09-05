@@ -24,9 +24,7 @@ SNAPSHOT_ID = "00000000-0000-4000-8000-000000000001"
 def with_plan_id(body):
     body = {key: value for key, value in body.items() if key != "plan_id"}
     digest = hashlib.sha256(
-        json.dumps(
-            body, ensure_ascii=True, sort_keys=True, separators=(",", ":")
-        ).encode("ascii")
+        json.dumps(body, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
     ).hexdigest()
     return {**body, "plan_id": digest}
 
@@ -62,12 +60,14 @@ def plan(
                     "row_count": count,
                     "schema": {
                         "type": "struct",
-                        "fields": [{
-                            "name": "ID",
-                            "type": "long",
-                            "nullable": True,
-                            "metadata": {},
-                        }],
+                        "fields": [
+                            {
+                                "name": "ID",
+                                "type": "long",
+                                "nullable": True,
+                                "metadata": {},
+                            }
+                        ],
                     },
                 }
                 for table, count in sorted(table_source_counts.items())
@@ -79,12 +79,14 @@ def plan(
                     "row_count": 1,
                     "schema": {
                         "type": "struct",
-                        "fields": [{
-                            "name": "TABELA",
-                            "type": "string",
-                            "nullable": False,
-                            "metadata": {},
-                        }],
+                        "fields": [
+                            {
+                                "name": "TABELA",
+                                "type": "string",
+                                "nullable": False,
+                                "metadata": {},
+                            }
+                        ],
                     },
                 }
                 if selective_missing
@@ -99,7 +101,7 @@ def plan(
                     "count_demand": table_count,
                     "step": step,
                     "minimum_start": minimum,
-                }
+                },
             },
             "SEM_PK_PROPRIA": {
                 "source_count": 0,
@@ -108,14 +110,13 @@ def plan(
                     "count_demand": 0,
                     "step": 1,
                     "minimum_start": None,
-                }
+                },
             },
         },
         "cod_operacao": {"count": cod_count},
         "meu_numero": {
             "ordinal_count_demand": meu_count,
-            **({"requested_prefix": requested_prefix}
-               if requested_prefix is not None else {}),
+            **({"requested_prefix": requested_prefix} if requested_prefix is not None else {}),
         },
     }
     return with_plan_id(body)
@@ -137,15 +138,9 @@ def grouped_plan(
         "operational_date": operational_date,
         "normalization": "trim_strip_decimal_zeroes_v1",
         "tuple_count_demand": sum(group["count_demand"] for group in groups),
-        "ordinal_count_demand": max(
-            (group["count_demand"] for group in groups), default=0
-        ),
+        "ordinal_count_demand": max((group["count_demand"] for group in groups), default=0),
         "groups": groups,
-        **(
-            {"requested_prefix": requested_prefix}
-            if requested_prefix is not None
-            else {}
-        ),
+        **({"requested_prefix": requested_prefix} if requested_prefix is not None else {}),
     }
     return with_plan_id(request)
 
@@ -243,9 +238,7 @@ def test_allocates_schema_compatible_ranges_and_keeps_oracle_as_cod_authority():
         "schema_version": 2,
         "plan_id": plan(REQUEST_A, "plan-a")["plan_id"],
         "product": "cdb_simplificado",
-        "table_pks": {
-            "OPERACAO": {"count": 3, "start": 100, "end": 104, "step": 2}
-        },
+        "table_pks": {"OPERACAO": {"count": 3, "start": 100, "end": 104, "step": 2}},
         "cod_operacao": {"strategy": "oracle_allocator", "count": 7},
         "meu_numero": {
             "strategy": "legacy_global_v1",
@@ -339,9 +332,7 @@ def test_external_selected_lote_uri_is_rejected_before_lease_or_ledger():
     [
         lambda descriptor: descriptor.update(artifact_type="wrong"),
         lambda descriptor: descriptor.update(schema_version=2),
-        lambda descriptor: descriptor.update(
-            snapshot_id="00000000-0000-4000-8000-00000000000A"
-        ),
+        lambda descriptor: descriptor.update(snapshot_id="00000000-0000-4000-8000-00000000000A"),
         lambda descriptor: descriptor.update(snapshot_uri=""),
         lambda descriptor: descriptor.update(table_set=list(reversed(descriptor["table_set"]))),
         lambda descriptor: descriptor["tables"].pop("OPERACAO"),
@@ -565,10 +556,10 @@ def test_concurrent_disjoint_groups_reuse_same_interval():
         for future in futures:
             future.result()
 
-    assert [
-        store.json(uri)["meu_numero"]["start"]
-        for uri in (RESERVATION_A, RESERVATION_B)
-    ] == [1, 1]
+    assert [store.json(uri)["meu_numero"]["start"] for uri in (RESERVATION_A, RESERVATION_B)] == [
+        1,
+        1,
+    ]
 
 
 def test_concurrent_overlapping_groups_get_non_overlapping_intervals():
@@ -830,14 +821,17 @@ def test_expired_lease_is_taken_over_but_live_lease_is_not():
 def test_quarantined_lease_never_expires_automatically():
     store = FakeStorage()
     store.seed(REQUEST_A, plan(REQUEST_A, "plan-a"))
-    store.seed(LEASE, {
-        "artifact_type": "pipeline_environment_lease",
-        "schema_version": 1,
-        "environment": "qab",
-        "run_id": "ambiguous-load",
-        "quarantined": True,
-        "expires_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
-    })
+    store.seed(
+        LEASE,
+        {
+            "artifact_type": "pipeline_environment_lease",
+            "schema_version": 1,
+            "environment": "qab",
+            "run_id": "ambiguous-load",
+            "quarantined": True,
+            "expires_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+        },
+    )
 
     with pytest.raises(R.LeaseUnavailable, match="quarantined"):
         reserve(store, REQUEST_A, RESERVATION_A, "run-a")

@@ -31,8 +31,7 @@ from collections import defaultdict
 
 def _norm_row(raw: dict) -> dict:
     return {
-        (k or "").strip().upper(): (v.strip() if isinstance(v, str) else v)
-        for k, v in raw.items()
+        (k or "").strip().upper(): (v.strip() if isinstance(v, str) else v) for k, v in raw.items()
     }
 
 
@@ -130,10 +129,12 @@ def _emit(schema: dict) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate schema.json from Oracle column + constraint dumps.")
+        description="Generate schema.json from Oracle column + constraint dumps."
+    )
     parser.add_argument("--columns", required=True, help="CSV from extract_schema.sql")
-    parser.add_argument("--constraints", required=True,
-                        help="CSV from extract_constraints.sql (U rows reused)")
+    parser.add_argument(
+        "--constraints", required=True, help="CSV from extract_constraints.sql (U rows reused)"
+    )
     parser.add_argument("--out", default="schema.json", help="Output schema.json path")
     args = parser.parse_args()
 

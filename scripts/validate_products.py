@@ -60,6 +60,7 @@ Usage
       --product cdb_simplificado --report-path report.json \
       --fail-severity error --validate-against union
 """
+
 from __future__ import annotations
 
 import argparse
@@ -102,24 +103,25 @@ def _check_is_skipped(check_id: str, skip_prefixes: List[str]) -> bool:
     return any(check_id.startswith(prefix) for prefix in skip_prefixes)
 
 
-def _check_group_is_skipped(check_prefixes: Tuple[str, ...],
-                            skip_prefixes: List[str]) -> bool:
+def _check_group_is_skipped(check_prefixes: Tuple[str, ...], skip_prefixes: List[str]) -> bool:
     return bool(check_prefixes) and all(
-        any(prefix.startswith(skip) for skip in skip_prefixes)
-        for prefix in check_prefixes
+        any(prefix.startswith(skip) for skip in skip_prefixes) for prefix in check_prefixes
     )
 
 
-def _run_check_group(label: str, check_prefixes: Tuple[str, ...],
-                     skip_prefixes: List[str], operation) -> List["Finding"]:
+def _run_check_group(
+    label: str, check_prefixes: Tuple[str, ...], skip_prefixes: List[str], operation
+) -> List["Finding"]:
     """Skip a whole check group before Spark work when every check is excluded."""
     if _check_group_is_skipped(check_prefixes, skip_prefixes):
         logger.info("Skipped %s before execution (--skip-check).", label)
         return []
     return [
-        finding for finding in _timed(label, operation)
+        finding
+        for finding in _timed(label, operation)
         if not _check_is_skipped(finding.check_id, skip_prefixes)
     ]
+
 
 ORACLE_DRIVER = "oracle.jdbc.OracleDriver"
 
@@ -170,12 +172,30 @@ CONDICAO_IF_TIPO_COL = "COD_TIPO_CONDICAO_IF"
 # CondicaoIFDO.hbm.xml during this pass, so an observed instance is reported as
 # `1b.unknown_tipo` (WARN) for review rather than silently accepted.
 EXPECTED_CONDICAO_TYPE_CODES: Dict[str, str] = {
-    "1": "AMORTIZACAO", "2": "JUROS_FIXO", "3": "JUROS_FLUTUANTE", "4": "ATUALIZACAO_POS",
-    "5": "SPREAD", "6": "PARTICIPACAO_NOS_LUCROS", "7": "PREMIO", "8": "TRIGGER_IN",
-    "14": "ATUALIZACAO_PRE", "15": "PREMIO_OPCAO", "16": "TERMO", "17": "PARAMETRO_LIMITE",
-    "18": "TRIGGER_OUT", "19": "TERMO_MOEDA", "20": "RESGATE", "21": "PREMIO_CONTRATO",
-    "22": "OPCAO", "23": "RESET", "24": "DESDOBRAMENTO", "25": "TERMO_COMMODITY",
-    "26": "PAGTO_MONETARIO", "27": "TERMO_INDICE", "28": "CORRECAO", "29": "TERMO_FLUXO",
+    "1": "AMORTIZACAO",
+    "2": "JUROS_FIXO",
+    "3": "JUROS_FLUTUANTE",
+    "4": "ATUALIZACAO_POS",
+    "5": "SPREAD",
+    "6": "PARTICIPACAO_NOS_LUCROS",
+    "7": "PREMIO",
+    "8": "TRIGGER_IN",
+    "14": "ATUALIZACAO_PRE",
+    "15": "PREMIO_OPCAO",
+    "16": "TERMO",
+    "17": "PARAMETRO_LIMITE",
+    "18": "TRIGGER_OUT",
+    "19": "TERMO_MOEDA",
+    "20": "RESGATE",
+    "21": "PREMIO_CONTRATO",
+    "22": "OPCAO",
+    "23": "RESET",
+    "24": "DESDOBRAMENTO",
+    "25": "TERMO_COMMODITY",
+    "26": "PAGTO_MONETARIO",
+    "27": "TERMO_INDICE",
+    "28": "CORRECAO",
+    "29": "TERMO_FLUXO",
     "30": "TRIGGER_CCP",
 }
 # Codes with a physical subclass table still pending confirmation (must be reviewed against
@@ -284,10 +304,24 @@ CAP_GRAVAME_GRAPH = "gravame_graph"
 CAP_GRAVAME_TARGET_ELIGIBILITY = "gravame_target_eligibility"
 
 ALL_CAPABILITIES: Tuple[str, ...] = (
-    CAP_IDENTITY, CAP_DOMAIN, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
-    CAP_CAPACITY, CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_LOOKUP_TOS,
-    CAP_PLATFORM, CAP_ACCOUNT, CAP_MODALIDADE, CAP_COD_IF_FORMAT,
-    CAP_COD_OPERACAO_FORMAT, CAP_MEU_NUMERO, CAP_SHAPE, CAP_REGISTRATION_PROFILE,
+    CAP_IDENTITY,
+    CAP_DOMAIN,
+    CAP_POLYMORPHISM,
+    CAP_REFERENTIAL,
+    CAP_NOT_NULL,
+    CAP_CAPACITY,
+    CAP_DATES,
+    CAP_PRIMARY_KEYS,
+    CAP_CLONE_MAP,
+    CAP_LOOKUP_TOS,
+    CAP_PLATFORM,
+    CAP_ACCOUNT,
+    CAP_MODALIDADE,
+    CAP_COD_IF_FORMAT,
+    CAP_COD_OPERACAO_FORMAT,
+    CAP_MEU_NUMERO,
+    CAP_SHAPE,
+    CAP_REGISTRATION_PROFILE,
 )
 
 # Hard shape-rule identifiers (subset toggled per product via hard_shape_rules).
@@ -327,61 +361,144 @@ _SIMPLIFICADO_REQUIRED = ALL_CAPABILITIES
 # profiles remain simplificado-only, while one RESGATE parent with a variable child schedule
 # applies to every CDB. CDB object service 44 and the CDB code prefix are evidence-backed.
 _CDB_REQUIRED = (
-    CAP_IDENTITY, CAP_DOMAIN, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
-    CAP_CAPACITY, CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_LOOKUP_TOS,
-    CAP_PLATFORM, CAP_ACCOUNT, CAP_MODALIDADE, CAP_COD_IF_FORMAT,
-    CAP_COD_OPERACAO_FORMAT, CAP_MEU_NUMERO,
+    CAP_IDENTITY,
+    CAP_DOMAIN,
+    CAP_POLYMORPHISM,
+    CAP_REFERENTIAL,
+    CAP_NOT_NULL,
+    CAP_CAPACITY,
+    CAP_DATES,
+    CAP_PRIMARY_KEYS,
+    CAP_CLONE_MAP,
+    CAP_LOOKUP_TOS,
+    CAP_PLATFORM,
+    CAP_ACCOUNT,
+    CAP_MODALIDADE,
+    CAP_COD_IF_FORMAT,
+    CAP_COD_OPERACAO_FORMAT,
+    CAP_MEU_NUMERO,
 )
-_CDB_SUPPORTED = tuple(
-    capability for capability in _CDB_REQUIRED if capability != CAP_POLYMORPHISM
-)
+_CDB_SUPPORTED = tuple(capability for capability in _CDB_REQUIRED if capability != CAP_POLYMORPHISM)
 # RDB — structural mode plus evidence-backed registration accounts and quantity graph.
 # Broad lookup combinations, subtype allow-list, shape, and registration profile remain blocked.
 _RDB_REQUIRED = (
-    CAP_IDENTITY, CAP_DOMAIN, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
-    CAP_CAPACITY, CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_LOOKUP_TOS,
-    CAP_COD_OPERACAO_FORMAT, CAP_MEU_NUMERO,
+    CAP_IDENTITY,
+    CAP_DOMAIN,
+    CAP_POLYMORPHISM,
+    CAP_REFERENTIAL,
+    CAP_NOT_NULL,
+    CAP_CAPACITY,
+    CAP_DATES,
+    CAP_PRIMARY_KEYS,
+    CAP_CLONE_MAP,
+    CAP_LOOKUP_TOS,
+    CAP_COD_OPERACAO_FORMAT,
+    CAP_MEU_NUMERO,
     # Blocked pending evidence — required so their absence is reported, not silently skipped:
-    CAP_PLATFORM, CAP_ACCOUNT, CAP_MODALIDADE, CAP_COD_IF_FORMAT, CAP_SHAPE,
+    CAP_PLATFORM,
+    CAP_ACCOUNT,
+    CAP_MODALIDADE,
+    CAP_COD_IF_FORMAT,
+    CAP_SHAPE,
     CAP_REGISTRATION_PROFILE,
 )
 _RDB_SUPPORTED = (
-    CAP_IDENTITY, CAP_DOMAIN, CAP_REFERENTIAL, CAP_NOT_NULL, CAP_CAPACITY,
-    CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_COD_OPERACAO_FORMAT,
-    CAP_MEU_NUMERO, CAP_ACCOUNT,
+    CAP_IDENTITY,
+    CAP_DOMAIN,
+    CAP_REFERENTIAL,
+    CAP_NOT_NULL,
+    CAP_CAPACITY,
+    CAP_DATES,
+    CAP_PRIMARY_KEYS,
+    CAP_CLONE_MAP,
+    CAP_COD_OPERACAO_FORMAT,
+    CAP_MEU_NUMERO,
+    CAP_ACCOUNT,
 )
 _CREDITO_SCR_REQUIRED = (
-    CAP_IDENTITY, CAP_REFERENTIAL, CAP_NOT_NULL, CAP_CAPACITY, CAP_DATES,
-    CAP_PRIMARY_KEYS, CAP_CREDITO_SCR_GRAPH, CAP_CREDITO_SCR_LOOKUPS,
-    CAP_IPOC_UNIQUENESS, CAP_REGISTRATION_PROFILE,
+    CAP_IDENTITY,
+    CAP_REFERENTIAL,
+    CAP_NOT_NULL,
+    CAP_CAPACITY,
+    CAP_DATES,
+    CAP_PRIMARY_KEYS,
+    CAP_CREDITO_SCR_GRAPH,
+    CAP_CREDITO_SCR_LOOKUPS,
+    CAP_IPOC_UNIQUENESS,
+    CAP_REGISTRATION_PROFILE,
 )
 _DICRE_REQUIRED = (
-    CAP_IDENTITY, CAP_REFERENTIAL, CAP_NOT_NULL, CAP_CAPACITY, CAP_DATES,
-    CAP_PRIMARY_KEYS, CAP_DICRE_GRAPH, CAP_DICRE_TARGET_ELIGIBILITY,
-    CAP_IPOC_UNIQUENESS, CAP_REGISTRATION_PROFILE,
+    CAP_IDENTITY,
+    CAP_REFERENTIAL,
+    CAP_NOT_NULL,
+    CAP_CAPACITY,
+    CAP_DATES,
+    CAP_PRIMARY_KEYS,
+    CAP_DICRE_GRAPH,
+    CAP_DICRE_TARGET_ELIGIBILITY,
+    CAP_IPOC_UNIQUENESS,
+    CAP_REGISTRATION_PROFILE,
 )
 _LCI_REQUIRED = (
-    CAP_IDENTITY, CAP_DOMAIN, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
-    CAP_CAPACITY, CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_SHAPE,
-    CAP_REGISTRATION_PROFILE, CAP_LCI_METADATA, CAP_LCI_GRAPH,
+    CAP_IDENTITY,
+    CAP_DOMAIN,
+    CAP_POLYMORPHISM,
+    CAP_REFERENTIAL,
+    CAP_NOT_NULL,
+    CAP_CAPACITY,
+    CAP_DATES,
+    CAP_PRIMARY_KEYS,
+    CAP_CLONE_MAP,
+    CAP_SHAPE,
+    CAP_REGISTRATION_PROFILE,
+    CAP_LCI_METADATA,
+    CAP_LCI_GRAPH,
     CAP_LCI_TARGET_ELIGIBILITY,
 )
 _LCA_REQUIRED = (
-    CAP_IDENTITY, CAP_DOMAIN, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
-    CAP_CAPACITY, CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_SHAPE,
-    CAP_REGISTRATION_PROFILE, CAP_LCA_METADATA, CAP_LCA_GRAPH,
+    CAP_IDENTITY,
+    CAP_DOMAIN,
+    CAP_POLYMORPHISM,
+    CAP_REFERENTIAL,
+    CAP_NOT_NULL,
+    CAP_CAPACITY,
+    CAP_DATES,
+    CAP_PRIMARY_KEYS,
+    CAP_CLONE_MAP,
+    CAP_SHAPE,
+    CAP_REGISTRATION_PROFILE,
+    CAP_LCA_METADATA,
+    CAP_LCA_GRAPH,
     CAP_LCA_TARGET_ELIGIBILITY,
 )
 _CCB_REQUIRED = (
-    CAP_IDENTITY, CAP_POLYMORPHISM, CAP_REFERENTIAL, CAP_NOT_NULL,
-    CAP_CAPACITY, CAP_DATES, CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_SHAPE,
-    CAP_REGISTRATION_PROFILE, CAP_CCB_METADATA, CAP_CCB_GRAPH,
+    CAP_IDENTITY,
+    CAP_POLYMORPHISM,
+    CAP_REFERENTIAL,
+    CAP_NOT_NULL,
+    CAP_CAPACITY,
+    CAP_DATES,
+    CAP_PRIMARY_KEYS,
+    CAP_CLONE_MAP,
+    CAP_SHAPE,
+    CAP_REGISTRATION_PROFILE,
+    CAP_CCB_METADATA,
+    CAP_CCB_GRAPH,
     CAP_CCB_TARGET_ELIGIBILITY,
 )
 _GRAVAME_REQUIRED = (
-    CAP_IDENTITY, CAP_REFERENTIAL, CAP_NOT_NULL, CAP_CAPACITY, CAP_DATES,
-    CAP_PRIMARY_KEYS, CAP_CLONE_MAP, CAP_SHAPE, CAP_REGISTRATION_PROFILE,
-    CAP_GRAVAME_METADATA, CAP_GRAVAME_GRAPH, CAP_GRAVAME_TARGET_ELIGIBILITY,
+    CAP_IDENTITY,
+    CAP_REFERENTIAL,
+    CAP_NOT_NULL,
+    CAP_CAPACITY,
+    CAP_DATES,
+    CAP_PRIMARY_KEYS,
+    CAP_CLONE_MAP,
+    CAP_SHAPE,
+    CAP_REGISTRATION_PROFILE,
+    CAP_GRAVAME_METADATA,
+    CAP_GRAVAME_GRAPH,
+    CAP_GRAVAME_TARGET_ELIGIBILITY,
 )
 
 VALIDATION_PROFILES: Dict[str, ValidationProfile] = {
@@ -663,8 +780,9 @@ def resolve_input_base(profile: ValidationProfile, input_base_arg: Optional[str]
     return f"{base}/{profile.default_clone_prefix}"
 
 
-def read_config(no_oracle: bool, profile: ValidationProfile,
-                input_base_arg: Optional[str] = None) -> Config:
+def read_config(
+    no_oracle: bool, profile: ValidationProfile, input_base_arg: Optional[str] = None
+) -> Config:
     resolved = resolve_input_base(profile, input_base_arg)
     jdbc_url = os.environ.get("DATAGEN_SOURCE_JDBC_URL", "").strip() or None
     jdbc_user = os.environ.get("DATAGEN_SOURCE_DB_USER", "").strip() or None
@@ -787,9 +905,7 @@ def load_oracle_metadata(spark: SparkSession, cfg: Config) -> Metadata:
         cname = r["CNAME"]
         child = (r["CHILD"] or "").upper()
         parent = (r["PARENT"] or "").upper()
-        entry = fk_tmp.setdefault(child, {}).setdefault(
-            cname, {"parent": parent, "cols": []}
-        )
+        entry = fk_tmp.setdefault(child, {}).setdefault(cname, {"parent": parent, "cols": []})
         entry["cols"].append(
             (int(r["POS"]), (r["CHILD_COL"] or "").upper(), (r["PARENT_COL"] or "").upper())
         )
@@ -809,7 +925,10 @@ def load_oracle_metadata(spark: SparkSession, cfg: Config) -> Metadata:
 
     logger.info(
         "Metadata: %d tables, %d with PK, %d with FK(s), %d with NOT NULL col(s).",
-        len(tables), len(pk), len(fks), len(not_null),
+        len(tables),
+        len(pk),
+        len(fks),
+        len(not_null),
     )
     nls: Dict[str, str] = {}
     try:
@@ -822,8 +941,14 @@ def load_oracle_metadata(spark: SparkSession, cfg: Config) -> Metadata:
         logger.warning("Could not load Oracle NLS character sets: %s", exc)
 
     return Metadata(
-        tables, pk, not_null, col_type, fks, column_capacity,
-        nls.get("NLS_CHARACTERSET"), nls.get("NLS_NCHAR_CHARACTERSET"),
+        tables,
+        pk,
+        not_null,
+        col_type,
+        fks,
+        column_capacity,
+        nls.get("NLS_CHARACTERSET"),
+        nls.get("NLS_NCHAR_CHARACTERSET"),
     )
 
 
@@ -839,11 +964,7 @@ def list_table_dirs(spark: SparkSession, base: str) -> List[str]:
         fs = p.getFileSystem(hconf)
         if not fs.exists(p):
             return []
-        return sorted(
-            st.getPath().getName()
-            for st in fs.listStatus(p)
-            if st.isDirectory()
-        )
+        return sorted(st.getPath().getName() for st in fs.listStatus(p) if st.isDirectory())
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not auto-list tables under %s: %s", base, exc)
         return []
@@ -854,9 +975,7 @@ def read_synthetic_tables(
 ) -> Dict[str, DataFrame]:
     names = only if only else list_table_dirs(spark, base)
     if not names:
-        raise SystemExit(
-            f"No synthetic tables found under {base}. Pass --tables to be explicit."
-        )
+        raise SystemExit(f"No synthetic tables found under {base}. Pass --tables to be explicit.")
     tables: Dict[str, DataFrame] = {}
     for name in names:
         path = f"{base}/{name}"
@@ -898,9 +1017,7 @@ def _norm_code(col):
 def _canon_key_col(col):
     """Spark expression equivalent of _canon_key for required lookup IDs."""
     value = F.trim(col.cast("string"))
-    stripped = F.regexp_replace(
-        F.regexp_replace(value, r"(\.\d*?)0+$", "$1"), r"\.$", ""
-    )
+    stripped = F.regexp_replace(F.regexp_replace(value, r"(\.\d*?)0+$", "$1"), r"\.$", "")
     return F.when(value.rlike(r"^-?\d+\.\d*0*$"), stripped).otherwise(value)
 
 
@@ -1512,22 +1629,34 @@ def check_capacity(
 # ---------------------------------------------------------------------------
 # Category 1 - CONDICAO_IF polymorphism (the ClassCastException)
 # ---------------------------------------------------------------------------
-def check_polymorphism(
-    tables: Dict[str, DataFrame], meta: Metadata, sample: int
-) -> List[Finding]:
+def check_polymorphism(tables: Dict[str, DataFrame], meta: Metadata, sample: int) -> List[Finding]:
     out: List[Finding] = []
     cond = tables.get(CONDICAO_IF_TABLE)
     if cond is None:
-        return [Finding("1.polymorphism", "CONDICAO_IF polymorphism", SEV_WARN,
-                        CONDICAO_IF_TABLE, False,
-                        message="CONDICAO_IF not in output; polymorphism check unavailable.")]
+        return [
+            Finding(
+                "1.polymorphism",
+                "CONDICAO_IF polymorphism",
+                SEV_WARN,
+                CONDICAO_IF_TABLE,
+                False,
+                message="CONDICAO_IF not in output; polymorphism check unavailable.",
+            )
+        ]
 
     nci = resolve(cond, CONDICAO_IF_PK)
     tipo = resolve(cond, CONDICAO_IF_TIPO_COL)
     if not nci or not tipo:
-        return [Finding("1.polymorphism", "CONDICAO_IF polymorphism", SEV_WARN,
-                        CONDICAO_IF_TABLE, False,
-                        message=f"Missing {CONDICAO_IF_PK}/{CONDICAO_IF_TIPO_COL} in CONDICAO_IF.")]
+        return [
+            Finding(
+                "1.polymorphism",
+                "CONDICAO_IF polymorphism",
+                SEV_WARN,
+                CONDICAO_IF_TABLE,
+                False,
+                message=f"Missing {CONDICAO_IF_PK}/{CONDICAO_IF_TIPO_COL} in CONDICAO_IF.",
+            )
+        ]
 
     present_subtypes = {t: tables[t] for t in set(SUBTYPE_BY_TIPO.values()) if t in tables}
 
@@ -1543,9 +1672,16 @@ def check_polymorphism(
     for tname, sdf in present_subtypes.items():
         skey = resolve(sdf, CONDICAO_IF_PK)
         if not skey:
-            out.append(Finding("1c.subtype_key_missing", "CONDICAO_IF polymorphism",
-                               SEV_WARN, tname, False,
-                               message=f"{tname} has no {CONDICAO_IF_PK} column."))
+            out.append(
+                Finding(
+                    "1c.subtype_key_missing",
+                    "CONDICAO_IF polymorphism",
+                    SEV_WARN,
+                    tname,
+                    False,
+                    message=f"{tname} has no {CONDICAO_IF_PK} column.",
+                )
+            )
             continue
         piece = sdf.select(F.col(skey).cast("string").alias("nci")).withColumn("tbl", F.lit(tname))
         memb = piece if memb is None else memb.unionByName(piece)
@@ -1556,11 +1692,19 @@ def check_polymorphism(
     )
 
     if memb is None:
-        out.append(Finding("1a.no_subtype_rows", "CONDICAO_IF polymorphism", SEV_ERROR,
-                           CONDICAO_IF_TABLE, False, count=cond_norm.count(),
-                           sample=_sample_keys(cond_norm.selectExpr("cnci"), ["cnci"], sample),
-                           hint=hint_bind,
-                           message="No subtype tables present; every CONDICAO_IF is dangling."))
+        out.append(
+            Finding(
+                "1a.no_subtype_rows",
+                "CONDICAO_IF polymorphism",
+                SEV_ERROR,
+                CONDICAO_IF_TABLE,
+                False,
+                count=cond_norm.count(),
+                sample=_sample_keys(cond_norm.selectExpr("cnci"), ["cnci"], sample),
+                hint=hint_bind,
+                message="No subtype tables present; every CONDICAO_IF is dangling.",
+            )
+        )
         return out
 
     agg = memb.groupBy("nci").agg(
@@ -1586,29 +1730,45 @@ def check_polymorphism(
     # 1a - dangling: CONDICAO_IF with no subtype row at all.
     dangling = joined.where(F.col("n_member_tbls") == 0)
     c = dangling.count()
-    out.append(Finding(
-        "1a.dangling_condicao_if", "CONDICAO_IF polymorphism",
-        SEV_ERROR if c else SEV_INFO, CONDICAO_IF_TABLE, c == 0, count=c,
-        column=CONDICAO_IF_PK,
-        sample=_sample_keys(dangling.select(F.col("cnci")), ["cnci"], sample),
-        hint=hint_bind,
-        message="CONDICAO_IF rows with NO row in any subtype table (Hibernate cannot type them).",
-    ))
+    out.append(
+        Finding(
+            "1a.dangling_condicao_if",
+            "CONDICAO_IF polymorphism",
+            SEV_ERROR if c else SEV_INFO,
+            CONDICAO_IF_TABLE,
+            c == 0,
+            count=c,
+            column=CONDICAO_IF_PK,
+            sample=_sample_keys(dangling.select(F.col("cnci")), ["cnci"], sample),
+            hint=hint_bind,
+            message=(
+                "CONDICAO_IF rows with NO row in any subtype table (Hibernate cannot type them)."
+            ),
+        )
+    )
 
     # 1a - ambiguous: present in >1 subtype table -> THE ClassCastException.
     ambiguous = joined.where(F.col("n_member_tbls") > 1)
     c = ambiguous.count()
-    out.append(Finding(
-        "1a.ambiguous_subtype", "CONDICAO_IF polymorphism",
-        SEV_ERROR if c else SEV_INFO, CONDICAO_IF_TABLE, c == 0, count=c,
-        column=CONDICAO_IF_PK,
-        sample=_sample_keys(
-            ambiguous.select(F.col("cnci"), F.concat_ws("+", F.col("tbls")).alias("tbls")),
-            ["cnci", "tbls"], sample),
-        hint=hint_bind,
-        message="NUM_CONDICAO_IF present in MORE THAN ONE subtype table -> "
-                "JurosFlutuanteDO cannot be cast to JurosFixoDO.",
-    ))
+    out.append(
+        Finding(
+            "1a.ambiguous_subtype",
+            "CONDICAO_IF polymorphism",
+            SEV_ERROR if c else SEV_INFO,
+            CONDICAO_IF_TABLE,
+            c == 0,
+            count=c,
+            column=CONDICAO_IF_PK,
+            sample=_sample_keys(
+                ambiguous.select(F.col("cnci"), F.concat_ws("+", F.col("tbls")).alias("tbls")),
+                ["cnci", "tbls"],
+                sample,
+            ),
+            hint=hint_bind,
+            message="NUM_CONDICAO_IF present in MORE THAN ONE subtype table -> "
+            "JurosFlutuanteDO cannot be cast to JurosFixoDO.",
+        )
+    )
 
     # 1b - wrong subtype: single membership but not the one COD_TIPO says.
     wrong = joined.where(
@@ -1617,31 +1777,50 @@ def check_polymorphism(
         & (F.col("tbls")[0] != F.col("expected_tbl"))
     )
     c = wrong.count()
-    out.append(Finding(
-        "1b.subtype_mismatch", "CONDICAO_IF polymorphism",
-        SEV_ERROR if c else SEV_INFO, CONDICAO_IF_TABLE, c == 0, count=c,
-        column=CONDICAO_IF_TIPO_COL,
-        sample=_sample_keys(
-            wrong.select(F.col("cnci"), F.col("ctipo"),
-                         F.col("tbls")[0].alias("actual"), F.col("expected_tbl")),
-            ["cnci", "ctipo", "actual", "expected_tbl"], sample),
-        hint=hint_bind,
-        message="Subtype table does not match COD_TIPO_CONDICAO_IF (e.g. tipo=2/JUROS_FIXO "
-                "but the row lives in JUROS_FLUTUANTE).",
-    ))
+    out.append(
+        Finding(
+            "1b.subtype_mismatch",
+            "CONDICAO_IF polymorphism",
+            SEV_ERROR if c else SEV_INFO,
+            CONDICAO_IF_TABLE,
+            c == 0,
+            count=c,
+            column=CONDICAO_IF_TIPO_COL,
+            sample=_sample_keys(
+                wrong.select(
+                    F.col("cnci"),
+                    F.col("ctipo"),
+                    F.col("tbls")[0].alias("actual"),
+                    F.col("expected_tbl"),
+                ),
+                ["cnci", "ctipo", "actual", "expected_tbl"],
+                sample,
+            ),
+            hint=hint_bind,
+            message="Subtype table does not match COD_TIPO_CONDICAO_IF (e.g. tipo=2/JUROS_FIXO "
+            "but the row lives in JUROS_FLUTUANTE).",
+        )
+    )
 
     # 1b - unknown tipo: COD_TIPO not in the curated map.
     unknown = joined.where(F.col("expected_tbl").isNull())
     c = unknown.count()
     if c:
-        out.append(Finding(
-            "1b.unknown_tipo", "CONDICAO_IF polymorphism", SEV_WARN,
-            CONDICAO_IF_TABLE, False, count=c, column=CONDICAO_IF_TIPO_COL,
-            sample=_sample_keys(unknown.select(F.col("ctipo")).distinct(), ["ctipo"], sample),
-            hint="Add these COD_TIPO_CONDICAO_IF values to SUBTYPE_BY_TIPO "
-                 "(verify against TipoCondicaoIFDO).",
-            message="COD_TIPO_CONDICAO_IF value not in the curated subtype map.",
-        ))
+        out.append(
+            Finding(
+                "1b.unknown_tipo",
+                "CONDICAO_IF polymorphism",
+                SEV_WARN,
+                CONDICAO_IF_TABLE,
+                False,
+                count=c,
+                column=CONDICAO_IF_TIPO_COL,
+                sample=_sample_keys(unknown.select(F.col("ctipo")).distinct(), ["ctipo"], sample),
+                hint="Add these COD_TIPO_CONDICAO_IF values to SUBTYPE_BY_TIPO "
+                "(verify against TipoCondicaoIFDO).",
+                message="COD_TIPO_CONDICAO_IF value not in the curated subtype map.",
+            )
+        )
 
     # 1c - orphan subtype rows (key not in CONDICAO_IF).
     cond_keys = cond.select(F.col(nci).cast("string").alias("cnci")).dropDuplicates()
@@ -1652,13 +1831,20 @@ def check_polymorphism(
         child_keys = sdf.select(F.col(skey).cast("string").alias("cnci"))
         orphans = child_keys.join(cond_keys, "cnci", "left_anti")
         c = orphans.count()
-        out.append(Finding(
-            "1c.orphan_subtype", "CONDICAO_IF polymorphism",
-            SEV_ERROR if c else SEV_INFO, tname, c == 0, count=c, column=CONDICAO_IF_PK,
-            sample=_sample_keys(orphans, ["cnci"], sample),
-            hint="Shared-key child references a NUM_CONDICAO_IF absent from CONDICAO_IF.",
-            message=f"{tname} rows whose {CONDICAO_IF_PK} has no parent CONDICAO_IF.",
-        ))
+        out.append(
+            Finding(
+                "1c.orphan_subtype",
+                "CONDICAO_IF polymorphism",
+                SEV_ERROR if c else SEV_INFO,
+                tname,
+                c == 0,
+                count=c,
+                column=CONDICAO_IF_PK,
+                sample=_sample_keys(orphans, ["cnci"], sample),
+                hint="Shared-key child references a NUM_CONDICAO_IF absent from CONDICAO_IF.",
+                message=f"{tname} rows whose {CONDICAO_IF_PK} has no parent CONDICAO_IF.",
+            )
+        )
 
     return out
 
@@ -1667,9 +1853,18 @@ def verify_subtype_map_against_production(spark: SparkSession, cfg: Config) -> L
     """Confirm the curated COD_TIPO->table map matches production (best-effort)."""
     out: List[Finding] = []
     for tipo, table in SUBTYPE_BY_TIPO.items():
-        if table not in {"JUROS_FIXO", "JUROS_FLUTUANTE", "AMORTIZACAO", "SPREAD",
-                         "RESGATE", "ATUALIZACAO_POS", "ATUALIZACAO_PRE", "RESET",
-                         "PARTICIPACAO_LUCROS", "DESDOBRAMENTO"}:
+        if table not in {
+            "JUROS_FIXO",
+            "JUROS_FLUTUANTE",
+            "AMORTIZACAO",
+            "SPREAD",
+            "RESGATE",
+            "ATUALIZACAO_POS",
+            "ATUALIZACAO_PRE",
+            "RESET",
+            "PARTICIPACAO_LUCROS",
+            "DESDOBRAMENTO",
+        }:
             continue
         q = (
             f"SELECT DISTINCT p.{CONDICAO_IF_TIPO_COL} tipo "
@@ -1681,12 +1876,21 @@ def verify_subtype_map_against_production(spark: SparkSession, cfg: Config) -> L
             rows = _jdbc(spark, cfg, q).collect()
             found = {str(r["TIPO"]).split(".")[0] for r in rows if r["TIPO"] is not None}
             if found and tipo not in found:
-                out.append(Finding(
-                    "1.map_verify", "CONDICAO_IF polymorphism", SEV_WARN, table, False,
-                    hint="Update SUBTYPE_BY_TIPO to match production.",
-                    message=f"Production {table} rows carry COD_TIPO_CONDICAO_IF={sorted(found)}, "
-                            f"but the curated map expects {tipo}.",
-                ))
+                out.append(
+                    Finding(
+                        "1.map_verify",
+                        "CONDICAO_IF polymorphism",
+                        SEV_WARN,
+                        table,
+                        False,
+                        hint="Update SUBTYPE_BY_TIPO to match production.",
+                        message=(
+                            f"Production {table} rows carry "
+                            f"COD_TIPO_CONDICAO_IF={sorted(found)}, "
+                            f"but the curated map expects {tipo}."
+                        ),
+                    )
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Subtype-map verify skipped for %s: %s", table, exc)
     return out
@@ -1697,11 +1901,17 @@ def check_subtype_map_snapshot(snapshot: dict, source: str = "baseline") -> List
     category = "CONDICAO_IF polymorphism"
     observed = snapshot.get("observed_by_table") if isinstance(snapshot, dict) else None
     if not isinstance(observed, dict) or not observed:
-        return [Finding(
-            "1.map_snapshot", category, SEV_WARN, CONDICAO_IF_TABLE, False,
-            hint="Regenerate the shape baseline with the current profile_cdb_shapes.py.",
-            message=f"Subtype-map snapshot from {source} has no observed subtype mappings.",
-        )]
+        return [
+            Finding(
+                "1.map_snapshot",
+                category,
+                SEV_WARN,
+                CONDICAO_IF_TABLE,
+                False,
+                hint="Regenerate the shape baseline with the current profile_cdb_shapes.py.",
+                message=f"Subtype-map snapshot from {source} has no observed subtype mappings.",
+            )
+        ]
 
     expected_by_table: Dict[str, set] = {}
     for tipo, table in SUBTYPE_BY_TIPO.items():
@@ -1713,49 +1923,69 @@ def check_subtype_map_snapshot(snapshot: dict, source: str = "baseline") -> List
         expected = expected_by_table.get(table, set())
         unexpected = sorted(found - expected)
         if unexpected:
-            out.append(Finding(
-                "1.map_snapshot", category, SEV_WARN, table, False,
-                column=CONDICAO_IF_TIPO_COL,
-                sample=unexpected,
-                hint="Review the raw baseline and update SUBTYPE_BY_TIPO only if the "
-                     "application joined-subclass mapping changed.",
-                message=f"Raw baseline {table} rows carry unexpected subtype value(s) "
-                        f"{unexpected}; curated value(s): {sorted(expected)}.",
-            ))
+            out.append(
+                Finding(
+                    "1.map_snapshot",
+                    category,
+                    SEV_WARN,
+                    table,
+                    False,
+                    column=CONDICAO_IF_TIPO_COL,
+                    sample=unexpected,
+                    hint="Review the raw baseline and update SUBTYPE_BY_TIPO only if the "
+                    "application joined-subclass mapping changed.",
+                    message=f"Raw baseline {table} rows carry unexpected subtype value(s) "
+                    f"{unexpected}; curated value(s): {sorted(expected)}.",
+                )
+            )
 
     if not out:
-        out.append(Finding(
-            "1.map_snapshot", category, SEV_INFO, CONDICAO_IF_TABLE, True,
-            count=len(observed),
-            message=f"{len(observed)} raw subtype table mapping(s) from {source} match "
-                    "the curated application map.",
-        ))
+        out.append(
+            Finding(
+                "1.map_snapshot",
+                category,
+                SEV_INFO,
+                CONDICAO_IF_TABLE,
+                True,
+                count=len(observed),
+                message=f"{len(observed)} raw subtype table mapping(s) from {source} match "
+                "the curated application map.",
+            )
+        )
     return out
 
 
-def verify_subtype_map_from_baseline(
-    spark: SparkSession, baseline_path: str
-) -> List[Finding]:
+def verify_subtype_map_from_baseline(spark: SparkSession, baseline_path: str) -> List[Finding]:
     """Load and verify the subtype snapshot embedded by profile_cdb_shapes.py."""
     try:
         baseline = json.loads(read_text(spark, baseline_path))
     except Exception as exc:  # noqa: BLE001
-        return [Finding(
-            "1.map_snapshot", "CONDICAO_IF polymorphism", SEV_WARN,
-            CONDICAO_IF_TABLE, False,
-            hint="Repair or regenerate the shape baseline before strict validation.",
-            message=f"Subtype-map snapshot unavailable because the baseline could not be "
-                    f"loaded: {exc}",
-        )]
+        return [
+            Finding(
+                "1.map_snapshot",
+                "CONDICAO_IF polymorphism",
+                SEV_WARN,
+                CONDICAO_IF_TABLE,
+                False,
+                hint="Repair or regenerate the shape baseline before strict validation.",
+                message=f"Subtype-map snapshot unavailable because the baseline could not be "
+                f"loaded: {exc}",
+            )
+        ]
     snapshot = baseline.get("subtype_map")
     if snapshot is None:
-        return [Finding(
-            "1.map_snapshot", "CONDICAO_IF polymorphism", SEV_WARN,
-            CONDICAO_IF_TABLE, False,
-            hint="Regenerate the shape baseline with the current profile_cdb_shapes.py.",
-            message=f"Subtype-map snapshot unavailable: baseline {baseline_path} has no "
-                    "subtype_map.",
-        )]
+        return [
+            Finding(
+                "1.map_snapshot",
+                "CONDICAO_IF polymorphism",
+                SEV_WARN,
+                CONDICAO_IF_TABLE,
+                False,
+                hint="Regenerate the shape baseline with the current profile_cdb_shapes.py.",
+                message=f"Subtype-map snapshot unavailable: baseline {baseline_path} has no "
+                "subtype_map.",
+            )
+        ]
     source = baseline.get("base_uri") or baseline_path
     return check_subtype_map_snapshot(snapshot, str(source))
 
@@ -1775,50 +2005,77 @@ def check_product_identity(
     cat = "Product identity"
     root = tables.get(SHAPE_ROOT_TABLE)
     if root is None:
-        return [Finding("0.identity", cat, SEV_ERROR, SHAPE_ROOT_TABLE, False,
-                        hint="Export INSTRUMENTO_FINANCEIRO in the synthetic output.",
-                        message=f"Root table {SHAPE_ROOT_TABLE} absent; cannot validate "
-                                f"product {profile.name}.")]
+        return [
+            Finding(
+                "0.identity",
+                cat,
+                SEV_ERROR,
+                SHAPE_ROOT_TABLE,
+                False,
+                hint="Export INSTRUMENTO_FINANCEIRO in the synthetic output.",
+                message=f"Root table {SHAPE_ROOT_TABLE} absent; cannot validate "
+                f"product {profile.name}.",
+            )
+        ]
     tipo = resolve(root, "NUM_TIPO_IF")
     key = resolve(root, SHAPE_ROOT_KEY)
     excl = resolve(root, "DAT_EXCLUSAO")
     missing = [n for n, a in (("NUM_TIPO_IF", tipo), (SHAPE_ROOT_KEY, key)) if not a]
     if missing:
-        return [Finding("0.identity", cat, SEV_ERROR, SHAPE_ROOT_TABLE, False,
-                        column=",".join(missing),
-                        hint="Root must carry NUM_TIPO_IF and NUM_IF for identity.",
-                        message=f"Root table missing column(s) {missing} for product "
-                                f"{profile.name}.")]
+        return [
+            Finding(
+                "0.identity",
+                cat,
+                SEV_ERROR,
+                SHAPE_ROOT_TABLE,
+                False,
+                column=",".join(missing),
+                hint="Root must carry NUM_TIPO_IF and NUM_IF for identity.",
+                message=f"Root table missing column(s) {missing} for product {profile.name}.",
+            )
+        ]
     active = root.where(_oracle_null_equivalent(F.col(excl))) if excl else root
-    type_counts = (
-        active.select(_norm_code(F.col(tipo)).alias("t"))
-        .groupBy("t").count().collect()
-    )
+    type_counts = active.select(_norm_code(F.col(tipo)).alias("t")).groupBy("t").count().collect()
     present = {r["t"]: r["count"] for r in type_counts}
     expected = str(profile.num_tipo_if)
     n_expected = present.get(expected, 0)
     wrong = {t: c for t, c in present.items() if t != expected}
     out: List[Finding] = []
-    out.append(Finding(
-        "0.identity.type", cat,
-        SEV_INFO if n_expected > 0 else SEV_ERROR, SHAPE_ROOT_TABLE, n_expected > 0,
-        count=n_expected, column="NUM_TIPO_IF",
-        hint="" if n_expected else
-             f"No active roots of NUM_TIPO_IF={expected}. Wrong --product for this output?",
-        message=f"Active {SHAPE_ROOT_TABLE} rows with NUM_TIPO_IF={expected} "
-                f"(product {profile.name}).",
-    ))
-    out.append(Finding(
-        "0.identity.mixed", cat,
-        SEV_ERROR if wrong else SEV_INFO, SHAPE_ROOT_TABLE, not wrong,
-        count=sum(wrong.values()), column="NUM_TIPO_IF",
-        sample=sorted(wrong)[:sample],
-        hint="Output mixes root types; a product output must contain a single NUM_TIPO_IF."
-             if wrong else "",
-        message=f"Foreign root NUM_TIPO_IF value(s) present besides {expected}: "
-                f"{sorted(wrong)}." if wrong else
-                f"Only NUM_TIPO_IF={expected} present.",
-    ))
+    out.append(
+        Finding(
+            "0.identity.type",
+            cat,
+            SEV_INFO if n_expected > 0 else SEV_ERROR,
+            SHAPE_ROOT_TABLE,
+            n_expected > 0,
+            count=n_expected,
+            column="NUM_TIPO_IF",
+            hint=""
+            if n_expected
+            else f"No active roots of NUM_TIPO_IF={expected}. Wrong --product for this output?",
+            message=f"Active {SHAPE_ROOT_TABLE} rows with NUM_TIPO_IF={expected} "
+            f"(product {profile.name}).",
+        )
+    )
+    out.append(
+        Finding(
+            "0.identity.mixed",
+            cat,
+            SEV_ERROR if wrong else SEV_INFO,
+            SHAPE_ROOT_TABLE,
+            not wrong,
+            count=sum(wrong.values()),
+            column="NUM_TIPO_IF",
+            sample=sorted(wrong)[:sample],
+            hint="Output mixes root types; a product output must contain a single NUM_TIPO_IF."
+            if wrong
+            else "",
+            message=f"Foreign root NUM_TIPO_IF value(s) present besides {expected}: "
+            f"{sorted(wrong)}."
+            if wrong
+            else f"Only NUM_TIPO_IF={expected} present.",
+        )
+    )
     return out
 
 
@@ -1833,15 +2090,21 @@ def build_capability_findings(profile: ValidationProfile) -> List[Finding]:
     """
     out: List[Finding] = []
     for cap in profile.unsupported_required():
-        out.append(Finding(
-            f"0.capability.{cap}", "Coverage", SEV_WARN, profile.name, False,
-            column=cap,
-            hint="Capture the target evidence for this product before enabling strict "
-                 "validation of this capability; do NOT inherit CDB defaults.",
-            message=f"Capability {cap!r} is REQUIRED for strict validation of product "
-                    f"{profile.name!r} but is UNSUPPORTED by current evidence "
-                    f"(forces PARTIAL).",
-        ))
+        out.append(
+            Finding(
+                f"0.capability.{cap}",
+                "Coverage",
+                SEV_WARN,
+                profile.name,
+                False,
+                column=cap,
+                hint="Capture the target evidence for this product before enabling strict "
+                "validation of this capability; do NOT inherit CDB defaults.",
+                message=f"Capability {cap!r} is REQUIRED for strict validation of product "
+                f"{profile.name!r} but is UNSUPPORTED by current evidence "
+                f"(forces PARTIAL).",
+            )
+        )
     return out
 
 
@@ -1878,8 +2141,11 @@ def build_eligible_num_ifs(
     if not root_tipo or not root_key:
         return None, [f"{SHAPE_ROOT_TABLE}.NUM_TIPO_IF/NUM_IF"]
 
-    universe = _active(root.where(F.col(root_tipo).cast("long") == profile.num_tipo_if)) \
-        .select(F.col(root_key).cast("long").alias("NUM_IF")).dropDuplicates()
+    universe = (
+        _active(root.where(F.col(root_tipo).cast("long") == profile.num_tipo_if))
+        .select(F.col(root_key).cast("long").alias("NUM_IF"))
+        .dropDuplicates()
+    )
 
     def require(table: str) -> Optional[DataFrame]:
         df = tables.get(table)
@@ -1941,14 +2207,17 @@ def build_eligible_num_ifs(
     if not cif_tipo:
         return None, ["CONDICAO_IF.COD_TIPO_CONDICAO_IF"]
     nonresgate_ifs = cif.where(_norm_code(F.col(cif_tipo)) != "20").select(
-        F.col(cif_if).cast("long").alias("NUM_IF"))
+        F.col(cif_if).cast("long").alias("NUM_IF")
+    )
 
     dep_keys = _long_keys(deposito, SHAPE_ROOT_KEY, "NUM_IF")
     missing_direct_keys = [
-        name for frame, name in (
+        name
+        for frame, name in (
             (tit_keys, "TITULO.NUM_IF"),
             (dep_keys, "DEPOSITO_AUTOMATICO_IF.NUM_IF"),
-        ) if frame is None
+        )
+        if frame is None
     ]
     if missing_direct_keys:
         return None, missing_direct_keys
@@ -1965,10 +2234,11 @@ def build_eligible_num_ifs(
         F.col(resolve(operacao, SHAPE_ROOT_KEY)).cast("long").alias("NUM_IF"),
     )
     op_with_dado = op_ids.join(
-        dado.select(F.col(dado_op).cast("long").alias("OP")).dropDuplicates(), "OP", "leftsemi")
+        dado.select(F.col(dado_op).cast("long").alias("OP")).dropDuplicates(), "OP", "leftsemi"
+    )
     op_cluster = op_with_dado.join(
-        lancamento.select(F.col(lan_op).cast("long").alias("OP")).dropDuplicates(),
-        "OP", "leftsemi").select("NUM_IF")
+        lancamento.select(F.col(lan_op).cast("long").alias("OP")).dropDuplicates(), "OP", "leftsemi"
+    ).select("NUM_IF")
 
     # Specification cluster: ESPECIFICACAO with ESPECIFICACAO_COMITENTE, reached via OPERACAO.
     esp_op = resolve(especificacao, OPERACAO_KEY_COL)
@@ -1976,12 +2246,18 @@ def build_eligible_num_ifs(
     epc_id = resolve(espec_comitente, "NUM_ID_ESPECIFICACAO")
     if not all([esp_op, esp_id, epc_id]):
         return None, ["ESPECIFICACAO/ESPECIFICACAO_COMITENTE key columns"]
-    esp_ok = especificacao.select(
-        F.col(esp_op).cast("long").alias("OP"),
-        F.col(esp_id).cast("long").alias("ESP"),
-    ).join(
-        espec_comitente.select(F.col(epc_id).cast("long").alias("ESP")).dropDuplicates(),
-        "ESP", "leftsemi").select("OP")
+    esp_ok = (
+        especificacao.select(
+            F.col(esp_op).cast("long").alias("OP"),
+            F.col(esp_id).cast("long").alias("ESP"),
+        )
+        .join(
+            espec_comitente.select(F.col(epc_id).cast("long").alias("ESP")).dropDuplicates(),
+            "ESP",
+            "leftsemi",
+        )
+        .select("OP")
+    )
     spec_cluster = op_ids.join(esp_ok, "OP", "leftsemi").select("NUM_IF")
 
     eligible = universe
@@ -1996,18 +2272,37 @@ def check_domain(
     cat = "Domain conformance"
     root = tables.get(SHAPE_ROOT_TABLE)
     if root is None:
-        return [Finding("2.domain", cat, SEV_ERROR, SHAPE_ROOT_TABLE, False,
-                        message=f"{SHAPE_ROOT_TABLE} absent; cannot evaluate domain.")]
+        return [
+            Finding(
+                "2.domain",
+                cat,
+                SEV_ERROR,
+                SHAPE_ROOT_TABLE,
+                False,
+                message=f"{SHAPE_ROOT_TABLE} absent; cannot evaluate domain.",
+            )
+        ]
     eligible, missing = build_eligible_num_ifs(tables, profile)
     if eligible is None:
-        return [Finding("2.domain.availability", cat, SEV_WARN, ",".join(missing), False,
-                        hint="Include the required domain tables/columns in the output.",
-                        message=f"Domain eligibility unavailable; missing: {missing}.")]
+        return [
+            Finding(
+                "2.domain.availability",
+                cat,
+                SEV_WARN,
+                ",".join(missing),
+                False,
+                hint="Include the required domain tables/columns in the output.",
+                message=f"Domain eligibility unavailable; missing: {missing}.",
+            )
+        ]
 
     tipo = resolve(root, "NUM_TIPO_IF")
     key = resolve(root, SHAPE_ROOT_KEY)
-    active_roots = _active(root.where(F.col(tipo).cast("long") == profile.num_tipo_if)) \
-        .select(F.col(key).cast("long").alias("NUM_IF")).dropDuplicates()
+    active_roots = (
+        _active(root.where(F.col(tipo).cast("long") == profile.num_tipo_if))
+        .select(F.col(key).cast("long").alias("NUM_IF"))
+        .dropDuplicates()
+    )
     ineligible = active_roots.join(eligible, "NUM_IF", "left_anti")
     c = ineligible.count()
     hint = (
@@ -2017,12 +2312,20 @@ def check_domain(
         + "active resgate path, non-resgate condição, deposit, operation cluster, or "
         "specification cluster."
     )
-    return [Finding(
-        "2.domain", cat, SEV_ERROR if c else SEV_INFO, SHAPE_ROOT_TABLE, c == 0, count=c,
-        column="NUM_IF", sample=_sample_keys(ineligible, ["NUM_IF"], sample),
-        hint=hint if c else "",
-        message=f"Active {profile.name} roots not eligible per IF-level EXISTS domain.",
-    )]
+    return [
+        Finding(
+            "2.domain",
+            cat,
+            SEV_ERROR if c else SEV_INFO,
+            SHAPE_ROOT_TABLE,
+            c == 0,
+            count=c,
+            column="NUM_IF",
+            sample=_sample_keys(ineligible, ["NUM_IF"], sample),
+            hint=hint if c else "",
+            message=f"Active {profile.name} roots not eligible per IF-level EXISTS domain.",
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -2049,12 +2352,20 @@ def check_cdb_variant_rules(
         message: str,
     ) -> None:
         count = bad.count()
-        out.append(Finding(
-            check_id, cat, severity if count else SEV_INFO, table, count == 0,
-            count=count, column=column,
-            sample=_sample_keys(bad, keys, sample) if count else [],
-            hint=hint if count else "", message=message,
-        ))
+        out.append(
+            Finding(
+                check_id,
+                cat,
+                severity if count else SEV_INFO,
+                table,
+                count == 0,
+                count=count,
+                column=column,
+                sample=_sample_keys(bad, keys, sample) if count else [],
+                hint=hint if count else "",
+                message=message,
+            )
+        )
 
     def try_cast(column: str, sql_type: str):
         escaped = column.replace("`", "``")
@@ -2065,30 +2376,45 @@ def check_cdb_variant_rules(
     condicao = tables.get("CONDICAO_IF")
     resgate = tables.get("RESGATE")
     missing_tables = [
-        name for name, frame in (
-            ("INSTRUMENTO_FINANCEIRO", root), ("TITULO", titulo),
-            ("CONDICAO_IF", condicao), ("RESGATE", resgate),
-        ) if frame is None
+        name
+        for name, frame in (
+            ("INSTRUMENTO_FINANCEIRO", root),
+            ("TITULO", titulo),
+            ("CONDICAO_IF", condicao),
+            ("RESGATE", resgate),
+        )
+        if frame is None
     ]
     if missing_tables:
-        return [Finding(
-            "2b.availability", cat, SEV_WARN, ",".join(missing_tables), False,
-            hint="Include the core CDB tables before validating product variants.",
-            message=f"CDB variant checks unavailable; missing: {missing_tables}.",
-        )]
+        return [
+            Finding(
+                "2b.availability",
+                cat,
+                SEV_WARN,
+                ",".join(missing_tables),
+                False,
+                hint="Include the core CDB tables before validating product variants.",
+                message=f"CDB variant checks unavailable; missing: {missing_tables}.",
+            )
+        ]
 
     root_cols = {
-        name: resolve(root, name) for name in (
-            "NUM_IF", "NUM_TIPO_IF", "DAT_EMISSAO", "DAT_VENCIMENTO",
+        name: resolve(root, name)
+        for name in (
+            "NUM_IF",
+            "NUM_TIPO_IF",
+            "DAT_EMISSAO",
+            "DAT_VENCIMENTO",
             "COD_SITUACAO_IF",
         )
     }
-    titulo_cols = {
-        name: resolve(titulo, name) for name in ("NUM_IF", "COD_TIPO_ESCALONAMENTO")
-    }
+    titulo_cols = {name: resolve(titulo, name) for name in ("NUM_IF", "COD_TIPO_ESCALONAMENTO")}
     cond_cols = {
-        name: resolve(condicao, name) for name in (
-            "NUM_CONDICAO_IF", "NUM_IF", "COD_TIPO_CONDICAO_IF",
+        name: resolve(condicao, name)
+        for name in (
+            "NUM_CONDICAO_IF",
+            "NUM_IF",
+            "COD_TIPO_CONDICAO_IF",
             "DAT_INICIO_CONDICAO_IF",
         )
     }
@@ -2097,67 +2423,98 @@ def check_cdb_variant_rules(
         for name in ("NUM_CONDICAO_IF", "COD_COND_RESGATE", "DAT_RESGATE")
     }
     required = {
-        **{f"INSTRUMENTO_FINANCEIRO.{name}": value for name, value in root_cols.items()
-           if name != "COD_SITUACAO_IF"},
+        **{
+            f"INSTRUMENTO_FINANCEIRO.{name}": value
+            for name, value in root_cols.items()
+            if name != "COD_SITUACAO_IF"
+        },
         **{f"TITULO.{name}": value for name, value in titulo_cols.items()},
-        **{f"CONDICAO_IF.{name}": value for name, value in cond_cols.items()
-           if name != "DAT_INICIO_CONDICAO_IF"},
+        **{
+            f"CONDICAO_IF.{name}": value
+            for name, value in cond_cols.items()
+            if name != "DAT_INICIO_CONDICAO_IF"
+        },
         **{f"RESGATE.{name}": value for name, value in res_cols.items()},
     }
     missing_columns = [name for name, value in required.items() if not value]
     if missing_columns:
-        return [Finding(
-            "2b.availability", cat, SEV_WARN, ",".join(missing_columns), False,
-            hint="Include the required CDB variant columns in the validation input.",
-            message=f"CDB variant checks unavailable; missing: {missing_columns}.",
-        )]
+        return [
+            Finding(
+                "2b.availability",
+                cat,
+                SEV_WARN,
+                ",".join(missing_columns),
+                False,
+                hint="Include the required CDB variant columns in the validation input.",
+                message=f"CDB variant checks unavailable; missing: {missing_columns}.",
+            )
+        ]
 
-    roots = _active(root).where(
-        F.col(root_cols["NUM_TIPO_IF"]).cast("long") == profile.num_tipo_if
-    ).select(
-        F.col(root_cols["NUM_IF"]).cast("long").alias("NUM_IF"),
-        try_cast(root_cols["DAT_EMISSAO"], "date").alias("root_emission"),
-        try_cast(root_cols["DAT_VENCIMENTO"], "date").alias("root_maturity"),
-        *(
-            [_norm_code(F.col(root_cols["COD_SITUACAO_IF"])).alias("root_status")]
-            if root_cols["COD_SITUACAO_IF"] else []
-        ),
-    ).dropDuplicates(["NUM_IF"])
-    conditions = _active(condicao).select(
-        F.col(cond_cols["NUM_CONDICAO_IF"]).cast("long").alias("condition_key"),
-        F.col(cond_cols["NUM_IF"]).cast("long").alias("NUM_IF"),
-        _norm_code(F.col(cond_cols["COD_TIPO_CONDICAO_IF"])).alias("condition_type"),
-        *(
-            [try_cast(cond_cols["DAT_INICIO_CONDICAO_IF"], "date").alias("condition_start")]
-            if cond_cols["DAT_INICIO_CONDICAO_IF"] else []
-        ),
-    ).join(roots.select("NUM_IF"), "NUM_IF", "inner")
+    roots = (
+        _active(root)
+        .where(F.col(root_cols["NUM_TIPO_IF"]).cast("long") == profile.num_tipo_if)
+        .select(
+            F.col(root_cols["NUM_IF"]).cast("long").alias("NUM_IF"),
+            try_cast(root_cols["DAT_EMISSAO"], "date").alias("root_emission"),
+            try_cast(root_cols["DAT_VENCIMENTO"], "date").alias("root_maturity"),
+            *(
+                [_norm_code(F.col(root_cols["COD_SITUACAO_IF"])).alias("root_status")]
+                if root_cols["COD_SITUACAO_IF"]
+                else []
+            ),
+        )
+        .dropDuplicates(["NUM_IF"])
+    )
+    conditions = (
+        _active(condicao)
+        .select(
+            F.col(cond_cols["NUM_CONDICAO_IF"]).cast("long").alias("condition_key"),
+            F.col(cond_cols["NUM_IF"]).cast("long").alias("NUM_IF"),
+            _norm_code(F.col(cond_cols["COD_TIPO_CONDICAO_IF"])).alias("condition_type"),
+            *(
+                [try_cast(cond_cols["DAT_INICIO_CONDICAO_IF"], "date").alias("condition_start")]
+                if cond_cols["DAT_INICIO_CONDICAO_IF"]
+                else []
+            ),
+        )
+        .join(roots.select("NUM_IF"), "NUM_IF", "inner")
+    )
     resgate_parents = conditions.where(F.col("condition_type") == "20").join(
         _active(resgate).select(
             F.col(res_cols["NUM_CONDICAO_IF"]).cast("long").alias("condition_key"),
             _norm_code(F.col(res_cols["COD_COND_RESGATE"])).alias("resgate_mode"),
             try_cast(res_cols["DAT_RESGATE"], "date").alias("resgate_date"),
         ),
-        "condition_key", "inner",
+        "condition_key",
+        "inner",
     )
     com_tabela = resgate_parents.where(F.col("resgate_mode") == "COM TABELA")
 
     schedule = tables.get("CONDICAO_RESGATE")
     if schedule is None:
         record(
-            "2b.resgate_schedule_coverage", "CONDICAO_RESGATE", "NUM_CONDICAO_IF",
-            com_tabela, ["NUM_IF", "condition_key"], SEV_ERROR,
+            "2b.resgate_schedule_coverage",
+            "CONDICAO_RESGATE",
+            "NUM_CONDICAO_IF",
+            com_tabela,
+            ["NUM_IF", "condition_key"],
+            SEV_ERROR,
             "Include at least one active CONDICAO_RESGATE per COM TABELA.",
             "COM TABELA resgates without an available redemption schedule.",
         )
     else:
         schedule_cols = {
-            name: resolve(schedule, name) for name in (
-                "NUM_CONDICAO_IF", "IND_EXCLUIDO", "DAT_RESGATE", "VAL_PERCENTUAL",
+            name: resolve(schedule, name)
+            for name in (
+                "NUM_CONDICAO_IF",
+                "IND_EXCLUIDO",
+                "DAT_RESGATE",
+                "VAL_PERCENTUAL",
             )
         }
         schedule_required = [
-            name for name in ("NUM_CONDICAO_IF", "DAT_RESGATE", "VAL_PERCENTUAL")
+            name
+            for name in ("NUM_CONDICAO_IF", "DAT_RESGATE", "VAL_PERCENTUAL")
             if not schedule_cols[name]
         ]
         if schedule_required:
@@ -2165,53 +2522,64 @@ def check_cdb_variant_rules(
             schedule_count = schedule.count()
             count = max(com_count, schedule_count)
             sample_frame = schedule if schedule_count else com_tabela
-            out.append(Finding(
-                "2b.resgate_schedule_coverage", cat,
-                SEV_ERROR if count else SEV_INFO, "CONDICAO_RESGATE", count == 0,
-                count=count, column=",".join(schedule_required),
-                sample=_sample_keys(
-                    sample_frame,
-                    ["NUM_IF", "NUM_CONDICAO_IF", "condition_key"],
-                    sample,
+            out.append(
+                Finding(
+                    "2b.resgate_schedule_coverage",
+                    cat,
+                    SEV_ERROR if count else SEV_INFO,
+                    "CONDICAO_RESGATE",
+                    count == 0,
+                    count=count,
+                    column=",".join(schedule_required),
+                    sample=_sample_keys(
+                        sample_frame,
+                        ["NUM_IF", "NUM_CONDICAO_IF", "condition_key"],
+                        sample,
+                    )
+                    if count
+                    else [],
+                    hint="Include the required redemption schedule columns." if count else "",
+                    message=f"Redemption schedule columns unavailable: {schedule_required}.",
                 )
-                if count else [],
-                hint="Include the required redemption schedule columns." if count else "",
-                message=f"Redemption schedule columns unavailable: {schedule_required}.",
-            ))
+            )
         else:
             active_schedule = schedule
             if schedule_cols["IND_EXCLUIDO"]:
-                excluded = _norm_code(F.col(schedule_cols["IND_EXCLUIDO"])).isin(
-                    "S", "Y", "1"
-                )
+                excluded = _norm_code(F.col(schedule_cols["IND_EXCLUIDO"])).isin("S", "Y", "1")
                 active_schedule = schedule.where(F.coalesce(~excluded, F.lit(True)))
             children = active_schedule.select(
                 F.col(schedule_cols["NUM_CONDICAO_IF"]).cast("long").alias("condition_key"),
                 try_cast(schedule_cols["DAT_RESGATE"], "date").alias("schedule_date"),
-                try_cast(schedule_cols["VAL_PERCENTUAL"], "double").alias(
-                    "schedule_percentage"
-                ),
+                try_cast(schedule_cols["VAL_PERCENTUAL"], "double").alias("schedule_percentage"),
             )
             child_keys = children.select("condition_key").dropDuplicates()
             record(
-                "2b.resgate_schedule_coverage", "CONDICAO_RESGATE", "NUM_CONDICAO_IF",
+                "2b.resgate_schedule_coverage",
+                "CONDICAO_RESGATE",
+                "NUM_CONDICAO_IF",
                 com_tabela.join(child_keys, "condition_key", "leftanti"),
-                ["NUM_IF", "condition_key"], SEV_ERROR,
+                ["NUM_IF", "condition_key"],
+                SEV_ERROR,
                 "Generate at least one active schedule row per COM TABELA.",
                 "COM TABELA resgates without active redemption schedule rows.",
             )
             record(
-                "2b.resgate_schedule_parent", "CONDICAO_RESGATE", "NUM_CONDICAO_IF",
+                "2b.resgate_schedule_parent",
+                "CONDICAO_RESGATE",
+                "NUM_CONDICAO_IF",
                 children.join(
                     com_tabela.select("condition_key").dropDuplicates(),
-                    "condition_key", "leftanti",
+                    "condition_key",
+                    "leftanti",
                 ),
-                ["condition_key", "schedule_date"], SEV_ERROR,
+                ["condition_key", "schedule_date"],
+                SEV_ERROR,
                 "Attach schedules only to active type-20 COM TABELA resgates.",
                 "Active schedule rows with invalid, inactive, or SEM TABELA parents.",
             )
             record(
-                "2b.resgate_schedule_values", "CONDICAO_RESGATE",
+                "2b.resgate_schedule_values",
+                "CONDICAO_RESGATE",
                 "DAT_RESGATE,VAL_PERCENTUAL",
                 children.where(
                     F.col("schedule_date").isNull()
@@ -2219,56 +2587,83 @@ def check_cdb_variant_rules(
                     | F.isnan(F.col("schedule_percentage"))
                     | (F.abs(F.col("schedule_percentage")) == F.lit(float("inf")))
                 ),
-                ["condition_key", "schedule_date"], SEV_ERROR,
+                ["condition_key", "schedule_date"],
+                SEV_ERROR,
                 "Populate a parseable date and percentage; percentages may exceed 100.",
                 "Active schedule rows with null/invalid date or percentage.",
             )
-            duplicate_dates = children.where(F.col("schedule_date").isNotNull()).groupBy(
-                "condition_key", "schedule_date"
-            ).count().where(F.col("count") > 1)
+            duplicate_dates = (
+                children.where(F.col("schedule_date").isNotNull())
+                .groupBy("condition_key", "schedule_date")
+                .count()
+                .where(F.col("count") > 1)
+            )
             record(
-                "2b.resgate_schedule_unique_dates", "CONDICAO_RESGATE", "DAT_RESGATE",
-                duplicate_dates, ["condition_key", "schedule_date"], SEV_ERROR,
+                "2b.resgate_schedule_unique_dates",
+                "CONDICAO_RESGATE",
+                "DAT_RESGATE",
+                duplicate_dates,
+                ["condition_key", "schedule_date"],
+                SEV_ERROR,
                 "Use each redemption date at most once per resgate condition.",
                 "Duplicate active redemption dates under the same resgate condition.",
             )
             bounded = children.join(
                 com_tabela.select("condition_key", "NUM_IF", "resgate_date"),
-                "condition_key", "inner",
+                "condition_key",
+                "inner",
             ).join(roots, "NUM_IF", "inner")
             record(
-                "2b.resgate_schedule_dates", "CONDICAO_RESGATE", "DAT_RESGATE",
+                "2b.resgate_schedule_dates",
+                "CONDICAO_RESGATE",
+                "DAT_RESGATE",
                 bounded.where(
                     F.col("schedule_date").isNotNull()
                     & (
-                        (F.col("root_emission").isNotNull()
-                         & (F.col("schedule_date") < F.col("root_emission")))
-                        | (F.col("root_maturity").isNotNull()
-                           & (F.col("schedule_date") > F.col("root_maturity")))
-                        | (F.col("resgate_date").isNotNull()
-                           & (F.col("schedule_date") > F.col("resgate_date")))
+                        (
+                            F.col("root_emission").isNotNull()
+                            & (F.col("schedule_date") < F.col("root_emission"))
+                        )
+                        | (
+                            F.col("root_maturity").isNotNull()
+                            & (F.col("schedule_date") > F.col("root_maturity"))
+                        )
+                        | (
+                            F.col("resgate_date").isNotNull()
+                            & (F.col("schedule_date") > F.col("resgate_date"))
+                        )
                     )
                 ),
-                ["NUM_IF", "condition_key", "schedule_date"], SEV_ERROR,
+                ["NUM_IF", "condition_key", "schedule_date"],
+                SEV_ERROR,
                 "Keep schedule dates between issuance and redemption/maturity.",
                 "Active redemption schedule rows outside the instrument date bounds.",
             )
 
-    escal_titles = _active(titulo).where(
-        _norm_code(F.col(titulo_cols["COD_TIPO_ESCALONAMENTO"])) == "EMISSAO"
-    ).select(F.col(titulo_cols["NUM_IF"]).cast("long").alias("NUM_IF")).join(
-        roots.select("NUM_IF"), "NUM_IF", "inner"
-    ).dropDuplicates()
+    escal_titles = (
+        _active(titulo)
+        .where(_norm_code(F.col(titulo_cols["COD_TIPO_ESCALONAMENTO"])) == "EMISSAO")
+        .select(F.col(titulo_cols["NUM_IF"]).cast("long").alias("NUM_IF"))
+        .join(roots.select("NUM_IF"), "NUM_IF", "inner")
+        .dropDuplicates()
+    )
     escal_count = escal_titles.count()
     juros = tables.get("JUROS_FLUTUANTE")
     if escal_count and (not cond_cols["DAT_INICIO_CONDICAO_IF"] or juros is None):
-        out.append(Finding(
-            "2b.escalonamento_coverage", cat, SEV_ERROR, "CONDICAO_IF,JUROS_FLUTUANTE",
-            False, count=escal_count, column="DAT_INICIO_CONDICAO_IF,NUM_CONDICAO_IF",
-            sample=_sample_keys(escal_titles, ["NUM_IF"], sample),
-            hint="Include dated active type-3 conditions and JUROS_FLUTUANTE rows.",
-            message="EMISSAO escalonamento has no complete segment data.",
-        ))
+        out.append(
+            Finding(
+                "2b.escalonamento_coverage",
+                cat,
+                SEV_ERROR,
+                "CONDICAO_IF,JUROS_FLUTUANTE",
+                False,
+                count=escal_count,
+                column="DAT_INICIO_CONDICAO_IF,NUM_CONDICAO_IF",
+                sample=_sample_keys(escal_titles, ["NUM_IF"], sample),
+                hint="Include dated active type-3 conditions and JUROS_FLUTUANTE rows.",
+                message="EMISSAO escalonamento has no complete segment data.",
+            )
+        )
     elif escal_count and juros is not None and cond_cols["DAT_INICIO_CONDICAO_IF"]:
         juros_key = resolve(juros, "NUM_CONDICAO_IF")
         escal_conditions = conditions.where(F.col("condition_type") == "3").join(
@@ -2278,21 +2673,30 @@ def check_cdb_variant_rules(
             incomplete = escal_titles
             segments = None
         else:
-            juros_counts = juros.select(
-                F.col(juros_key).cast("long").alias("condition_key")
-            ).groupBy("condition_key").count().withColumnRenamed("count", "juros_count")
+            juros_counts = (
+                juros.select(F.col(juros_key).cast("long").alias("condition_key"))
+                .groupBy("condition_key")
+                .count()
+                .withColumnRenamed("count", "juros_count")
+            )
             covered = escal_conditions.join(juros_counts, "condition_key", "left").fillna(
                 0, ["juros_count"]
             )
-            incomplete = escal_titles.join(
-                escal_conditions.select("NUM_IF").dropDuplicates(), "NUM_IF", "leftanti"
-            ).unionByName(
-                covered.where(F.col("juros_count") < 1).select("NUM_IF")
-            ).dropDuplicates()
+            incomplete = (
+                escal_titles.join(
+                    escal_conditions.select("NUM_IF").dropDuplicates(), "NUM_IF", "leftanti"
+                )
+                .unionByName(covered.where(F.col("juros_count") < 1).select("NUM_IF"))
+                .dropDuplicates()
+            )
             segments = covered.where(F.col("juros_count") >= 1)
         record(
-            "2b.escalonamento_coverage", "CONDICAO_IF,JUROS_FLUTUANTE",
-            "COD_TIPO_CONDICAO_IF,NUM_CONDICAO_IF", incomplete, ["NUM_IF"], SEV_ERROR,
+            "2b.escalonamento_coverage",
+            "CONDICAO_IF,JUROS_FLUTUANTE",
+            "COD_TIPO_CONDICAO_IF,NUM_CONDICAO_IF",
+            incomplete,
+            ["NUM_IF"],
+            SEV_ERROR,
             "Generate active dated type-3 segments, each with an interest row.",
             "EMISSAO titles without a complete floating-interest segment set.",
         )
@@ -2300,74 +2704,111 @@ def check_cdb_variant_rules(
             dated = segments.join(roots, "NUM_IF", "inner")
             invalid_dates = dated.where(
                 F.col("condition_start").isNull()
-                | (F.col("root_emission").isNotNull()
-                   & (F.col("condition_start") < F.col("root_emission")))
-                | (F.col("root_maturity").isNotNull()
-                   & (F.col("condition_start") > F.col("root_maturity")))
+                | (
+                    F.col("root_emission").isNotNull()
+                    & (F.col("condition_start") < F.col("root_emission"))
+                )
+                | (
+                    F.col("root_maturity").isNotNull()
+                    & (F.col("condition_start") > F.col("root_maturity"))
+                )
             ).select("NUM_IF")
-            wrong_first = dated.groupBy("NUM_IF").agg(
-                F.min("condition_start").alias("first_start"),
-                F.min("root_emission").alias("root_emission"),
-            ).where(
-                F.col("first_start").isNull()
-                | F.col("root_emission").isNull()
-                | (F.col("first_start") != F.col("root_emission"))
-            ).select("NUM_IF")
+            wrong_first = (
+                dated.groupBy("NUM_IF")
+                .agg(
+                    F.min("condition_start").alias("first_start"),
+                    F.min("root_emission").alias("root_emission"),
+                )
+                .where(
+                    F.col("first_start").isNull()
+                    | F.col("root_emission").isNull()
+                    | (F.col("first_start") != F.col("root_emission"))
+                )
+                .select("NUM_IF")
+            )
             record(
-                "2b.escalonamento_dates", "CONDICAO_IF", "DAT_INICIO_CONDICAO_IF",
-                invalid_dates.union(wrong_first).dropDuplicates(), ["NUM_IF"], SEV_ERROR,
+                "2b.escalonamento_dates",
+                "CONDICAO_IF",
+                "DAT_INICIO_CONDICAO_IF",
+                invalid_dates.union(wrong_first).dropDuplicates(),
+                ["NUM_IF"],
+                SEV_ERROR,
                 "Keep starts within IF dates and start EMISSAO at issuance.",
                 "EMISSAO instruments with invalid segment dates or first start.",
             )
-            duplicate_starts = segments.where(F.col("condition_start").isNotNull()).groupBy(
-                "NUM_IF", "condition_start"
-            ).count().where(F.col("count") > 1)
+            duplicate_starts = (
+                segments.where(F.col("condition_start").isNotNull())
+                .groupBy("NUM_IF", "condition_start")
+                .count()
+                .where(F.col("count") > 1)
+            )
             record(
-                "2b.escalonamento_unique_dates", "CONDICAO_IF", "DAT_INICIO_CONDICAO_IF",
-                duplicate_starts, ["NUM_IF", "condition_start"], SEV_ERROR,
+                "2b.escalonamento_unique_dates",
+                "CONDICAO_IF",
+                "DAT_INICIO_CONDICAO_IF",
+                duplicate_starts,
+                ["NUM_IF", "condition_start"],
+                SEV_ERROR,
                 "Use each active segment start at most once per instrument.",
                 "Duplicate active escalonamento segment start dates.",
             )
 
             consistency_names = (
-                "NUM_INDICE_VALORIZACAO", "VAL_TAXA_JUROS_FLUTUANTE",
-                "IND_ANO_COMERCIAL", "IND_DIAS_CORRIDOS", "IND_INCORPORA_JUROS",
-                "NUM_ID_TIPO_INDICADOR", "NOM_AGENDA_PAGAMENTO",
+                "NUM_INDICE_VALORIZACAO",
+                "VAL_TAXA_JUROS_FLUTUANTE",
+                "IND_ANO_COMERCIAL",
+                "IND_DIAS_CORRIDOS",
+                "IND_INCORPORA_JUROS",
+                "NUM_ID_TIPO_INDICADOR",
+                "NOM_AGENDA_PAGAMENTO",
             )
             consistency_cols = {name: resolve(juros, name) for name in consistency_names}
-            missing_consistency = [
-                name for name, value in consistency_cols.items() if not value
-            ]
+            missing_consistency = [name for name, value in consistency_cols.items() if not value]
             if missing_consistency and escal_count:
-                out.append(Finding(
-                    "2b.escalonamento_consistency", cat, SEV_ERROR, "JUROS_FLUTUANTE",
-                    False, count=escal_count, column=",".join(missing_consistency),
-                    sample=_sample_keys(escal_titles, ["NUM_IF"], sample),
-                    hint="Include every base-rate configuration column.",
-                    message=f"Cannot compare segment configuration: {missing_consistency}.",
-                ))
+                out.append(
+                    Finding(
+                        "2b.escalonamento_consistency",
+                        cat,
+                        SEV_ERROR,
+                        "JUROS_FLUTUANTE",
+                        False,
+                        count=escal_count,
+                        column=",".join(missing_consistency),
+                        sample=_sample_keys(escal_titles, ["NUM_IF"], sample),
+                        hint="Include every base-rate configuration column.",
+                        message=f"Cannot compare segment configuration: {missing_consistency}.",
+                    )
+                )
             else:
                 config = segments.select("NUM_IF", "condition_key").join(
                     juros.select(
                         F.col(juros_key).cast("long").alias("condition_key"),
                         *[
-                            F.coalesce(F.trim(F.col(value).cast("string")), F.lit("<NULL>"))
-                            .alias(name)
+                            F.coalesce(F.trim(F.col(value).cast("string")), F.lit("<NULL>")).alias(
+                                name
+                            )
                             for name, value in consistency_cols.items()
                         ],
                     ),
-                    "condition_key", "inner",
+                    "condition_key",
+                    "inner",
                 )
-                counts = config.groupBy("NUM_IF").agg(*[
-                    F.countDistinct(F.col(name)).alias(name) for name in consistency_names
-                ])
-                inconsistent = counts.where(reduce(
-                    lambda left, right: left | right,
-                    [F.col(name) > 1 for name in consistency_names],
-                ))
+                counts = config.groupBy("NUM_IF").agg(
+                    *[F.countDistinct(F.col(name)).alias(name) for name in consistency_names]
+                )
+                inconsistent = counts.where(
+                    reduce(
+                        lambda left, right: left | right,
+                        [F.col(name) > 1 for name in consistency_names],
+                    )
+                )
                 record(
-                    "2b.escalonamento_consistency", "JUROS_FLUTUANTE",
-                    ",".join(consistency_names), inconsistent, ["NUM_IF"], SEV_ERROR,
+                    "2b.escalonamento_consistency",
+                    "JUROS_FLUTUANTE",
+                    ",".join(consistency_names),
+                    inconsistent,
+                    ["NUM_IF"],
+                    SEV_ERROR,
                     "Keep base rate/index configuration constant across active segments.",
                     "EMISSAO segments with inconsistent base-rate configuration.",
                 )
@@ -2375,37 +2816,48 @@ def check_cdb_variant_rules(
     pending = tables.get("PENDENCIA_IF")
     if pending is not None:
         pending_cols = {
-            name: resolve(pending, name) for name in (
-                "NUM_ID_PENDENCIA_IF", "NUM_IF", "NUM_ID_TIPO_PENDENCIA",
-                "DAT_INICIO_PENDENCIA", "DAT_FIM_PENDENCIA",
+            name: resolve(pending, name)
+            for name in (
+                "NUM_ID_PENDENCIA_IF",
+                "NUM_IF",
+                "NUM_ID_TIPO_PENDENCIA",
+                "DAT_INICIO_PENDENCIA",
+                "DAT_FIM_PENDENCIA",
             )
         }
         required_pending = [
-            name for name in (
-                "NUM_IF", "NUM_ID_TIPO_PENDENCIA", "DAT_INICIO_PENDENCIA",
+            name
+            for name in (
+                "NUM_IF",
+                "NUM_ID_TIPO_PENDENCIA",
+                "DAT_INICIO_PENDENCIA",
                 "DAT_FIM_PENDENCIA",
-            ) if not pending_cols[name]
+            )
+            if not pending_cols[name]
         ]
         if required_pending:
-            out.append(Finding(
-                "2b.pendencia_availability", cat, SEV_WARN, "PENDENCIA_IF", False,
-                column=",".join(required_pending),
-                hint="Include pending lifecycle columns to validate workflow history.",
-                message=f"Pending-history checks unavailable: {required_pending}.",
-            ))
+            out.append(
+                Finding(
+                    "2b.pendencia_availability",
+                    cat,
+                    SEV_WARN,
+                    "PENDENCIA_IF",
+                    False,
+                    column=",".join(required_pending),
+                    hint="Include pending lifecycle columns to validate workflow history.",
+                    message=f"Pending-history checks unavailable: {required_pending}.",
+                )
+            )
         else:
             pending_rows = pending.select(
                 *(
                     [F.col(pending_cols["NUM_ID_PENDENCIA_IF"]).alias("pending_key")]
-                    if pending_cols["NUM_ID_PENDENCIA_IF"] else []
+                    if pending_cols["NUM_ID_PENDENCIA_IF"]
+                    else []
                 ),
                 F.col(pending_cols["NUM_IF"]).cast("long").alias("NUM_IF"),
-                _norm_code(F.col(pending_cols["NUM_ID_TIPO_PENDENCIA"])).alias(
-                    "pending_type"
-                ),
-                try_cast(pending_cols["DAT_INICIO_PENDENCIA"], "date").alias(
-                    "pending_start"
-                ),
+                _norm_code(F.col(pending_cols["NUM_ID_TIPO_PENDENCIA"])).alias("pending_type"),
+                try_cast(pending_cols["DAT_INICIO_PENDENCIA"], "date").alias("pending_start"),
                 try_cast(pending_cols["DAT_FIM_PENDENCIA"], "date").alias("pending_end"),
                 (
                     F.col(pending_cols["DAT_INICIO_PENDENCIA"]).isNotNull()
@@ -2420,11 +2872,10 @@ def check_cdb_variant_rules(
                     | (F.trim(F.col(pending_cols["DAT_FIM_PENDENCIA"]).cast("string")) == "")
                 ).alias("pending_open"),
             )
-            pending_keys = (
-                ["pending_key"] if "pending_key" in pending_rows.columns else ["NUM_IF"]
-            )
+            pending_keys = ["pending_key"] if "pending_key" in pending_rows.columns else ["NUM_IF"]
             record(
-                "2b.pendencia_dates", "PENDENCIA_IF",
+                "2b.pendencia_dates",
+                "PENDENCIA_IF",
                 "DAT_INICIO_PENDENCIA<=DAT_FIM_PENDENCIA",
                 pending_rows.where(
                     (F.col("pending_start_present") & F.col("pending_start").isNull())
@@ -2435,31 +2886,42 @@ def check_cdb_variant_rules(
                         & (F.col("pending_start") > F.col("pending_end"))
                     )
                 ),
-                pending_keys, SEV_WARN,
+                pending_keys,
+                SEV_WARN,
                 "Close pending rows on or after their start date.",
                 "Pending-history rows whose end precedes their start.",
             )
             if root_cols["COD_SITUACAO_IF"]:
-                open_final = pending_rows.where(
-                    F.col("pending_type").isin("1", "29") & F.col("pending_open")
-                ).join(roots.select("NUM_IF", "root_status"), "NUM_IF", "inner").where(
-                    F.col("root_status") == "0"
+                open_final = (
+                    pending_rows.where(
+                        F.col("pending_type").isin("1", "29") & F.col("pending_open")
+                    )
+                    .join(roots.select("NUM_IF", "root_status"), "NUM_IF", "inner")
+                    .where(F.col("root_status") == "0")
                 )
                 record(
-                    "2b.pendencia_open_final", "PENDENCIA_IF",
-                    "DAT_FIM_PENDENCIA,COD_SITUACAO_IF", open_final,
-                    pending_keys, SEV_WARN,
+                    "2b.pendencia_open_final",
+                    "PENDENCIA_IF",
+                    "DAT_FIM_PENDENCIA,COD_SITUACAO_IF",
+                    open_final,
+                    pending_keys,
+                    SEV_WARN,
                     "Close type-1/type-29 pending rows before returning the IF to status 0.",
                     "Final-status CDBs retaining an open registration pending row.",
                 )
             else:
-                out.append(Finding(
-                    "2b.pendencia_open_final", cat, SEV_WARN,
-                    "INSTRUMENTO_FINANCEIRO,PENDENCIA_IF", False,
-                    column="COD_SITUACAO_IF,DAT_FIM_PENDENCIA",
-                    hint="Include COD_SITUACAO_IF to validate open pending rows.",
-                    message="Open final-status pending check unavailable without IF status.",
-                ))
+                out.append(
+                    Finding(
+                        "2b.pendencia_open_final",
+                        cat,
+                        SEV_WARN,
+                        "INSTRUMENTO_FINANCEIRO,PENDENCIA_IF",
+                        False,
+                        column="COD_SITUACAO_IF,DAT_FIM_PENDENCIA",
+                        hint="Include COD_SITUACAO_IF to validate open pending rows.",
+                        message="Open final-status pending check unavailable without IF status.",
+                    )
+                )
 
     return out
 
@@ -2489,12 +2951,20 @@ def check_rdb_resgate_schedule_rules(
         message: str,
     ) -> None:
         count = bad.count()
-        out.append(Finding(
-            check_id, cat, severity if count else SEV_INFO, table, count == 0,
-            count=count, column=column,
-            sample=_sample_keys(bad, keys, sample) if count else [],
-            hint=hint if count else "", message=message,
-        ))
+        out.append(
+            Finding(
+                check_id,
+                cat,
+                severity if count else SEV_INFO,
+                table,
+                count == 0,
+                count=count,
+                column=column,
+                sample=_sample_keys(bad, keys, sample) if count else [],
+                hint=hint if count else "",
+                message=message,
+            )
+        )
 
     def try_cast(column: str, sql_type: str):
         escaped = column.replace("`", "``")
@@ -2504,20 +2974,26 @@ def check_rdb_resgate_schedule_rules(
     condicao = tables.get("CONDICAO_IF")
     resgate = tables.get("RESGATE")
     missing_tables = [
-        name for name, frame in (
+        name
+        for name, frame in (
             ("INSTRUMENTO_FINANCEIRO", root),
             ("CONDICAO_IF", condicao),
             ("RESGATE", resgate),
-        ) if frame is None
+        )
+        if frame is None
     ]
     if missing_tables:
-        return [Finding(
-            "2c.rdb_resgate_schedule_availability", cat,
-            SEV_ERROR if strict_variant else SEV_WARN,
-            ",".join(missing_tables), False,
-            hint="Include the RDB root, condition, and resgate tables.",
-            message=f"RDB schedule checks unavailable; missing: {missing_tables}.",
-        )]
+        return [
+            Finding(
+                "2c.rdb_resgate_schedule_availability",
+                cat,
+                SEV_ERROR if strict_variant else SEV_WARN,
+                ",".join(missing_tables),
+                False,
+                hint="Include the RDB root, condition, and resgate tables.",
+                message=f"RDB schedule checks unavailable; missing: {missing_tables}.",
+            )
+        ]
 
     root_cols = {
         name: resolve(root, name)
@@ -2538,31 +3014,42 @@ def check_rdb_resgate_schedule_rules(
     }
     missing_columns = [name for name, value in required.items() if not value]
     if missing_columns:
-        return [Finding(
-            "2c.rdb_resgate_schedule_availability", cat,
-            SEV_ERROR if strict_variant else SEV_WARN,
-            ",".join(missing_columns), False,
-            hint="Include the columns required to resolve RDB schedule ownership and dates.",
-            message=f"RDB schedule checks unavailable; missing: {missing_columns}.",
-        )]
+        return [
+            Finding(
+                "2c.rdb_resgate_schedule_availability",
+                cat,
+                SEV_ERROR if strict_variant else SEV_WARN,
+                ",".join(missing_columns),
+                False,
+                hint="Include the columns required to resolve RDB schedule ownership and dates.",
+                message=f"RDB schedule checks unavailable; missing: {missing_columns}.",
+            )
+        ]
 
-    roots = _active(root).where(
-        F.col(root_cols["NUM_TIPO_IF"]).cast("long") == profile.num_tipo_if
-    ).select(
-        F.col(root_cols["NUM_IF"]).cast("long").alias("NUM_IF"),
-        try_cast(root_cols["DAT_EMISSAO"], "date").alias("root_emission"),
-        try_cast(root_cols["DAT_VENCIMENTO"], "date").alias("root_maturity"),
-    ).dropDuplicates(["NUM_IF"])
-    conditions = _active(condicao).select(
-        F.col(cond_cols["NUM_CONDICAO_IF"]).cast("long").alias("condition_key"),
-        F.col(cond_cols["NUM_IF"]).cast("long").alias("NUM_IF"),
-        _norm_code(F.col(cond_cols["COD_TIPO_CONDICAO_IF"])).alias("condition_type"),
-    ).join(roots.select("NUM_IF"), "NUM_IF", "inner")
+    roots = (
+        _active(root)
+        .where(F.col(root_cols["NUM_TIPO_IF"]).cast("long") == profile.num_tipo_if)
+        .select(
+            F.col(root_cols["NUM_IF"]).cast("long").alias("NUM_IF"),
+            try_cast(root_cols["DAT_EMISSAO"], "date").alias("root_emission"),
+            try_cast(root_cols["DAT_VENCIMENTO"], "date").alias("root_maturity"),
+        )
+        .dropDuplicates(["NUM_IF"])
+    )
+    conditions = (
+        _active(condicao)
+        .select(
+            F.col(cond_cols["NUM_CONDICAO_IF"]).cast("long").alias("condition_key"),
+            F.col(cond_cols["NUM_IF"]).cast("long").alias("NUM_IF"),
+            _norm_code(F.col(cond_cols["COD_TIPO_CONDICAO_IF"])).alias("condition_type"),
+        )
+        .join(roots.select("NUM_IF"), "NUM_IF", "inner")
+    )
     type_20_conditions = conditions.where(F.col("condition_type") == "20")
     resgate_rows = _active(resgate).select(
-            F.col(res_cols["NUM_CONDICAO_IF"]).cast("long").alias("condition_key"),
-            _norm_code(F.col(res_cols["COD_COND_RESGATE"])).alias("resgate_mode"),
-            try_cast(res_cols["DAT_RESGATE"], "date").alias("resgate_date"),
+        F.col(res_cols["NUM_CONDICAO_IF"]).cast("long").alias("condition_key"),
+        _norm_code(F.col(res_cols["COD_COND_RESGATE"])).alias("resgate_mode"),
+        try_cast(res_cols["DAT_RESGATE"], "date").alias("resgate_date"),
     )
     parents = type_20_conditions.join(resgate_rows, "condition_key", "inner")
     com_tabela = parents.where(F.col("resgate_mode") == "COM TABELA")
@@ -2572,24 +3059,29 @@ def check_rdb_resgate_schedule_rules(
         "rdb_resgate": "COM TABELA",
     }.get(profile.name)
     if expected_mode is not None:
-        variant_summary = roots.select("NUM_IF").join(
-            type_20_conditions.select("NUM_IF", "condition_key"),
-            "NUM_IF",
-            "left",
-        ).join(resgate_rows, "condition_key", "left").groupBy("NUM_IF").agg(
-            F.count("condition_key").alias("resgate_count"),
-            F.sum(
-                F.when(F.col("resgate_mode") == expected_mode, 1).otherwise(0)
-            ).alias("expected_mode_count"),
-            F.collect_set("resgate_mode").alias("resgate_modes"),
+        variant_summary = (
+            roots.select("NUM_IF")
+            .join(
+                type_20_conditions.select("NUM_IF", "condition_key"),
+                "NUM_IF",
+                "left",
+            )
+            .join(resgate_rows, "condition_key", "left")
+            .groupBy("NUM_IF")
+            .agg(
+                F.count("condition_key").alias("resgate_count"),
+                F.sum(F.when(F.col("resgate_mode") == expected_mode, 1).otherwise(0)).alias(
+                    "expected_mode_count"
+                ),
+                F.collect_set("resgate_mode").alias("resgate_modes"),
+            )
         )
         record(
             "2c.rdb_variant_resgate_mode",
             "RESGATE",
             "COD_COND_RESGATE",
             variant_summary.where(
-                (F.col("resgate_count") != 1)
-                | (F.col("expected_mode_count") != 1)
+                (F.col("resgate_count") != 1) | (F.col("expected_mode_count") != 1)
             ),
             ["NUM_IF", "resgate_count", "resgate_modes"],
             SEV_ERROR,
@@ -2600,20 +3092,20 @@ def check_rdb_resgate_schedule_rules(
     if profile.name == "rdb_inclusao":
         titulo = tables.get("TITULO")
         titulo_num_if = resolve(titulo, "NUM_IF") if titulo is not None else None
-        qtd_resgatada = (
-            resolve(titulo, "QTD_RESGATADA") if titulo is not None else None
-        )
+        qtd_resgatada = resolve(titulo, "QTD_RESGATADA") if titulo is not None else None
         if titulo is None or not titulo_num_if or not qtd_resgatada:
-            out.append(Finding(
-                "2c.rdb_inclusao_redeemed_quantity",
-                cat,
-                SEV_ERROR,
-                "TITULO",
-                False,
-                column="QTD_RESGATADA",
-                hint="Include TITULO.NUM_IF and QTD_RESGATADA in the validation input.",
-                message="RDB inclusion redeemed-quantity check is unavailable.",
-            ))
+            out.append(
+                Finding(
+                    "2c.rdb_inclusao_redeemed_quantity",
+                    cat,
+                    SEV_ERROR,
+                    "TITULO",
+                    False,
+                    column="QTD_RESGATADA",
+                    hint="Include TITULO.NUM_IF and QTD_RESGATADA in the validation input.",
+                    message="RDB inclusion redeemed-quantity check is unavailable.",
+                )
+            )
         else:
             titulo_quantities = _active(titulo).select(
                 F.col(titulo_num_if).cast("long").alias("NUM_IF"),
@@ -2623,11 +3115,10 @@ def check_rdb_resgate_schedule_rules(
                 "2c.rdb_inclusao_redeemed_quantity",
                 "TITULO",
                 "QTD_RESGATADA",
-                roots.select("NUM_IF").join(
-                    titulo_quantities, "NUM_IF", "left"
-                ).where(
-                    F.col("redeemed_quantity").isNull()
-                    | (F.col("redeemed_quantity") != F.lit(0))
+                roots.select("NUM_IF")
+                .join(titulo_quantities, "NUM_IF", "left")
+                .where(
+                    F.col("redeemed_quantity").isNull() | (F.col("redeemed_quantity") != F.lit(0))
                 ),
                 ["NUM_IF", "redeemed_quantity"],
                 SEV_ERROR,
@@ -2638,8 +3129,12 @@ def check_rdb_resgate_schedule_rules(
     schedule = tables.get("CONDICAO_RESGATE")
     if schedule is None:
         record(
-            "2c.rdb_resgate_schedule_coverage", "CONDICAO_RESGATE", "NUM_CONDICAO_IF",
-            com_tabela, ["NUM_IF", "condition_key"], SEV_ERROR,
+            "2c.rdb_resgate_schedule_coverage",
+            "CONDICAO_RESGATE",
+            "NUM_CONDICAO_IF",
+            com_tabela,
+            ["NUM_IF", "condition_key"],
+            SEV_ERROR,
             "Include at least one active schedule row per COM TABELA RDB.",
             "COM TABELA RDBs without an available redemption schedule.",
         )
@@ -2650,18 +3145,25 @@ def check_rdb_resgate_schedule_rules(
         for name in ("NUM_CONDICAO_IF", "IND_EXCLUIDO", "DAT_RESGATE", "VAL_PERCENTUAL")
     }
     missing_schedule = [
-        name for name in ("NUM_CONDICAO_IF", "DAT_RESGATE", "VAL_PERCENTUAL")
+        name
+        for name in ("NUM_CONDICAO_IF", "DAT_RESGATE", "VAL_PERCENTUAL")
         if not schedule_cols[name]
     ]
     if missing_schedule:
         count = max(com_tabela.count(), schedule.count())
-        out.append(Finding(
-            "2c.rdb_resgate_schedule_availability", cat,
-            SEV_ERROR if count else SEV_INFO, "CONDICAO_RESGATE", count == 0,
-            count=count, column=",".join(missing_schedule),
-            hint="Include the required schedule columns." if count else "",
-            message=f"RDB schedule columns unavailable: {missing_schedule}.",
-        ))
+        out.append(
+            Finding(
+                "2c.rdb_resgate_schedule_availability",
+                cat,
+                SEV_ERROR if count else SEV_INFO,
+                "CONDICAO_RESGATE",
+                count == 0,
+                count=count,
+                column=",".join(missing_schedule),
+                hint="Include the required schedule columns." if count else "",
+                message=f"RDB schedule columns unavailable: {missing_schedule}.",
+            )
+        )
         return out
 
     active_schedule = schedule
@@ -2676,24 +3178,32 @@ def check_rdb_resgate_schedule_rules(
     child_keys = children.select("condition_key").dropDuplicates()
 
     record(
-        "2c.rdb_resgate_schedule_coverage", "CONDICAO_RESGATE", "NUM_CONDICAO_IF",
+        "2c.rdb_resgate_schedule_coverage",
+        "CONDICAO_RESGATE",
+        "NUM_CONDICAO_IF",
         com_tabela.join(child_keys, "condition_key", "leftanti"),
-        ["NUM_IF", "condition_key"], SEV_ERROR,
+        ["NUM_IF", "condition_key"],
+        SEV_ERROR,
         "Generate at least one active schedule row per COM TABELA RDB.",
         "COM TABELA RDBs without active redemption schedule rows.",
     )
     record(
-        "2c.rdb_resgate_schedule_parent", "CONDICAO_RESGATE", "NUM_CONDICAO_IF",
+        "2c.rdb_resgate_schedule_parent",
+        "CONDICAO_RESGATE",
+        "NUM_CONDICAO_IF",
         children.join(
             com_tabela.select("condition_key").dropDuplicates(),
-            "condition_key", "leftanti",
+            "condition_key",
+            "leftanti",
         ),
-        ["condition_key", "schedule_date"], SEV_ERROR,
+        ["condition_key", "schedule_date"],
+        SEV_ERROR,
         "Attach active schedules only to type-20 COM TABELA RDB resgates.",
         "Active RDB schedule rows attached to invalid or SEM TABELA parents.",
     )
     record(
-        "2c.rdb_resgate_schedule_values", "CONDICAO_RESGATE",
+        "2c.rdb_resgate_schedule_values",
+        "CONDICAO_RESGATE",
         "DAT_RESGATE,VAL_PERCENTUAL",
         children.where(
             F.col("schedule_date").isNull()
@@ -2701,39 +3211,57 @@ def check_rdb_resgate_schedule_rules(
             | F.isnan(F.col("schedule_percentage"))
             | (F.abs(F.col("schedule_percentage")) == F.lit(float("inf")))
         ),
-        ["condition_key", "schedule_date"], SEV_ERROR,
+        ["condition_key", "schedule_date"],
+        SEV_ERROR,
         "Populate a parseable date and percentage; percentages may exceed 100.",
         "Active RDB schedule rows with null or invalid values.",
     )
 
-    duplicate_dates = children.where(F.col("schedule_date").isNotNull()).groupBy(
-        "condition_key", "schedule_date"
-    ).count().where(F.col("count") > 1)
+    duplicate_dates = (
+        children.where(F.col("schedule_date").isNotNull())
+        .groupBy("condition_key", "schedule_date")
+        .count()
+        .where(F.col("count") > 1)
+    )
     record(
-        "2c.rdb_resgate_schedule_unique_dates", "CONDICAO_RESGATE", "DAT_RESGATE",
-        duplicate_dates, ["condition_key", "schedule_date"], SEV_WARN,
+        "2c.rdb_resgate_schedule_unique_dates",
+        "CONDICAO_RESGATE",
+        "DAT_RESGATE",
+        duplicate_dates,
+        ["condition_key", "schedule_date"],
+        SEV_WARN,
         "Review duplicate dates; captured RDB schedules use one row per date.",
         "Duplicate active redemption dates under one RDB resgate condition.",
     )
 
     bounded = children.join(
         com_tabela.select("condition_key", "NUM_IF", "resgate_date"),
-        "condition_key", "inner",
+        "condition_key",
+        "inner",
     ).join(roots, "NUM_IF", "inner")
     record(
-        "2c.rdb_resgate_schedule_dates", "CONDICAO_RESGATE", "DAT_RESGATE",
+        "2c.rdb_resgate_schedule_dates",
+        "CONDICAO_RESGATE",
+        "DAT_RESGATE",
         bounded.where(
             F.col("schedule_date").isNotNull()
             & (
-                (F.col("root_emission").isNotNull()
-                 & (F.col("schedule_date") < F.col("root_emission")))
-                | (F.col("root_maturity").isNotNull()
-                   & (F.col("schedule_date") > F.col("root_maturity")))
-                | (F.col("resgate_date").isNotNull()
-                   & (F.col("schedule_date") > F.col("resgate_date")))
+                (
+                    F.col("root_emission").isNotNull()
+                    & (F.col("schedule_date") < F.col("root_emission"))
+                )
+                | (
+                    F.col("root_maturity").isNotNull()
+                    & (F.col("schedule_date") > F.col("root_maturity"))
+                )
+                | (
+                    F.col("resgate_date").isNotNull()
+                    & (F.col("schedule_date") > F.col("resgate_date"))
+                )
             )
         ),
-        ["NUM_IF", "condition_key", "schedule_date"], SEV_WARN,
+        ["NUM_IF", "condition_key", "schedule_date"],
+        SEV_WARN,
         "Review schedule dates outside issuance and redemption/maturity bounds.",
         "Active RDB schedule rows outside observed instrument date bounds.",
     )
@@ -2747,12 +3275,15 @@ def check_rdb_resgate_schedule_rules(
         ),
     )
     record(
-        "2c.rdb_resgate_schedule_percentages", "CONDICAO_RESGATE", "VAL_PERCENTUAL",
+        "2c.rdb_resgate_schedule_percentages",
+        "CONDICAO_RESGATE",
+        "VAL_PERCENTUAL",
         ordered.where(
             F.col("previous_percentage").isNotNull()
             & (F.col("schedule_percentage") <= F.col("previous_percentage"))
         ),
-        ["condition_key", "schedule_date"], SEV_WARN,
+        ["condition_key", "schedule_date"],
+        SEV_WARN,
         "Review non-increasing percentages; all captured schedules increase by date.",
         "RDB schedule percentages that do not increase with redemption date.",
     )
@@ -2769,8 +3300,12 @@ LOTE_TABLE = "LOTE"
 
 def _credito_scr_unavailable(check_id: str, missing: List[str], severity: str) -> Finding:
     return Finding(
-        check_id, "Credito SCR", severity, ",".join(sorted({m.split('.')[0] for m in missing})),
-        False, hint="Export the complete Credito SCR graph and rerun with target metadata.",
+        check_id,
+        "Credito SCR",
+        severity,
+        ",".join(sorted({m.split(".")[0] for m in missing})),
+        False,
+        hint="Export the complete Credito SCR graph and rerun with target metadata.",
         message=f"Check unavailable; missing required input: {', '.join(missing)}.",
     )
 
@@ -2786,9 +3321,7 @@ def _credito_scr_columns(
             missing.append(table)
             continue
         resolved[table] = {name: resolve(df, name) for name in names}
-        missing.extend(
-            f"{table}.{name}" for name, actual in resolved[table].items() if not actual
-        )
+        missing.extend(f"{table}.{name}" for name, actual in resolved[table].items() if not actual)
     return resolved, missing
 
 
@@ -2823,18 +3356,27 @@ def check_credito_scr_identity(
         return [_credito_scr_unavailable("0.identity.root", [CREDITO_SCR_TABLE], SEV_ERROR)]
     key = resolve(credit, "NUM_ID_CREDITO_SCR")
     if not key:
-        return [_credito_scr_unavailable(
-            "0.identity.root", [f"{CREDITO_SCR_TABLE}.NUM_ID_CREDITO_SCR"], SEV_ERROR
-        )]
+        return [
+            _credito_scr_unavailable(
+                "0.identity.root", [f"{CREDITO_SCR_TABLE}.NUM_ID_CREDITO_SCR"], SEV_ERROR
+            )
+        ]
     active = _credito_scr_active(credit)
     count = active.count()
-    return [Finding(
-        "0.identity.root", "Product identity", SEV_INFO if count else SEV_ERROR,
-        CREDITO_SCR_TABLE, count > 0, count=count, column="NUM_ID_CREDITO_SCR",
-        sample=_sample_keys(active, [key], sample) if count else [],
-        hint="Export at least one active CREDITO_SCR row." if not count else "",
-        message="Active CREDITO_SCR rows define the credito_scr product universe.",
-    )]
+    return [
+        Finding(
+            "0.identity.root",
+            "Product identity",
+            SEV_INFO if count else SEV_ERROR,
+            CREDITO_SCR_TABLE,
+            count > 0,
+            count=count,
+            column="NUM_ID_CREDITO_SCR",
+            sample=_sample_keys(active, [key], sample) if count else [],
+            hint="Export at least one active CREDITO_SCR row." if not count else "",
+            message="Active CREDITO_SCR rows define the credito_scr product universe.",
+        )
+    ]
 
 
 def check_credito_scr_metadata(
@@ -2843,23 +3385,38 @@ def check_credito_scr_metadata(
     if profile.pipeline != "credito_scr":
         return []
     if no_oracle:
-        return [Finding(
-            "0.credito_scr_metadata", "Coverage", SEV_INFO, "Oracle metadata", True,
-            message="Authoritative Credito SCR metadata deferred under --no-oracle; "
-                    "the run is already marked PARTIAL.",
-        )]
+        return [
+            Finding(
+                "0.credito_scr_metadata",
+                "Coverage",
+                SEV_INFO,
+                "Oracle metadata",
+                True,
+                message="Authoritative Credito SCR metadata deferred under --no-oracle; "
+                "the run is already marked PARTIAL.",
+            )
+        ]
     required = (LOTE_TABLE, CREDITO_SCR_TABLE, HISTORICO_CREDITO_SCR_TABLE)
     missing = [table for table in required if table not in meta.tables]
     missing_pk = [table for table in required if table in meta.tables and not meta.pk.get(table)]
     failed = bool(missing or missing_pk)
-    return [Finding(
-        "0.credito_scr_metadata", "Coverage", SEV_ERROR if failed else SEV_INFO,
-        ",".join(required), not failed, count=len(missing) + len(missing_pk),
-        hint="Extract metadata from the receiving Oracle schema; do not infer constraints "
-             "from the insertion log." if failed else "",
-        message=f"Missing Oracle table metadata={missing}; missing PK metadata={missing_pk}."
-                if failed else "Authoritative Oracle table and PK metadata are available.",
-    )]
+    return [
+        Finding(
+            "0.credito_scr_metadata",
+            "Coverage",
+            SEV_ERROR if failed else SEV_INFO,
+            ",".join(required),
+            not failed,
+            count=len(missing) + len(missing_pk),
+            hint="Extract metadata from the receiving Oracle schema; do not infer constraints "
+            "from the insertion log."
+            if failed
+            else "",
+            message=f"Missing Oracle table metadata={missing}; missing PK metadata={missing_pk}."
+            if failed
+            else "Authoritative Oracle table and PK metadata are available.",
+        )
+    ]
 
 
 def check_credito_scr_graph(
@@ -2869,15 +3426,25 @@ def check_credito_scr_graph(
         return []
     requirements = {
         LOTE_TABLE: (
-            "NUM_ID_LOTE", "NOME_LOTE", "NUM_CONTA_PARTICIPANTE", "NUM_ID_TIPO_LOTE",
+            "NUM_ID_LOTE",
+            "NOME_LOTE",
+            "NUM_CONTA_PARTICIPANTE",
+            "NUM_ID_TIPO_LOTE",
             "DAT_EXCLUSAO",
         ),
         CREDITO_SCR_TABLE: (
-            "NUM_ID_CREDITO_SCR", "COD_CREDITO_SCR", "NUM_ID_LOTE", "DAT_EXCLUSAO",
+            "NUM_ID_CREDITO_SCR",
+            "COD_CREDITO_SCR",
+            "NUM_ID_LOTE",
+            "DAT_EXCLUSAO",
         ),
         HISTORICO_CREDITO_SCR_TABLE: (
-            "NUM_ID_HISTORICO_CREDITO_SCR", "NUM_ID_CREDITO_SCR", "COD_CREDITO_SCR",
-            "NUM_ID_LOTE", "NUM_CONTA_PARTICIPANTE", "TXT_DESCRICAO",
+            "NUM_ID_HISTORICO_CREDITO_SCR",
+            "NUM_ID_CREDITO_SCR",
+            "COD_CREDITO_SCR",
+            "NUM_ID_LOTE",
+            "NUM_CONTA_PARTICIPANTE",
+            "TXT_DESCRICAO",
         ),
     }
     columns, missing = _credito_scr_columns(tables, requirements)
@@ -2909,65 +3476,96 @@ def check_credito_scr_graph(
     inclusions = histories.where(F.col("action") == "INCLUSAO")
     out: List[Finding] = []
 
-    duplicate_lots = lots.groupBy("lot_name", "lot_account", "lot_type").count().where(
-        F.col("count") > 1
+    duplicate_lots = (
+        lots.groupBy("lot_name", "lot_account", "lot_type").count().where(F.col("count") > 1)
     )
     count = duplicate_lots.count()
-    out.append(Finding(
-        "2d.active_lot_natural_key", "Credito SCR graph",
-        SEV_ERROR if count else SEV_INFO, LOTE_TABLE, count == 0, count=count,
-        column="NOME_LOTE,NUM_CONTA_PARTICIPANTE,NUM_ID_TIPO_LOTE",
-        sample=_sample_keys(duplicate_lots, ["lot_name", "lot_account", "lot_type"], sample),
-        hint="Keep at most one active lot for the serialized application natural key."
-             if count else "",
-        message="Duplicate active lot natural keys.",
-    ))
+    out.append(
+        Finding(
+            "2d.active_lot_natural_key",
+            "Credito SCR graph",
+            SEV_ERROR if count else SEV_INFO,
+            LOTE_TABLE,
+            count == 0,
+            count=count,
+            column="NOME_LOTE,NUM_CONTA_PARTICIPANTE,NUM_ID_TIPO_LOTE",
+            sample=_sample_keys(duplicate_lots, ["lot_name", "lot_account", "lot_type"], sample),
+            hint="Keep at most one active lot for the serialized application natural key."
+            if count
+            else "",
+            message="Duplicate active lot natural keys.",
+        )
+    )
 
     lot_counts = lots.groupBy("lot_id").count().withColumnRenamed("count", "lot_count")
     bad_lot_links = credits.join(
         lot_counts, credits.credit_lot_id == lot_counts.lot_id, "left"
     ).where(F.coalesce(F.col("lot_count"), F.lit(0)) != 1)
     count = bad_lot_links.count()
-    out.append(Finding(
-        "2d.credit_active_lot", "Credito SCR graph", SEV_ERROR if count else SEV_INFO,
-        CREDITO_SCR_TABLE, count == 0, count=count, column="NUM_ID_LOTE",
-        sample=_sample_keys(bad_lot_links, ["credit_id", "credit_lot_id"], sample),
-        hint="Point every active credit to exactly one active lot." if count else "",
-        message="Active credits without exactly one active lot.",
-    ))
+    out.append(
+        Finding(
+            "2d.credit_active_lot",
+            "Credito SCR graph",
+            SEV_ERROR if count else SEV_INFO,
+            CREDITO_SCR_TABLE,
+            count == 0,
+            count=count,
+            column="NUM_ID_LOTE",
+            sample=_sample_keys(bad_lot_links, ["credit_id", "credit_lot_id"], sample),
+            hint="Point every active credit to exactly one active lot." if count else "",
+            message="Active credits without exactly one active lot.",
+        )
+    )
 
     coded = credits.withColumn(
         "code_count", F.count(F.lit(1)).over(Window.partitionBy("credit_code"))
     )
     bad_codes = coded.where(
-        F.col("credit_code").isNull() | (F.col("credit_code") == "")
-        | (F.col("code_count") > 1)
+        F.col("credit_code").isNull() | (F.col("credit_code") == "") | (F.col("code_count") > 1)
     )
     count = bad_codes.count()
-    out.append(Finding(
-        "2d.credit_code_unique", "Credito SCR graph", SEV_ERROR if count else SEV_INFO,
-        CREDITO_SCR_TABLE, count == 0, count=count, column="COD_CREDITO_SCR",
-        sample=_sample_keys(bad_codes, ["credit_id", "credit_code"], sample),
-        hint="Generate a nonblank unique active COD_CREDITO_SCR; do not infer its regex."
-             if count else "",
-        message="Active credits with blank or duplicate business codes.",
-    ))
+    out.append(
+        Finding(
+            "2d.credit_code_unique",
+            "Credito SCR graph",
+            SEV_ERROR if count else SEV_INFO,
+            CREDITO_SCR_TABLE,
+            count == 0,
+            count=count,
+            column="COD_CREDITO_SCR",
+            sample=_sample_keys(bad_codes, ["credit_id", "credit_code"], sample),
+            hint="Generate a nonblank unique active COD_CREDITO_SCR; do not infer its regex."
+            if count
+            else "",
+            message="Active credits with blank or duplicate business codes.",
+        )
+    )
 
-    inclusion_counts = inclusions.groupBy("history_credit_id").count().withColumnRenamed(
-        "count", "inclusion_count"
+    inclusion_counts = (
+        inclusions.groupBy("history_credit_id")
+        .count()
+        .withColumnRenamed("count", "inclusion_count")
     )
     bad_history_counts = credits.join(
         inclusion_counts, credits.credit_id == inclusion_counts.history_credit_id, "left"
     ).where(F.coalesce(F.col("inclusion_count"), F.lit(0)) != 1)
     count = bad_history_counts.count()
-    out.append(Finding(
-        "2d.inclusion_history", "Credito SCR graph", SEV_ERROR if count else SEV_INFO,
-        HISTORICO_CREDITO_SCR_TABLE, count == 0, count=count, column="TXT_DESCRICAO",
-        sample=_sample_keys(bad_history_counts, ["credit_id", "inclusion_count"], sample),
-        hint="Preserve exactly one history action normalized to INCLUSAO per active credit."
-             if count else "",
-        message="Active credits without exactly one inclusion history row.",
-    ))
+    out.append(
+        Finding(
+            "2d.inclusion_history",
+            "Credito SCR graph",
+            SEV_ERROR if count else SEV_INFO,
+            HISTORICO_CREDITO_SCR_TABLE,
+            count == 0,
+            count=count,
+            column="TXT_DESCRICAO",
+            sample=_sample_keys(bad_history_counts, ["credit_id", "inclusion_count"], sample),
+            hint="Preserve exactly one history action normalized to INCLUSAO per active credit."
+            if count
+            else "",
+            message="Active credits without exactly one inclusion history row.",
+        )
+    )
 
     inclusion_identity = inclusions.join(
         credits, inclusions.history_credit_id == credits.credit_id, "inner"
@@ -2978,23 +3576,35 @@ def check_credito_scr_graph(
         | ~F.col("history_account").eqNullSafe(F.col("lot_account"))
     )
     count = bad_identity.count()
-    out.append(Finding(
-        "2d.inclusion_identity", "Credito SCR graph", SEV_ERROR if count else SEV_INFO,
-        HISTORICO_CREDITO_SCR_TABLE, count == 0, count=count,
-        column="NUM_ID_CREDITO_SCR,COD_CREDITO_SCR,NUM_ID_LOTE,NUM_CONTA_PARTICIPANTE",
-        sample=_sample_keys(bad_identity, ["history_id", "credit_id"], sample),
-        hint="Keep inclusion identity/ownership equal to the active credit and its lot."
-             if count else "",
-        message="Inclusion histories with mismatching identity or ownership.",
-    ))
+    out.append(
+        Finding(
+            "2d.inclusion_identity",
+            "Credito SCR graph",
+            SEV_ERROR if count else SEV_INFO,
+            HISTORICO_CREDITO_SCR_TABLE,
+            count == 0,
+            count=count,
+            column="NUM_ID_CREDITO_SCR,COD_CREDITO_SCR,NUM_ID_LOTE,NUM_CONTA_PARTICIPANTE",
+            sample=_sample_keys(bad_identity, ["history_id", "credit_id"], sample),
+            hint="Keep inclusion identity/ownership equal to the active credit and its lot."
+            if count
+            else "",
+            message="Inclusion histories with mismatching identity or ownership.",
+        )
+    )
     return out
 
 
 def check_credito_scr_target_frames(
-    tables: Dict[str, DataFrame], modalidade: Optional[DataFrame],
-    eligible_bases: Optional[DataFrame], feature_toggle: Optional[DataFrame], sample: int,
-    profile: ValidationProfile, lookup_errors: Optional[Dict[str, str]] = None,
-    account_profile: Optional[DataFrame] = None, registration_profile: bool = False,
+    tables: Dict[str, DataFrame],
+    modalidade: Optional[DataFrame],
+    eligible_bases: Optional[DataFrame],
+    feature_toggle: Optional[DataFrame],
+    sample: int,
+    profile: ValidationProfile,
+    lookup_errors: Optional[Dict[str, str]] = None,
+    account_profile: Optional[DataFrame] = None,
+    registration_profile: bool = False,
     existing_ipocs: Optional[DataFrame] = None,
 ) -> List[Finding]:
     if profile.pipeline != "credito_scr":
@@ -3003,8 +3613,13 @@ def check_credito_scr_target_frames(
     requirements = {
         LOTE_TABLE: ("NUM_ID_LOTE", "NUM_CONTA_PARTICIPANTE", "DAT_EXCLUSAO"),
         CREDITO_SCR_TABLE: (
-            "NUM_ID_CREDITO_SCR", "NUM_ID_LOTE", "NUM_ID_MODALIDADE_CREDITO",
-            "NUM_ID_BASE_CREDITO", "COD_IPOC", "DAT_SALDO_REMANESCENTE", "DAT_EXCLUSAO",
+            "NUM_ID_CREDITO_SCR",
+            "NUM_ID_LOTE",
+            "NUM_ID_MODALIDADE_CREDITO",
+            "NUM_ID_BASE_CREDITO",
+            "COD_IPOC",
+            "DAT_SALDO_REMANESCENTE",
+            "DAT_EXCLUSAO",
         ),
     }
     columns, missing = _credito_scr_columns(tables, requirements)
@@ -3026,17 +3641,22 @@ def check_credito_scr_target_frames(
     out: List[Finding] = []
 
     if modalidade is None:
-        out.append(_credito_scr_unavailable(
-            "6d.lookup.modalidade", [lookup_errors.get("MODALIDADE_CREDITO", "MODALIDADE_CREDITO")],
-            SEV_WARN,
-        ))
+        out.append(
+            _credito_scr_unavailable(
+                "6d.lookup.modalidade",
+                [lookup_errors.get("MODALIDADE_CREDITO", "MODALIDADE_CREDITO")],
+                SEV_WARN,
+            )
+        )
     else:
         mid = resolve(modalidade, "NUM_ID_MODALIDADE_CREDITO")
         mcode = resolve(modalidade, "COD_MODALIDADE_CREDITO")
         if not mid or not mcode:
-            out.append(_credito_scr_unavailable(
-                "6d.lookup.modalidade", ["MODALIDADE_CREDITO required columns"], SEV_WARN
-            ))
+            out.append(
+                _credito_scr_unavailable(
+                    "6d.lookup.modalidade", ["MODALIDADE_CREDITO required columns"], SEV_WARN
+                )
+            )
         else:
             modes = modalidade.select(
                 _canon_key_col(F.col(mid)).alias("lookup_modalidade_id"),
@@ -3046,37 +3666,48 @@ def check_credito_scr_target_frames(
                 modes, credits.modalidade_id == modes.lookup_modalidade_id, "left"
             ).where(F.col("lookup_modalidade_id").isNull() | (F.col("modalidade_code") == "9999"))
             count = bad.count()
-            out.append(Finding(
-                "6d.lookup.modalidade", "Credito SCR target lookups",
-                SEV_ERROR if count else SEV_INFO, CREDITO_SCR_TABLE, count == 0, count=count,
-                column="NUM_ID_MODALIDADE_CREDITO", sample=_sample_keys(
-                    bad, ["credit_id", "modalidade_id", "modalidade_code"], sample
-                ),
-                hint="Use a target modalidade that resolves and whose code is not 9999."
-                     if count else "",
-                message="Credits with missing or application-excluded modalidade.",
-            ))
+            out.append(
+                Finding(
+                    "6d.lookup.modalidade",
+                    "Credito SCR target lookups",
+                    SEV_ERROR if count else SEV_INFO,
+                    CREDITO_SCR_TABLE,
+                    count == 0,
+                    count=count,
+                    column="NUM_ID_MODALIDADE_CREDITO",
+                    sample=_sample_keys(
+                        bad, ["credit_id", "modalidade_id", "modalidade_code"], sample
+                    ),
+                    hint="Use a target modalidade that resolves and whose code is not 9999."
+                    if count
+                    else "",
+                    message="Credits with missing or application-excluded modalidade.",
+                )
+            )
 
     if eligible_bases is None:
-        out.append(_credito_scr_unavailable(
-            "6d.lookup.base_eligibility",
-            [lookup_errors.get("PARAMETRO_BASE_CREDITO", "PARAMETRO_BASE_CREDITO")], SEV_WARN,
-        ))
+        out.append(
+            _credito_scr_unavailable(
+                "6d.lookup.base_eligibility",
+                [lookup_errors.get("PARAMETRO_BASE_CREDITO", "PARAMETRO_BASE_CREDITO")],
+                SEV_WARN,
+            )
+        )
     else:
         account = resolve(eligible_bases, "NUM_CONTA_PARTICIPANTE")
         base = resolve(eligible_bases, "NUM_ID_BASE_CREDITO")
         if not account or not base:
-            out.append(_credito_scr_unavailable(
-                "6d.lookup.base_eligibility", ["eligible base required columns"], SEV_WARN
-            ))
+            out.append(
+                _credito_scr_unavailable(
+                    "6d.lookup.base_eligibility", ["eligible base required columns"], SEV_WARN
+                )
+            )
         else:
             eligible = eligible_bases.select(
                 _canon_key_col(F.col(account)).alias("eligible_account"),
                 _canon_key_col(F.col(base)).alias("eligible_base"),
             ).dropDuplicates()
-            credit_bases = credits.join(
-                lots, credits.credit_lot_id == lots.lot_id, "left"
-            ).join(
+            credit_bases = credits.join(lots, credits.credit_lot_id == lots.lot_id, "left").join(
                 F.broadcast(eligible),
                 (F.col("lot_account") == F.col("eligible_account"))
                 & (F.col("base_id") == F.col("eligible_base")),
@@ -3084,29 +3715,41 @@ def check_credito_scr_target_frames(
             )
             bad = credit_bases.where(F.col("eligible_base").isNull())
             count = bad.count()
-            out.append(Finding(
-                "6d.lookup.base_eligibility", "Credito SCR target lookups",
-                SEV_ERROR if count else SEV_INFO, CREDITO_SCR_TABLE, count == 0, count=count,
-                column="NUM_ID_BASE_CREDITO,NUM_CONTA_PARTICIPANTE",
-                sample=_sample_keys(bad, ["credit_id", "lot_account", "base_id"], sample),
-                hint="Use a type-1 credit base authorized for the lot participant."
-                     if count else "",
-                message="Credits whose base is not eligible for the lot participant.",
-            ))
+            out.append(
+                Finding(
+                    "6d.lookup.base_eligibility",
+                    "Credito SCR target lookups",
+                    SEV_ERROR if count else SEV_INFO,
+                    CREDITO_SCR_TABLE,
+                    count == 0,
+                    count=count,
+                    column="NUM_ID_BASE_CREDITO,NUM_CONTA_PARTICIPANTE",
+                    sample=_sample_keys(bad, ["credit_id", "lot_account", "base_id"], sample),
+                    hint="Use a type-1 credit base authorized for the lot participant."
+                    if count
+                    else "",
+                    message="Credits whose base is not eligible for the lot participant.",
+                )
+            )
 
     if feature_toggle is None:
-        out.append(_credito_scr_unavailable(
-            "6d.lookup.ipoc_unique",
-            [lookup_errors.get("TCTPFEATURE_TOGGLE", "TCTPFEATURE_TOGGLE")], SEV_WARN,
-        ))
+        out.append(
+            _credito_scr_unavailable(
+                "6d.lookup.ipoc_unique",
+                [lookup_errors.get("TCTPFEATURE_TOGGLE", "TCTPFEATURE_TOGGLE")],
+                SEV_WARN,
+            )
+        )
     else:
         start = resolve(feature_toggle, "DATA_INIC_VIG_FTRE")
         end = resolve(feature_toggle, "DATA_FIM_VIG_FTRE")
         enabled = resolve(feature_toggle, "IND_FTRE_HAB")
         if not start or not end or not enabled:
-            out.append(_credito_scr_unavailable(
-                "6d.lookup.ipoc_unique", ["feature toggle required columns"], SEV_WARN
-            ))
+            out.append(
+                _credito_scr_unavailable(
+                    "6d.lookup.ipoc_unique", ["feature toggle required columns"], SEV_WARN
+                )
+            )
         else:
             periods = feature_toggle.where(_norm_code(F.col(enabled)) == "S").select(
                 F.to_date(F.col(start)).alias("toggle_start"),
@@ -3120,101 +3763,146 @@ def check_credito_scr_target_frames(
             )
             enabled_count = enabled_credits.limit(1).count()
             if not enabled_count:
-                out.append(Finding(
-                    "6d.lookup.ipoc_unique", "Credito SCR target lookups", SEV_INFO,
-                    CREDITO_SCR_TABLE, True, column="COD_IPOC",
-                    message="IPOC uniqueness toggle is disabled for all synthetic "
-                            "credit reference dates.",
-                ))
+                out.append(
+                    Finding(
+                        "6d.lookup.ipoc_unique",
+                        "Credito SCR target lookups",
+                        SEV_INFO,
+                        CREDITO_SCR_TABLE,
+                        True,
+                        column="COD_IPOC",
+                        message="IPOC uniqueness toggle is disabled for all synthetic "
+                        "credit reference dates.",
+                    )
+                )
             elif existing_ipocs is None:
-                out.append(_credito_scr_unavailable(
-                    "6d.lookup.ipoc_unique",
-                    [lookup_errors.get("CREDITO_SCR_TARGET", "target CREDITO_SCR IPOCs")],
-                    SEV_WARN,
-                ))
+                out.append(
+                    _credito_scr_unavailable(
+                        "6d.lookup.ipoc_unique",
+                        [lookup_errors.get("CREDITO_SCR_TARGET", "target CREDITO_SCR IPOCs")],
+                        SEV_WARN,
+                    )
+                )
             else:
                 target_ipoc_column = resolve(existing_ipocs, "COD_IPOC")
                 if not target_ipoc_column:
-                    out.append(_credito_scr_unavailable(
-                        "6d.lookup.ipoc_unique", ["target CREDITO_SCR.COD_IPOC"], SEV_WARN
-                    ))
+                    out.append(
+                        _credito_scr_unavailable(
+                            "6d.lookup.ipoc_unique", ["target CREDITO_SCR.COD_IPOC"], SEV_WARN
+                        )
+                    )
                 else:
-                    duplicate_ipocs = credits.where(
-                        F.col("ipoc").isNotNull() & (F.col("ipoc") != "")
-                    ).groupBy("ipoc").count().where(F.col("count") > 1).select("ipoc")
-                    target_ipocs = existing_ipocs.select(
-                        _credito_scr_text(F.col(target_ipoc_column)).alias("ipoc")
-                    ).where(
-                        F.col("ipoc").isNotNull() & (F.col("ipoc") != "")
-                    ).dropDuplicates()
-                    conflicting_ipocs = duplicate_ipocs.unionByName(
-                        target_ipocs
-                    ).dropDuplicates()
+                    duplicate_ipocs = (
+                        credits.where(F.col("ipoc").isNotNull() & (F.col("ipoc") != ""))
+                        .groupBy("ipoc")
+                        .count()
+                        .where(F.col("count") > 1)
+                        .select("ipoc")
+                    )
+                    target_ipocs = (
+                        existing_ipocs.select(
+                            _credito_scr_text(F.col(target_ipoc_column)).alias("ipoc")
+                        )
+                        .where(F.col("ipoc").isNotNull() & (F.col("ipoc") != ""))
+                        .dropDuplicates()
+                    )
+                    conflicting_ipocs = duplicate_ipocs.unionByName(target_ipocs).dropDuplicates()
                     bad = enabled_credits.join(conflicting_ipocs, "ipoc", "inner")
                     count = bad.count()
-                    out.append(Finding(
-                        "6d.lookup.ipoc_unique", "Credito SCR target lookups",
-                        SEV_ERROR if count else SEV_INFO, CREDITO_SCR_TABLE,
-                        count == 0, count=count, column="COD_IPOC",
-                        sample=_sample_keys(bad, ["credit_id", "ipoc"], sample),
-                        hint="Regenerate IPOCs duplicated in the output or active target when "
-                             "HAB_VALIDACAO_UNIC_IPOC_SCR is active." if count else "",
-                        message="Toggle-enabled synthetic credits with duplicate IPOCs.",
-                    ))
+                    out.append(
+                        Finding(
+                            "6d.lookup.ipoc_unique",
+                            "Credito SCR target lookups",
+                            SEV_ERROR if count else SEV_INFO,
+                            CREDITO_SCR_TABLE,
+                            count == 0,
+                            count=count,
+                            column="COD_IPOC",
+                            sample=_sample_keys(bad, ["credit_id", "ipoc"], sample),
+                            hint="Regenerate IPOCs duplicated in the output or active target when "
+                            "HAB_VALIDACAO_UNIC_IPOC_SCR is active."
+                            if count
+                            else "",
+                            message="Toggle-enabled synthetic credits with duplicate IPOCs.",
+                        )
+                    )
 
     if registration_profile:
         if account_profile is None:
-            out.append(_credito_scr_unavailable(
-                "8d.profile.account_eligibility",
-                [lookup_errors.get("CONTA_PARTICIPANTE", "CONTA_PARTICIPANTE")], SEV_WARN,
-            ))
+            out.append(
+                _credito_scr_unavailable(
+                    "8d.profile.account_eligibility",
+                    [lookup_errors.get("CONTA_PARTICIPANTE", "CONTA_PARTICIPANTE")],
+                    SEV_WARN,
+                )
+            )
         else:
             account_columns = {
                 name: resolve(account_profile, name)
                 for name in (
-                    "NUM_CONTA_PARTICIPANTE", "NUM_ID_SITUACAO_CONTA",
-                    "COD_CONTA_PARTICIPANTE", "NUM_ID_AREA_ATUACAO", "COD_TIPO_ACESSO",
+                    "NUM_CONTA_PARTICIPANTE",
+                    "NUM_ID_SITUACAO_CONTA",
+                    "COD_CONTA_PARTICIPANTE",
+                    "NUM_ID_AREA_ATUACAO",
+                    "COD_TIPO_ACESSO",
                 )
             }
-            missing_account = [
-                name for name, actual in account_columns.items() if not actual
-            ]
+            missing_account = [name for name, actual in account_columns.items() if not actual]
             if missing_account:
-                out.append(_credito_scr_unavailable(
-                    "8d.profile.account_eligibility",
-                    [f"CONTA_PARTICIPANTE.{name}" for name in missing_account], SEV_WARN,
-                ))
+                out.append(
+                    _credito_scr_unavailable(
+                        "8d.profile.account_eligibility",
+                        [f"CONTA_PARTICIPANTE.{name}" for name in missing_account],
+                        SEV_WARN,
+                    )
+                )
             else:
-                eligible_accounts = account_profile.where(
-                    _norm_code(F.col(account_columns["NUM_ID_SITUACAO_CONTA"])).isin("1", "2")
-                    & F.col(account_columns["COD_CONTA_PARTICIPANTE"])
-                    .cast("string").rlike(r"^[0-9]{5}\.40-[0-9]$")
-                    & (_norm_code(F.col(account_columns["NUM_ID_AREA_ATUACAO"])) == "1")
-                    & (_norm_code(F.col(account_columns["COD_TIPO_ACESSO"])) == "L")
-                ).select(
-                    _canon_key_col(F.col(account_columns["NUM_CONTA_PARTICIPANTE"]))
-                    .alias("eligible_account")
-                ).dropDuplicates()
+                eligible_accounts = (
+                    account_profile.where(
+                        _norm_code(F.col(account_columns["NUM_ID_SITUACAO_CONTA"])).isin("1", "2")
+                        & F.col(account_columns["COD_CONTA_PARTICIPANTE"])
+                        .cast("string")
+                        .rlike(r"^[0-9]{5}\.40-[0-9]$")
+                        & (_norm_code(F.col(account_columns["NUM_ID_AREA_ATUACAO"])) == "1")
+                        & (_norm_code(F.col(account_columns["COD_TIPO_ACESSO"])) == "L")
+                    )
+                    .select(
+                        _canon_key_col(F.col(account_columns["NUM_CONTA_PARTICIPANTE"])).alias(
+                            "eligible_account"
+                        )
+                    )
+                    .dropDuplicates()
+                )
                 bad = lots.join(
                     F.broadcast(eligible_accounts),
                     lots.lot_account == eligible_accounts.eligible_account,
                     "left_anti",
                 )
                 count = bad.count()
-                out.append(Finding(
-                    "8d.profile.account_eligibility",
-                    "Credito SCR observed insertion profile", SEV_WARN if count else SEV_INFO,
-                    LOTE_TABLE, count == 0, count=count, column="NUM_CONTA_PARTICIPANTE",
-                    sample=_sample_keys(bad, ["lot_id", "lot_account"], sample),
-                    hint="Capture other Credito SCR routes before promoting these account "
-                         "predicates to hard validation." if count else "",
-                    message="Active lot accounts outside the observed Lastro-LCI role profile.",
-                ))
+                out.append(
+                    Finding(
+                        "8d.profile.account_eligibility",
+                        "Credito SCR observed insertion profile",
+                        SEV_WARN if count else SEV_INFO,
+                        LOTE_TABLE,
+                        count == 0,
+                        count=count,
+                        column="NUM_CONTA_PARTICIPANTE",
+                        sample=_sample_keys(bad, ["lot_id", "lot_account"], sample),
+                        hint="Capture other Credito SCR routes before promoting these account "
+                        "predicates to hard validation."
+                        if count
+                        else "",
+                        message="Active lot accounts outside the observed Lastro-LCI role profile.",
+                    )
+                )
     return out
 
 
 def load_credito_scr_target_frames(
-    spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame],
+    spark: SparkSession,
+    cfg: Config,
+    tables: Dict[str, DataFrame],
     registration_profile: bool = False,
 ) -> Tuple[Dict[str, DataFrame], Dict[str, str]]:
     queries = {
@@ -3248,18 +3936,26 @@ def load_credito_scr_target_frames(
     if not all((lot_id, lot_account, credit_lot, credit_base)):
         errors["PARAMETRO_BASE_CREDITO"] = "credit/lot base-key columns unavailable"
     else:
-        pairs = _credito_scr_active(credit).select(
-            _canon_key_col(F.col(credit_lot)).alias("lot_id"),
-            _canon_key_col(F.col(credit_base)).alias("base_id"),
-        ).join(
-            _credito_scr_active(lot).select(
-                _canon_key_col(F.col(lot_id)).alias("lot_id"),
-                _canon_key_col(F.col(lot_account)).alias("account_id"),
-            ),
-            "lot_id", "inner",
-        ).select("account_id", "base_id").where(
-            F.col("account_id").isNotNull() & F.col("base_id").isNotNull()
-        ).dropDuplicates().limit(100_001).collect()
+        pairs = (
+            _credito_scr_active(credit)
+            .select(
+                _canon_key_col(F.col(credit_lot)).alias("lot_id"),
+                _canon_key_col(F.col(credit_base)).alias("base_id"),
+            )
+            .join(
+                _credito_scr_active(lot).select(
+                    _canon_key_col(F.col(lot_id)).alias("lot_id"),
+                    _canon_key_col(F.col(lot_account)).alias("account_id"),
+                ),
+                "lot_id",
+                "inner",
+            )
+            .select("account_id", "base_id")
+            .where(F.col("account_id").isNotNull() & F.col("base_id").isNotNull())
+            .dropDuplicates()
+            .limit(100_001)
+            .collect()
+        )
         if len(pairs) > 100_000:
             errors["PARAMETRO_BASE_CREDITO"] = "more than 100000 synthetic account/base pairs"
         else:
@@ -3268,9 +3964,12 @@ def load_credito_scr_target_frames(
             try:
                 for offset in range(0, len(pairs), 500):
                     predicates = " OR ".join(
-                        "(pb.NUM_CONTA_PARTICIPANTE=" + _sql_literal(row["account_id"])
-                        + " AND pb.NUM_ID_BASE_CREDITO=" + _sql_literal(row["base_id"]) + ")"
-                        for row in pairs[offset:offset + 500]
+                        "(pb.NUM_CONTA_PARTICIPANTE="
+                        + _sql_literal(row["account_id"])
+                        + " AND pb.NUM_ID_BASE_CREDITO="
+                        + _sql_literal(row["base_id"])
+                        + ")"
+                        for row in pairs[offset : offset + 500]
                     )
                     query = (
                         "SELECT DISTINCT pb.NUM_CONTA_PARTICIPANTE, pb.NUM_ID_BASE_CREDITO "
@@ -3287,7 +3986,8 @@ def load_credito_scr_target_frames(
                     base_rows.extend(rows)
                 frames["PARAMETRO_BASE_CREDITO"] = (
                     spark.createDataFrame(base_rows, base_schema)
-                    if base_schema is not None else spark.createDataFrame(
+                    if base_schema is not None
+                    else spark.createDataFrame(
                         [], "NUM_CONTA_PARTICIPANTE string, NUM_ID_BASE_CREDITO string"
                     )
                 )
@@ -3300,10 +4000,13 @@ def load_credito_scr_target_frames(
         errors["CREDITO_SCR_TARGET"] = "CREDITO_SCR.COD_IPOC unavailable"
     else:
         ipocs = [
-            row["ipoc"] for row in _credito_scr_active(credit).select(
-                _credito_scr_text(F.col(ipoc_column)).alias("ipoc")
-            ).where(F.col("ipoc").isNotNull() & (F.col("ipoc") != ""))
-            .dropDuplicates().limit(100_001).collect()
+            row["ipoc"]
+            for row in _credito_scr_active(credit)
+            .select(_credito_scr_text(F.col(ipoc_column)).alias("ipoc"))
+            .where(F.col("ipoc").isNotNull() & (F.col("ipoc") != ""))
+            .dropDuplicates()
+            .limit(100_001)
+            .collect()
         ]
         if len(ipocs) > 100_000:
             errors["CREDITO_SCR_TARGET"] = "more than 100000 distinct synthetic IPOCs"
@@ -3313,7 +4016,7 @@ def load_credito_scr_target_frames(
             try:
                 for offset in range(0, len(ipocs), 1000):
                     literals = ", ".join(
-                        _sql_literal(value) for value in ipocs[offset:offset + 1000]
+                        _sql_literal(value) for value in ipocs[offset : offset + 1000]
                     )
                     query = (
                         "SELECT COD_IPOC "
@@ -3326,7 +4029,8 @@ def load_credito_scr_target_frames(
                     target_rows.extend(rows)
                 frames["CREDITO_SCR_TARGET"] = (
                     spark.createDataFrame(target_rows, target_schema)
-                    if target_schema is not None else spark.createDataFrame([], "COD_IPOC string")
+                    if target_schema is not None
+                    else spark.createDataFrame([], "COD_IPOC string")
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Credito SCR target IPOC lookup failed: %s", exc)
@@ -3338,9 +4042,12 @@ def load_credito_scr_target_frames(
         else:
             account_keys = [
                 _canon_key(row["account"])
-                for row in _credito_scr_active(lot).select(
-                    _canon_key_col(F.col(account_column)).alias("account")
-                ).where(F.col("account").isNotNull()).dropDuplicates().limit(1_000_001).collect()
+                for row in _credito_scr_active(lot)
+                .select(_canon_key_col(F.col(account_column)).alias("account"))
+                .where(F.col("account").isNotNull())
+                .dropDuplicates()
+                .limit(1_000_001)
+                .collect()
             ]
             if len(account_keys) > 1_000_000:
                 errors["CONTA_PARTICIPANTE"] = "more than 1000000 distinct lot accounts"
@@ -3352,7 +4059,7 @@ def load_credito_scr_target_frames(
                 try:
                     for offset in range(0, len(account_keys), 1000):
                         literals = ", ".join(
-                            _sql_literal(value) for value in account_keys[offset:offset + 1000]
+                            _sql_literal(value) for value in account_keys[offset : offset + 1000]
                         )
                         query = (
                             "SELECT cp.NUM_CONTA_PARTICIPANTE, cp.NUM_ID_SITUACAO_CONTA, "
@@ -3377,7 +4084,9 @@ def load_credito_scr_target_frames(
 
 
 def check_credito_scr_registration_profile(
-    tables: Dict[str, DataFrame], sample: int, registration_profile: bool,
+    tables: Dict[str, DataFrame],
+    sample: int,
+    registration_profile: bool,
     profile: ValidationProfile,
 ) -> List[Finding]:
     if profile.pipeline != "credito_scr" or not registration_profile:
@@ -3385,23 +4094,52 @@ def check_credito_scr_registration_profile(
     requirements = {
         LOTE_TABLE: ("NUM_ID_LOTE", "IND_REVOLVENCIA", "DAT_EXCLUSAO"),
         CREDITO_SCR_TABLE: (
-            "NUM_ID_CREDITO_SCR", "NUM_TIPO_IF", "COD_TIPO_PESSOA", "IND_MULTIPLO_IPOC",
-            "NUM_ID_BASE_CREDITO", "NUM_ID_TIPO_CREDITO", "NUM_ID_MODALIDADE_CREDITO",
-            "NUM_ID_INDEXADOR_CREDITO", "VAL_SALDO_REMANESCENTE", "VAL_CONTRATADO",
-            "DAT_CONTRATACAO", "DAT_VENCIMENTO", "DAT_EXCLUSAO", "NUM_IF", "QTD_CREDITO",
-            "DAT_SALDO_REMANESCENTE", "COD_CONTRATO_SCR",
-            "COD_REFERENCIA_EXTERNA_DEVEDOR", "VAL_PERCENTUAL_INDEXADOR",
-            "VAL_PERCENTUAL_TAXA_ANUAL", "COD_IPOC",
+            "NUM_ID_CREDITO_SCR",
+            "NUM_TIPO_IF",
+            "COD_TIPO_PESSOA",
+            "IND_MULTIPLO_IPOC",
+            "NUM_ID_BASE_CREDITO",
+            "NUM_ID_TIPO_CREDITO",
+            "NUM_ID_MODALIDADE_CREDITO",
+            "NUM_ID_INDEXADOR_CREDITO",
+            "VAL_SALDO_REMANESCENTE",
+            "VAL_CONTRATADO",
+            "DAT_CONTRATACAO",
+            "DAT_VENCIMENTO",
+            "DAT_EXCLUSAO",
+            "NUM_IF",
+            "QTD_CREDITO",
+            "DAT_SALDO_REMANESCENTE",
+            "COD_CONTRATO_SCR",
+            "COD_REFERENCIA_EXTERNA_DEVEDOR",
+            "VAL_PERCENTUAL_INDEXADOR",
+            "VAL_PERCENTUAL_TAXA_ANUAL",
+            "COD_IPOC",
         ),
         HISTORICO_CREDITO_SCR_TABLE: (
-            "NUM_ID_HISTORICO_CREDITO_SCR", "NUM_ID_CREDITO_SCR", "TXT_DESCRICAO",
-            "COD_ID_CANAL", "NUM_TIPO_IF", "COD_TIPO_PESSOA", "IND_MULTIPLO_IPOC",
-            "NUM_ID_LOTE", "VAL_SALDO_REMANESCENTE", "VAL_CONTRATADO",
-            "DAT_CONTRATACAO", "DAT_VENCIMENTO", "NUM_IF_CREDITO", "QTD_CREDITO",
-            "DAT_SALDO_REMANESCENTE", "COD_CONTRATO_SCR", "NUM_ID_TIPO_CREDITO",
-            "NUM_ID_MODALIDADE_CREDITO", "NUM_ID_INDEXADOR_CREDITO",
-            "COD_REFERENCIA_EXTERNA_DEVEDOR", "VAL_PERCENTUAL_INDEXADOR",
-            "VAL_PERCENTUAL_TAXA_ANUAL", "COD_IPOC",
+            "NUM_ID_HISTORICO_CREDITO_SCR",
+            "NUM_ID_CREDITO_SCR",
+            "TXT_DESCRICAO",
+            "COD_ID_CANAL",
+            "NUM_TIPO_IF",
+            "COD_TIPO_PESSOA",
+            "IND_MULTIPLO_IPOC",
+            "NUM_ID_LOTE",
+            "VAL_SALDO_REMANESCENTE",
+            "VAL_CONTRATADO",
+            "DAT_CONTRATACAO",
+            "DAT_VENCIMENTO",
+            "NUM_IF_CREDITO",
+            "QTD_CREDITO",
+            "DAT_SALDO_REMANESCENTE",
+            "COD_CONTRATO_SCR",
+            "NUM_ID_TIPO_CREDITO",
+            "NUM_ID_MODALIDADE_CREDITO",
+            "NUM_ID_INDEXADOR_CREDITO",
+            "COD_REFERENCIA_EXTERNA_DEVEDOR",
+            "VAL_PERCENTUAL_INDEXADOR",
+            "VAL_PERCENTUAL_TAXA_ANUAL",
+            "COD_IPOC",
         ),
     }
     columns, missing = _credito_scr_columns(tables, requirements)
@@ -3418,30 +4156,62 @@ def check_credito_scr_registration_profile(
     out: List[Finding] = []
 
     constant_sets = (
-        ("8d.profile.lot_constants", LOTE_TABLE, lots, lot_cols, {"IND_REVOLVENCIA": "N"},
-         [lot_cols["NUM_ID_LOTE"]]),
-        ("8d.profile.credit_constants", CREDITO_SCR_TABLE, credits, credit_cols,
-         {"NUM_TIPO_IF": "143", "COD_TIPO_PESSOA": "PF", "IND_MULTIPLO_IPOC": "N",
-          "NUM_ID_BASE_CREDITO": "505"}, [credit_cols["NUM_ID_CREDITO_SCR"]]),
-        ("8d.profile.history_constants", HISTORICO_CREDITO_SCR_TABLE, inclusion, history_cols,
-         {"COD_ID_CANAL": "6"}, [history_cols["NUM_ID_HISTORICO_CREDITO_SCR"]]),
+        (
+            "8d.profile.lot_constants",
+            LOTE_TABLE,
+            lots,
+            lot_cols,
+            {"IND_REVOLVENCIA": "N"},
+            [lot_cols["NUM_ID_LOTE"]],
+        ),
+        (
+            "8d.profile.credit_constants",
+            CREDITO_SCR_TABLE,
+            credits,
+            credit_cols,
+            {
+                "NUM_TIPO_IF": "143",
+                "COD_TIPO_PESSOA": "PF",
+                "IND_MULTIPLO_IPOC": "N",
+                "NUM_ID_BASE_CREDITO": "505",
+            },
+            [credit_cols["NUM_ID_CREDITO_SCR"]],
+        ),
+        (
+            "8d.profile.history_constants",
+            HISTORICO_CREDITO_SCR_TABLE,
+            inclusion,
+            history_cols,
+            {"COD_ID_CANAL": "6"},
+            [history_cols["NUM_ID_HISTORICO_CREDITO_SCR"]],
+        ),
     )
     for check_id, table, frame, cols, expected, keys in constant_sets:
         mismatch = reduce(
             lambda left, right: left | right,
-            [~F.coalesce(_norm_code(F.col(cols[name])) == value, F.lit(False))
-             for name, value in expected.items()],
+            [
+                ~F.coalesce(_norm_code(F.col(cols[name])) == value, F.lit(False))
+                for name, value in expected.items()
+            ],
         )
         bad = frame.where(mismatch)
         count = bad.count()
-        out.append(Finding(
-            check_id, "Credito SCR observed insertion profile",
-            SEV_WARN if count else SEV_INFO, table, count == 0, count=count,
-            column=",".join(expected), sample=_sample_keys(bad, keys, sample),
-            hint="Review against additional inclusion samples before promoting this profile."
-                 if count else "",
-            message="Rows differing from one-batch Lastro-LCI insertion constants.",
-        ))
+        out.append(
+            Finding(
+                check_id,
+                "Credito SCR observed insertion profile",
+                SEV_WARN if count else SEV_INFO,
+                table,
+                count == 0,
+                count=count,
+                column=",".join(expected),
+                sample=_sample_keys(bad, keys, sample),
+                hint="Review against additional inclusion samples before promoting this profile."
+                if count
+                else "",
+                message="Rows differing from one-batch Lastro-LCI insertion constants.",
+            )
+        )
 
     variants = credits.select(
         _canon_key_col(F.col(credit_cols["NUM_ID_CREDITO_SCR"])).alias("credit_id"),
@@ -3450,8 +4220,11 @@ def check_credito_scr_registration_profile(
         _canon_key_col(F.col(credit_cols["NUM_ID_INDEXADOR_CREDITO"])).alias("indexer"),
     )
     observed = (
-        ("17", "46", "2"), ("18", "47", "5"), ("18", "47", "1"),
-        ("19", "12", "2"), ("20", "12", "2"),
+        ("17", "46", "2"),
+        ("18", "47", "5"),
+        ("18", "47", "1"),
+        ("19", "12", "2"),
+        ("20", "12", "2"),
     )
     observed_predicate = reduce(
         lambda left, right: left | right,
@@ -3464,51 +4237,76 @@ def check_credito_scr_registration_profile(
     )
     bad_variants = variants.where(~F.coalesce(observed_predicate, F.lit(False)))
     count = bad_variants.count()
-    out.append(Finding(
-        "8d.profile.variant_drift", "Credito SCR observed insertion profile",
-        SEV_WARN if count else SEV_INFO, CREDITO_SCR_TABLE, count == 0, count=count,
-        column="NUM_ID_TIPO_CREDITO,NUM_ID_MODALIDADE_CREDITO,NUM_ID_INDEXADOR_CREDITO",
-        sample=_sample_keys(
-            bad_variants, ["credit_id", "credit_type", "modalidade", "indexer"], sample
-        ),
-        hint="Confirm new combinations against target lookups and additional route samples."
-             if count else "",
-        message="Combinations outside the five observed insertion variants.",
-    ))
+    out.append(
+        Finding(
+            "8d.profile.variant_drift",
+            "Credito SCR observed insertion profile",
+            SEV_WARN if count else SEV_INFO,
+            CREDITO_SCR_TABLE,
+            count == 0,
+            count=count,
+            column="NUM_ID_TIPO_CREDITO,NUM_ID_MODALIDADE_CREDITO,NUM_ID_INDEXADOR_CREDITO",
+            sample=_sample_keys(
+                bad_variants, ["credit_id", "credit_type", "modalidade", "indexer"], sample
+            ),
+            hint="Confirm new combinations against target lookups and additional route samples."
+            if count
+            else "",
+            message="Combinations outside the five observed insertion variants.",
+        )
+    )
 
     financial = credits.select(
         F.col(credit_cols["NUM_ID_CREDITO_SCR"]).alias("credit_id"),
-        F.expr(f"try_cast(`{credit_cols['VAL_SALDO_REMANESCENTE']}` as decimal(38,10))")
-        .alias("balance"),
-        F.expr(f"try_cast(`{credit_cols['VAL_CONTRATADO']}` as decimal(38,10))")
-        .alias("contracted"),
+        F.expr(f"try_cast(`{credit_cols['VAL_SALDO_REMANESCENTE']}` as decimal(38,10))").alias(
+            "balance"
+        ),
+        F.expr(f"try_cast(`{credit_cols['VAL_CONTRATADO']}` as decimal(38,10))").alias(
+            "contracted"
+        ),
         F.expr(f"try_cast(`{credit_cols['DAT_CONTRATACAO']}` as date)").alias("contract_date"),
         F.expr(f"try_cast(`{credit_cols['DAT_VENCIMENTO']}` as date)").alias("maturity"),
     )
     bad_financial = financial.where(
-        (F.col("balance").isNotNull() & F.col("contracted").isNotNull()
-         & (F.col("balance") > F.col("contracted")))
-        | (F.col("contract_date").isNotNull() & F.col("maturity").isNotNull()
-           & (F.col("contract_date") > F.col("maturity")))
+        (
+            F.col("balance").isNotNull()
+            & F.col("contracted").isNotNull()
+            & (F.col("balance") > F.col("contracted"))
+        )
+        | (
+            F.col("contract_date").isNotNull()
+            & F.col("maturity").isNotNull()
+            & (F.col("contract_date") > F.col("maturity"))
+        )
     )
     count = bad_financial.count()
-    out.append(Finding(
-        "8d.profile.financial_plausibility", "Credito SCR observed insertion profile",
-        SEV_WARN if count else SEV_INFO, CREDITO_SCR_TABLE, count == 0, count=count,
-        column="VAL_SALDO_REMANESCENTE,VAL_CONTRATADO,DAT_CONTRATACAO,DAT_VENCIMENTO",
-        sample=_sample_keys(bad_financial, ["credit_id"], sample),
-        hint="Review this plausible relationship; the insertion log contains no counterexample."
-             if count else "",
-        message="Rows outside financial/date relationships observed in one successful batch.",
-    ))
+    out.append(
+        Finding(
+            "8d.profile.financial_plausibility",
+            "Credito SCR observed insertion profile",
+            SEV_WARN if count else SEV_INFO,
+            CREDITO_SCR_TABLE,
+            count == 0,
+            count=count,
+            column="VAL_SALDO_REMANESCENTE,VAL_CONTRATADO,DAT_CONTRATACAO,DAT_VENCIMENTO",
+            sample=_sample_keys(bad_financial, ["credit_id"], sample),
+            hint="Review this plausible relationship; the insertion log contains no counterexample."
+            if count
+            else "",
+            message="Rows outside financial/date relationships observed in one successful batch.",
+        )
+    )
 
     detail_pairs = (
-        ("NUM_TIPO_IF", "NUM_TIPO_IF"), ("NUM_IF", "NUM_IF_CREDITO"),
+        ("NUM_TIPO_IF", "NUM_TIPO_IF"),
+        ("NUM_IF", "NUM_IF_CREDITO"),
         ("VAL_SALDO_REMANESCENTE", "VAL_SALDO_REMANESCENTE"),
         ("DAT_SALDO_REMANESCENTE", "DAT_SALDO_REMANESCENTE"),
-        ("COD_CONTRATO_SCR", "COD_CONTRATO_SCR"), ("QTD_CREDITO", "QTD_CREDITO"),
+        ("COD_CONTRATO_SCR", "COD_CONTRATO_SCR"),
+        ("QTD_CREDITO", "QTD_CREDITO"),
         ("NUM_ID_TIPO_CREDITO", "NUM_ID_TIPO_CREDITO"),
-        ("VAL_CONTRATADO", "VAL_CONTRATADO"), ("DAT_CONTRATACAO", "DAT_CONTRATACAO"),
+        ("VAL_CONTRATADO", "VAL_CONTRATADO"),
+        ("DAT_CONTRATACAO", "DAT_CONTRATACAO"),
         ("DAT_VENCIMENTO", "DAT_VENCIMENTO"),
         ("NUM_ID_MODALIDADE_CREDITO", "NUM_ID_MODALIDADE_CREDITO"),
         ("NUM_ID_INDEXADOR_CREDITO", "NUM_ID_INDEXADOR_CREDITO"),
@@ -3516,7 +4314,8 @@ def check_credito_scr_registration_profile(
         ("COD_REFERENCIA_EXTERNA_DEVEDOR", "COD_REFERENCIA_EXTERNA_DEVEDOR"),
         ("VAL_PERCENTUAL_INDEXADOR", "VAL_PERCENTUAL_INDEXADOR"),
         ("VAL_PERCENTUAL_TAXA_ANUAL", "VAL_PERCENTUAL_TAXA_ANUAL"),
-        ("COD_IPOC", "COD_IPOC"), ("IND_MULTIPLO_IPOC", "IND_MULTIPLO_IPOC"),
+        ("COD_IPOC", "COD_IPOC"),
+        ("IND_MULTIPLO_IPOC", "IND_MULTIPLO_IPOC"),
     )
     current = credits.select(
         _canon_key_col(F.col(credit_cols["NUM_ID_CREDITO_SCR"])).alias("credit_id"),
@@ -3525,26 +4324,37 @@ def check_credito_scr_registration_profile(
     snapshots = inclusion.select(
         _canon_key_col(F.col(history_cols["NUM_ID_CREDITO_SCR"])).alias("history_credit_id"),
         F.col(history_cols["NUM_ID_HISTORICO_CREDITO_SCR"]).alias("history_id"),
-        *[F.col(history_cols[history_name]).alias(f"history_{history_name}")
-          for _, history_name in detail_pairs],
+        *[
+            F.col(history_cols[history_name]).alias(f"history_{history_name}")
+            for _, history_name in detail_pairs
+        ],
     )
     compared = current.join(snapshots, current.credit_id == snapshots.history_credit_id, "inner")
     detail_mismatch = reduce(
         lambda left, right: left | right,
-        [~F.col(f"credit_{credit_name}").eqNullSafe(F.col(f"history_{history_name}"))
-         for credit_name, history_name in detail_pairs],
+        [
+            ~F.col(f"credit_{credit_name}").eqNullSafe(F.col(f"history_{history_name}"))
+            for credit_name, history_name in detail_pairs
+        ],
     )
     bad_details = compared.where(detail_mismatch)
     count = bad_details.count()
-    out.append(Finding(
-        "8d.profile.history_details", "Credito SCR observed insertion profile",
-        SEV_WARN if count else SEV_INFO, HISTORICO_CREDITO_SCR_TABLE, count == 0, count=count,
-        column=",".join(name for name, _ in detail_pairs),
-        sample=_sample_keys(bad_details, ["credit_id", "history_id"], sample),
-        hint="Confirm whether differences are legitimate post-inclusion lifecycle updates."
-             if count else "",
-        message="Inclusion details differing from current credit values.",
-    ))
+    out.append(
+        Finding(
+            "8d.profile.history_details",
+            "Credito SCR observed insertion profile",
+            SEV_WARN if count else SEV_INFO,
+            HISTORICO_CREDITO_SCR_TABLE,
+            count == 0,
+            count=count,
+            column=",".join(name for name, _ in detail_pairs),
+            sample=_sample_keys(bad_details, ["credit_id", "history_id"], sample),
+            hint="Confirm whether differences are legitimate post-inclusion lifecycle updates."
+            if count
+            else "",
+            message="Inclusion details differing from current credit values.",
+        )
+    )
     return out
 
 
@@ -3573,8 +4383,11 @@ DICRE_IPOC_TOGGLE = "VALIDADOR_UNICIDADE_IPOC_LCA"
 
 def _dicre_unavailable(check_id: str, missing: List[str], severity: str) -> Finding:
     return Finding(
-        check_id, "DICRE", severity,
-        ",".join(sorted({value.split(".")[0] for value in missing})), False,
+        check_id,
+        "DICRE",
+        severity,
+        ",".join(sorted({value.split(".")[0] for value in missing})),
+        False,
         hint="Export the complete DICRE graph and make the bounded target lookup available.",
         message=f"Check unavailable; missing required input: {', '.join(missing)}.",
     )
@@ -3595,18 +4408,27 @@ def check_dicre_identity(
         return [_dicre_unavailable("0.identity.root", [CREDITO_DC_TABLE], SEV_ERROR)]
     key = resolve(root, "NUM_ID_CREDITO_DC")
     if not key:
-        return [_dicre_unavailable(
-            "0.identity.root", [f"{CREDITO_DC_TABLE}.NUM_ID_CREDITO_DC"], SEV_ERROR
-        )]
+        return [
+            _dicre_unavailable(
+                "0.identity.root", [f"{CREDITO_DC_TABLE}.NUM_ID_CREDITO_DC"], SEV_ERROR
+            )
+        ]
     count = root.count()
-    return [Finding(
-        "0.identity.root", "Product identity", SEV_INFO if count else SEV_ERROR,
-        CREDITO_DC_TABLE, count > 0, count=count, column="NUM_ID_CREDITO_DC",
-        sample=_sample_keys(root, [key], sample) if count else [],
-        hint="Export at least one CREDITO_DC row." if not count else "",
-        message="All exported CREDITO_DC rows define the DICRE semantic universe; "
-                "DAT_EXCLUSAO does not filter the root.",
-    )]
+    return [
+        Finding(
+            "0.identity.root",
+            "Product identity",
+            SEV_INFO if count else SEV_ERROR,
+            CREDITO_DC_TABLE,
+            count > 0,
+            count=count,
+            column="NUM_ID_CREDITO_DC",
+            sample=_sample_keys(root, [key], sample) if count else [],
+            hint="Export at least one CREDITO_DC row." if not count else "",
+            message="All exported CREDITO_DC rows define the DICRE semantic universe; "
+            "DAT_EXCLUSAO does not filter the root.",
+        )
+    ]
 
 
 def check_dicre_metadata(
@@ -3615,25 +4437,40 @@ def check_dicre_metadata(
     if profile.pipeline != "dicre":
         return []
     if no_oracle:
-        return [Finding(
-            "0.dicre_metadata", "Coverage", SEV_INFO, "Oracle metadata", True,
-            message="Authoritative DICRE metadata deferred under --no-oracle; local checks "
-                    "still run and the verdict remains PARTIAL.",
-        )]
+        return [
+            Finding(
+                "0.dicre_metadata",
+                "Coverage",
+                SEV_INFO,
+                "Oracle metadata",
+                True,
+                message="Authoritative DICRE metadata deferred under --no-oracle; local checks "
+                "still run and the verdict remains PARTIAL.",
+            )
+        ]
     missing = [table for table in DICRE_GRAPH_TABLES if table not in meta.tables]
     missing_pk = [
         table for table in DICRE_GRAPH_TABLES if table in meta.tables and not meta.pk.get(table)
     ]
     failed = bool(missing or missing_pk)
-    return [Finding(
-        "0.dicre_metadata", "Coverage", SEV_ERROR if failed else SEV_INFO,
-        ",".join(DICRE_GRAPH_TABLES), not failed, count=len(missing) + len(missing_pk),
-        hint="Read table and PK metadata for all eight DICRE graph tables from Oracle."
-             if failed else "",
-        message=(f"Missing Oracle table metadata={missing}; missing PK metadata={missing_pk}."
-                 if failed else
-                 "Authoritative Oracle table and PK metadata cover the complete DICRE graph."),
-    )]
+    return [
+        Finding(
+            "0.dicre_metadata",
+            "Coverage",
+            SEV_ERROR if failed else SEV_INFO,
+            ",".join(DICRE_GRAPH_TABLES),
+            not failed,
+            count=len(missing) + len(missing_pk),
+            hint="Read table and PK metadata for all eight DICRE graph tables from Oracle."
+            if failed
+            else "",
+            message=(
+                f"Missing Oracle table metadata={missing}; missing PK metadata={missing_pk}."
+                if failed
+                else "Authoritative Oracle table and PK metadata cover the complete DICRE graph."
+            ),
+        )
+    ]
 
 
 def check_dicre_graph(
@@ -3643,14 +4480,23 @@ def check_dicre_graph(
         return []
     requirements = {
         LOTE_TABLE: (
-            "NUM_ID_LOTE", "NOME_LOTE", "NUM_CONTA_PARTICIPANTE",
-            "NUM_ID_TIPO_LOTE", "NUM_TIPO_IF", "DAT_EXCLUSAO",
+            "NUM_ID_LOTE",
+            "NOME_LOTE",
+            "NUM_CONTA_PARTICIPANTE",
+            "NUM_ID_TIPO_LOTE",
+            "NUM_TIPO_IF",
+            "DAT_EXCLUSAO",
         ),
         CREDITO_DC_TABLE: (
-            "NUM_ID_CREDITO_DC", "COD_CREDITO_DC", "NUM_ID_LOTE", "DAT_EXCLUSAO",
+            "NUM_ID_CREDITO_DC",
+            "COD_CREDITO_DC",
+            "NUM_ID_LOTE",
+            "DAT_EXCLUSAO",
         ),
         HISTORICO_CREDITO_DC_TABLE: (
-            "NUM_ID_HISTORICO_CREDITO_DC", "COD_CREDITO_DC", "NUM_ID_LOTE",
+            "NUM_ID_HISTORICO_CREDITO_DC",
+            "COD_CREDITO_DC",
+            "NUM_ID_LOTE",
             "NUM_ID_TIPO_ACAO_HIST_CREDITO",
         ),
     }
@@ -3682,57 +4528,80 @@ def check_dicre_graph(
     inclusions = histories.where(F.col("action") == "1")
     out: List[Finding] = []
 
-    duplicate_lots = lots.groupBy(
-        "lot_name", "lot_account_exact", "lot_type_exact", "lot_if_type_exact"
-    ).count().where(F.col("count") > 1)
+    duplicate_lots = (
+        lots.groupBy("lot_name", "lot_account_exact", "lot_type_exact", "lot_if_type_exact")
+        .count()
+        .where(F.col("count") > 1)
+    )
     count = duplicate_lots.count()
-    out.append(Finding(
-        "2f.active_lot_natural_key", "DICRE graph", SEV_ERROR if count else SEV_INFO,
-        LOTE_TABLE, count == 0, count=count,
-        column="NOME_LOTE,NUM_CONTA_PARTICIPANTE,NUM_ID_TIPO_LOTE,NUM_TIPO_IF",
-        sample=_sample_keys(
-            duplicate_lots,
-            ["lot_name", "lot_account_exact", "lot_type_exact", "lot_if_type_exact"], sample,
-        ),
-        hint="Keep at most one active lot for the exact-trimmed four-column key."
-             if count else "",
-        message="Duplicate active DICRE lot business keys.",
-    ))
+    out.append(
+        Finding(
+            "2f.active_lot_natural_key",
+            "DICRE graph",
+            SEV_ERROR if count else SEV_INFO,
+            LOTE_TABLE,
+            count == 0,
+            count=count,
+            column="NOME_LOTE,NUM_CONTA_PARTICIPANTE,NUM_ID_TIPO_LOTE,NUM_TIPO_IF",
+            sample=_sample_keys(
+                duplicate_lots,
+                ["lot_name", "lot_account_exact", "lot_type_exact", "lot_if_type_exact"],
+                sample,
+            ),
+            hint="Keep at most one active lot for the exact-trimmed four-column key."
+            if count
+            else "",
+            message="Duplicate active DICRE lot business keys.",
+        )
+    )
 
     lot_counts = lots.groupBy("lot_id").count().withColumnRenamed("count", "lot_count")
-    bad_lots = roots.join(
-        lot_counts, roots.credit_lot_id == lot_counts.lot_id, "left"
-    ).where(F.coalesce(F.col("lot_count"), F.lit(0)) != 1)
+    bad_lots = roots.join(lot_counts, roots.credit_lot_id == lot_counts.lot_id, "left").where(
+        F.coalesce(F.col("lot_count"), F.lit(0)) != 1
+    )
     count = bad_lots.count()
-    out.append(Finding(
-        "2f.credit_active_lot", "DICRE graph", SEV_ERROR if count else SEV_INFO,
-        CREDITO_DC_TABLE, count == 0, count=count, column="NUM_ID_LOTE",
-        sample=_sample_keys(bad_lots, ["credit_id", "credit_lot_id"], sample),
-        hint="Point every exported CREDITO_DC row to exactly one active LOTE."
-             if count else "",
-        message="DICRE roots without exactly one active lot.",
-    ))
+    out.append(
+        Finding(
+            "2f.credit_active_lot",
+            "DICRE graph",
+            SEV_ERROR if count else SEV_INFO,
+            CREDITO_DC_TABLE,
+            count == 0,
+            count=count,
+            column="NUM_ID_LOTE",
+            sample=_sample_keys(bad_lots, ["credit_id", "credit_lot_id"], sample),
+            hint="Point every exported CREDITO_DC row to exactly one active LOTE." if count else "",
+            message="DICRE roots without exactly one active lot.",
+        )
+    )
 
     coded = roots.withColumn(
         "code_count", F.count(F.lit(1)).over(Window.partitionBy("credit_code"))
     )
     bad_codes = coded.where(
-        F.col("credit_code").isNull() | (F.col("credit_code") == "")
-        | (F.col("code_count") > 1)
+        F.col("credit_code").isNull() | (F.col("credit_code") == "") | (F.col("code_count") > 1)
     )
     count = bad_codes.count()
-    out.append(Finding(
-        "2f.credit_code_unique", "DICRE graph", SEV_ERROR if count else SEV_INFO,
-        CREDITO_DC_TABLE, count == 0, count=count, column="COD_CREDITO_DC",
-        sample=_sample_keys(bad_codes, ["credit_id", "credit_code"], sample),
-        hint="Generate nonblank, unique exact-trimmed COD_CREDITO_DC values."
-             if count else "",
-        message="DICRE roots with blank or duplicate business codes.",
-    ))
+    out.append(
+        Finding(
+            "2f.credit_code_unique",
+            "DICRE graph",
+            SEV_ERROR if count else SEV_INFO,
+            CREDITO_DC_TABLE,
+            count == 0,
+            count=count,
+            column="COD_CREDITO_DC",
+            sample=_sample_keys(bad_codes, ["credit_id", "credit_code"], sample),
+            hint="Generate nonblank, unique exact-trimmed COD_CREDITO_DC values." if count else "",
+            message="DICRE roots with blank or duplicate business codes.",
+        )
+    )
 
-    inclusion_counts = inclusions.groupBy(
-        "history_code", "history_lot_id"
-    ).count().withColumnRenamed("count", "inclusion_count")
+    inclusion_counts = (
+        inclusions.groupBy("history_code", "history_lot_id")
+        .count()
+        .withColumnRenamed("count", "inclusion_count")
+    )
     bad_history = roots.join(
         inclusion_counts,
         (roots.credit_code == inclusion_counts.history_code)
@@ -3740,62 +4609,92 @@ def check_dicre_graph(
         "left",
     ).where(F.coalesce(F.col("inclusion_count"), F.lit(0)) != 1)
     count = bad_history.count()
-    out.append(Finding(
-        "2f.inclusion_history", "DICRE graph", SEV_ERROR if count else SEV_INFO,
-        HISTORICO_CREDITO_DC_TABLE, count == 0, count=count,
-        column="COD_CREDITO_DC,NUM_ID_LOTE,NUM_ID_TIPO_ACAO_HIST_CREDITO",
-        sample=_sample_keys(bad_history, ["credit_id", "credit_code", "credit_lot_id"], sample),
-        hint="Keep exactly one action 1 history per exact code + canonical lot root identity."
-             if count else "",
-        message="DICRE roots without exactly one inclusion history action.",
-    ))
+    out.append(
+        Finding(
+            "2f.inclusion_history",
+            "DICRE graph",
+            SEV_ERROR if count else SEV_INFO,
+            HISTORICO_CREDITO_DC_TABLE,
+            count == 0,
+            count=count,
+            column="COD_CREDITO_DC,NUM_ID_LOTE,NUM_ID_TIPO_ACAO_HIST_CREDITO",
+            sample=_sample_keys(bad_history, ["credit_id", "credit_code", "credit_lot_id"], sample),
+            hint="Keep exactly one action 1 history per exact code + canonical lot root identity."
+            if count
+            else "",
+            message="DICRE roots without exactly one inclusion history action.",
+        )
+    )
 
     root_identity = roots.select(
         F.col("credit_code").alias("history_code"),
         F.col("credit_lot_id").alias("history_lot_id"),
     ).dropDuplicates()
-    orphan_history = inclusions.join(
-        root_identity, ["history_code", "history_lot_id"], "left_anti"
-    )
+    orphan_history = inclusions.join(root_identity, ["history_code", "history_lot_id"], "left_anti")
     count = orphan_history.count()
-    out.append(Finding(
-        "2f.inclusion_history_orphan", "DICRE graph",
-        SEV_ERROR if count else SEV_INFO, HISTORICO_CREDITO_DC_TABLE,
-        count == 0, count=count, column="COD_CREDITO_DC,NUM_ID_LOTE",
-        sample=_sample_keys(
-            orphan_history, ["history_id", "history_code", "history_lot_id"], sample
-        ),
-        hint="Link action 1 history by exact code and canonical lot only." if count else "",
-        message="Inclusion histories not linked to a DICRE root identity.",
-    ))
+    out.append(
+        Finding(
+            "2f.inclusion_history_orphan",
+            "DICRE graph",
+            SEV_ERROR if count else SEV_INFO,
+            HISTORICO_CREDITO_DC_TABLE,
+            count == 0,
+            count=count,
+            column="COD_CREDITO_DC,NUM_ID_LOTE",
+            sample=_sample_keys(
+                orphan_history, ["history_id", "history_code", "history_lot_id"], sample
+            ),
+            hint="Link action 1 history by exact code and canonical lot only." if count else "",
+            message="Inclusion histories not linked to a DICRE root identity.",
+        )
+    )
     return out
 
 
 def _dicre_edge_finding(
-    check_id: str, child: DataFrame, parent: DataFrame, join_columns: List[str],
-    table: str, column: str, sample_columns: List[str], sample: int,
+    check_id: str,
+    child: DataFrame,
+    parent: DataFrame,
+    join_columns: List[str],
+    table: str,
+    column: str,
+    sample_columns: List[str],
+    sample: int,
 ) -> Finding:
     bad = child.join(parent.dropDuplicates(join_columns), join_columns, "left_anti")
     count = bad.count()
     return Finding(
-        check_id, "DICRE IROP graph", SEV_ERROR if count else SEV_INFO,
-        table, count == 0, count=count, column=column,
+        check_id,
+        "DICRE IROP graph",
+        SEV_ERROR if count else SEV_INFO,
+        table,
+        count == 0,
+        count=count,
+        column=column,
         sample=_sample_keys(bad, sample_columns, sample),
-        hint="Remove the orphan edge or export its referenced DICRE graph row."
-             if count else "",
+        hint="Remove the orphan edge or export its referenced DICRE graph row." if count else "",
         message="Orphan DICRE IROP edge.",
     )
 
 
 def _dicre_duplicate_edge_finding(
-    check_id: str, frame: DataFrame, edge_columns: List[str], table: str,
-    column: str, sample: int,
+    check_id: str,
+    frame: DataFrame,
+    edge_columns: List[str],
+    table: str,
+    column: str,
+    sample: int,
 ) -> Finding:
     duplicate = frame.groupBy(*edge_columns).count().where(F.col("count") > 1)
     count = duplicate.count()
     return Finding(
-        check_id, "DICRE IROP graph", SEV_ERROR if count else SEV_INFO,
-        table, count == 0, count=count, column=column,
+        check_id,
+        "DICRE IROP graph",
+        SEV_ERROR if count else SEV_INFO,
+        table,
+        count == 0,
+        count=count,
+        column=column,
         sample=_sample_keys(duplicate, edge_columns, sample),
         hint="Keep each exported IROP business edge unambiguous." if count else "",
         message="Duplicate DICRE IROP business edges.",
@@ -3813,7 +4712,9 @@ def check_dicre_irop_graph(
         TCTPDET_CHAV_IROP_CCB_TABLE: ("NUM_CHAV_IROP",),
         TCTPDET_CHAV_IROP_CMER_TABLE: ("NUM_CHAV_IROP",),
         TCTPIROP_ATIV_TABLE: (
-            "NUM_IROP_ATIV", "NUM_IDT_CRE_DC", "NUM_CHAV_IROP",
+            "NUM_IROP_ATIV",
+            "NUM_IDT_CRE_DC",
+            "NUM_CHAV_IROP",
         ),
         TCTPSOLI_IROP_ATIV_TABLE: ("NUM_IROP_ATIV",),
     }
@@ -3822,69 +4723,111 @@ def check_dicre_irop_graph(
         return [_dicre_unavailable("2f.irop.availability", missing, SEV_ERROR)]
 
     roots = tables[CREDITO_DC_TABLE].select(
-        _canon_key_col(F.col(columns[CREDITO_DC_TABLE]["NUM_ID_CREDITO_DC"]))
-        .alias("credit_id")
+        _canon_key_col(F.col(columns[CREDITO_DC_TABLE]["NUM_ID_CREDITO_DC"])).alias("credit_id")
     )
     keys = tables[TCTPCHAV_IROP_ATIV_TABLE].select(
-        _canon_key_col(F.col(columns[TCTPCHAV_IROP_ATIV_TABLE]["NUM_CHAV_IROP"]))
-        .alias("irop_key")
+        _canon_key_col(F.col(columns[TCTPCHAV_IROP_ATIV_TABLE]["NUM_CHAV_IROP"])).alias("irop_key")
     )
     irops = tables[TCTPIROP_ATIV_TABLE].select(
-        _canon_key_col(F.col(columns[TCTPIROP_ATIV_TABLE]["NUM_IROP_ATIV"]))
-        .alias("irop_id"),
-        _canon_key_col(F.col(columns[TCTPIROP_ATIV_TABLE]["NUM_IDT_CRE_DC"]))
-        .alias("credit_id"),
-        _canon_key_col(F.col(columns[TCTPIROP_ATIV_TABLE]["NUM_CHAV_IROP"]))
-        .alias("irop_key"),
+        _canon_key_col(F.col(columns[TCTPIROP_ATIV_TABLE]["NUM_IROP_ATIV"])).alias("irop_id"),
+        _canon_key_col(F.col(columns[TCTPIROP_ATIV_TABLE]["NUM_IDT_CRE_DC"])).alias("credit_id"),
+        _canon_key_col(F.col(columns[TCTPIROP_ATIV_TABLE]["NUM_CHAV_IROP"])).alias("irop_key"),
     )
     ccb = tables[TCTPDET_CHAV_IROP_CCB_TABLE].select(
-        _canon_key_col(F.col(columns[TCTPDET_CHAV_IROP_CCB_TABLE]["NUM_CHAV_IROP"]))
-        .alias("irop_key")
+        _canon_key_col(F.col(columns[TCTPDET_CHAV_IROP_CCB_TABLE]["NUM_CHAV_IROP"])).alias(
+            "irop_key"
+        )
     )
     cmer = tables[TCTPDET_CHAV_IROP_CMER_TABLE].select(
-        _canon_key_col(F.col(columns[TCTPDET_CHAV_IROP_CMER_TABLE]["NUM_CHAV_IROP"]))
-        .alias("irop_key")
+        _canon_key_col(F.col(columns[TCTPDET_CHAV_IROP_CMER_TABLE]["NUM_CHAV_IROP"])).alias(
+            "irop_key"
+        )
     )
     requests = tables[TCTPSOLI_IROP_ATIV_TABLE].select(
-        _canon_key_col(F.col(columns[TCTPSOLI_IROP_ATIV_TABLE]["NUM_IROP_ATIV"]))
-        .alias("irop_id")
+        _canon_key_col(F.col(columns[TCTPSOLI_IROP_ATIV_TABLE]["NUM_IROP_ATIV"])).alias("irop_id")
     )
     out = [
         _dicre_edge_finding(
-            "2f.irop.credit_edge", irops, roots, ["credit_id"], TCTPIROP_ATIV_TABLE,
-            "NUM_IDT_CRE_DC", ["irop_id", "credit_id"], sample,
+            "2f.irop.credit_edge",
+            irops,
+            roots,
+            ["credit_id"],
+            TCTPIROP_ATIV_TABLE,
+            "NUM_IDT_CRE_DC",
+            ["irop_id", "credit_id"],
+            sample,
         ),
         _dicre_edge_finding(
-            "2f.irop.key_edge", irops, keys, ["irop_key"], TCTPIROP_ATIV_TABLE,
-            "NUM_CHAV_IROP", ["irop_id", "irop_key"], sample,
+            "2f.irop.key_edge",
+            irops,
+            keys,
+            ["irop_key"],
+            TCTPIROP_ATIV_TABLE,
+            "NUM_CHAV_IROP",
+            ["irop_id", "irop_key"],
+            sample,
         ),
         _dicre_edge_finding(
-            "2f.irop.ccb_key_edge", ccb, keys, ["irop_key"],
-            TCTPDET_CHAV_IROP_CCB_TABLE, "NUM_CHAV_IROP", ["irop_key"], sample,
+            "2f.irop.ccb_key_edge",
+            ccb,
+            keys,
+            ["irop_key"],
+            TCTPDET_CHAV_IROP_CCB_TABLE,
+            "NUM_CHAV_IROP",
+            ["irop_key"],
+            sample,
         ),
         _dicre_edge_finding(
-            "2f.irop.cmer_key_edge", cmer, keys, ["irop_key"],
-            TCTPDET_CHAV_IROP_CMER_TABLE, "NUM_CHAV_IROP", ["irop_key"], sample,
+            "2f.irop.cmer_key_edge",
+            cmer,
+            keys,
+            ["irop_key"],
+            TCTPDET_CHAV_IROP_CMER_TABLE,
+            "NUM_CHAV_IROP",
+            ["irop_key"],
+            sample,
         ),
         _dicre_edge_finding(
-            "2f.irop.request_edge", requests, irops.select("irop_id"), ["irop_id"],
-            TCTPSOLI_IROP_ATIV_TABLE, "NUM_IROP_ATIV", ["irop_id"], sample,
+            "2f.irop.request_edge",
+            requests,
+            irops.select("irop_id"),
+            ["irop_id"],
+            TCTPSOLI_IROP_ATIV_TABLE,
+            "NUM_IROP_ATIV",
+            ["irop_id"],
+            sample,
         ),
         _dicre_duplicate_edge_finding(
-            "2f.irop.credit_key_unique", irops, ["credit_id", "irop_key"],
-            TCTPIROP_ATIV_TABLE, "NUM_IDT_CRE_DC,NUM_CHAV_IROP", sample,
+            "2f.irop.credit_key_unique",
+            irops,
+            ["credit_id", "irop_key"],
+            TCTPIROP_ATIV_TABLE,
+            "NUM_IDT_CRE_DC,NUM_CHAV_IROP",
+            sample,
         ),
         _dicre_duplicate_edge_finding(
-            "2f.irop.ccb_key_unique", ccb, ["irop_key"],
-            TCTPDET_CHAV_IROP_CCB_TABLE, "NUM_CHAV_IROP", sample,
+            "2f.irop.ccb_key_unique",
+            ccb,
+            ["irop_key"],
+            TCTPDET_CHAV_IROP_CCB_TABLE,
+            "NUM_CHAV_IROP",
+            sample,
         ),
         _dicre_duplicate_edge_finding(
-            "2f.irop.cmer_key_unique", cmer, ["irop_key"],
-            TCTPDET_CHAV_IROP_CMER_TABLE, "NUM_CHAV_IROP", sample,
+            "2f.irop.cmer_key_unique",
+            cmer,
+            ["irop_key"],
+            TCTPDET_CHAV_IROP_CMER_TABLE,
+            "NUM_CHAV_IROP",
+            sample,
         ),
         _dicre_duplicate_edge_finding(
-            "2f.irop.request_unique", requests, ["irop_id"],
-            TCTPSOLI_IROP_ATIV_TABLE, "NUM_IROP_ATIV", sample,
+            "2f.irop.request_unique",
+            requests,
+            ["irop_id"],
+            TCTPSOLI_IROP_ATIV_TABLE,
+            "NUM_IROP_ATIV",
+            sample,
         ),
     ]
     return out
@@ -3922,22 +4865,35 @@ def _dicre_enabled_credits(roots: DataFrame, toggle: DataFrame) -> Optional[Data
 
 
 def check_dicre_target_frames(
-    tables: Dict[str, DataFrame], lookup_frames: Dict[str, DataFrame], sample: int,
-    profile: ValidationProfile, lookup_errors: Optional[Dict[str, str]] = None,
+    tables: Dict[str, DataFrame],
+    lookup_frames: Dict[str, DataFrame],
+    sample: int,
+    profile: ValidationProfile,
+    lookup_errors: Optional[Dict[str, str]] = None,
 ) -> List[Finding]:
     if profile.pipeline != "dicre":
         return []
     lookup_errors = lookup_errors or {}
     requirements = {
         LOTE_TABLE: (
-            "NUM_ID_LOTE", "NUM_CONTA_PARTICIPANTE", "NUM_ID_TIPO_LOTE",
-            "NUM_TIPO_IF", "DAT_EXCLUSAO",
+            "NUM_ID_LOTE",
+            "NUM_CONTA_PARTICIPANTE",
+            "NUM_ID_TIPO_LOTE",
+            "NUM_TIPO_IF",
+            "DAT_EXCLUSAO",
         ),
         CREDITO_DC_TABLE: (
-            "NUM_ID_CREDITO_DC", "NUM_ID_LOTE", "NUM_TIPO_IF",
-            "NUM_CONTA_CUSTODIANTE", "NUM_ID_BASE_CREDITO", "DAT_INCLUSAO", "COD_IPOC",
-            "NUM_ID_QUALIF_FINALIDADE", "NUM_ID_QUALIF_JUROS_A_CADA",
-            "NUM_ID_QUALIF_AMORT_A_CADA", "NUM_ID_QUALIF_GARANTIA_ESPEC",
+            "NUM_ID_CREDITO_DC",
+            "NUM_ID_LOTE",
+            "NUM_TIPO_IF",
+            "NUM_CONTA_CUSTODIANTE",
+            "NUM_ID_BASE_CREDITO",
+            "DAT_INCLUSAO",
+            "COD_IPOC",
+            "NUM_ID_QUALIF_FINALIDADE",
+            "NUM_ID_QUALIF_JUROS_A_CADA",
+            "NUM_ID_QUALIF_AMORT_A_CADA",
+            "NUM_ID_QUALIF_GARANTIA_ESPEC",
         ),
     }
     columns, missing = _credito_scr_columns(tables, requirements)
@@ -3950,40 +4906,49 @@ def check_dicre_target_frames(
         _canon_key_col(F.col(lot_cols["NUM_ID_TIPO_LOTE"])).alias("lot_type"),
         _canon_key_col(F.col(lot_cols["NUM_TIPO_IF"])).alias("guaranteed_if_type"),
     )
-    roots = tables[CREDITO_DC_TABLE].select(
-        _canon_key_col(F.col(root_cols["NUM_ID_CREDITO_DC"])).alias("credit_id"),
-        _canon_key_col(F.col(root_cols["NUM_ID_LOTE"])).alias("credit_lot_id"),
-        _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])).alias("credit_if_type"),
-        _canon_key_col(F.col(root_cols["NUM_CONTA_CUSTODIANTE"])).alias("custodian_account"),
-        _canon_key_col(F.col(root_cols["NUM_ID_BASE_CREDITO"])).alias("base_id"),
-        F.to_date(F.col(root_cols["DAT_INCLUSAO"])).alias("inclusion_date"),
-        _dicre_text(F.col(root_cols["COD_IPOC"])).alias("ipoc"),
-        *[
-            _canon_key_col(F.col(root_cols[column])).alias(alias)
-            for column, alias in (
-                ("NUM_ID_QUALIF_FINALIDADE", "qualification_20"),
-                ("NUM_ID_QUALIF_JUROS_A_CADA", "qualification_21"),
-                ("NUM_ID_QUALIF_AMORT_A_CADA", "qualification_22"),
-                ("NUM_ID_QUALIF_GARANTIA_ESPEC", "qualification_23"),
-            )
-        ],
-    ).join(lots, F.col("credit_lot_id") == lots.lot_id, "left")
+    roots = (
+        tables[CREDITO_DC_TABLE]
+        .select(
+            _canon_key_col(F.col(root_cols["NUM_ID_CREDITO_DC"])).alias("credit_id"),
+            _canon_key_col(F.col(root_cols["NUM_ID_LOTE"])).alias("credit_lot_id"),
+            _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])).alias("credit_if_type"),
+            _canon_key_col(F.col(root_cols["NUM_CONTA_CUSTODIANTE"])).alias("custodian_account"),
+            _canon_key_col(F.col(root_cols["NUM_ID_BASE_CREDITO"])).alias("base_id"),
+            F.to_date(F.col(root_cols["DAT_INCLUSAO"])).alias("inclusion_date"),
+            _dicre_text(F.col(root_cols["COD_IPOC"])).alias("ipoc"),
+            *[
+                _canon_key_col(F.col(root_cols[column])).alias(alias)
+                for column, alias in (
+                    ("NUM_ID_QUALIF_FINALIDADE", "qualification_20"),
+                    ("NUM_ID_QUALIF_JUROS_A_CADA", "qualification_21"),
+                    ("NUM_ID_QUALIF_AMORT_A_CADA", "qualification_22"),
+                    ("NUM_ID_QUALIF_GARANTIA_ESPEC", "qualification_23"),
+                )
+            ],
+        )
+        .join(lots, F.col("credit_lot_id") == lots.lot_id, "left")
+    )
     out: List[Finding] = []
 
     account_frame = lookup_frames.get("DICRE_ACCOUNTS")
     account_names = (
-        "NUM_CONTA_PARTICIPANTE", "NUM_ID_SITUACAO_CONTA", "COD_TIPO_ACESSO",
-        "NUM_ID_AREA_ATUACAO", "NOM_SIMPLIFICADO",
+        "NUM_CONTA_PARTICIPANTE",
+        "NUM_ID_SITUACAO_CONTA",
+        "COD_TIPO_ACESSO",
+        "NUM_ID_AREA_ATUACAO",
+        "NOM_SIMPLIFICADO",
     )
     account_cols, account_missing = _dicre_lookup_columns(account_frame, account_names)
     if account_missing:
-        out.append(_dicre_unavailable(
-            "6f.lookup.accounts",
-            [lookup_errors.get("DICRE_ACCOUNTS", "DICRE_ACCOUNTS")]
-            if account_frame is None else
-            [f"DICRE_ACCOUNTS.{name}" for name in account_missing],
-            SEV_WARN,
-        ))
+        out.append(
+            _dicre_unavailable(
+                "6f.lookup.accounts",
+                [lookup_errors.get("DICRE_ACCOUNTS", "DICRE_ACCOUNTS")]
+                if account_frame is None
+                else [f"DICRE_ACCOUNTS.{name}" for name in account_missing],
+                SEV_WARN,
+            )
+        )
     else:
         accounts = account_frame.select(
             _canon_key_col(F.col(account_cols["NUM_CONTA_PARTICIPANTE"])).alias("account_id"),
@@ -3993,8 +4958,7 @@ def check_dicre_target_frames(
             _dicre_text(F.col(account_cols["NOM_SIMPLIFICADO"])).alias("short_name"),
         )
         emitters = accounts.where(
-            F.col("status").isin("1", "2")
-            & (F.col("access") == "L") & (F.col("area") == "1")
+            F.col("status").isin("1", "2") & (F.col("access") == "L") & (F.col("area") == "1")
         ).select(
             F.col("account_id").alias("emitter_account"),
             F.col("short_name").alias("emitter_name"),
@@ -4003,36 +4967,49 @@ def check_dicre_target_frames(
             F.col("account_id").alias("custodian_account"),
             F.col("short_name").alias("custodian_name"),
         )
-        eligible_pairs = emitters.join(
-            custodians, F.col("emitter_name") == F.col("custodian_name"), "inner"
-        ).select("emitter_account", "custodian_account").dropDuplicates()
+        eligible_pairs = (
+            emitters.join(custodians, F.col("emitter_name") == F.col("custodian_name"), "inner")
+            .select("emitter_account", "custodian_account")
+            .dropDuplicates()
+        )
         bad = roots.join(
             F.broadcast(eligible_pairs), ["emitter_account", "custodian_account"], "left_anti"
         )
         count = bad.count()
-        out.append(Finding(
-            "6f.lookup.accounts", "DICRE target eligibility",
-            SEV_ERROR if count else SEV_INFO, CREDITO_DC_TABLE, count == 0, count=count,
-            column="NUM_CONTA_PARTICIPANTE,NUM_CONTA_CUSTODIANTE",
-            sample=_sample_keys(
-                bad, ["credit_id", "emitter_account", "custodian_account"], sample
-            ),
-            hint="Use active emitter/custodian accounts for the same participant; emitter "
-                 "must have local access L in area 1." if count else "",
-            message="DICRE rows with ineligible emitter/custodian account pairs.",
-        ))
+        out.append(
+            Finding(
+                "6f.lookup.accounts",
+                "DICRE target eligibility",
+                SEV_ERROR if count else SEV_INFO,
+                CREDITO_DC_TABLE,
+                count == 0,
+                count=count,
+                column="NUM_CONTA_PARTICIPANTE,NUM_CONTA_CUSTODIANTE",
+                sample=_sample_keys(
+                    bad, ["credit_id", "emitter_account", "custodian_account"], sample
+                ),
+                hint="Use active emitter/custodian accounts for the same participant; emitter "
+                "must have local access L in area 1."
+                if count
+                else "",
+                message="DICRE rows with ineligible emitter/custodian account pairs.",
+            )
+        )
 
     base_frame = lookup_frames.get("DICRE_BASES")
     base_cols, base_missing = _dicre_lookup_columns(
         base_frame, ("NUM_CONTA_PARTICIPANTE", "NUM_ID_BASE_CREDITO")
     )
     if base_missing:
-        out.append(_dicre_unavailable(
-            "6f.lookup.base",
-            [lookup_errors.get("DICRE_BASES", "DICRE_BASES")]
-            if base_frame is None else [f"DICRE_BASES.{name}" for name in base_missing],
-            SEV_WARN,
-        ))
+        out.append(
+            _dicre_unavailable(
+                "6f.lookup.base",
+                [lookup_errors.get("DICRE_BASES", "DICRE_BASES")]
+                if base_frame is None
+                else [f"DICRE_BASES.{name}" for name in base_missing],
+                SEV_WARN,
+            )
+        )
     else:
         bases = base_frame.select(
             _canon_key_col(F.col(base_cols["NUM_CONTA_PARTICIPANTE"])).alias("emitter_account"),
@@ -4040,28 +5017,37 @@ def check_dicre_target_frames(
         ).dropDuplicates()
         bad = roots.join(F.broadcast(bases), ["emitter_account", "base_id"], "left_anti")
         count = bad.count()
-        out.append(Finding(
-            "6f.lookup.base", "DICRE target eligibility", SEV_ERROR if count else SEV_INFO,
-            CREDITO_DC_TABLE, count == 0, count=count,
-            column="NUM_CONTA_PARTICIPANTE,NUM_ID_BASE_CREDITO",
-            sample=_sample_keys(bad, ["credit_id", "emitter_account", "base_id"], sample),
-            hint="Use a base authorized for the emitter through exact type-base code 2."
-                 if count else "",
-            message="DICRE rows without an eligible type-2 credit base.",
-        ))
+        out.append(
+            Finding(
+                "6f.lookup.base",
+                "DICRE target eligibility",
+                SEV_ERROR if count else SEV_INFO,
+                CREDITO_DC_TABLE,
+                count == 0,
+                count=count,
+                column="NUM_CONTA_PARTICIPANTE,NUM_ID_BASE_CREDITO",
+                sample=_sample_keys(bad, ["credit_id", "emitter_account", "base_id"], sample),
+                hint="Use a base authorized for the emitter through exact type-base code 2."
+                if count
+                else "",
+                message="DICRE rows without an eligible type-2 credit base.",
+            )
+        )
 
     if_frame = lookup_frames.get("DICRE_IF_COMPATIBILITY")
     if_cols, if_missing = _dicre_lookup_columns(
         if_frame, ("NUM_TIPO_IF", "NUM_TIPO_IF_GARANTIDO", "NUM_ID_TIPO_LOTE")
     )
     if if_missing:
-        out.append(_dicre_unavailable(
-            "6f.lookup.if_compatibility",
-            [lookup_errors.get("DICRE_IF_COMPATIBILITY", "DICRE_IF_COMPATIBILITY")]
-            if if_frame is None else
-            [f"DICRE_IF_COMPATIBILITY.{name}" for name in if_missing],
-            SEV_WARN,
-        ))
+        out.append(
+            _dicre_unavailable(
+                "6f.lookup.if_compatibility",
+                [lookup_errors.get("DICRE_IF_COMPATIBILITY", "DICRE_IF_COMPATIBILITY")]
+                if if_frame is None
+                else [f"DICRE_IF_COMPATIBILITY.{name}" for name in if_missing],
+                SEV_WARN,
+            )
+        )
     else:
         compatible = if_frame.select(
             _canon_key_col(F.col(if_cols["NUM_TIPO_IF"])).alias("credit_if_type"),
@@ -4070,20 +5056,28 @@ def check_dicre_target_frames(
         ).dropDuplicates()
         bad = roots.join(
             F.broadcast(compatible),
-            ["credit_if_type", "guaranteed_if_type", "lot_type"], "left_anti",
+            ["credit_if_type", "guaranteed_if_type", "lot_type"],
+            "left_anti",
         )
         count = bad.count()
-        out.append(Finding(
-            "6f.lookup.if_compatibility", "DICRE target eligibility",
-            SEV_ERROR if count else SEV_INFO, CREDITO_DC_TABLE, count == 0, count=count,
-            column="NUM_TIPO_IF,LOTE.NUM_TIPO_IF,LOTE.NUM_ID_TIPO_LOTE",
-            sample=_sample_keys(
-                bad, ["credit_id", "credit_if_type", "guaranteed_if_type", "lot_type"], sample
-            ),
-            hint="Use an active subtype enabled for lot type 2 and guaranteed LCA."
-                 if count else "",
-            message="DICRE subtype/guaranteed-LCA incompatibilities.",
-        ))
+        out.append(
+            Finding(
+                "6f.lookup.if_compatibility",
+                "DICRE target eligibility",
+                SEV_ERROR if count else SEV_INFO,
+                CREDITO_DC_TABLE,
+                count == 0,
+                count=count,
+                column="NUM_TIPO_IF,LOTE.NUM_TIPO_IF,LOTE.NUM_ID_TIPO_LOTE",
+                sample=_sample_keys(
+                    bad, ["credit_id", "credit_if_type", "guaranteed_if_type", "lot_type"], sample
+                ),
+                hint="Use an active subtype enabled for lot type 2 and guaranteed LCA."
+                if count
+                else "",
+                message="DICRE subtype/guaranteed-LCA incompatibilities.",
+            )
+        )
 
     qualification_frame = lookup_frames.get("DICRE_QUALIFICATIONS")
     qualification_cols, qualification_missing = _dicre_lookup_columns(
@@ -4091,19 +5085,22 @@ def check_dicre_target_frames(
         ("NUM_ID_QUALIFICACAO", "NUM_ID_QUALIFICACAO_SUBGRUPO"),
     )
     if qualification_missing:
-        out.append(_dicre_unavailable(
-            "6f.lookup.qualifications",
-            [lookup_errors.get("DICRE_QUALIFICATIONS", "DICRE_QUALIFICATIONS")]
-            if qualification_frame is None else
-            [f"DICRE_QUALIFICATIONS.{name}" for name in qualification_missing],
-            SEV_WARN,
-        ))
+        out.append(
+            _dicre_unavailable(
+                "6f.lookup.qualifications",
+                [lookup_errors.get("DICRE_QUALIFICATIONS", "DICRE_QUALIFICATIONS")]
+                if qualification_frame is None
+                else [f"DICRE_QUALIFICATIONS.{name}" for name in qualification_missing],
+                SEV_WARN,
+            )
+        )
     else:
         required_qualifications = reduce(
             lambda left, right: left.unionByName(right),
             [
                 roots.where(F.col(f"qualification_{subgroup}").isNotNull()).select(
-                    "credit_id", "guaranteed_if_type",
+                    "credit_id",
+                    "guaranteed_if_type",
                     F.col(f"qualification_{subgroup}").alias("qualification_id"),
                     F.lit(subgroup).alias("subgroup"),
                 )
@@ -4111,85 +5108,126 @@ def check_dicre_target_frames(
             ],
         )
         eligible_qualifications = qualification_frame.select(
-            _canon_key_col(F.col(qualification_cols["NUM_ID_QUALIFICACAO"]))
-            .alias("qualification_id"),
-            _canon_key_col(F.col(qualification_cols["NUM_ID_QUALIFICACAO_SUBGRUPO"]))
-            .alias("subgroup"),
+            _canon_key_col(F.col(qualification_cols["NUM_ID_QUALIFICACAO"])).alias(
+                "qualification_id"
+            ),
+            _canon_key_col(F.col(qualification_cols["NUM_ID_QUALIFICACAO_SUBGRUPO"])).alias(
+                "subgroup"
+            ),
         ).dropDuplicates()
         bad = required_qualifications.join(
             F.broadcast(eligible_qualifications), ["qualification_id", "subgroup"], "left_anti"
         )
         count = bad.count()
-        out.append(Finding(
-            "6f.lookup.qualifications", "DICRE target eligibility",
-            SEV_ERROR if count else SEV_INFO, CREDITO_DC_TABLE, count == 0, count=count,
-            column="NUM_ID_QUALIF_*",
-            sample=_sample_keys(bad, ["credit_id", "qualification_id", "subgroup"], sample),
-            hint="Resolve each nonnull qualification through an enabled group-4 LCA "
-                 "relationship for subgroup 20, 21, 22, or 23." if count else "",
-            message="DICRE rows with ineligible nonnull qualifications.",
-        ))
+        out.append(
+            Finding(
+                "6f.lookup.qualifications",
+                "DICRE target eligibility",
+                SEV_ERROR if count else SEV_INFO,
+                CREDITO_DC_TABLE,
+                count == 0,
+                count=count,
+                column="NUM_ID_QUALIF_*",
+                sample=_sample_keys(bad, ["credit_id", "qualification_id", "subgroup"], sample),
+                hint="Resolve each nonnull qualification through an enabled group-4 LCA "
+                "relationship for subgroup 20, 21, 22, or 23."
+                if count
+                else "",
+                message="DICRE rows with ineligible nonnull qualifications.",
+            )
+        )
 
     toggle = lookup_frames.get("TCTPFEATURE_TOGGLE")
     if toggle is None:
-        out.append(_dicre_unavailable(
-            "6f.lookup.ipoc_unique",
-            [lookup_errors.get("TCTPFEATURE_TOGGLE", "TCTPFEATURE_TOGGLE")], SEV_WARN,
-        ))
+        out.append(
+            _dicre_unavailable(
+                "6f.lookup.ipoc_unique",
+                [lookup_errors.get("TCTPFEATURE_TOGGLE", "TCTPFEATURE_TOGGLE")],
+                SEV_WARN,
+            )
+        )
     else:
         enabled_credits = _dicre_enabled_credits(roots, toggle)
         if enabled_credits is None:
-            out.append(_dicre_unavailable(
-                "6f.lookup.ipoc_unique", ["TCTPFEATURE_TOGGLE required columns"], SEV_WARN
-            ))
+            out.append(
+                _dicre_unavailable(
+                    "6f.lookup.ipoc_unique", ["TCTPFEATURE_TOGGLE required columns"], SEV_WARN
+                )
+            )
         elif enabled_credits.limit(1).count() == 0:
-            out.append(Finding(
-                "6f.lookup.ipoc_unique", "DICRE target eligibility", SEV_INFO,
-                CREDITO_DC_TABLE, True, column="COD_IPOC",
-                message="VALIDADOR_UNICIDADE_IPOC_LCA is disabled for all synthetic "
-                        "CREDITO_DC.DAT_INCLUSAO dates; target IPOCs are not required.",
-            ))
+            out.append(
+                Finding(
+                    "6f.lookup.ipoc_unique",
+                    "DICRE target eligibility",
+                    SEV_INFO,
+                    CREDITO_DC_TABLE,
+                    True,
+                    column="COD_IPOC",
+                    message="VALIDADOR_UNICIDADE_IPOC_LCA is disabled for all synthetic "
+                    "CREDITO_DC.DAT_INCLUSAO dates; target IPOCs are not required.",
+                )
+            )
         else:
             target = lookup_frames.get("CREDITO_DC_TARGET")
             target_column = resolve(target, "COD_IPOC") if target is not None else None
             if target is None or not target_column:
-                out.append(_dicre_unavailable(
-                    "6f.lookup.ipoc_unique",
-                    [lookup_errors.get("CREDITO_DC_TARGET", "CREDITO_DC_TARGET.COD_IPOC")],
-                    SEV_WARN,
-                ))
+                out.append(
+                    _dicre_unavailable(
+                        "6f.lookup.ipoc_unique",
+                        [lookup_errors.get("CREDITO_DC_TARGET", "CREDITO_DC_TARGET.COD_IPOC")],
+                        SEV_WARN,
+                    )
+                )
             else:
-                duplicate_synthetic = roots.where(
-                    F.col("ipoc").isNotNull() & (F.col("ipoc") != "")
-                ).groupBy("ipoc").count().where(F.col("count") > 1).select("ipoc")
+                duplicate_synthetic = (
+                    roots.where(F.col("ipoc").isNotNull() & (F.col("ipoc") != ""))
+                    .groupBy("ipoc")
+                    .count()
+                    .where(F.col("count") > 1)
+                    .select("ipoc")
+                )
                 active_target = target
                 target_exclusion = resolve(target, "DAT_EXCLUSAO")
                 if target_exclusion:
                     active_target = target.where(F.col(target_exclusion).isNull())
-                target_ipocs = active_target.select(
-                    _dicre_text(F.col(target_column)).alias("ipoc")
-                ).where(F.col("ipoc").isNotNull() & (F.col("ipoc") != "")).dropDuplicates()
+                target_ipocs = (
+                    active_target.select(_dicre_text(F.col(target_column)).alias("ipoc"))
+                    .where(F.col("ipoc").isNotNull() & (F.col("ipoc") != ""))
+                    .dropDuplicates()
+                )
                 conflicts = duplicate_synthetic.unionByName(target_ipocs).dropDuplicates()
                 bad = enabled_credits.join(conflicts, "ipoc", "inner")
                 count = bad.count()
-                out.append(Finding(
-                    "6f.lookup.ipoc_unique", "DICRE target eligibility",
-                    SEV_ERROR if count else SEV_INFO, CREDITO_DC_TABLE,
-                    count == 0, count=count, column="COD_IPOC",
-                    sample=_sample_keys(bad, ["credit_id", "ipoc"], sample),
-                    hint="Regenerate exact-trimmed, case-sensitive IPOCs colliding within the "
-                         "enabled synthetic rows or active target CREDITO_DC." if count else "",
-                    message="Toggle-enabled DICRE rows with duplicate IPOCs.",
-                ))
+                out.append(
+                    Finding(
+                        "6f.lookup.ipoc_unique",
+                        "DICRE target eligibility",
+                        SEV_ERROR if count else SEV_INFO,
+                        CREDITO_DC_TABLE,
+                        count == 0,
+                        count=count,
+                        column="COD_IPOC",
+                        sample=_sample_keys(bad, ["credit_id", "ipoc"], sample),
+                        hint="Regenerate exact-trimmed, case-sensitive IPOCs colliding within the "
+                        "enabled synthetic rows or active target CREDITO_DC."
+                        if count
+                        else "",
+                        message="Toggle-enabled DICRE rows with duplicate IPOCs.",
+                    )
+                )
     return out
 
 
 def _dicre_collect_values(
     frame: DataFrame, expression, alias: str, maximum: int = 100_000
 ) -> Tuple[List[str], Optional[str]]:
-    rows = frame.select(expression.alias(alias)).where(
-        F.col(alias).isNotNull()
-    ).dropDuplicates().limit(maximum + 1).collect()
+    rows = (
+        frame.select(expression.alias(alias))
+        .where(F.col(alias).isNotNull())
+        .dropDuplicates()
+        .limit(maximum + 1)
+        .collect()
+    )
     if len(rows) > maximum:
         return [], f"more than {maximum} distinct synthetic keys"
     return [str(row[alias]) for row in rows], None
@@ -4241,9 +5279,7 @@ def load_dicre_target_frames(
     if all((lot_id, lot_account, lot_type, guaranteed_type, root_lot)):
         joined = root.select(
             _canon_key_col(F.col(root_lot)).alias("lot_id"),
-            *([
-                _canon_key_col(F.col(root_type)).alias("credit_if_type")
-            ] if root_type else []),
+            *([_canon_key_col(F.col(root_type)).alias("credit_if_type")] if root_type else []),
             *([_canon_key_col(F.col(custodian)).alias("custodian")] if custodian else []),
             *([_canon_key_col(F.col(base)).alias("base_id")] if base else []),
         ).join(
@@ -4252,15 +5288,15 @@ def load_dicre_target_frames(
                 _canon_key_col(F.col(lot_account)).alias("emitter"),
                 _canon_key_col(F.col(lot_type)).alias("lot_type"),
                 _canon_key_col(F.col(guaranteed_type)).alias("guaranteed_if_type"),
-            ), "lot_id", "inner",
+            ),
+            "lot_id",
+            "inner",
         )
 
     if joined is None or not custodian:
         errors["DICRE_ACCOUNTS"] = "synthetic account keys unavailable"
     else:
-        emitter_values, emitter_error = _dicre_collect_values(
-            joined, F.col("emitter"), "value"
-        )
+        emitter_values, emitter_error = _dicre_collect_values(joined, F.col("emitter"), "value")
         custodian_values, custodian_error = _dicre_collect_values(
             joined, F.col("custodian"), "value"
         )
@@ -4280,7 +5316,7 @@ def load_dicre_target_frames(
                     f"LEFT JOIN {cfg.schema}.V_CONTA_PARTICIPANTE vcp "
                     "ON vcp.COD_CONTA_PARTICIPANTE=cp.COD_CONTA_PARTICIPANTE "
                     "WHERE cp.NUM_CONTA_PARTICIPANTE IN ("
-                    + ", ".join(_sql_literal(value) for value in values[offset:offset + 1000])
+                    + ", ".join(_sql_literal(value) for value in values[offset : offset + 1000])
                     + ")"
                     for offset in range(0, len(values), 1000)
                 ],
@@ -4289,9 +5325,13 @@ def load_dicre_target_frames(
     if joined is None or not base:
         errors["DICRE_BASES"] = "synthetic emitter/base pairs unavailable"
     else:
-        pairs = joined.select("emitter", "base_id").where(
-            F.col("emitter").isNotNull() & F.col("base_id").isNotNull()
-        ).dropDuplicates().limit(100_001).collect()
+        pairs = (
+            joined.select("emitter", "base_id")
+            .where(F.col("emitter").isNotNull() & F.col("base_id").isNotNull())
+            .dropDuplicates()
+            .limit(100_001)
+            .collect()
+        )
         if len(pairs) > 100_000:
             errors["DICRE_BASES"] = "more than 100000 synthetic emitter/base pairs"
         elif pairs:
@@ -4306,10 +5346,14 @@ def load_dicre_target_frames(
                     "ON tb.NUM_ID_TIPO_BASE_CREDITO=b.NUM_ID_TIPO_BASE_CREDITO "
                     "WHERE TRIM(tb.COD_TIPO_BASE_CREDITO)='2' AND ("
                     + " OR ".join(
-                        "(pb.NUM_CONTA_PARTICIPANTE=" + _sql_literal(row["emitter"])
-                        + " AND pb.NUM_ID_BASE_CREDITO=" + _sql_literal(row["base_id"])
-                        + ")" for row in pairs[offset:offset + 500]
-                    ) + ")"
+                        "(pb.NUM_CONTA_PARTICIPANTE="
+                        + _sql_literal(row["emitter"])
+                        + " AND pb.NUM_ID_BASE_CREDITO="
+                        + _sql_literal(row["base_id"])
+                        + ")"
+                        for row in pairs[offset : offset + 500]
+                    )
+                    + ")"
                     for offset in range(0, len(pairs), 500)
                 ],
             )
@@ -4317,9 +5361,13 @@ def load_dicre_target_frames(
     if joined is None or not root_type:
         errors["DICRE_IF_COMPATIBILITY"] = "synthetic IF compatibility triples unavailable"
     else:
-        triples = joined.select(
-            "credit_if_type", "guaranteed_if_type", "lot_type"
-        ).dropna().dropDuplicates().limit(100_001).collect()
+        triples = (
+            joined.select("credit_if_type", "guaranteed_if_type", "lot_type")
+            .dropna()
+            .dropDuplicates()
+            .limit(100_001)
+            .collect()
+        )
         if len(triples) > 100_000:
             errors["DICRE_IF_COMPATIBILITY"] = "more than 100000 synthetic IF triples"
         elif triples:
@@ -4336,12 +5384,16 @@ def load_dicre_target_frames(
                     "AND guaranteed.DAT_EXCLUSAO IS NULL AND h.NUM_ID_TIPO_LOTE=2 "
                     "AND TRIM(guaranteed.COD_TIPO_IF)='LCA' AND ("
                     + " OR ".join(
-                        "(h.NUM_TIPO_IF=" + _sql_literal(row["credit_if_type"])
+                        "(h.NUM_TIPO_IF="
+                        + _sql_literal(row["credit_if_type"])
                         + " AND h.NUM_TIPO_IF_GARANTIDO="
                         + _sql_literal(row["guaranteed_if_type"])
-                        + " AND h.NUM_ID_TIPO_LOTE=" + _sql_literal(row["lot_type"]) + ")"
-                        for row in triples[offset:offset + 500]
-                    ) + ")"
+                        + " AND h.NUM_ID_TIPO_LOTE="
+                        + _sql_literal(row["lot_type"])
+                        + ")"
+                        for row in triples[offset : offset + 500]
+                    )
+                    + ")"
                     for offset in range(0, len(triples), 500)
                 ],
             )
@@ -4358,9 +5410,11 @@ def load_dicre_target_frames(
         if actual:
             qualification_rows.extend(
                 (row["value"], subgroup)
-                for row in root.select(
-                    _canon_key_col(F.col(actual)).alias("value")
-                ).where(F.col("value").isNotNull()).dropDuplicates().limit(100_001).collect()
+                for row in root.select(_canon_key_col(F.col(actual)).alias("value"))
+                .where(F.col("value").isNotNull())
+                .dropDuplicates()
+                .limit(100_001)
+                .collect()
             )
     qualification_rows = sorted(set(qualification_rows))
     if len(qualification_rows) > 100_000:
@@ -4383,10 +5437,14 @@ def load_dicre_target_frames(
                 "AND q.NUM_ID_SITUACAO_QUALIFICACAO=0 "
                 "AND TRIM(tif.COD_TIPO_IF)='LCA' AND ("
                 + " OR ".join(
-                    "(r.NUM_ID_QUALIFICACAO=" + _sql_literal(value)
-                    + " AND s.NUM_ID_QUALIFICACAO_SUBGRUPO=" + _sql_literal(subgroup) + ")"
-                    for value, subgroup in qualification_rows[offset:offset + 500]
-                ) + ")"
+                    "(r.NUM_ID_QUALIFICACAO="
+                    + _sql_literal(value)
+                    + " AND s.NUM_ID_QUALIFICACAO_SUBGRUPO="
+                    + _sql_literal(subgroup)
+                    + ")"
+                    for value, subgroup in qualification_rows[offset : offset + 500]
+                )
+                + ")"
                 for offset in range(0, len(qualification_rows), 500)
             ],
         )
@@ -4421,9 +5479,8 @@ def load_dicre_target_frames(
                         "SELECT COD_IPOC, DAT_EXCLUSAO "
                         f"FROM {cfg.schema}.CREDITO_DC WHERE DAT_EXCLUSAO IS NULL "
                         "AND TRIM(COD_IPOC) IN ("
-                        + ", ".join(
-                            _sql_literal(value) for value in ipocs[offset:offset + 1000]
-                        ) + ")"
+                        + ", ".join(_sql_literal(value) for value in ipocs[offset : offset + 1000])
+                        + ")"
                         for offset in range(0, len(ipocs), 1000)
                     ],
                 )
@@ -4435,27 +5492,51 @@ def load_dicre_target_frames(
 
 
 def check_dicre_registration_profile(
-    tables: Dict[str, DataFrame], sample: int, registration_profile: bool,
+    tables: Dict[str, DataFrame],
+    sample: int,
+    registration_profile: bool,
     profile: ValidationProfile,
 ) -> List[Finding]:
     if profile.pipeline != "dicre" or not registration_profile:
         return []
     requirements = {
         LOTE_TABLE: (
-            "NUM_ID_LOTE", "NUM_ID_TIPO_LOTE", "IND_REVOLVENCIA", "DAT_EXCLUSAO",
+            "NUM_ID_LOTE",
+            "NUM_ID_TIPO_LOTE",
+            "IND_REVOLVENCIA",
+            "DAT_EXCLUSAO",
         ),
         CREDITO_DC_TABLE: (
-            "NUM_ID_CREDITO_DC", "COD_CREDITO_DC", "NUM_ID_LOTE", "NUM_TIPO_IF",
-            "VAL_PU", "VAL_PU_EMISSAO", "DAT_VAL_PU", "DAT_CONTRATACAO",
-            "DAT_VENCIMENTO", "COD_TIPO_PESSOA", "NUM_ID_MODALIDADE_CREDITO",
-            "NUM_ID_TIPO_GARANTIA", "NUM_ID_BASE_CREDITO", "NUM_ID_INDEXADOR_CREDITO",
-            "NUM_ID_FORMA_PAGAMENTO", "NUM_ID_TIPO_AMORTIZACAO", "IND_INADIMPLENTE",
-            "IND_MULTIPLO_IPOC", "IND_BAIXA_AUTOMATICA_VENC", "NUM_ID_UF",
+            "NUM_ID_CREDITO_DC",
+            "COD_CREDITO_DC",
+            "NUM_ID_LOTE",
+            "NUM_TIPO_IF",
+            "VAL_PU",
+            "VAL_PU_EMISSAO",
+            "DAT_VAL_PU",
+            "DAT_CONTRATACAO",
+            "DAT_VENCIMENTO",
+            "COD_TIPO_PESSOA",
+            "NUM_ID_MODALIDADE_CREDITO",
+            "NUM_ID_TIPO_GARANTIA",
+            "NUM_ID_BASE_CREDITO",
+            "NUM_ID_INDEXADOR_CREDITO",
+            "NUM_ID_FORMA_PAGAMENTO",
+            "NUM_ID_TIPO_AMORTIZACAO",
+            "IND_INADIMPLENTE",
+            "IND_MULTIPLO_IPOC",
+            "IND_BAIXA_AUTOMATICA_VENC",
+            "NUM_ID_UF",
         ),
         HISTORICO_CREDITO_DC_TABLE: (
-            "NUM_ID_HISTORICO_CREDITO_DC", "COD_CREDITO_DC", "NUM_ID_LOTE",
-            "NUM_ID_TIPO_ACAO_HIST_CREDITO", "VAL_PU", "DAT_VAL_PU",
-            "IND_INADIMPLENTE", "DAT_IND_INADIMPLENTE",
+            "NUM_ID_HISTORICO_CREDITO_DC",
+            "COD_CREDITO_DC",
+            "NUM_ID_LOTE",
+            "NUM_ID_TIPO_ACAO_HIST_CREDITO",
+            "VAL_PU",
+            "DAT_VAL_PU",
+            "IND_INADIMPLENTE",
+            "DAT_IND_INADIMPLENTE",
         ),
     }
     columns, missing = _credito_scr_columns(tables, requirements)
@@ -4479,42 +5560,59 @@ def check_dicre_registration_profile(
         )
     )
     count = lot_bad.count()
-    out.append(Finding(
-        "8f.profile.lot_constants", "DICRE observed registration profile",
-        SEV_WARN if count else SEV_INFO, LOTE_TABLE, count == 0, count=count,
-        column="NUM_ID_TIPO_LOTE,IND_REVOLVENCIA",
-        sample=_sample_keys(lot_bad, [lot_cols["NUM_ID_LOTE"]], sample),
-        hint="Treat type-2/revolvencia-S as one DICREINCL batch observation only."
-             if count else "",
-        message="Active lots differing from the observed LCA DICRE batch constants.",
-    ))
+    out.append(
+        Finding(
+            "8f.profile.lot_constants",
+            "DICRE observed registration profile",
+            SEV_WARN if count else SEV_INFO,
+            LOTE_TABLE,
+            count == 0,
+            count=count,
+            column="NUM_ID_TIPO_LOTE,IND_REVOLVENCIA",
+            sample=_sample_keys(lot_bad, [lot_cols["NUM_ID_LOTE"]], sample),
+            hint="Treat type-2/revolvencia-S as one DICREINCL batch observation only."
+            if count
+            else "",
+            message="Active lots differing from the observed LCA DICRE batch constants.",
+        )
+    )
 
     root_expected = {
-        "VAL_PU": "1", "VAL_PU_EMISSAO": "1", "COD_TIPO_PESSOA": "PJ",
-        "NUM_ID_MODALIDADE_CREDITO": "46", "NUM_ID_TIPO_GARANTIA": "16",
-        "NUM_ID_BASE_CREDITO": "4199", "IND_INADIMPLENTE": "N",
-        "IND_MULTIPLO_IPOC": "N", "IND_BAIXA_AUTOMATICA_VENC": "N",
+        "VAL_PU": "1",
+        "VAL_PU_EMISSAO": "1",
+        "COD_TIPO_PESSOA": "PJ",
+        "NUM_ID_MODALIDADE_CREDITO": "46",
+        "NUM_ID_TIPO_GARANTIA": "16",
+        "NUM_ID_BASE_CREDITO": "4199",
+        "IND_INADIMPLENTE": "N",
+        "IND_MULTIPLO_IPOC": "N",
+        "IND_BAIXA_AUTOMATICA_VENC": "N",
     }
     root_mismatch = reduce(
         lambda left, right: left | right,
         [
-            ~F.coalesce(
-                _canon_key_col(F.col(root_cols[name])) == expected, F.lit(False)
-            )
+            ~F.coalesce(_canon_key_col(F.col(root_cols[name])) == expected, F.lit(False))
             for name, expected in root_expected.items()
         ],
     )
     root_bad = roots.where(root_mismatch)
     count = root_bad.count()
-    out.append(Finding(
-        "8f.profile.root_constants", "DICRE observed registration profile",
-        SEV_WARN if count else SEV_INFO, CREDITO_DC_TABLE, count == 0, count=count,
-        column=",".join(root_expected),
-        sample=_sample_keys(root_bad, [root_cols["NUM_ID_CREDITO_DC"]], sample),
-        hint="Confirm drift against another successful DICRE route; these are not hard rules."
-             if count else "",
-        message="CREDITO_DC rows differing from common values in the observed batch.",
-    ))
+    out.append(
+        Finding(
+            "8f.profile.root_constants",
+            "DICRE observed registration profile",
+            SEV_WARN if count else SEV_INFO,
+            CREDITO_DC_TABLE,
+            count == 0,
+            count=count,
+            column=",".join(root_expected),
+            sample=_sample_keys(root_bad, [root_cols["NUM_ID_CREDITO_DC"]], sample),
+            hint="Confirm drift against another successful DICRE route; these are not hard rules."
+            if count
+            else "",
+            message="CREDITO_DC rows differing from common values in the observed batch.",
+        )
+    )
 
     observed_combinations = {
         ("53", "2", "268", "6"),
@@ -4533,25 +5631,34 @@ def check_dicre_registration_profile(
     observed = reduce(
         lambda left, right: left | right,
         [
-            (F.col("if_type") == if_type) & (F.col("indexer") == indexer)
-            & (F.col("payment") == payment) & (F.col("amortization") == amortization)
+            (F.col("if_type") == if_type)
+            & (F.col("indexer") == indexer)
+            & (F.col("payment") == payment)
+            & (F.col("amortization") == amortization)
             for if_type, indexer, payment, amortization in observed_combinations
         ],
     )
     variant_bad = variants.where(~F.coalesce(observed, F.lit(False)))
     count = variant_bad.count()
-    out.append(Finding(
-        "8f.profile.subtype_combinations", "DICRE observed registration profile",
-        SEV_WARN if count else SEV_INFO, CREDITO_DC_TABLE, count == 0, count=count,
-        column="NUM_TIPO_IF,NUM_ID_INDEXADOR_CREDITO,NUM_ID_FORMA_PAGAMENTO,"
-               "NUM_ID_TIPO_AMORTIZACAO",
-        sample=_sample_keys(
-            variant_bad, ["credit_id", "if_type", "indexer", "payment", "amortization"], sample
-        ),
-        hint="Validate new subtype combinations through live target FKs and compatibility."
-             if count else "",
-        message="Rows outside the five observed CCB/CMER/CCCM/CCIN/CDIV combinations.",
-    ))
+    out.append(
+        Finding(
+            "8f.profile.subtype_combinations",
+            "DICRE observed registration profile",
+            SEV_WARN if count else SEV_INFO,
+            CREDITO_DC_TABLE,
+            count == 0,
+            count=count,
+            column="NUM_TIPO_IF,NUM_ID_INDEXADOR_CREDITO,NUM_ID_FORMA_PAGAMENTO,"
+            "NUM_ID_TIPO_AMORTIZACAO",
+            sample=_sample_keys(
+                variant_bad, ["credit_id", "if_type", "indexer", "payment", "amortization"], sample
+            ),
+            hint="Validate new subtype combinations through live target FKs and compatibility."
+            if count
+            else "",
+            message="Rows outside the five observed CCB/CMER/CCCM/CCIN/CDIV combinations.",
+        )
+    )
 
     root_history = roots.select(
         _dicre_text(F.col(root_cols["COD_CREDITO_DC"])).alias("code"),
@@ -4564,12 +5671,13 @@ def check_dicre_registration_profile(
         inclusion.select(
             _dicre_text(F.col(history_cols["COD_CREDITO_DC"])).alias("code"),
             _canon_key_col(F.col(history_cols["NUM_ID_LOTE"])).alias("lot_id"),
-            _canon_key_col(F.col(history_cols["NUM_ID_HISTORICO_CREDITO_DC"]))
-            .alias("history_id"),
+            _canon_key_col(F.col(history_cols["NUM_ID_HISTORICO_CREDITO_DC"])).alias("history_id"),
             F.col(history_cols["VAL_PU"]).alias("history_val_pu"),
             F.col(history_cols["DAT_VAL_PU"]).alias("history_dat_val_pu"),
             F.col(history_cols["IND_INADIMPLENTE"]).alias("history_default"),
-        ), ["code", "lot_id"], "inner",
+        ),
+        ["code", "lot_id"],
+        "inner",
     )
     history_bad = root_history.where(
         ~F.col("root_val_pu").eqNullSafe(F.col("history_val_pu"))
@@ -4577,43 +5685,65 @@ def check_dicre_registration_profile(
         | ~F.col("root_default").eqNullSafe(F.col("history_default"))
     )
     count = history_bad.count()
-    out.append(Finding(
-        "8f.profile.history_copied_values", "DICRE observed registration profile",
-        SEV_WARN if count else SEV_INFO, HISTORICO_CREDITO_DC_TABLE,
-        count == 0, count=count, column="VAL_PU,DAT_VAL_PU,IND_INADIMPLENTE",
-        sample=_sample_keys(history_bad, ["credit_id", "history_id"], sample),
-        hint="Copied inclusion values are advisory because later lifecycle changes may drift."
-             if count else "",
-        message="Inclusion history copied values differing from current CREDITO_DC.",
-    ))
+    out.append(
+        Finding(
+            "8f.profile.history_copied_values",
+            "DICRE observed registration profile",
+            SEV_WARN if count else SEV_INFO,
+            HISTORICO_CREDITO_DC_TABLE,
+            count == 0,
+            count=count,
+            column="VAL_PU,DAT_VAL_PU,IND_INADIMPLENTE",
+            sample=_sample_keys(history_bad, ["credit_id", "history_id"], sample),
+            hint="Copied inclusion values are advisory because later lifecycle changes may drift."
+            if count
+            else "",
+            message="Inclusion history copied values differing from current CREDITO_DC.",
+        )
+    )
 
     financial = roots.select(
         _canon_key_col(F.col(root_cols["NUM_ID_CREDITO_DC"])).alias("credit_id"),
         F.expr(f"try_cast(`{root_cols['VAL_PU']}` as decimal(38,10))").alias("pu"),
-        F.expr(f"try_cast(`{root_cols['VAL_PU_EMISSAO']}` as decimal(38,10))")
-        .alias("issue_pu"),
+        F.expr(f"try_cast(`{root_cols['VAL_PU_EMISSAO']}` as decimal(38,10))").alias("issue_pu"),
         F.to_date(F.col(root_cols["DAT_VAL_PU"])).alias("pu_date"),
         F.to_date(F.col(root_cols["DAT_CONTRATACAO"])).alias("contract_date"),
         F.to_date(F.col(root_cols["DAT_VENCIMENTO"])).alias("maturity"),
     )
     financial_bad = financial.where(
-        (F.col("pu").isNotNull() & F.col("issue_pu").isNotNull()
-         & (F.col("pu") != F.col("issue_pu")))
-        | (F.col("pu_date").isNotNull() & F.col("contract_date").isNotNull()
-           & (F.col("pu_date") != F.col("contract_date")))
-        | (F.col("contract_date").isNotNull() & F.col("maturity").isNotNull()
-           & (F.col("contract_date") > F.col("maturity")))
+        (
+            F.col("pu").isNotNull()
+            & F.col("issue_pu").isNotNull()
+            & (F.col("pu") != F.col("issue_pu"))
+        )
+        | (
+            F.col("pu_date").isNotNull()
+            & F.col("contract_date").isNotNull()
+            & (F.col("pu_date") != F.col("contract_date"))
+        )
+        | (
+            F.col("contract_date").isNotNull()
+            & F.col("maturity").isNotNull()
+            & (F.col("contract_date") > F.col("maturity"))
+        )
     )
     count = financial_bad.count()
-    out.append(Finding(
-        "8f.profile.financial_dates", "DICRE observed registration profile",
-        SEV_WARN if count else SEV_INFO, CREDITO_DC_TABLE, count == 0, count=count,
-        column="VAL_PU,VAL_PU_EMISSAO,DAT_VAL_PU,DAT_CONTRATACAO,DAT_VENCIMENTO",
-        sample=_sample_keys(financial_bad, ["credit_id"], sample),
-        hint="These financial/date equalities are observed, not universal DICRE rules."
-             if count else "",
-        message="Rows outside the observed financial/date relationships.",
-    ))
+    out.append(
+        Finding(
+            "8f.profile.financial_dates",
+            "DICRE observed registration profile",
+            SEV_WARN if count else SEV_INFO,
+            CREDITO_DC_TABLE,
+            count == 0,
+            count=count,
+            column="VAL_PU,VAL_PU_EMISSAO,DAT_VAL_PU,DAT_CONTRATACAO,DAT_VENCIMENTO",
+            sample=_sample_keys(financial_bad, ["credit_id"], sample),
+            hint="These financial/date equalities are observed, not universal DICRE rules."
+            if count
+            else "",
+            message="Rows outside the observed financial/date relationships.",
+        )
+    )
 
     uf_rows = roots.select(
         _canon_key_col(F.col(root_cols["NUM_ID_CREDITO_DC"])).alias("credit_id"),
@@ -4625,93 +5755,142 @@ def check_dicre_registration_profile(
         | ((F.col("if_type") != "53") & F.col("uf").isNotNull())
     )
     count = uf_bad.count()
-    out.append(Finding(
-        "8f.profile.uf_behavior", "DICRE observed registration profile",
-        SEV_WARN if count else SEV_INFO, CREDITO_DC_TABLE, count == 0, count=count,
-        column="NUM_TIPO_IF,NUM_ID_UF",
-        sample=_sample_keys(uf_bad, ["credit_id", "if_type", "uf"], sample),
-        hint="Interpret UF with HAB_CAMPO_UF_EMISSAO_DICRE_LCA before making it hard."
-             if count else "",
-        message="UF behavior differing from the observed enabled-toggle batch.",
-    ))
+    out.append(
+        Finding(
+            "8f.profile.uf_behavior",
+            "DICRE observed registration profile",
+            SEV_WARN if count else SEV_INFO,
+            CREDITO_DC_TABLE,
+            count == 0,
+            count=count,
+            column="NUM_TIPO_IF,NUM_ID_UF",
+            sample=_sample_keys(uf_bad, ["credit_id", "if_type", "uf"], sample),
+            hint="Interpret UF with HAB_CAMPO_UF_EMISSAO_DICRE_LCA before making it hard."
+            if count
+            else "",
+            message="UF behavior differing from the observed enabled-toggle batch.",
+        )
+    )
 
-    closure_tables = all(table in tables for table in (
-        TCTPIROP_ATIV_TABLE, TCTPDET_CHAV_IROP_CCB_TABLE,
-        TCTPDET_CHAV_IROP_CMER_TABLE, TCTPSOLI_IROP_ATIV_TABLE,
-    ))
+    closure_tables = all(
+        table in tables
+        for table in (
+            TCTPIROP_ATIV_TABLE,
+            TCTPDET_CHAV_IROP_CCB_TABLE,
+            TCTPDET_CHAV_IROP_CMER_TABLE,
+            TCTPSOLI_IROP_ATIV_TABLE,
+        )
+    )
     if not closure_tables:
-        out.append(_dicre_unavailable(
-            "8f.profile.irop_shape", ["complete IROP closure"], SEV_WARN
-        ))
+        out.append(_dicre_unavailable("8f.profile.irop_shape", ["complete IROP closure"], SEV_WARN))
     else:
-        irop_cols, irop_missing = _credito_scr_columns(tables, {
-            TCTPIROP_ATIV_TABLE: ("NUM_IROP_ATIV", "NUM_IDT_CRE_DC", "NUM_CHAV_IROP"),
-            TCTPDET_CHAV_IROP_CCB_TABLE: ("NUM_CHAV_IROP",),
-            TCTPDET_CHAV_IROP_CMER_TABLE: ("NUM_CHAV_IROP",),
-            TCTPSOLI_IROP_ATIV_TABLE: ("NUM_IROP_ATIV",),
-        })
+        irop_cols, irop_missing = _credito_scr_columns(
+            tables,
+            {
+                TCTPIROP_ATIV_TABLE: ("NUM_IROP_ATIV", "NUM_IDT_CRE_DC", "NUM_CHAV_IROP"),
+                TCTPDET_CHAV_IROP_CCB_TABLE: ("NUM_CHAV_IROP",),
+                TCTPDET_CHAV_IROP_CMER_TABLE: ("NUM_CHAV_IROP",),
+                TCTPSOLI_IROP_ATIV_TABLE: ("NUM_IROP_ATIV",),
+            },
+        )
         if irop_missing:
             out.append(_dicre_unavailable("8f.profile.irop_shape", irop_missing, SEV_WARN))
         else:
             irops = tables[TCTPIROP_ATIV_TABLE].select(
-                _canon_key_col(F.col(irop_cols[TCTPIROP_ATIV_TABLE]["NUM_IDT_CRE_DC"]))
-                .alias("credit_id"),
-                _canon_key_col(F.col(irop_cols[TCTPIROP_ATIV_TABLE]["NUM_IROP_ATIV"]))
-                .alias("irop_id"),
-                _canon_key_col(F.col(irop_cols[TCTPIROP_ATIV_TABLE]["NUM_CHAV_IROP"]))
-                .alias("irop_key"),
+                _canon_key_col(F.col(irop_cols[TCTPIROP_ATIV_TABLE]["NUM_IDT_CRE_DC"])).alias(
+                    "credit_id"
+                ),
+                _canon_key_col(F.col(irop_cols[TCTPIROP_ATIV_TABLE]["NUM_IROP_ATIV"])).alias(
+                    "irop_id"
+                ),
+                _canon_key_col(F.col(irop_cols[TCTPIROP_ATIV_TABLE]["NUM_CHAV_IROP"])).alias(
+                    "irop_key"
+                ),
             )
             ccb = tables[TCTPDET_CHAV_IROP_CCB_TABLE].select(
-                _canon_key_col(F.col(irop_cols[TCTPDET_CHAV_IROP_CCB_TABLE]["NUM_CHAV_IROP"]))
-                .alias("ccb_key")
+                _canon_key_col(
+                    F.col(irop_cols[TCTPDET_CHAV_IROP_CCB_TABLE]["NUM_CHAV_IROP"])
+                ).alias("ccb_key")
             )
             cmer = tables[TCTPDET_CHAV_IROP_CMER_TABLE].select(
-                _canon_key_col(F.col(irop_cols[TCTPDET_CHAV_IROP_CMER_TABLE]["NUM_CHAV_IROP"]))
-                .alias("cmer_key")
+                _canon_key_col(
+                    F.col(irop_cols[TCTPDET_CHAV_IROP_CMER_TABLE]["NUM_CHAV_IROP"])
+                ).alias("cmer_key")
             )
             requests = tables[TCTPSOLI_IROP_ATIV_TABLE].select(
-                _canon_key_col(F.col(irop_cols[TCTPSOLI_IROP_ATIV_TABLE]["NUM_IROP_ATIV"]))
-                .alias("request_irop_id")
+                _canon_key_col(F.col(irop_cols[TCTPSOLI_IROP_ATIV_TABLE]["NUM_IROP_ATIV"])).alias(
+                    "request_irop_id"
+                )
             )
-            closure_counts = irops.join(
-                ccb.groupBy("ccb_key").count().withColumnRenamed("count", "ccb_count"),
-                F.col("irop_key") == F.col("ccb_key"), "left",
-            ).join(
-                cmer.groupBy("cmer_key").count().withColumnRenamed("count", "cmer_count"),
-                F.col("irop_key") == F.col("cmer_key"), "left",
-            ).join(
-                requests.groupBy("request_irop_id").count().withColumnRenamed(
-                    "count", "request_count"
-                ),
-                F.col("irop_id") == F.col("request_irop_id"), "left",
-            ).groupBy("credit_id").agg(
-                F.count(F.lit(1)).alias("irop_count"),
-                F.sum(F.coalesce(F.col("ccb_count"), F.lit(0))).alias("ccb_count"),
-                F.sum(F.coalesce(F.col("cmer_count"), F.lit(0))).alias("cmer_count"),
-                F.sum(F.coalesce(F.col("request_count"), F.lit(0))).alias("request_count"),
+            closure_counts = (
+                irops.join(
+                    ccb.groupBy("ccb_key").count().withColumnRenamed("count", "ccb_count"),
+                    F.col("irop_key") == F.col("ccb_key"),
+                    "left",
+                )
+                .join(
+                    cmer.groupBy("cmer_key").count().withColumnRenamed("count", "cmer_count"),
+                    F.col("irop_key") == F.col("cmer_key"),
+                    "left",
+                )
+                .join(
+                    requests.groupBy("request_irop_id")
+                    .count()
+                    .withColumnRenamed("count", "request_count"),
+                    F.col("irop_id") == F.col("request_irop_id"),
+                    "left",
+                )
+                .groupBy("credit_id")
+                .agg(
+                    F.count(F.lit(1)).alias("irop_count"),
+                    F.sum(F.coalesce(F.col("ccb_count"), F.lit(0))).alias("ccb_count"),
+                    F.sum(F.coalesce(F.col("cmer_count"), F.lit(0))).alias("cmer_count"),
+                    F.sum(F.coalesce(F.col("request_count"), F.lit(0))).alias("request_count"),
+                )
             )
-            shape = variants.select("credit_id", "if_type").join(
-                closure_counts, "credit_id", "left"
-            ).fillna(0, ["irop_count", "ccb_count", "cmer_count", "request_count"])
+            shape = (
+                variants.select("credit_id", "if_type")
+                .join(closure_counts, "credit_id", "left")
+                .fillna(0, ["irop_count", "ccb_count", "cmer_count", "request_count"])
+            )
             shape_bad = shape.where(
-                ((F.col("if_type") == "53")
-                 & ((F.col("irop_count") != 1) | (F.col("ccb_count") != 1)
-                    | (F.col("cmer_count") != 0) | (F.col("request_count") != 1)))
-                | ((F.col("if_type") == "139")
-                   & ((F.col("irop_count") != 1) | (F.col("ccb_count") != 0)
-                      | (F.col("cmer_count") != 1) | (F.col("request_count") != 1)))
+                (
+                    (F.col("if_type") == "53")
+                    & (
+                        (F.col("irop_count") != 1)
+                        | (F.col("ccb_count") != 1)
+                        | (F.col("cmer_count") != 0)
+                        | (F.col("request_count") != 1)
+                    )
+                )
+                | (
+                    (F.col("if_type") == "139")
+                    & (
+                        (F.col("irop_count") != 1)
+                        | (F.col("ccb_count") != 0)
+                        | (F.col("cmer_count") != 1)
+                        | (F.col("request_count") != 1)
+                    )
+                )
                 | ((~F.col("if_type").isin("53", "139")) & (F.col("irop_count") != 0))
             )
             count = shape_bad.count()
-            out.append(Finding(
-                "8f.profile.irop_shape", "DICRE observed registration profile",
-                SEV_WARN if count else SEV_INFO, TCTPIROP_ATIV_TABLE,
-                count == 0, count=count, column="observed CCB/CMER closure",
-                sample=_sample_keys(shape_bad, ["credit_id", "if_type"], sample),
-                hint="Do not promote observed CCB/CMER closure cardinality to a hard rule."
-                     if count else "",
-                message="IROP closure shape differing from the observed batch.",
-            ))
+            out.append(
+                Finding(
+                    "8f.profile.irop_shape",
+                    "DICRE observed registration profile",
+                    SEV_WARN if count else SEV_INFO,
+                    TCTPIROP_ATIV_TABLE,
+                    count == 0,
+                    count=count,
+                    column="observed CCB/CMER closure",
+                    sample=_sample_keys(shape_bad, ["credit_id", "if_type"], sample),
+                    hint="Do not promote observed CCB/CMER closure cardinality to a hard rule."
+                    if count
+                    else "",
+                    message="IROP closure shape differing from the observed batch.",
+                )
+            )
     return out
 
 
@@ -4727,13 +5906,27 @@ CCB_CONDITION_SUBTYPES = {
     "20": "RESGATE",
 }
 CCB_CORE_OUTPUT_TABLES = (
-    "INSTRUMENTO_FINANCEIRO", "TITULO", "CREDITO", "CONDICAO_IF", "JUROS_FIXO",
-    "HISTORICO_PU_CURVA", "HISTORICO_IF_TITULO", "ALTERACAO_IF", "TCTPIF_CCB",
-    "TCTPCRONOGRAMA_CCB", "OPERACAO", "LANCAMENTO",
+    "INSTRUMENTO_FINANCEIRO",
+    "TITULO",
+    "CREDITO",
+    "CONDICAO_IF",
+    "JUROS_FIXO",
+    "HISTORICO_PU_CURVA",
+    "HISTORICO_IF_TITULO",
+    "ALTERACAO_IF",
+    "TCTPIF_CCB",
+    "TCTPCRONOGRAMA_CCB",
+    "OPERACAO",
+    "LANCAMENTO",
 )
 CCB_OUTPUT_TABLES = CCB_CORE_OUTPUT_TABLES + (
-    "AMORTIZACAO", "ATUALIZACAO_POS", "ATUALIZACAO_PRE", "SPREAD", "RESGATE",
-    "GARANTIA", "TCTPCADEIA_IPOC",
+    "AMORTIZACAO",
+    "ATUALIZACAO_POS",
+    "ATUALIZACAO_PRE",
+    "SPREAD",
+    "RESGATE",
+    "GARANTIA",
+    "TCTPCADEIA_IPOC",
 )
 
 
@@ -4750,8 +5943,11 @@ def _ccb_active(frame: DataFrame) -> DataFrame:
 
 def _ccb_unavailable(check_id: str, missing: Sequence[str], severity: str = SEV_ERROR) -> Finding:
     return Finding(
-        check_id, "CCB validation", severity,
-        ",".join(sorted({item.split(".")[0] for item in missing})), False,
+        check_id,
+        "CCB validation",
+        severity,
+        ",".join(sorted({item.split(".")[0] for item in missing})),
+        False,
         hint="Export the complete CCB aggregate and required columns." if missing else "",
         message=f"Check unavailable; missing required input: {', '.join(missing)}.",
     )
@@ -4763,33 +5959,51 @@ def check_ccb_metadata(
     if profile.pipeline != "ccb":
         return []
     if no_oracle:
-        return [Finding(
-            "0.ccb_metadata", "Coverage", SEV_WARN, "Oracle metadata", False,
-            hint="Rerun with live Oracle metadata for the complete CCB table union.",
-            message="Live Oracle metadata for CCB is unavailable under --no-oracle.",
-        )]
+        return [
+            Finding(
+                "0.ccb_metadata",
+                "Coverage",
+                SEV_WARN,
+                "Oracle metadata",
+                False,
+                hint="Rerun with live Oracle metadata for the complete CCB table union.",
+                message="Live Oracle metadata for CCB is unavailable under --no-oracle.",
+            )
+        ]
     missing_tables = [table for table in CCB_OUTPUT_TABLES if table not in meta.tables]
     missing_pk = [
-        table for table in CCB_OUTPUT_TABLES
+        table
+        for table in CCB_OUTPUT_TABLES
         if table in meta.tables and table not in PK_METADATA_WARN_TABLES and not meta.pk.get(table)
     ]
     failed = bool(missing_tables or missing_pk)
-    return [Finding(
-        "0.ccb_metadata", "Coverage", SEV_ERROR if failed else SEV_INFO,
-        ",".join(CCB_OUTPUT_TABLES), not failed,
-        count=len(missing_tables) + len(missing_pk),
-        hint="Load live table and PK metadata for every CCB core/variant table."
-             if failed else "",
-        message=(
-            f"Missing Oracle tables={missing_tables}; missing PK metadata={missing_pk}."
-            if failed else "Live Oracle metadata covers the CCB table union."
-        ),
-    )]
+    return [
+        Finding(
+            "0.ccb_metadata",
+            "Coverage",
+            SEV_ERROR if failed else SEV_INFO,
+            ",".join(CCB_OUTPUT_TABLES),
+            not failed,
+            count=len(missing_tables) + len(missing_pk),
+            hint="Load live table and PK metadata for every CCB core/variant table."
+            if failed
+            else "",
+            message=(
+                f"Missing Oracle tables={missing_tables}; missing PK metadata={missing_pk}."
+                if failed
+                else "Live Oracle metadata covers the CCB table union."
+            ),
+        )
+    ]
 
 
 def _ccb_edge_finding(
-    check_id: str, parents: DataFrame, child: DataFrame, parent_column: str,
-    sample: int, child_column: Optional[str] = None,
+    check_id: str,
+    parents: DataFrame,
+    child: DataFrame,
+    parent_column: str,
+    sample: int,
+    child_column: Optional[str] = None,
 ) -> Finding:
     parent_ids = parents.select("parent_id").dropDuplicates()
     child_ids = _ccb_active(child).select(
@@ -4799,9 +6013,14 @@ def _ccb_edge_finding(
     bad = child_ids.join(parent_ids, "parent_id", "left_anti")
     count = bad.count()
     return Finding(
-        check_id, "CCB graph", SEV_ERROR if count else SEV_INFO,
-        check_id.split(".")[1].upper(), count == 0, count=count,
-        column=parent_column, sample=_sample_keys(bad, ["child_id", "parent_id"], sample),
+        check_id,
+        "CCB graph",
+        SEV_ERROR if count else SEV_INFO,
+        check_id.split(".")[1].upper(),
+        count == 0,
+        count=count,
+        column=parent_column,
+        sample=_sample_keys(bad, ["child_id", "parent_id"], sample),
         hint="Remove the orphan row or export its active CCB parent." if count else "",
         message="Present CCB child rows must resolve to an active type-53 parent.",
     )
@@ -4850,92 +6069,104 @@ def check_ccb_graph(
         if holder_wallet_if is None:
             comitente_missing.append("CARTEIRA_COMITENTE.NUM_IF")
         else:
-            comitente_roots.append(_ccb_active(holder_wallet).select(
-                _canon_key_col(F.col(holder_wallet_if)).alias("parent_id")
-            ).join(roots.select("parent_id"), "parent_id", "inner"))
+            comitente_roots.append(
+                _ccb_active(holder_wallet)
+                .select(_canon_key_col(F.col(holder_wallet_if)).alias("parent_id"))
+                .join(roots.select("parent_id"), "parent_id", "inner")
+            )
     holder_specification = tables.get("ESPECIFICACAO_COMITENTE")
     specification = tables.get("ESPECIFICACAO")
-    if (holder_specification is not None
-            and _ccb_active(holder_specification).limit(1).count()):
-        holder_specification_id = resolve(
-            holder_specification, "NUM_ID_ESPECIFICACAO"
-        ) if holder_specification is not None else None
-        specification_id = resolve(
-            specification, "NUM_ID_ESPECIFICACAO"
-        ) if specification is not None else None
-        specification_operation = resolve(
-            specification, "NUM_ID_OPERACAO"
-        ) if specification is not None else None
+    if holder_specification is not None and _ccb_active(holder_specification).limit(1).count():
+        holder_specification_id = (
+            resolve(holder_specification, "NUM_ID_ESPECIFICACAO")
+            if holder_specification is not None
+            else None
+        )
+        specification_id = (
+            resolve(specification, "NUM_ID_ESPECIFICACAO") if specification is not None else None
+        )
+        specification_operation = (
+            resolve(specification, "NUM_ID_OPERACAO") if specification is not None else None
+        )
         if not all((holder_specification_id, specification_id, specification_operation)):
-            comitente_missing.append(
-                "ESPECIFICACAO_COMITENTE->ESPECIFICACAO.NUM_ID_OPERACAO"
-            )
+            comitente_missing.append("ESPECIFICACAO_COMITENTE->ESPECIFICACAO.NUM_ID_OPERACAO")
         else:
             operation_roots = _ccb_active(tables["OPERACAO"]).select(
-                _canon_key_col(F.col(columns["OPERACAO"]["NUM_ID_OPERACAO"]))
-                .alias("operation_id"),
+                _canon_key_col(F.col(columns["OPERACAO"]["NUM_ID_OPERACAO"])).alias("operation_id"),
                 _canon_key_col(F.col(columns["OPERACAO"]["NUM_IF"])).alias("parent_id"),
             )
             comitente_roots.append(
-                _ccb_active(holder_specification).select(
-                    _canon_key_col(F.col(holder_specification_id)).alias("specification_id")
-                ).join(
+                _ccb_active(holder_specification)
+                .select(_canon_key_col(F.col(holder_specification_id)).alias("specification_id"))
+                .join(
                     _ccb_active(specification).select(
                         _canon_key_col(F.col(specification_id)).alias("specification_id"),
                         _canon_key_col(F.col(specification_operation)).alias("operation_id"),
                     ),
                     "specification_id",
                     "inner",
-                ).join(operation_roots, "operation_id", "inner").select("parent_id")
+                )
+                .join(operation_roots, "operation_id", "inner")
+                .select("parent_id")
             )
     if comitente_missing:
-        out.append(_ccb_unavailable(
-            "2h.no_comitente_branch", comitente_missing, SEV_ERROR
-        ))
+        out.append(_ccb_unavailable("2h.no_comitente_branch", comitente_missing, SEV_ERROR))
     else:
         contaminated = (
             reduce(lambda left, right: left.unionByName(right), comitente_roots)
-            if comitente_roots else roots.limit(0).select("parent_id")
+            if comitente_roots
+            else roots.limit(0).select("parent_id")
         ).dropDuplicates()
         contaminated_count = contaminated.count()
-        out.append(Finding(
-            "2h.no_comitente_branch", "CCB graph",
-            SEV_ERROR if contaminated_count else SEV_INFO,
-            "CARTEIRA_COMITENTE,ESPECIFICACAO_COMITENTE",
-            contaminated_count == 0, count=contaminated_count,
-            sample=_sample_keys(contaminated, ["parent_id"], sample),
-            hint="Remove the CDB/RDB comitente branch from CCB aggregates."
-                 if contaminated_count else "",
-            message="Active CCB roots must not have holder-wallet or holder-specification rows.",
-        ))
+        out.append(
+            Finding(
+                "2h.no_comitente_branch",
+                "CCB graph",
+                SEV_ERROR if contaminated_count else SEV_INFO,
+                "CARTEIRA_COMITENTE,ESPECIFICACAO_COMITENTE",
+                contaminated_count == 0,
+                count=contaminated_count,
+                sample=_sample_keys(contaminated, ["parent_id"], sample),
+                hint="Remove the CDB/RDB comitente branch from CCB aggregates."
+                if contaminated_count
+                else "",
+                message=(
+                    "Active CCB roots must not have holder-wallet or holder-specification rows."
+                ),
+            )
+        )
 
     generic_event = tables.get("EVENTO")
     generic_event_if = resolve(generic_event, "NUM_IF") if generic_event is not None else None
     has_generic_events = (
-        bool(_ccb_active(generic_event).limit(1).count())
-        if generic_event is not None else False
+        bool(_ccb_active(generic_event).limit(1).count()) if generic_event is not None else False
     )
     if has_generic_events and generic_event_if is None:
-        out.append(_ccb_unavailable(
-            "2h.generic_event_for_ccb", ["EVENTO.NUM_IF"], SEV_ERROR
-        ))
+        out.append(_ccb_unavailable("2h.generic_event_for_ccb", ["EVENTO.NUM_IF"], SEV_ERROR))
     else:
         generic_events = (
-            _ccb_active(generic_event).select(
-                _canon_key_col(F.col(generic_event_if)).alias("parent_id")
-            ).join(roots.select("parent_id"), "parent_id", "inner")
-            if has_generic_events else roots.limit(0).select("parent_id")
+            _ccb_active(generic_event)
+            .select(_canon_key_col(F.col(generic_event_if)).alias("parent_id"))
+            .join(roots.select("parent_id"), "parent_id", "inner")
+            if has_generic_events
+            else roots.limit(0).select("parent_id")
         )
         generic_event_count = generic_events.count()
-        out.append(Finding(
-            "2h.generic_event_for_ccb", "CCB graph",
-            SEV_ERROR if generic_event_count else SEV_INFO,
-            "EVENTO", generic_event_count == 0, count=generic_event_count,
-            sample=_sample_keys(generic_events, ["parent_id"], sample),
-            hint="Use TCTPCRONOGRAMA_CCB for CCB schedules; remove generic EVENTO rows."
-                 if generic_event_count else "",
-            message="Active CCB roots must use their dedicated schedule instead of EVENTO.",
-        ))
+        out.append(
+            Finding(
+                "2h.generic_event_for_ccb",
+                "CCB graph",
+                SEV_ERROR if generic_event_count else SEV_INFO,
+                "EVENTO",
+                generic_event_count == 0,
+                count=generic_event_count,
+                sample=_sample_keys(generic_events, ["parent_id"], sample),
+                hint="Use TCTPCRONOGRAMA_CCB for CCB schedules; remove generic EVENTO rows."
+                if generic_event_count
+                else "",
+                message="Active CCB roots must use their dedicated schedule instead of EVENTO.",
+            )
+        )
 
     for name, table, child_column in (
         ("title", "TITULO", None),
@@ -4947,35 +6178,55 @@ def check_ccb_graph(
         ("schedule", "TCTPCRONOGRAMA_CCB", "NUM_EVENTO_CCB"),
         ("operation", "OPERACAO", "NUM_ID_OPERACAO"),
     ):
-        out.append(_ccb_edge_finding(
-            f"2h.{name}.edge", roots, tables[table], columns[table]["NUM_IF"], sample,
-            columns[table].get(child_column) if child_column else None,
-        ))
+        out.append(
+            _ccb_edge_finding(
+                f"2h.{name}.edge",
+                roots,
+                tables[table],
+                columns[table]["NUM_IF"],
+                sample,
+                columns[table].get(child_column) if child_column else None,
+            )
+        )
 
-    root_codes = roots.select("business_code").where(
-        F.col("business_code").isNotNull() & (F.col("business_code") != "")
-    ).dropDuplicates()
+    root_codes = (
+        roots.select("business_code")
+        .where(F.col("business_code").isNotNull() & (F.col("business_code") != ""))
+        .dropDuplicates()
+    )
     history_code = columns["HISTORICO_IF_TITULO"]["COD_IF"]
     histories = _ccb_active(tables["HISTORICO_IF_TITULO"]).select(
         F.trim(F.col(history_code).cast("string")).alias("business_code")
     )
     bad_history = histories.join(root_codes, "business_code", "left_anti")
     count = bad_history.count()
-    out.append(Finding(
-        "2h.title_history.edge", "CCB graph", SEV_ERROR if count else SEV_INFO,
-        "HISTORICO_IF_TITULO", count == 0, count=count, column="COD_IF",
-        sample=_sample_keys(bad_history, ["business_code"], sample),
-        hint="Preserve the exact trimmed root COD_IF in title history." if count else "",
-        message="CCB title-history rows must resolve to an active root COD_IF.",
-    ))
+    out.append(
+        Finding(
+            "2h.title_history.edge",
+            "CCB graph",
+            SEV_ERROR if count else SEV_INFO,
+            "HISTORICO_IF_TITULO",
+            count == 0,
+            count=count,
+            column="COD_IF",
+            sample=_sample_keys(bad_history, ["business_code"], sample),
+            hint="Preserve the exact trimmed root COD_IF in title history." if count else "",
+            message="CCB title-history rows must resolve to an active root COD_IF.",
+        )
+    )
 
     operation_ids = _ccb_active(tables["OPERACAO"]).select(
         _canon_key_col(F.col(columns["OPERACAO"]["NUM_ID_OPERACAO"])).alias("parent_id")
     )
-    out.append(_ccb_edge_finding(
-        "2h.launch.edge", operation_ids, tables["LANCAMENTO"],
-        columns["LANCAMENTO"]["NUM_ID_OPERACAO"], sample,
-    ))
+    out.append(
+        _ccb_edge_finding(
+            "2h.launch.edge",
+            operation_ids,
+            tables["LANCAMENTO"],
+            columns["LANCAMENTO"]["NUM_ID_OPERACAO"],
+            sample,
+        )
+    )
 
     for name, table, child_id in (
         ("guarantee", "GARANTIA", "NUM_ID_GARANTIA"),
@@ -4986,13 +6237,18 @@ def check_ccb_graph(
             continue
         parent_col, id_col = resolve(frame, "NUM_IF"), resolve(frame, child_id)
         if not parent_col or not id_col:
-            out.append(_ccb_unavailable(
-                f"2h.{name}.availability", [f"{table}.NUM_IF/{child_id}"]
-            ))
+            out.append(_ccb_unavailable(f"2h.{name}.availability", [f"{table}.NUM_IF/{child_id}"]))
             continue
-        out.append(_ccb_edge_finding(
-            f"2h.{name}.edge", roots, frame, parent_col, sample, id_col,
-        ))
+        out.append(
+            _ccb_edge_finding(
+                f"2h.{name}.edge",
+                roots,
+                frame,
+                parent_col,
+                sample,
+                id_col,
+            )
+        )
 
     chain = tables.get("TCTPCADEIA_IPOC")
     if chain is not None:
@@ -5009,21 +6265,28 @@ def check_ccb_graph(
                 F.col("chain_id").alias("previous_id"),
                 F.col("root_id").alias("parent_root_id"),
             )
-            bad_parent = active_chain.where(F.col("previous_id").isNotNull()).join(
-                parents, "previous_id", "left"
-            ).where(
-                F.col("parent_root_id").isNull()
-                | (F.col("parent_root_id") != F.col("root_id"))
+            bad_parent = (
+                active_chain.where(F.col("previous_id").isNotNull())
+                .join(parents, "previous_id", "left")
+                .where(
+                    F.col("parent_root_id").isNull() | (F.col("parent_root_id") != F.col("root_id"))
+                )
             )
             count = bad_parent.count()
-            out.append(Finding(
-                "2h.ipoc_parent", "CCB graph", SEV_ERROR if count else SEV_INFO,
-                "TCTPCADEIA_IPOC", count == 0, count=count,
-                column="NUM_IPOC_ANTERIOR",
-                sample=_sample_keys(bad_parent, ["chain_id", "previous_id", "root_id"], sample),
-                hint="Keep each IPOC predecessor inside the same CCB chain." if count else "",
-                message="Present IPOC predecessor links must resolve inside the same CCB.",
-            ))
+            out.append(
+                Finding(
+                    "2h.ipoc_parent",
+                    "CCB graph",
+                    SEV_ERROR if count else SEV_INFO,
+                    "TCTPCADEIA_IPOC",
+                    count == 0,
+                    count=count,
+                    column="NUM_IPOC_ANTERIOR",
+                    sample=_sample_keys(bad_parent, ["chain_id", "previous_id", "root_id"], sample),
+                    hint="Keep each IPOC predecessor inside the same CCB chain." if count else "",
+                    message="Present IPOC predecessor links must resolve inside the same CCB.",
+                )
+            )
     return out
 
 
@@ -5038,10 +6301,12 @@ def check_ccb_polymorphism(
     condition_id = resolve(condition, "NUM_CONDICAO_IF")
     condition_type = resolve(condition, "COD_TIPO_CONDICAO_IF")
     if not condition_id or not condition_type:
-        return [_ccb_unavailable(
-            "2h.condition.availability",
-            ["CONDICAO_IF.NUM_CONDICAO_IF/COD_TIPO_CONDICAO_IF"],
-        )]
+        return [
+            _ccb_unavailable(
+                "2h.condition.availability",
+                ["CONDICAO_IF.NUM_CONDICAO_IF/COD_TIPO_CONDICAO_IF"],
+            )
+        ]
     conditions = _ccb_active(condition).select(
         _canon_key_col(F.col(condition_id)).alias("condition_id"),
         F.trim(F.col(condition_type).cast("string")).alias("condition_type"),
@@ -5071,11 +6336,13 @@ def check_ccb_polymorphism(
     known = conditions.where(F.col("condition_type").isin(*CCB_CONDITION_SUBTYPES)).withColumn(
         "expected_table", F.create_map(*expected_pairs)[F.col("condition_type")]
     )
-    joined = known.join(member_counts, "condition_id", "left").withColumn(
-        "physical_count", F.coalesce(F.col("physical_count"), F.lit(0))
-    ).withColumn(
-        "physical_tables",
-        F.coalesce(F.col("physical_tables"), F.array().cast("array<string>")),
+    joined = (
+        known.join(member_counts, "condition_id", "left")
+        .withColumn("physical_count", F.coalesce(F.col("physical_count"), F.lit(0)))
+        .withColumn(
+            "physical_tables",
+            F.coalesce(F.col("physical_tables"), F.array().cast("array<string>")),
+        )
     )
     bad = joined.where(
         (F.col("physical_count") != 1)
@@ -5094,30 +6361,43 @@ def check_ccb_polymorphism(
     orphan_count = orphan.count()
     return [
         Finding(
-            "2h.condition_polymorphism", "CCB condition polymorphism",
-            SEV_ERROR if bad_count else SEV_INFO, "CONDICAO_IF", bad_count == 0,
-            count=bad_count, column="COD_TIPO_CONDICAO_IF,NUM_CONDICAO_IF",
+            "2h.condition_polymorphism",
+            "CCB condition polymorphism",
+            SEV_ERROR if bad_count else SEV_INFO,
+            "CONDICAO_IF",
+            bad_count == 0,
+            count=bad_count,
+            column="COD_TIPO_CONDICAO_IF,NUM_CONDICAO_IF",
             sample=_sample_keys(bad, ["condition_id", "condition_type"], sample),
-            hint="Emit exactly one expected shared-key physical subtype row."
-                 if bad_count else "",
+            hint="Emit exactly one expected shared-key physical subtype row." if bad_count else "",
             message="Known CCB conditions with missing, duplicate, or wrong physical subtype.",
         ),
         Finding(
-            "2h.unknown_condition_type", "CCB condition polymorphism",
-            SEV_WARN if unknown_count else SEV_INFO, "CONDICAO_IF", unknown_count == 0,
-            count=unknown_count, column="COD_TIPO_CONDICAO_IF",
+            "2h.unknown_condition_type",
+            "CCB condition polymorphism",
+            SEV_WARN if unknown_count else SEV_INFO,
+            "CONDICAO_IF",
+            unknown_count == 0,
+            count=unknown_count,
+            column="COD_TIPO_CONDICAO_IF",
             sample=_sample_keys(unknown, ["condition_id", "condition_type"], sample),
             hint="Capture and map the CCB condition subtype before enforcing it."
-                 if unknown_count else "",
+            if unknown_count
+            else "",
             message="CCB condition types outside the six log-proven mappings.",
         ),
         Finding(
-            "2h.subtype_orphan", "CCB condition polymorphism",
-            SEV_ERROR if orphan_count else SEV_INFO, "CONDICAO_IF", orphan_count == 0,
-            count=orphan_count, column="NUM_CONDICAO_IF",
+            "2h.subtype_orphan",
+            "CCB condition polymorphism",
+            SEV_ERROR if orphan_count else SEV_INFO,
+            "CONDICAO_IF",
+            orphan_count == 0,
+            count=orphan_count,
+            column="NUM_CONDICAO_IF",
             sample=_sample_keys(orphan, ["condition_id", "physical_table"], sample),
             hint="Remove physical subtype rows without an active condition parent."
-                 if orphan_count else "",
+            if orphan_count
+            else "",
             message="Known CCB physical subtype rows without a condition parent.",
         ),
     ]
@@ -5133,38 +6413,59 @@ def check_ccb_variant_rules(
         "CONDICAO_IF": ("NUM_IF", "COD_TIPO_CONDICAO_IF"),
         "TCTPIF_CCB": ("NUM_IF", "IND_BAIXA_VENCIMENTO"),
         "TCTPCRONOGRAMA_CCB": (
-            "NUM_EVENTO_CCB", "NUM_IF", "NUM_TIPO_EVENTO_LEGADO",
+            "NUM_EVENTO_CCB",
+            "NUM_IF",
+            "NUM_TIPO_EVENTO_LEGADO",
         ),
     }
     columns, missing = _credito_scr_columns(tables, requirements)
     if missing:
         return [_ccb_unavailable("2h.variant.availability", missing, SEV_WARN)]
     root_cols = columns["INSTRUMENTO_FINANCEIRO"]
-    roots = _ccb_active(tables["INSTRUMENTO_FINANCEIRO"]).where(
-        _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if)
-    ).select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"))
+    roots = (
+        _ccb_active(tables["INSTRUMENTO_FINANCEIRO"])
+        .where(_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if))
+        .select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"))
+    )
     cond_cols = columns["CONDICAO_IF"]
-    resgate = _ccb_active(tables["CONDICAO_IF"]).where(
-        F.trim(F.col(cond_cols["COD_TIPO_CONDICAO_IF"]).cast("string")) == "20"
-    ).select(_canon_key_col(F.col(cond_cols["NUM_IF"])).alias("root_id")) \
-        .groupBy("root_id").count().withColumnRenamed("count", "resgate_count")
+    resgate = (
+        _ccb_active(tables["CONDICAO_IF"])
+        .where(F.trim(F.col(cond_cols["COD_TIPO_CONDICAO_IF"]).cast("string")) == "20")
+        .select(_canon_key_col(F.col(cond_cols["NUM_IF"])).alias("root_id"))
+        .groupBy("root_id")
+        .count()
+        .withColumnRenamed("count", "resgate_count")
+    )
     extension_cols = columns["TCTPIF_CCB"]
-    extension = _ccb_active(tables["TCTPIF_CCB"]).select(
-        _canon_key_col(F.col(extension_cols["NUM_IF"])).alias("root_id"),
-        F.when(
-            F.upper(F.trim(F.col(extension_cols["IND_BAIXA_VENCIMENTO"])
-                           .cast("string"))) == "S", 1,
-        ).otherwise(0).alias("baixa"),
-    ).groupBy("root_id").agg(F.max("baixa").alias("baixa"))
+    extension = (
+        _ccb_active(tables["TCTPIF_CCB"])
+        .select(
+            _canon_key_col(F.col(extension_cols["NUM_IF"])).alias("root_id"),
+            F.when(
+                F.upper(F.trim(F.col(extension_cols["IND_BAIXA_VENCIMENTO"]).cast("string")))
+                == "S",
+                1,
+            )
+            .otherwise(0)
+            .alias("baixa"),
+        )
+        .groupBy("root_id")
+        .agg(F.max("baixa").alias("baixa"))
+    )
     schedule_cols = columns["TCTPCRONOGRAMA_CCB"]
-    terminal = _ccb_active(tables["TCTPCRONOGRAMA_CCB"]).where(
-        F.trim(F.col(schedule_cols["NUM_TIPO_EVENTO_LEGADO"]).cast("string")) == "85"
-    ).select(_canon_key_col(F.col(schedule_cols["NUM_IF"])).alias("root_id")) \
-        .groupBy("root_id").count().withColumnRenamed("count", "terminal_count")
-    topology = roots.join(resgate, "root_id", "left").join(
-        extension, "root_id", "left"
-    ).join(terminal, "root_id", "left").fillna(
-        0, ["resgate_count", "baixa", "terminal_count"]
+    terminal = (
+        _ccb_active(tables["TCTPCRONOGRAMA_CCB"])
+        .where(F.trim(F.col(schedule_cols["NUM_TIPO_EVENTO_LEGADO"]).cast("string")) == "85")
+        .select(_canon_key_col(F.col(schedule_cols["NUM_IF"])).alias("root_id"))
+        .groupBy("root_id")
+        .count()
+        .withColumnRenamed("count", "terminal_count")
+    )
+    topology = (
+        roots.join(resgate, "root_id", "left")
+        .join(extension, "root_id", "left")
+        .join(terminal, "root_id", "left")
+        .fillna(0, ["resgate_count", "baixa", "terminal_count"])
     )
     bad = topology.where(
         ((F.col("resgate_count") > 0) != (F.col("baixa") == 1))
@@ -5173,15 +6474,22 @@ def check_ccb_variant_rules(
         | (F.col("terminal_count") > 1)
     )
     count = bad.count()
-    return [Finding(
-        "2h.resgate_baixa_event", "CCB observed variant rules",
-        SEV_WARN if count else SEV_INFO, "TCTPIF_CCB", count == 0,
-        count=count, column="type20,IND_BAIXA_VENCIMENTO,event85",
-        sample=_sample_keys(bad, ["root_id"], sample),
-        hint="Review the inferred resgate/baixa/type-85 correlation before promotion to ERROR."
-             if count else "",
-        message="CCB rows differing from the observed resgate/baixa/type-85 correlation.",
-    )] + _check_ccb_resgate_details(tables, sample, profile)
+    return [
+        Finding(
+            "2h.resgate_baixa_event",
+            "CCB observed variant rules",
+            SEV_WARN if count else SEV_INFO,
+            "TCTPIF_CCB",
+            count == 0,
+            count=count,
+            column="type20,IND_BAIXA_VENCIMENTO,event85",
+            sample=_sample_keys(bad, ["root_id"], sample),
+            hint="Review the inferred resgate/baixa/type-85 correlation before promotion to ERROR."
+            if count
+            else "",
+            message="CCB rows differing from the observed resgate/baixa/type-85 correlation.",
+        )
+    ] + _check_ccb_resgate_details(tables, sample, profile)
 
 
 def _ccb_try_date(column: str):
@@ -5197,63 +6505,88 @@ def _check_ccb_resgate_details(
         "CONDICAO_IF": ("NUM_CONDICAO_IF", "NUM_IF", "COD_TIPO_CONDICAO_IF"),
         "RESGATE": ("NUM_CONDICAO_IF", "DAT_RESGATE", "COD_TIPO_EXERCICIO"),
         "TCTPCRONOGRAMA_CCB": (
-            "NUM_IF", "NUM_TIPO_EVENTO_LEGADO", "DATA_ORIGINAL_EVENTO",
+            "NUM_IF",
+            "NUM_TIPO_EVENTO_LEGADO",
+            "DATA_ORIGINAL_EVENTO",
         ),
     }
     columns, missing = _credito_scr_columns(tables, requirements)
     if missing:
         return [_ccb_unavailable("2h.resgate_details", missing, SEV_WARN)]
     root_cols = columns["INSTRUMENTO_FINANCEIRO"]
-    roots = _ccb_active(tables["INSTRUMENTO_FINANCEIRO"]).where(
-        _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if)
-    ).select(
-        _canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"),
-        _ccb_try_date(root_cols["DAT_VENCIMENTO"]).alias("maturity"),
+    roots = (
+        _ccb_active(tables["INSTRUMENTO_FINANCEIRO"])
+        .where(_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if))
+        .select(
+            _canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"),
+            _ccb_try_date(root_cols["DAT_VENCIMENTO"]).alias("maturity"),
+        )
     )
     cond_cols = columns["CONDICAO_IF"]
-    type20 = _ccb_active(tables["CONDICAO_IF"]).where(
-        F.trim(F.col(cond_cols["COD_TIPO_CONDICAO_IF"]).cast("string")) == "20"
-    ).select(
-        _canon_key_col(F.col(cond_cols["NUM_CONDICAO_IF"])).alias("condition_id"),
-        _canon_key_col(F.col(cond_cols["NUM_IF"])).alias("root_id"),
+    type20 = (
+        _ccb_active(tables["CONDICAO_IF"])
+        .where(F.trim(F.col(cond_cols["COD_TIPO_CONDICAO_IF"]).cast("string")) == "20")
+        .select(
+            _canon_key_col(F.col(cond_cols["NUM_CONDICAO_IF"])).alias("condition_id"),
+            _canon_key_col(F.col(cond_cols["NUM_IF"])).alias("root_id"),
+        )
     )
     res_cols = columns["RESGATE"]
-    resgate = _ccb_active(tables["RESGATE"]).select(
-        _canon_key_col(F.col(res_cols["NUM_CONDICAO_IF"])).alias("condition_id"),
-        _ccb_try_date(res_cols["DAT_RESGATE"]).alias("event_date"),
-        F.upper(F.trim(F.col(res_cols["COD_TIPO_EXERCICIO"])
-                       .cast("string"))).alias("exercise"),
-    ).join(type20, "condition_id", "inner").join(roots, "root_id", "inner")
-    bad_resgate = resgate.where(
-        F.col("event_date").isNull()
-        | (F.col("maturity").isNull())
-        | (F.col("event_date") != F.col("maturity"))
-        | (F.coalesce(F.col("exercise"), F.lit("")) != "EUROPEIA")
-    ).select("root_id").withColumn("source", F.lit("RESGATE"))
+    resgate = (
+        _ccb_active(tables["RESGATE"])
+        .select(
+            _canon_key_col(F.col(res_cols["NUM_CONDICAO_IF"])).alias("condition_id"),
+            _ccb_try_date(res_cols["DAT_RESGATE"]).alias("event_date"),
+            F.upper(F.trim(F.col(res_cols["COD_TIPO_EXERCICIO"]).cast("string"))).alias("exercise"),
+        )
+        .join(type20, "condition_id", "inner")
+        .join(roots, "root_id", "inner")
+    )
+    bad_resgate = (
+        resgate.where(
+            F.col("event_date").isNull()
+            | (F.col("maturity").isNull())
+            | (F.col("event_date") != F.col("maturity"))
+            | (F.coalesce(F.col("exercise"), F.lit("")) != "EUROPEIA")
+        )
+        .select("root_id")
+        .withColumn("source", F.lit("RESGATE"))
+    )
     schedule_cols = columns["TCTPCRONOGRAMA_CCB"]
-    terminal = _ccb_active(tables["TCTPCRONOGRAMA_CCB"]).where(
-        F.trim(F.col(schedule_cols["NUM_TIPO_EVENTO_LEGADO"])
-               .cast("string")) == "85"
-    ).select(
-        _canon_key_col(F.col(schedule_cols["NUM_IF"])).alias("root_id"),
-        _ccb_try_date(schedule_cols["DATA_ORIGINAL_EVENTO"]).alias("event_date"),
-    ).join(roots, "root_id", "inner")
-    bad_terminal = terminal.where(
-        F.col("event_date").isNull()
-        | F.col("maturity").isNull()
-        | (F.col("event_date") != F.col("maturity"))
-    ).select("root_id").withColumn("source", F.lit("TCTPCRONOGRAMA_CCB"))
+    terminal = (
+        _ccb_active(tables["TCTPCRONOGRAMA_CCB"])
+        .where(F.trim(F.col(schedule_cols["NUM_TIPO_EVENTO_LEGADO"]).cast("string")) == "85")
+        .select(
+            _canon_key_col(F.col(schedule_cols["NUM_IF"])).alias("root_id"),
+            _ccb_try_date(schedule_cols["DATA_ORIGINAL_EVENTO"]).alias("event_date"),
+        )
+        .join(roots, "root_id", "inner")
+    )
+    bad_terminal = (
+        terminal.where(
+            F.col("event_date").isNull()
+            | F.col("maturity").isNull()
+            | (F.col("event_date") != F.col("maturity"))
+        )
+        .select("root_id")
+        .withColumn("source", F.lit("TCTPCRONOGRAMA_CCB"))
+    )
     bad = bad_resgate.unionByName(bad_terminal)
     count = bad.count()
-    return [Finding(
-        "2h.resgate_details", "CCB observed variant rules",
-        SEV_WARN if count else SEV_INFO, "RESGATE,TCTPCRONOGRAMA_CCB",
-        count == 0, count=count, column="maturity,EUROPEIA",
-        sample=_sample_keys(bad, ["root_id", "source"], sample),
-        hint="Review maturity/exercise drift against broader CCB evidence."
-             if count else "",
-        message="CCB resgate/type-85 details differ from the observed maturity profile.",
-    )]
+    return [
+        Finding(
+            "2h.resgate_details",
+            "CCB observed variant rules",
+            SEV_WARN if count else SEV_INFO,
+            "RESGATE,TCTPCRONOGRAMA_CCB",
+            count == 0,
+            count=count,
+            column="maturity,EUROPEIA",
+            sample=_sample_keys(bad, ["root_id", "source"], sample),
+            hint="Review maturity/exercise drift against broader CCB evidence." if count else "",
+            message="CCB resgate/type-85 details differ from the observed maturity profile.",
+        )
+    ]
 
 
 def check_ccb_dates(
@@ -5263,7 +6596,10 @@ def check_ccb_dates(
         return []
     requirements = {
         "INSTRUMENTO_FINANCEIRO": (
-            "NUM_IF", "DAT_EMISSAO", "DAT_REGISTRO", "DAT_VENCIMENTO",
+            "NUM_IF",
+            "DAT_EMISSAO",
+            "DAT_REGISTRO",
+            "DAT_VENCIMENTO",
         ),
         "CREDITO": ("NUM_IF", "DAT_INICIO_RENTABILIDADE", "DAT_VENCIMENTO_CREDITO"),
     }
@@ -5281,44 +6617,63 @@ def check_ccb_dates(
         table_cols = columns[table]
         projections = [_canon_key_col(F.col(table_cols["NUM_IF"])).alias("root_id")]
         for name in date_columns:
-            projections.extend((
-                F.col(table_cols[name]).alias(f"{name}_raw"),
-                _ccb_try_date(table_cols[name]).alias(name),
-            ))
+            projections.extend(
+                (
+                    F.col(table_cols[name]).alias(f"{name}_raw"),
+                    _ccb_try_date(table_cols[name]).alias(name),
+                )
+            )
         parsed[table] = frame.select(*projections)
         for name in date_columns:
-            bad = parsed[table].where(
-                ~_oracle_null_equivalent(F.col(f"{name}_raw")) & F.col(name).isNull()
-            ).select("root_id", F.col(f"{name}_raw").cast("string").alias("raw_value")) \
+            bad = (
+                parsed[table]
+                .where(~_oracle_null_equivalent(F.col(f"{name}_raw")) & F.col(name).isNull())
+                .select("root_id", F.col(f"{name}_raw").cast("string").alias("raw_value"))
                 .withColumn("field", F.lit(f"{table}.{name}"))
+            )
             parse_bad = bad if parse_bad is None else parse_bad.unionByName(bad)
     parse_count = parse_bad.count()
 
     root_dates = parsed["INSTRUMENTO_FINANCEIRO"]
     credit_dates = parsed["CREDITO"]
-    bad_root_order = root_dates.where(
-        (F.col("DAT_EMISSAO") > F.col("DAT_VENCIMENTO"))
-        | (F.col("DAT_REGISTRO") > F.col("DAT_VENCIMENTO"))
-    ).select("root_id").withColumn("rule", F.lit("root dates <= maturity"))
-    bad_credit_order = credit_dates.where(
-        F.col("DAT_INICIO_RENTABILIDADE") > F.col("DAT_VENCIMENTO_CREDITO")
-    ).select("root_id").withColumn("rule", F.lit("credit start <= maturity"))
+    bad_root_order = (
+        root_dates.where(
+            (F.col("DAT_EMISSAO") > F.col("DAT_VENCIMENTO"))
+            | (F.col("DAT_REGISTRO") > F.col("DAT_VENCIMENTO"))
+        )
+        .select("root_id")
+        .withColumn("rule", F.lit("root dates <= maturity"))
+    )
+    bad_credit_order = (
+        credit_dates.where(F.col("DAT_INICIO_RENTABILIDADE") > F.col("DAT_VENCIMENTO_CREDITO"))
+        .select("root_id")
+        .withColumn("rule", F.lit("credit start <= maturity"))
+    )
     order_bad = bad_root_order.unionByName(bad_credit_order)
     order_count = order_bad.count()
     return [
         Finding(
-            "5h.date_parse", "CCB date coherence", SEV_ERROR if parse_count else SEV_INFO,
-            "INSTRUMENTO_FINANCEIRO,CREDITO", parse_count == 0, count=parse_count,
+            "5h.date_parse",
+            "CCB date coherence",
+            SEV_ERROR if parse_count else SEV_INFO,
+            "INSTRUMENTO_FINANCEIRO,CREDITO",
+            parse_count == 0,
+            count=parse_count,
             sample=_sample_keys(parse_bad, ["root_id", "field", "raw_value"], sample),
             hint="Export parseable CCB registration and credit dates." if parse_count else "",
             message="Malformed nonblank CCB dates.",
         ),
         Finding(
-            "5h.date_order", "CCB date coherence", SEV_ERROR if order_count else SEV_INFO,
-            "INSTRUMENTO_FINANCEIRO,CREDITO", order_count == 0, count=order_count,
+            "5h.date_order",
+            "CCB date coherence",
+            SEV_ERROR if order_count else SEV_INFO,
+            "INSTRUMENTO_FINANCEIRO,CREDITO",
+            order_count == 0,
+            count=order_count,
             sample=_sample_keys(order_bad, ["root_id", "rule"], sample),
             hint="Keep issuance/registration/credit starts on or before maturity."
-                 if order_count else "",
+            if order_count
+            else "",
             message="Reversed CCB root or credit date ranges.",
         ),
     ]
@@ -5331,7 +6686,10 @@ def check_ccb_registration_profile(
         return []
     requirements = {
         "INSTRUMENTO_FINANCEIRO": (
-            "NUM_IF", "NUM_TIPO_IF", "COD_IF", "NUM_ID_FORMA_PAGAMENTO",
+            "NUM_IF",
+            "NUM_TIPO_IF",
+            "COD_IF",
+            "NUM_ID_FORMA_PAGAMENTO",
             "IND_AGENDA_CONSTANTE",
         ),
         "TITULO": ("NUM_IF",),
@@ -5342,7 +6700,9 @@ def check_ccb_registration_profile(
         "ALTERACAO_IF": ("NUM_IF", "COD_TIPO_ALTERACAO"),
         "TCTPIF_CCB": ("NUM_IF",),
         "TCTPCRONOGRAMA_CCB": (
-            "NUM_EVENTO_CCB", "NUM_IF", "NUM_TIPO_EVENTO_LEGADO",
+            "NUM_EVENTO_CCB",
+            "NUM_IF",
+            "NUM_TIPO_EVENTO_LEGADO",
         ),
         "OPERACAO": ("NUM_ID_OPERACAO", "NUM_IF"),
         "LANCAMENTO": ("NUM_ID_OPERACAO",),
@@ -5351,61 +6711,82 @@ def check_ccb_registration_profile(
     if missing:
         return [_ccb_unavailable("8h.profile.availability", missing, SEV_WARN)]
     root_cols = columns["INSTRUMENTO_FINANCEIRO"]
-    roots = _ccb_active(tables["INSTRUMENTO_FINANCEIRO"]).where(
-        _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if)
-    ).select(
-        _canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"),
-        _canon_key_col(F.col(root_cols["NUM_ID_FORMA_PAGAMENTO"])).alias("payment_form"),
-        F.upper(F.trim(F.col(root_cols["IND_AGENDA_CONSTANTE"]).cast("string"))).alias("agenda"),
-        F.trim(F.col(root_cols["COD_IF"]).cast("string")).alias("business_code"),
+    roots = (
+        _ccb_active(tables["INSTRUMENTO_FINANCEIRO"])
+        .where(_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if))
+        .select(
+            _canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"),
+            _canon_key_col(F.col(root_cols["NUM_ID_FORMA_PAGAMENTO"])).alias("payment_form"),
+            F.upper(F.trim(F.col(root_cols["IND_AGENDA_CONSTANTE"]).cast("string"))).alias(
+                "agenda"
+            ),
+            F.trim(F.col(root_cols["COD_IF"]).cast("string")).alias("business_code"),
+        )
     )
     coded_roots = roots.withColumn(
         "code_count", F.count(F.lit(1)).over(Window.partitionBy("business_code"))
     )
     bad_root_codes = coded_roots.where(
-        F.col("business_code").isNull()
-        | (F.col("business_code") == "")
-        | (F.col("code_count") > 1)
+        F.col("business_code").isNull() | (F.col("business_code") == "") | (F.col("code_count") > 1)
     )
     root_code_count = bad_root_codes.count()
 
     counts = roots.select("root_id")
     for table in (
-        "TITULO", "CREDITO", "HISTORICO_PU_CURVA", "ALTERACAO_IF", "TCTPIF_CCB",
-        "TCTPCRONOGRAMA_CCB", "OPERACAO",
+        "TITULO",
+        "CREDITO",
+        "HISTORICO_PU_CURVA",
+        "ALTERACAO_IF",
+        "TCTPIF_CCB",
+        "TCTPCRONOGRAMA_CCB",
+        "OPERACAO",
     ):
         frame = _ccb_active(tables[table])
         root_column = columns[table]["NUM_IF"]
-        per_root = frame.select(
-            _canon_key_col(F.col(root_column)).alias("root_id")
-        ).groupBy("root_id").count().withColumnRenamed("count", f"{table}_count")
+        per_root = (
+            frame.select(_canon_key_col(F.col(root_column)).alias("root_id"))
+            .groupBy("root_id")
+            .count()
+            .withColumnRenamed("count", f"{table}_count")
+        )
         counts = counts.join(per_root, "root_id", "left")
     history_cols = columns["HISTORICO_IF_TITULO"]
-    history_per_root = _ccb_active(tables["HISTORICO_IF_TITULO"]).select(
-        F.trim(F.col(history_cols["COD_IF"]).cast("string")).alias("business_code")
-    ).join(
-        roots.select("root_id", "business_code"), "business_code", "inner"
-    ).groupBy("root_id").count().withColumnRenamed("count", "HISTORICO_IF_TITULO_count")
+    history_per_root = (
+        _ccb_active(tables["HISTORICO_IF_TITULO"])
+        .select(F.trim(F.col(history_cols["COD_IF"]).cast("string")).alias("business_code"))
+        .join(roots.select("root_id", "business_code"), "business_code", "inner")
+        .groupBy("root_id")
+        .count()
+        .withColumnRenamed("count", "HISTORICO_IF_TITULO_count")
+    )
     counts = counts.join(history_per_root, "root_id", "left")
     alteration_cols = columns["ALTERACAO_IF"]
-    registration_alterations = _ccb_active(tables["ALTERACAO_IF"]).where(
-        F.upper(F.trim(F.col(alteration_cols["COD_TIPO_ALTERACAO"])
-                       .cast("string"))) == "R"
-    ).select(
-        _canon_key_col(F.col(alteration_cols["NUM_IF"])).alias("root_id")
-    ).groupBy("root_id").count().withColumnRenamed("count", "ALTERACAO_IF_R_count")
+    registration_alterations = (
+        _ccb_active(tables["ALTERACAO_IF"])
+        .where(F.upper(F.trim(F.col(alteration_cols["COD_TIPO_ALTERACAO"]).cast("string"))) == "R")
+        .select(_canon_key_col(F.col(alteration_cols["NUM_IF"])).alias("root_id"))
+        .groupBy("root_id")
+        .count()
+        .withColumnRenamed("count", "ALTERACAO_IF_R_count")
+    )
     counts = counts.join(registration_alterations, "root_id", "left")
     op_cols = columns["OPERACAO"]
     launch_cols = columns["LANCAMENTO"]
-    launch_per_root = _ccb_active(tables["LANCAMENTO"]).select(
-        _canon_key_col(F.col(launch_cols["NUM_ID_OPERACAO"])).alias("operation_id")
-    ).join(
-        _ccb_active(tables["OPERACAO"]).select(
-            _canon_key_col(F.col(op_cols["NUM_ID_OPERACAO"])).alias("operation_id"),
-            _canon_key_col(F.col(op_cols["NUM_IF"])).alias("root_id"),
-        ),
-        "operation_id", "inner",
-    ).groupBy("root_id").count().withColumnRenamed("count", "LANCAMENTO_count")
+    launch_per_root = (
+        _ccb_active(tables["LANCAMENTO"])
+        .select(_canon_key_col(F.col(launch_cols["NUM_ID_OPERACAO"])).alias("operation_id"))
+        .join(
+            _ccb_active(tables["OPERACAO"]).select(
+                _canon_key_col(F.col(op_cols["NUM_ID_OPERACAO"])).alias("operation_id"),
+                _canon_key_col(F.col(op_cols["NUM_IF"])).alias("root_id"),
+            ),
+            "operation_id",
+            "inner",
+        )
+        .groupBy("root_id")
+        .count()
+        .withColumnRenamed("count", "LANCAMENTO_count")
+    )
     counts = counts.join(launch_per_root, "root_id", "left").fillna(0)
     bad_core = counts.where(
         (F.col("TITULO_count") != 1)
@@ -5422,26 +6803,46 @@ def check_ccb_registration_profile(
     core_count = bad_core.count()
 
     cond_cols = columns["CONDICAO_IF"]
-    mixes = _ccb_active(tables["CONDICAO_IF"]).select(
-        _canon_key_col(F.col(cond_cols["NUM_IF"])).alias("root_id"),
-        F.trim(F.col(cond_cols["COD_TIPO_CONDICAO_IF"]).cast("string")).alias("condition_type"),
-    ).groupBy("root_id").agg(
-        F.concat_ws(",", F.sort_array(F.collect_list("condition_type"))).alias("condition_mix"),
-        F.count(F.lit(1)).alias("condition_count"),
-        F.sum(F.when(F.col("condition_type") == "2", 1).otherwise(0)).alias("fixed_count"),
+    mixes = (
+        _ccb_active(tables["CONDICAO_IF"])
+        .select(
+            _canon_key_col(F.col(cond_cols["NUM_IF"])).alias("root_id"),
+            F.trim(F.col(cond_cols["COD_TIPO_CONDICAO_IF"]).cast("string")).alias("condition_type"),
+        )
+        .groupBy("root_id")
+        .agg(
+            F.concat_ws(",", F.sort_array(F.collect_list("condition_type"))).alias("condition_mix"),
+            F.count(F.lit(1)).alias("condition_count"),
+            F.sum(F.when(F.col("condition_type") == "2", 1).otherwise(0)).alias("fixed_count"),
+        )
     )
     variants = roots.join(mixes, "root_id", "left")
     valid_variant = (
-        ((F.col("payment_form") == "3253") & (F.col("agenda") == "S")
-         & F.col("condition_mix").isin("1,2,4", "1,2,20,4"))
-        | ((F.col("payment_form") == "3253") & (F.col("agenda") == "N")
-           & F.col("condition_mix").isin("1,2", "1,2,20"))
-        | ((F.col("payment_form") == "229") & (F.col("agenda") == "S")
-           & (F.col("condition_mix") == "14,2,20,5"))
-        | ((F.col("payment_form") == "8") & (F.col("agenda") == "N")
-           & F.col("condition_mix").isin("2,4", "2,20,4"))
-        | ((F.col("payment_form") == "3261") & (F.col("agenda") == "S")
-           & (F.col("condition_mix") == "14,2,20"))
+        (
+            (F.col("payment_form") == "3253")
+            & (F.col("agenda") == "S")
+            & F.col("condition_mix").isin("1,2,4", "1,2,20,4")
+        )
+        | (
+            (F.col("payment_form") == "3253")
+            & (F.col("agenda") == "N")
+            & F.col("condition_mix").isin("1,2", "1,2,20")
+        )
+        | (
+            (F.col("payment_form") == "229")
+            & (F.col("agenda") == "S")
+            & (F.col("condition_mix") == "14,2,20,5")
+        )
+        | (
+            (F.col("payment_form") == "8")
+            & (F.col("agenda") == "N")
+            & F.col("condition_mix").isin("2,4", "2,20,4")
+        )
+        | (
+            (F.col("payment_form") == "3261")
+            & (F.col("agenda") == "S")
+            & (F.col("condition_mix") == "14,2,20")
+        )
     )
     known_form = F.col("payment_form").isin("3253", "229", "8", "3261")
     bad_variant = variants.where(known_form & ~F.coalesce(valid_variant, F.lit(False)))
@@ -5454,101 +6855,132 @@ def check_ccb_registration_profile(
     unknown_forms = variants.where(~known_form)
     unknown_form_count = unknown_forms.count()
     schedule_cols = columns["TCTPCRONOGRAMA_CCB"]
-    event_mixes = _ccb_active(tables["TCTPCRONOGRAMA_CCB"]).select(
-        _canon_key_col(F.col(schedule_cols["NUM_IF"])).alias("root_id"),
-        F.trim(F.col(schedule_cols["NUM_TIPO_EVENTO_LEGADO"])
-               .cast("string")).alias("event_type"),
-    ).groupBy("root_id").agg(F.collect_set("event_type").alias("event_types"))
+    event_mixes = (
+        _ccb_active(tables["TCTPCRONOGRAMA_CCB"])
+        .select(
+            _canon_key_col(F.col(schedule_cols["NUM_IF"])).alias("root_id"),
+            F.trim(F.col(schedule_cols["NUM_TIPO_EVENTO_LEGADO"]).cast("string")).alias(
+                "event_type"
+            ),
+        )
+        .groupBy("root_id")
+        .agg(F.collect_set("event_type").alias("event_types"))
+    )
     event_variants = roots.join(event_mixes, "root_id", "left")
 
     def has_event(code: str):
         return F.array_contains(F.col("event_types"), code)
 
-    allowed_3253 = F.size(F.array_except(
-        F.col("event_types"), F.array(F.lit("83"), F.lit("84"), F.lit("85"))
-    )) == 0
-    allowed_157 = F.size(F.array_except(
-        F.col("event_types"), F.array(F.lit("157"), F.lit("85"))
-    )) == 0
-    allowed_90 = F.size(F.array_except(
-        F.col("event_types"), F.array(F.lit("90"), F.lit("85"))
-    )) == 0
+    allowed_3253 = (
+        F.size(F.array_except(F.col("event_types"), F.array(F.lit("83"), F.lit("84"), F.lit("85"))))
+        == 0
+    )
+    allowed_157 = (
+        F.size(F.array_except(F.col("event_types"), F.array(F.lit("157"), F.lit("85")))) == 0
+    )
+    allowed_90 = (
+        F.size(F.array_except(F.col("event_types"), F.array(F.lit("90"), F.lit("85")))) == 0
+    )
     valid_events = (
-        ((F.col("payment_form") == "3253") & has_event("83") & has_event("84")
-         & allowed_3253)
-        | ((F.col("payment_form") == "229") & has_event("157") & has_event("85")
-           & allowed_157)
+        ((F.col("payment_form") == "3253") & has_event("83") & has_event("84") & allowed_3253)
+        | ((F.col("payment_form") == "229") & has_event("157") & has_event("85") & allowed_157)
         | ((F.col("payment_form") == "8") & has_event("90") & allowed_90)
-        | ((F.col("payment_form") == "3261") & has_event("157") & has_event("85")
-           & allowed_157)
+        | ((F.col("payment_form") == "3261") & has_event("157") & has_event("85") & allowed_157)
     )
     bad_events = event_variants.where(known_form & ~F.coalesce(valid_events, F.lit(False)))
     event_count = bad_events.count()
     return [
         Finding(
-            "8h.profile.core_counts", "CCB observed registration profile",
-            SEV_WARN if core_count else SEV_INFO, "INSTRUMENTO_FINANCEIRO",
-            core_count == 0, count=core_count,
+            "8h.profile.core_counts",
+            "CCB observed registration profile",
+            SEV_WARN if core_count else SEV_INFO,
+            "INSTRUMENTO_FINANCEIRO",
+            core_count == 0,
+            count=core_count,
             sample=_sample_keys(bad_core, ["root_id"], sample),
             hint="Keep exact registration counts advisory; lifecycle snapshots may differ."
-                 if core_count else "",
+            if core_count
+            else "",
             message="CCB core cardinality differs from all 22 insertion snapshots.",
         ),
         Finding(
-            "8h.profile.root_code", "CCB observed registration profile",
-            SEV_WARN if root_code_count else SEV_INFO, "INSTRUMENTO_FINANCEIRO",
-            root_code_count == 0, count=root_code_count, column="COD_IF",
+            "8h.profile.root_code",
+            "CCB observed registration profile",
+            SEV_WARN if root_code_count else SEV_INFO,
+            "INSTRUMENTO_FINANCEIRO",
+            root_code_count == 0,
+            count=root_code_count,
+            column="COD_IF",
             sample=_sample_keys(bad_root_codes, ["root_id", "business_code"], sample),
             hint="Review blank or duplicate active CCB COD_IF values before loading."
-                 if root_code_count else "",
+            if root_code_count
+            else "",
             message="Observed CCB registration profile uses nonblank unique COD_IF values.",
         ),
         Finding(
-            "8h.profile.variant_condition_mix", "CCB observed registration profile",
-            SEV_WARN if variant_count else SEV_INFO, "CONDICAO_IF",
-            variant_count == 0, count=variant_count,
+            "8h.profile.variant_condition_mix",
+            "CCB observed registration profile",
+            SEV_WARN if variant_count else SEV_INFO,
+            "CONDICAO_IF",
+            variant_count == 0,
+            count=variant_count,
             sample=_sample_keys(
                 bad_variant, ["root_id", "payment_form", "agenda", "condition_mix"], sample
             ),
             hint="Capture another successful variant before extending the observed matrix."
-                 if variant_count else "",
+            if variant_count
+            else "",
             message="CCB payment-form/agenda condition mix outside the observed matrix.",
         ),
         Finding(
-            "8h.profile.common_conditions", "CCB observed registration profile",
-            SEV_WARN if common_condition_count else SEV_INFO, "CONDICAO_IF",
-            common_condition_count == 0, count=common_condition_count,
+            "8h.profile.common_conditions",
+            "CCB observed registration profile",
+            SEV_WARN if common_condition_count else SEV_INFO,
+            "CONDICAO_IF",
+            common_condition_count == 0,
+            count=common_condition_count,
             sample=_sample_keys(
                 bad_common_conditions, ["root_id", "condition_count", "fixed_count"], sample
             ),
             hint="Keep at least two conditions and exactly one type-2 pair advisory."
-                 if common_condition_count else "",
+            if common_condition_count
+            else "",
             message="CCB condition count or fixed-interest multiplicity differs from the corpus.",
         ),
         Finding(
-            "8h.profile.unknown_payment_form", "CCB observed registration profile",
-            SEV_WARN if unknown_form_count else SEV_INFO, "INSTRUMENTO_FINANCEIRO",
-            unknown_form_count == 0, count=unknown_form_count,
+            "8h.profile.unknown_payment_form",
+            "CCB observed registration profile",
+            SEV_WARN if unknown_form_count else SEV_INFO,
+            "INSTRUMENTO_FINANCEIRO",
+            unknown_form_count == 0,
+            count=unknown_form_count,
             sample=_sample_keys(unknown_forms, ["root_id", "payment_form"], sample),
             hint="Capture the new form before adding it to the advisory matrix."
-                 if unknown_form_count else "",
+            if unknown_form_count
+            else "",
             message="CCB payment forms outside the five observed route families.",
         ),
         Finding(
-            "8h.profile.variant_event_mix", "CCB observed registration profile",
-            SEV_WARN if event_count else SEV_INFO, "TCTPCRONOGRAMA_CCB",
-            event_count == 0, count=event_count,
+            "8h.profile.variant_event_mix",
+            "CCB observed registration profile",
+            SEV_WARN if event_count else SEV_INFO,
+            "TCTPCRONOGRAMA_CCB",
+            event_count == 0,
+            count=event_count,
             sample=_sample_keys(bad_events, ["root_id", "payment_form", "event_types"], sample),
             hint="Keep schedule families advisory until broader CCB evidence is captured."
-                 if event_count else "",
+            if event_count
+            else "",
             message="CCB payment-form schedule family outside the observed matrix.",
         ),
     ] + _check_ccb_schedule_profile(tables, roots, columns, sample)
 
 
 def _check_ccb_schedule_profile(
-    tables: Dict[str, DataFrame], roots: DataFrame,
-    columns: Dict[str, Dict[str, str]], sample: int,
+    tables: Dict[str, DataFrame],
+    roots: DataFrame,
+    columns: Dict[str, Dict[str, str]],
+    sample: int,
 ) -> List[Finding]:
     root = tables["INSTRUMENTO_FINANCEIRO"]
     schedule = _ccb_active(tables["TCTPCRONOGRAMA_CCB"])
@@ -5556,20 +6988,28 @@ def _check_ccb_schedule_profile(
     maturity_col = resolve(root, "DAT_VENCIMENTO")
     original_col = resolve(schedule, "DATA_ORIGINAL_EVENTO")
     if not all((issue_col, maturity_col, original_col)):
-        return [_ccb_unavailable(
-            "8h.profile.schedule_dates",
-            ["INSTRUMENTO_FINANCEIRO.DAT_EMISSAO/DAT_VENCIMENTO",
-             "TCTPCRONOGRAMA_CCB.DATA_ORIGINAL_EVENTO"],
-            SEV_WARN,
-        )]
+        return [
+            _ccb_unavailable(
+                "8h.profile.schedule_dates",
+                [
+                    "INSTRUMENTO_FINANCEIRO.DAT_EMISSAO/DAT_VENCIMENTO",
+                    "TCTPCRONOGRAMA_CCB.DATA_ORIGINAL_EVENTO",
+                ],
+                SEV_WARN,
+            )
+        ]
     root_id = columns["INSTRUMENTO_FINANCEIRO"]["NUM_IF"]
     schedule_id = columns["TCTPCRONOGRAMA_CCB"]["NUM_EVENTO_CCB"]
     schedule_if = columns["TCTPCRONOGRAMA_CCB"]["NUM_IF"]
-    date_bounds = _ccb_active(root).select(
-        _canon_key_col(F.col(root_id)).alias("root_id"),
-        _ccb_try_date(issue_col).alias("issuance"),
-        _ccb_try_date(maturity_col).alias("maturity"),
-    ).join(roots.select("root_id"), "root_id", "leftsemi")
+    date_bounds = (
+        _ccb_active(root)
+        .select(
+            _canon_key_col(F.col(root_id)).alias("root_id"),
+            _ccb_try_date(issue_col).alias("issuance"),
+            _ccb_try_date(maturity_col).alias("maturity"),
+        )
+        .join(roots.select("root_id"), "root_id", "leftsemi")
+    )
     dated = schedule.select(
         _canon_key_col(F.col(schedule_if)).alias("root_id"),
         _canon_key_col(F.col(schedule_id)).alias("event_id"),
@@ -5609,18 +7049,22 @@ def _check_ccb_schedule_profile(
             continue
         escaped = actual.replace("`", "``")
         parsed_value = F.expr(f"try_cast(`{escaped}` as double)")
-        bad = schedule.where(
-            ~_oracle_null_equivalent(F.col(actual))
-            & (
-                parsed_value.isNull()
-                | F.isnan(parsed_value)
-                | (F.abs(parsed_value) == float("inf"))
-                | (parsed_value < 0)
+        bad = (
+            schedule.where(
+                ~_oracle_null_equivalent(F.col(actual))
+                & (
+                    parsed_value.isNull()
+                    | F.isnan(parsed_value)
+                    | (F.abs(parsed_value) == float("inf"))
+                    | (parsed_value < 0)
+                )
             )
-        ).select(
-            _canon_key_col(F.col(schedule_if)).alias("root_id"),
-            _canon_key_col(F.col(schedule_id)).alias("event_id"),
-        ).withColumn("field", F.lit(candidate))
+            .select(
+                _canon_key_col(F.col(schedule_if)).alias("root_id"),
+                _canon_key_col(F.col(schedule_id)).alias("event_id"),
+            )
+            .withColumn("field", F.lit(candidate))
+        )
         bad_values = bad if bad_values is None else bad_values.unionByName(bad)
     if bad_values is None:
         bad_values = schedule.sparkSession.createDataFrame(
@@ -5629,43 +7073,61 @@ def _check_ccb_schedule_profile(
     value_count = bad_values.count()
     return [
         Finding(
-            "8h.profile.schedule_dates", "CCB observed registration profile",
-            SEV_WARN if date_count else SEV_INFO, "TCTPCRONOGRAMA_CCB",
-            date_count == 0, count=date_count,
+            "8h.profile.schedule_dates",
+            "CCB observed registration profile",
+            SEV_WARN if date_count else SEV_INFO,
+            "TCTPCRONOGRAMA_CCB",
+            date_count == 0,
+            count=date_count,
             sample=_sample_keys(bad_dates, ["root_id", "event_id", "raw_date"], sample),
             hint="Keep original event dates parseable and within issuance/maturity."
-                 if date_count else "",
+            if date_count
+            else "",
             message="CCB original schedule dates outside the observed bounds.",
         ),
         Finding(
-            "8h.profile.schedule_parcels", "CCB observed registration profile",
+            "8h.profile.schedule_parcels",
+            "CCB observed registration profile",
             SEV_WARN if parcel_count or parcel_unavailable else SEV_INFO,
-            "TCTPCRONOGRAMA_CCB", parcel_count == 0 and not parcel_unavailable,
+            "TCTPCRONOGRAMA_CCB",
+            parcel_count == 0 and not parcel_unavailable,
             count=parcel_count,
             sample=_sample_keys(bad_parcels, ["root_id", "parcel"], sample),
             hint="Export COD_PARCELA and keep nonblank values unique within each CCB."
-                 if parcel_count or parcel_unavailable else "",
-            message=("COD_PARCELA unavailable."
-                     if parcel_unavailable else "Duplicate nonblank CCB parcel codes."),
+            if parcel_count or parcel_unavailable
+            else "",
+            message=(
+                "COD_PARCELA unavailable."
+                if parcel_unavailable
+                else "Duplicate nonblank CCB parcel codes."
+            ),
         ),
         Finding(
-            "8h.profile.schedule_values", "CCB observed registration profile",
+            "8h.profile.schedule_values",
+            "CCB observed registration profile",
             SEV_WARN if value_count or missing_value_columns else SEV_INFO,
-            "TCTPCRONOGRAMA_CCB", value_count == 0 and not missing_value_columns,
+            "TCTPCRONOGRAMA_CCB",
+            value_count == 0 and not missing_value_columns,
             count=value_count,
             sample=_sample_keys(bad_values, ["root_id", "event_id", "field"], sample),
             hint="Export schedule values and keep populated values finite and nonnegative."
-                 if value_count or missing_value_columns else "",
-            message=(f"Missing schedule value columns: {missing_value_columns}."
-                     if missing_value_columns else
-                     "Malformed, non-finite, or negative CCB schedule values."),
+            if value_count or missing_value_columns
+            else "",
+            message=(
+                f"Missing schedule value columns: {missing_value_columns}."
+                if missing_value_columns
+                else "Malformed, non-finite, or negative CCB schedule values."
+            ),
         ),
     ]
 
 
 def check_ccb_target_frames(
-    tables: Dict[str, DataFrame], lookup_frames: Dict[str, DataFrame], sample: int,
-    profile: ValidationProfile, lookup_errors: Optional[Dict[str, str]] = None,
+    tables: Dict[str, DataFrame],
+    lookup_frames: Dict[str, DataFrame],
+    sample: int,
+    profile: ValidationProfile,
+    lookup_errors: Optional[Dict[str, str]] = None,
 ) -> List[Finding]:
     if profile.pipeline != "ccb":
         return []
@@ -5676,22 +7138,35 @@ def check_ccb_target_frames(
     tipo_required = ("NUM_TIPO_IF", "COD_TIPO_IF", "DAT_EXCLUSAO")
     tipo_cols = {name: resolve(tipo, name) if tipo is not None else None for name in tipo_required}
     if tipo is None or any(value is None for value in tipo_cols.values()):
-        out.append(_ccb_unavailable(
-            "6h.lookup.tipo_if", [lookup_errors.get("CCB_TIPO_IF", "CCB_TIPO_IF")], SEV_WARN
-        ))
+        out.append(
+            _ccb_unavailable(
+                "6h.lookup.tipo_if", [lookup_errors.get("CCB_TIPO_IF", "CCB_TIPO_IF")], SEV_WARN
+            )
+        )
     else:
-        matches = _ccb_active(tipo).where(
-            (_canon_key_col(F.col(tipo_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if))
-            & (F.trim(F.col(tipo_cols["COD_TIPO_IF"]).cast("string")) == "CCB")
-        ).limit(2).count()
-        out.append(Finding(
-            "6h.lookup.tipo_if", "CCB target eligibility",
-            SEV_INFO if matches == 1 else SEV_ERROR, "TIPO_IF", matches == 1,
-            count=0 if matches == 1 else matches,
-            hint="Provide exactly one active target TIPO_IF 53/CCB row."
-                 if matches != 1 else "",
-            message="Target CCB type identity is active and unambiguous.",
-        ))
+        matches = (
+            _ccb_active(tipo)
+            .where(
+                (_canon_key_col(F.col(tipo_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if))
+                & (F.trim(F.col(tipo_cols["COD_TIPO_IF"]).cast("string")) == "CCB")
+            )
+            .limit(2)
+            .count()
+        )
+        out.append(
+            Finding(
+                "6h.lookup.tipo_if",
+                "CCB target eligibility",
+                SEV_INFO if matches == 1 else SEV_ERROR,
+                "TIPO_IF",
+                matches == 1,
+                count=0 if matches == 1 else matches,
+                hint="Provide exactly one active target TIPO_IF 53/CCB row."
+                if matches != 1
+                else "",
+                message="Target CCB type identity is active and unambiguous.",
+            )
+        )
 
     platform = lookup_frames.get("CCB_OBJECT_SERVICE")
     platform_cols = {
@@ -5699,36 +7174,56 @@ def check_ccb_target_frames(
         for name in ("COD_OBJETO_SERVICO", "IND_PLATAFORMA_BAIXA")
     }
     if platform is None or any(value is None for value in platform_cols.values()):
-        out.append(_ccb_unavailable(
-            "6h.lookup.platform",
-            [lookup_errors.get("CCB_OBJECT_SERVICE", "CCB_OBJECT_SERVICE")], SEV_WARN,
-        ))
+        out.append(
+            _ccb_unavailable(
+                "6h.lookup.platform",
+                [lookup_errors.get("CCB_OBJECT_SERVICE", "CCB_OBJECT_SERVICE")],
+                SEV_WARN,
+            )
+        )
     else:
-        enabled = platform.where(
-            (F.trim(F.col(platform_cols["COD_OBJETO_SERVICO"]).cast("string")) == "CCB")
-            & (F.upper(F.trim(F.col(platform_cols["IND_PLATAFORMA_BAIXA"])
-                              .cast("string"))) == "S")
-        ).limit(1).count()
-        out.append(Finding(
-            "6h.lookup.platform", "CCB target eligibility",
-            SEV_INFO if enabled else SEV_ERROR, "V_OBJETOS_SERVICO", bool(enabled),
-            count=0 if enabled else 1,
-            hint="Enable COD_OBJETO_SERVICO='CCB' on the baixa platform." if not enabled else "",
-            message="Target CCB object service is enabled for the baixa platform.",
-        ))
+        enabled = (
+            platform.where(
+                (F.trim(F.col(platform_cols["COD_OBJETO_SERVICO"]).cast("string")) == "CCB")
+                & (
+                    F.upper(F.trim(F.col(platform_cols["IND_PLATAFORMA_BAIXA"]).cast("string")))
+                    == "S"
+                )
+            )
+            .limit(1)
+            .count()
+        )
+        out.append(
+            Finding(
+                "6h.lookup.platform",
+                "CCB target eligibility",
+                SEV_INFO if enabled else SEV_ERROR,
+                "V_OBJETOS_SERVICO",
+                bool(enabled),
+                count=0 if enabled else 1,
+                hint="Enable COD_OBJETO_SERVICO='CCB' on the baixa platform."
+                if not enabled
+                else "",
+                message="Target CCB object service is enabled for the baixa platform.",
+            )
+        )
 
     requirements = {
         "INSTRUMENTO_FINANCEIRO": ("NUM_IF", "NUM_TIPO_IF"),
         "OPERACAO": (
-            "NUM_ID_OPERACAO", "NUM_IF", "NUM_ID_TIPO_OPER_OBJETO_SERV",
+            "NUM_ID_OPERACAO",
+            "NUM_IF",
+            "NUM_ID_TIPO_OPER_OBJETO_SERV",
             "NUM_ID_MODALIDADE_LIQUIDACAO",
         ),
     }
     columns, missing = _credito_scr_columns(tables, requirements)
     routes = lookup_frames.get("CCB_ROUTES")
     route_required = (
-        "NUM_ID_TIPO_OPER_OBJETO_SERV", "NUM_ID_OBJETO_SERVICO",
-        "COD_TIPO_OPERACAO", "IND_DISPONIVEL_IDENTIFICACAO",
+        "NUM_ID_TIPO_OPER_OBJETO_SERV",
+        "NUM_ID_OBJETO_SERVICO",
+        "COD_TIPO_OPERACAO",
+        "IND_DISPONIVEL_IDENTIFICACAO",
     )
     route_cols = {
         name: resolve(routes, name) if routes is not None else None for name in route_required
@@ -5738,116 +7233,155 @@ def check_ccb_target_frames(
         out.append(_ccb_unavailable("6h.lookup.registration_route", unavailable, SEV_WARN))
         return out
     root_cols = columns["INSTRUMENTO_FINANCEIRO"]
-    roots = _ccb_active(tables["INSTRUMENTO_FINANCEIRO"]).where(
-        _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if)
-    ).select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id")).dropDuplicates()
+    roots = (
+        _ccb_active(tables["INSTRUMENTO_FINANCEIRO"])
+        .where(_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if))
+        .select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"))
+        .dropDuplicates()
+    )
     operation_cols = columns["OPERACAO"]
     party_account_col = resolve(tables["OPERACAO"], "COD_CONTA_PARTE")
     counterparty_account_col = resolve(tables["OPERACAO"], "COD_CONTA_CONTRAPARTE")
-    operations = _ccb_active(tables["OPERACAO"]).select(
-        _canon_key_col(F.col(operation_cols["NUM_ID_OPERACAO"])).alias("operation_id"),
-        _canon_key_col(F.col(operation_cols["NUM_IF"])).alias("root_id"),
-        _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias("route_id"),
-        _canon_key_col(F.col(operation_cols["NUM_ID_MODALIDADE_LIQUIDACAO"])).alias("modality"),
-        (
-            F.trim(F.col(party_account_col).cast("string"))
-            if party_account_col else F.lit(None).cast("string")
-        ).alias("party_account"),
-        (
-            F.trim(F.col(counterparty_account_col).cast("string"))
-            if counterparty_account_col else F.lit(None).cast("string")
-        ).alias("counterparty_account"),
-    ).join(roots, "root_id", "inner")
+    operations = (
+        _ccb_active(tables["OPERACAO"])
+        .select(
+            _canon_key_col(F.col(operation_cols["NUM_ID_OPERACAO"])).alias("operation_id"),
+            _canon_key_col(F.col(operation_cols["NUM_IF"])).alias("root_id"),
+            _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias("route_id"),
+            _canon_key_col(F.col(operation_cols["NUM_ID_MODALIDADE_LIQUIDACAO"])).alias("modality"),
+            (
+                F.trim(F.col(party_account_col).cast("string"))
+                if party_account_col
+                else F.lit(None).cast("string")
+            ).alias("party_account"),
+            (
+                F.trim(F.col(counterparty_account_col).cast("string"))
+                if counterparty_account_col
+                else F.lit(None).cast("string")
+            ).alias("counterparty_account"),
+        )
+        .join(roots, "root_id", "inner")
+    )
     route_semantics = routes.select(
         _canon_key_col(F.col(route_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias("route_id"),
         _canon_key_col(F.col(route_cols["NUM_ID_OBJETO_SERVICO"])).alias("object_id"),
         F.trim(F.col(route_cols["COD_TIPO_OPERACAO"]).cast("string")).alias("operation_type"),
-        F.upper(F.trim(F.col(route_cols["IND_DISPONIVEL_IDENTIFICACAO"])
-                       .cast("string"))).alias("identification"),
+        F.upper(F.trim(F.col(route_cols["IND_DISPONIVEL_IDENTIFICACAO"]).cast("string"))).alias(
+            "identification"
+        ),
     ).dropDuplicates(["route_id"])
     classified = operations.join(F.broadcast(route_semantics), "route_id", "left")
     registration = classified.where(
-        (F.col("operation_type") == "1")
-        & (F.col("object_id") == str(profile.object_service_id))
+        (F.col("operation_type") == "1") & (F.col("object_id") == str(profile.object_service_id))
     )
-    valid = registration.where(
-        F.col("identification") == "S"
-    )
+    valid = registration.where(F.col("identification") == "S")
     valid_roots = valid.select("root_id").dropDuplicates()
-    invalid = registration.where(
-        F.coalesce(F.col("identification"), F.lit("")) != "S"
-    ).select("root_id").unionByName(
-        roots.join(valid_roots, "root_id", "left_anti")
-    ).dropDuplicates()
+    invalid = (
+        registration.where(F.coalesce(F.col("identification"), F.lit("")) != "S")
+        .select("root_id")
+        .unionByName(roots.join(valid_roots, "root_id", "left_anti"))
+        .dropDuplicates()
+    )
     count = invalid.count()
-    out.append(Finding(
-        "6h.lookup.registration_route", "CCB target eligibility",
-        SEV_ERROR if count else SEV_INFO, "TIPO_OPER_OBJETO_SERV", count == 0,
-        count=count, column="object=47,operation_type=1,identification=S",
-        sample=_sample_keys(invalid, ["root_id"], sample),
-        hint="Give every active CCB an approved operation-type-1 route on object 47."
-             if count else "",
-        message="Every active CCB has an approved registration route; historical routes ignored.",
-    ))
+    out.append(
+        Finding(
+            "6h.lookup.registration_route",
+            "CCB target eligibility",
+            SEV_ERROR if count else SEV_INFO,
+            "TIPO_OPER_OBJETO_SERV",
+            count == 0,
+            count=count,
+            column="object=47,operation_type=1,identification=S",
+            sample=_sample_keys(invalid, ["root_id"], sample),
+            hint="Give every active CCB an approved operation-type-1 route on object 47."
+            if count
+            else "",
+            message=(
+                "Every active CCB has an approved registration route; historical routes ignored."
+            ),
+        )
+    )
     if not party_account_col or not counterparty_account_col:
         missing_accounts = [
-            name for name, actual in (
+            name
+            for name, actual in (
                 ("OPERACAO.COD_CONTA_PARTE", party_account_col),
                 ("OPERACAO.COD_CONTA_CONTRAPARTE", counterparty_account_col),
-            ) if not actual
+            )
+            if not actual
         ]
-        out.append(_ccb_unavailable(
-            "6h.registration_account_roles", missing_accounts, SEV_ERROR
-        ))
+        out.append(_ccb_unavailable("6h.registration_account_roles", missing_accounts, SEV_ERROR))
     else:
         account_bad = valid.where(
-            ~F.coalesce(F.col("party_account"), F.lit(""))
-            .rlike(r"^[0-9]{5}\.00-[0-9]$")
-            | ~F.coalesce(F.col("counterparty_account"), F.lit(""))
-            .rlike(r"^[0-9]{5}\.40-[0-9]$")
+            ~F.coalesce(F.col("party_account"), F.lit("")).rlike(r"^[0-9]{5}\.00-[0-9]$")
+            | ~F.coalesce(F.col("counterparty_account"), F.lit("")).rlike(r"^[0-9]{5}\.40-[0-9]$")
         )
         account_count = account_bad.count()
-        out.append(Finding(
-            "6h.registration_account_roles", "CCB target eligibility",
-            SEV_ERROR if account_count else SEV_INFO, "OPERACAO", account_count == 0,
-            count=account_count, column="COD_CONTA_PARTE,COD_CONTA_CONTRAPARTE",
-            sample=_sample_keys(
-                account_bad,
-                ["root_id", "operation_id", "party_account", "counterparty_account"],
-                sample,
-            ),
-            hint="Persist registration P1/party as .00 and P2/counterparty as .40."
-                 if account_count else "",
-            message="CCB registration operations must preserve observed .00/.40 account roles.",
-        ))
+        out.append(
+            Finding(
+                "6h.registration_account_roles",
+                "CCB target eligibility",
+                SEV_ERROR if account_count else SEV_INFO,
+                "OPERACAO",
+                account_count == 0,
+                count=account_count,
+                column="COD_CONTA_PARTE,COD_CONTA_CONTRAPARTE",
+                sample=_sample_keys(
+                    account_bad,
+                    ["root_id", "operation_id", "party_account", "counterparty_account"],
+                    sample,
+                ),
+                hint="Persist registration P1/party as .00 and P2/counterparty as .40."
+                if account_count
+                else "",
+                message="CCB registration operations must preserve observed .00/.40 account roles.",
+            )
+        )
     tos_bad = valid.where(F.col("route_id") != "871")
     tos_count = tos_bad.count()
-    out.append(Finding(
-        "6h.profile.registration_tos", "CCB observed registration profile",
-        SEV_WARN if tos_count else SEV_INFO, "OPERACAO", tos_count == 0,
-        count=tos_count, column="NUM_ID_TIPO_OPER_OBJETO_SERV",
-        sample=_sample_keys(tos_bad, ["root_id", "operation_id", "route_id"], sample),
-        hint="Capture a successful registration trace before promoting a non-871 CCB TOS."
-             if tos_count else "",
-        message="CCB registration operations outside the observed TOS 871 profile.",
-    ))
+    out.append(
+        Finding(
+            "6h.profile.registration_tos",
+            "CCB observed registration profile",
+            SEV_WARN if tos_count else SEV_INFO,
+            "OPERACAO",
+            tos_count == 0,
+            count=tos_count,
+            column="NUM_ID_TIPO_OPER_OBJETO_SERV",
+            sample=_sample_keys(tos_bad, ["root_id", "operation_id", "route_id"], sample),
+            hint="Capture a successful registration trace before promoting a non-871 CCB TOS."
+            if tos_count
+            else "",
+            message="CCB registration operations outside the observed TOS 871 profile.",
+        )
+    )
     modality_bad = valid.where(F.col("modality") != "6")
     modality_count = modality_bad.count()
-    out.append(Finding(
-        "6h.profile.registration_modality", "CCB target eligibility",
-        SEV_WARN if modality_count else SEV_INFO, "OPERACAO", modality_count == 0,
-        count=modality_count, column="NUM_ID_MODALIDADE_LIQUIDACAO",
-        sample=_sample_keys(modality_bad, ["root_id", "route_id", "modality"], sample),
-        hint="Review the observed registration modalidade 6 before promotion to ERROR."
-             if modality_count else "",
-        message="CCB registration operations outside observed modalidade 6.",
-    ))
+    out.append(
+        Finding(
+            "6h.profile.registration_modality",
+            "CCB target eligibility",
+            SEV_WARN if modality_count else SEV_INFO,
+            "OPERACAO",
+            modality_count == 0,
+            count=modality_count,
+            column="NUM_ID_MODALIDADE_LIQUIDACAO",
+            sample=_sample_keys(modality_bad, ["root_id", "route_id", "modality"], sample),
+            hint="Review the observed registration modalidade 6 before promotion to ERROR."
+            if modality_count
+            else "",
+            message="CCB registration operations outside observed modalidade 6.",
+        )
+    )
     return out
 
 
 def load_ccb_target_frames(
-    spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame],
-    skip_prefixes: Optional[Sequence[str]] = None, max_route_keys: int = 10_000,
+    spark: SparkSession,
+    cfg: Config,
+    tables: Dict[str, DataFrame],
+    skip_prefixes: Optional[Sequence[str]] = None,
+    max_route_keys: int = 10_000,
 ) -> Tuple[Dict[str, DataFrame], Dict[str, str]]:
     skip_prefixes = list(skip_prefixes or [])
     if _check_group_is_skipped(("6h.lookup",), skip_prefixes):
@@ -5863,16 +7397,18 @@ def load_ccb_target_frames(
         ),
     }
     operation = tables.get("OPERACAO")
-    route_col = resolve(operation, "NUM_ID_TIPO_OPER_OBJETO_SERV") \
-        if operation is not None else None
+    route_col = (
+        resolve(operation, "NUM_ID_TIPO_OPER_OBJETO_SERV") if operation is not None else None
+    )
     route_ids = []
     if operation is not None and route_col:
         route_ids = [
             _canon_key(row["route_id"])
-            for row in operation.select(
-                _canon_key_col(F.col(route_col)).alias("route_id")
-            ).where(F.col("route_id").isNotNull()).dropDuplicates() \
-                .limit(max_route_keys + 1).collect()
+            for row in operation.select(_canon_key_col(F.col(route_col)).alias("route_id"))
+            .where(F.col("route_id").isNotNull())
+            .dropDuplicates()
+            .limit(max_route_keys + 1)
+            .collect()
         ]
     frames: Dict[str, DataFrame] = {}
     errors: Dict[str, str] = {}
@@ -5894,7 +7430,7 @@ def load_ccb_target_frames(
         try:
             for offset in range(0, len(route_ids), 1000):
                 literals = ", ".join(
-                    _sql_literal(value) for value in route_ids[offset:offset + 1000]
+                    _sql_literal(value) for value in route_ids[offset : offset + 1000]
                 )
                 query = (
                     "SELECT tos.NUM_ID_TIPO_OPER_OBJETO_SERV, tos.NUM_ID_OBJETO_SERVICO, "
@@ -5924,12 +7460,22 @@ def load_ccb_target_frames(
 # Category 0/2i/5i/6i/8i - Gravame registration-route evidence
 # ---------------------------------------------------------------------------
 GRAVAME_CORE_OUTPUT_TABLES = (
-    "INSTRUMENTO_FINANCEIRO", "COMPLEMENTO_CONTRATO", "IF_GRVM",
-    "PARAMETRO_PONTA", "CONTA", "OPERACAO", "LANCAMENTO", "DADO_OPERACAO",
-    "ARQUIVO_TRANSF", "ARQUIVO_TRANSF_CONTEUDO", "ARQUIVO_IF", "PROTOCOLO",
+    "INSTRUMENTO_FINANCEIRO",
+    "COMPLEMENTO_CONTRATO",
+    "IF_GRVM",
+    "PARAMETRO_PONTA",
+    "CONTA",
+    "OPERACAO",
+    "LANCAMENTO",
+    "DADO_OPERACAO",
+    "ARQUIVO_TRANSF",
+    "ARQUIVO_TRANSF_CONTEUDO",
+    "ARQUIVO_IF",
+    "PROTOCOLO",
 )
 GRAVAME_OUTPUT_TABLES = GRAVAME_CORE_OUTPUT_TABLES + (
-    "GRAVAME_GRAU_PENHOR", "ALERTA",
+    "GRAVAME_GRAU_PENHOR",
+    "ALERTA",
 )
 
 
@@ -5939,33 +7485,45 @@ def check_gravame_metadata(
     if profile.pipeline != "gravame":
         return []
     if no_oracle:
-        return [Finding(
-            "0.gravame_metadata", "Coverage", SEV_WARN, "Oracle metadata", False,
-            hint="Rerun with live Oracle metadata for the complete Gravame table union.",
-            message="Live Oracle metadata for Gravame is unavailable under --no-oracle.",
-        )]
+        return [
+            Finding(
+                "0.gravame_metadata",
+                "Coverage",
+                SEV_WARN,
+                "Oracle metadata",
+                False,
+                hint="Rerun with live Oracle metadata for the complete Gravame table union.",
+                message="Live Oracle metadata for Gravame is unavailable under --no-oracle.",
+            )
+        ]
     missing_tables = [table for table in GRAVAME_OUTPUT_TABLES if table not in meta.tables]
     missing_pk = [
-        table for table in GRAVAME_OUTPUT_TABLES
+        table
+        for table in GRAVAME_OUTPUT_TABLES
         if table in meta.tables and table not in PK_METADATA_WARN_TABLES and not meta.pk.get(table)
     ]
     failed = bool(missing_tables or missing_pk)
-    return [Finding(
-        "0.gravame_metadata", "Coverage", SEV_ERROR if failed else SEV_INFO,
-        ",".join(GRAVAME_OUTPUT_TABLES), not failed,
-        count=len(missing_tables) + len(missing_pk),
-        hint="Load live table and PK metadata for every Gravame core/variant table."
-             if failed else "",
-        message=(
-            f"Missing Oracle tables={missing_tables}; missing PK metadata={missing_pk}."
-            if failed else "Live Oracle metadata covers the Gravame table union."
-        ),
-    )]
+    return [
+        Finding(
+            "0.gravame_metadata",
+            "Coverage",
+            SEV_ERROR if failed else SEV_INFO,
+            ",".join(GRAVAME_OUTPUT_TABLES),
+            not failed,
+            count=len(missing_tables) + len(missing_pk),
+            hint="Load live table and PK metadata for every Gravame core/variant table."
+            if failed
+            else "",
+            message=(
+                f"Missing Oracle tables={missing_tables}; missing PK metadata={missing_pk}."
+                if failed
+                else "Live Oracle metadata covers the Gravame table union."
+            ),
+        )
+    ]
 
 
-def _gravame_operation_chain(
-    tables: Dict[str, DataFrame], roots: DataFrame
-) -> Optional[DataFrame]:
+def _gravame_operation_chain(tables: Dict[str, DataFrame], roots: DataFrame) -> Optional[DataFrame]:
     operation = tables.get("OPERACAO")
     if operation is None:
         return None
@@ -5982,9 +7540,9 @@ def _gravame_operation_chain(
         F.trim(F.col(original_code).cast("string")).alias("original_code"),
     )
     root_ids = roots.select("root_id").dropDuplicates()
-    chain = operations.join(
-        root_ids, F.col("operation_if") == F.col("root_id"), "inner"
-    ).select("operation_id", "operation_code", "original_code", "root_id")
+    chain = operations.join(root_ids, F.col("operation_if") == F.col("root_id"), "inner").select(
+        "operation_id", "operation_code", "original_code", "root_id"
+    )
     frontier = chain
     for _ in range(4):
         parents = frontier.select(
@@ -5999,8 +7557,12 @@ def _gravame_operation_chain(
 
 
 def _gravame_edge(
-    check_id: str, parent_ids: DataFrame, child: DataFrame, child_parent: str,
-    child_id: str, sample: int,
+    check_id: str,
+    parent_ids: DataFrame,
+    child: DataFrame,
+    child_parent: str,
+    child_id: str,
+    sample: int,
 ) -> Finding:
     children = _ccb_active(child).select(
         _canon_key_col(F.col(child_parent)).alias("parent_id"),
@@ -6009,8 +7571,12 @@ def _gravame_edge(
     bad = children.join(parent_ids.select("parent_id").dropDuplicates(), "parent_id", "left_anti")
     count = bad.count()
     return Finding(
-        check_id, "Gravame graph", SEV_ERROR if count else SEV_INFO,
-        check_id.split(".")[1].upper(), count == 0, count=count,
+        check_id,
+        "Gravame graph",
+        SEV_ERROR if count else SEV_INFO,
+        check_id.split(".")[1].upper(),
+        count == 0,
+        count=count,
         sample=_sample_keys(bad, ["child_id", "parent_id"], sample),
         hint="Remove the orphan or include its parent in the Gravame closure." if count else "",
         message="Present Gravame child rows must resolve to their aggregate parent.",
@@ -6032,9 +7598,13 @@ def check_gravame_graph(
         "PARAMETRO_PONTA": ("NUM_ID_PARAMETRO_PONTA", "NUM_IF", "NUM_CONTA"),
         "CONTA": ("NUM_CONTA",),
         "OPERACAO": (
-            "NUM_ID_OPERACAO", "NUM_IF", "COD_OPERACAO", "COD_OPERACAO_ORIGINAL",
+            "NUM_ID_OPERACAO",
+            "NUM_IF",
+            "COD_OPERACAO",
+            "COD_OPERACAO_ORIGINAL",
             "NUM_ID_TIPO_OPER_OBJETO_SERV",
-            "NUM_ID_PARAMETRO_PONTA_P1", "NUM_ID_PARAMETRO_PONTA_P2",
+            "NUM_ID_PARAMETRO_PONTA_P1",
+            "NUM_ID_PARAMETRO_PONTA_P2",
         ),
         "LANCAMENTO": ("NUM_ID_LANCAMENTO", "NUM_ID_OPERACAO"),
         "DADO_OPERACAO": ("NUM_ID_DADO_OPERACAO", "NUM_ID_OPERACAO"),
@@ -6047,9 +7617,11 @@ def check_gravame_graph(
     if missing:
         return [_ccb_unavailable("2i.graph.availability", missing, SEV_WARN)]
     root_cols = columns["INSTRUMENTO_FINANCEIRO"]
-    roots = _ccb_active(tables["INSTRUMENTO_FINANCEIRO"]).where(
-        _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if)
-    ).select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"))
+    roots = (
+        _ccb_active(tables["INSTRUMENTO_FINANCEIRO"])
+        .where(_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if))
+        .select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"))
+    )
     root_parents = roots.select(F.col("root_id").alias("parent_id"))
     out: List[Finding] = []
     for name, table, child_id in (
@@ -6059,25 +7631,41 @@ def check_gravame_graph(
         ("document", "ARQUIVO_IF", "NUM_ID_ARQUIVO_IF"),
         ("protocol", "PROTOCOLO", "NUM_ID_PROTOCOLO"),
     ):
-        out.append(_gravame_edge(
-            f"2i.{name}.edge", root_parents, tables[table], columns[table]["NUM_IF"],
-            columns[table][child_id], sample,
-        ))
+        out.append(
+            _gravame_edge(
+                f"2i.{name}.edge",
+                root_parents,
+                tables[table],
+                columns[table]["NUM_IF"],
+                columns[table][child_id],
+                sample,
+            )
+        )
 
     operation_cols = columns["OPERACAO"]
     operation_parents = _ccb_active(tables["OPERACAO"]).select(
         _canon_key_col(F.col(operation_cols["NUM_ID_OPERACAO"])).alias("parent_id")
     )
-    out.append(_gravame_edge(
-        "2i.launch.edge", operation_parents, tables["LANCAMENTO"],
-        columns["LANCAMENTO"]["NUM_ID_OPERACAO"],
-        columns["LANCAMENTO"]["NUM_ID_LANCAMENTO"], sample,
-    ))
-    out.append(_gravame_edge(
-        "2i.operation_data.edge", operation_parents, tables["DADO_OPERACAO"],
-        columns["DADO_OPERACAO"]["NUM_ID_OPERACAO"],
-        columns["DADO_OPERACAO"]["NUM_ID_DADO_OPERACAO"], sample,
-    ))
+    out.append(
+        _gravame_edge(
+            "2i.launch.edge",
+            operation_parents,
+            tables["LANCAMENTO"],
+            columns["LANCAMENTO"]["NUM_ID_OPERACAO"],
+            columns["LANCAMENTO"]["NUM_ID_LANCAMENTO"],
+            sample,
+        )
+    )
+    out.append(
+        _gravame_edge(
+            "2i.operation_data.edge",
+            operation_parents,
+            tables["DADO_OPERACAO"],
+            columns["DADO_OPERACAO"]["NUM_ID_OPERACAO"],
+            columns["DADO_OPERACAO"]["NUM_ID_DADO_OPERACAO"],
+            sample,
+        )
+    )
 
     account_parents = _ccb_active(tables["CONTA"]).select(
         _canon_key_col(F.col(columns["CONTA"]["NUM_CONTA"])).alias("parent_id")
@@ -6087,85 +7675,128 @@ def check_gravame_graph(
         ~_oracle_null_equivalent(F.col(columns["PARAMETRO_PONTA"]["NUM_CONTA"]))
     ).select(
         _canon_key_col(F.col(columns["PARAMETRO_PONTA"]["NUM_CONTA"])).alias("parent_id"),
-        _canon_key_col(F.col(columns["PARAMETRO_PONTA"]["NUM_ID_PARAMETRO_PONTA"]))
-        .alias("child_id"),
+        _canon_key_col(F.col(columns["PARAMETRO_PONTA"]["NUM_ID_PARAMETRO_PONTA"])).alias(
+            "child_id"
+        ),
     )
     bad_accounts = endpoint_account.join(account_parents, "parent_id", "left_anti")
     count = bad_accounts.count()
-    out.append(Finding(
-        "2i.endpoint_account", "Gravame graph", SEV_ERROR if count else SEV_INFO,
-        "PARAMETRO_PONTA", count == 0, count=count,
-        sample=_sample_keys(bad_accounts, ["child_id", "parent_id"], sample),
-        hint="Include each generated Gravame endpoint account in the local closure."
-             if count else "",
-        message="Generated endpoint account references not resolved inside the Gravame closure.",
-    ))
+    out.append(
+        Finding(
+            "2i.endpoint_account",
+            "Gravame graph",
+            SEV_ERROR if count else SEV_INFO,
+            "PARAMETRO_PONTA",
+            count == 0,
+            count=count,
+            sample=_sample_keys(bad_accounts, ["child_id", "parent_id"], sample),
+            hint="Include each generated Gravame endpoint account in the local closure."
+            if count
+            else "",
+            message=(
+                "Generated endpoint account references not resolved inside the Gravame closure."
+            ),
+        )
+    )
 
     endpoint_parents = endpoints.select(
-        _canon_key_col(F.col(columns["PARAMETRO_PONTA"]["NUM_ID_PARAMETRO_PONTA"]))
-        .alias("parent_id")
+        _canon_key_col(F.col(columns["PARAMETRO_PONTA"]["NUM_ID_PARAMETRO_PONTA"])).alias(
+            "parent_id"
+        )
     )
     operation_endpoint_bad = None
     for role in ("NUM_ID_PARAMETRO_PONTA_P1", "NUM_ID_PARAMETRO_PONTA_P2"):
-        part = _ccb_active(tables["OPERACAO"]).where(
-            ~_oracle_null_equivalent(F.col(operation_cols[role]))
-        ).select(
-            _canon_key_col(F.col(operation_cols[role])).alias("parent_id"),
-            _canon_key_col(F.col(operation_cols["NUM_ID_OPERACAO"])).alias("child_id"),
-        ).join(endpoint_parents, "parent_id", "left_anti").withColumn("role", F.lit(role))
+        part = (
+            _ccb_active(tables["OPERACAO"])
+            .where(~_oracle_null_equivalent(F.col(operation_cols[role])))
+            .select(
+                _canon_key_col(F.col(operation_cols[role])).alias("parent_id"),
+                _canon_key_col(F.col(operation_cols["NUM_ID_OPERACAO"])).alias("child_id"),
+            )
+            .join(endpoint_parents, "parent_id", "left_anti")
+            .withColumn("role", F.lit(role))
+        )
         operation_endpoint_bad = (
             part if operation_endpoint_bad is None else operation_endpoint_bad.unionByName(part)
         )
     count = operation_endpoint_bad.count()
-    out.append(Finding(
-        "2i.operation_endpoint", "Gravame graph", SEV_ERROR if count else SEV_INFO,
-        "OPERACAO", count == 0, count=count,
-        sample=_sample_keys(operation_endpoint_bad, ["child_id", "parent_id", "role"], sample),
-        hint="Keep operation endpoint pointers inside the Gravame closure." if count else "",
-        message="Operation endpoint pointers without PARAMETRO_PONTA parent.",
-    ))
+    out.append(
+        Finding(
+            "2i.operation_endpoint",
+            "Gravame graph",
+            SEV_ERROR if count else SEV_INFO,
+            "OPERACAO",
+            count == 0,
+            count=count,
+            sample=_sample_keys(operation_endpoint_bad, ["child_id", "parent_id", "role"], sample),
+            hint="Keep operation endpoint pointers inside the Gravame closure." if count else "",
+            message="Operation endpoint pointers without PARAMETRO_PONTA parent.",
+        )
+    )
 
     transfer_parents = _ccb_active(tables["ARQUIVO_TRANSF"]).select(
-        _canon_key_col(F.col(columns["ARQUIVO_TRANSF"]["NUM_ID_ARQUIVO_TRANSF"]))
-        .alias("parent_id")
+        _canon_key_col(F.col(columns["ARQUIVO_TRANSF"]["NUM_ID_ARQUIVO_TRANSF"])).alias("parent_id")
     )
-    out.append(_gravame_edge(
-        "2i.document_transfer", transfer_parents, tables["ARQUIVO_IF"],
-        columns["ARQUIVO_IF"]["NUM_ID_ARQUIVO_TRANSF"],
-        columns["ARQUIVO_IF"]["NUM_ID_ARQUIVO_IF"], sample,
-    ))
-    out.append(_gravame_edge(
-        "2i.transfer_content", transfer_parents, tables["ARQUIVO_TRANSF_CONTEUDO"],
-        columns["ARQUIVO_TRANSF_CONTEUDO"]["NUM_ID_ARQUIVO_TRANSF_CONT"],
-        columns["ARQUIVO_TRANSF_CONTEUDO"]["NUM_ID_ARQUIVO_TRANSF_CONT"], sample,
-    ))
+    out.append(
+        _gravame_edge(
+            "2i.document_transfer",
+            transfer_parents,
+            tables["ARQUIVO_IF"],
+            columns["ARQUIVO_IF"]["NUM_ID_ARQUIVO_TRANSF"],
+            columns["ARQUIVO_IF"]["NUM_ID_ARQUIVO_IF"],
+            sample,
+        )
+    )
+    out.append(
+        _gravame_edge(
+            "2i.transfer_content",
+            transfer_parents,
+            tables["ARQUIVO_TRANSF_CONTEUDO"],
+            columns["ARQUIVO_TRANSF_CONTEUDO"]["NUM_ID_ARQUIVO_TRANSF_CONT"],
+            columns["ARQUIVO_TRANSF_CONTEUDO"]["NUM_ID_ARQUIVO_TRANSF_CONT"],
+            sample,
+        )
+    )
 
     operations = _ccb_active(tables["OPERACAO"]).select(
         _canon_key_col(F.col(operation_cols["NUM_ID_OPERACAO"])).alias("operation_id"),
         F.trim(F.col(operation_cols["COD_OPERACAO"]).cast("string")).alias("operation_code"),
-        F.trim(F.col(operation_cols["COD_OPERACAO_ORIGINAL"])
-               .cast("string")).alias("original_code"),
+        F.trim(F.col(operation_cols["COD_OPERACAO_ORIGINAL"]).cast("string")).alias(
+            "original_code"
+        ),
     )
-    duplicate_codes = operations.where(
-        F.col("operation_code").isNull() | (F.col("operation_code") == "")
-    ).unionByName(
-        operations.withColumn(
-            "code_count", F.count(F.lit(1)).over(Window.partitionBy("operation_code"))
-        ).where(F.col("code_count") > 1).select(operations.columns)
-    ).dropDuplicates(["operation_id"])
+    duplicate_codes = (
+        operations.where(F.col("operation_code").isNull() | (F.col("operation_code") == ""))
+        .unionByName(
+            operations.withColumn(
+                "code_count", F.count(F.lit(1)).over(Window.partitionBy("operation_code"))
+            )
+            .where(F.col("code_count") > 1)
+            .select(operations.columns)
+        )
+        .dropDuplicates(["operation_id"])
+    )
     duplicate_count = duplicate_codes.count()
-    out.append(Finding(
-        "2i.operation_code", "Gravame operation closure",
-        SEV_ERROR if duplicate_count else SEV_INFO, "OPERACAO", duplicate_count == 0,
-        count=duplicate_count,
-        sample=_sample_keys(duplicate_codes, ["operation_id", "operation_code"], sample),
-        hint="Keep operation codes nonblank and unique inside the closure."
-             if duplicate_count else "",
-        message="Blank or duplicate operation codes in the Gravame closure.",
-    ))
-    code_parents = operations.select(
-        F.col("operation_code").alias("original_code")
-    ).where(F.col("original_code").isNotNull() & (F.col("original_code") != "")).dropDuplicates()
+    out.append(
+        Finding(
+            "2i.operation_code",
+            "Gravame operation closure",
+            SEV_ERROR if duplicate_count else SEV_INFO,
+            "OPERACAO",
+            duplicate_count == 0,
+            count=duplicate_count,
+            sample=_sample_keys(duplicate_codes, ["operation_id", "operation_code"], sample),
+            hint="Keep operation codes nonblank and unique inside the closure."
+            if duplicate_count
+            else "",
+            message="Blank or duplicate operation codes in the Gravame closure.",
+        )
+    )
+    code_parents = (
+        operations.select(F.col("operation_code").alias("original_code"))
+        .where(F.col("original_code").isNotNull() & (F.col("original_code") != ""))
+        .dropDuplicates()
+    )
     broken_chain = operations.where(
         F.col("original_code").isNotNull() & (F.col("original_code") != "")
     ).join(code_parents, "original_code", "left_anti")
@@ -6174,7 +7805,8 @@ def check_gravame_graph(
         & F.col("original_code").isNotNull()
         & (F.col("original_code") != "")
     ).select(
-        F.col("operation_id"), F.col("operation_code").alias("start_code"),
+        F.col("operation_id"),
+        F.col("operation_code").alias("start_code"),
         F.col("original_code").alias("next_code"),
     )
     cycles = links.where(F.col("start_code") == F.col("next_code")).select("operation_id")
@@ -6186,36 +7818,47 @@ def check_gravame_graph(
     for _ in range(4):
         paths = paths.join(
             parent_links, F.col("next_code") == F.col("parent_child_code"), "inner"
-        ).select(
-            "operation_id", "start_code", F.col("parent_next_code").alias("next_code")
-        )
+        ).select("operation_id", "start_code", F.col("parent_next_code").alias("next_code"))
         cycles = cycles.unionByName(
             paths.where(F.col("start_code") == F.col("next_code")).select("operation_id")
         )
-    cycle_rows = cycles.dropDuplicates().join(
-        operations, "operation_id", "inner"
-    ).select(operations.columns)
+    cycle_rows = (
+        cycles.dropDuplicates().join(operations, "operation_id", "inner").select(operations.columns)
+    )
     broken_chain = broken_chain.unionByName(cycle_rows).dropDuplicates(["operation_id"])
     chain_count = broken_chain.count()
-    out.append(Finding(
-        "2i.operation_chain", "Gravame operation closure",
-        SEV_ERROR if chain_count else SEV_INFO, "OPERACAO", chain_count == 0,
-        count=chain_count,
-        sample=_sample_keys(broken_chain, ["operation_id", "original_code"], sample),
-        hint="Include the original operation and remove self-cycles." if chain_count else "",
-        message="Broken original-operation references in the Gravame closure.",
-    ))
-    depth_probe = paths.join(
-        parent_links, F.col("next_code") == F.col("parent_child_code"), "inner"
-    ).limit(1).count()
-    out.append(Finding(
-        "2i.operation_chain_depth", "Gravame operation closure",
-        SEV_WARN if depth_probe else SEV_INFO, "OPERACAO", depth_probe == 0,
-        count=depth_probe,
-        hint="Increase the audited closure depth after inspecting this historical chain."
-             if depth_probe else "",
-        message="Operation chain exceeds the five-link validation/profile boundary.",
-    ))
+    out.append(
+        Finding(
+            "2i.operation_chain",
+            "Gravame operation closure",
+            SEV_ERROR if chain_count else SEV_INFO,
+            "OPERACAO",
+            chain_count == 0,
+            count=chain_count,
+            sample=_sample_keys(broken_chain, ["operation_id", "original_code"], sample),
+            hint="Include the original operation and remove self-cycles." if chain_count else "",
+            message="Broken original-operation references in the Gravame closure.",
+        )
+    )
+    depth_probe = (
+        paths.join(parent_links, F.col("next_code") == F.col("parent_child_code"), "inner")
+        .limit(1)
+        .count()
+    )
+    out.append(
+        Finding(
+            "2i.operation_chain_depth",
+            "Gravame operation closure",
+            SEV_WARN if depth_probe else SEV_INFO,
+            "OPERACAO",
+            depth_probe == 0,
+            count=depth_probe,
+            hint="Increase the audited closure depth after inspecting this historical chain."
+            if depth_probe
+            else "",
+            message="Operation chain exceeds the five-link validation/profile boundary.",
+        )
+    )
 
     pledge = tables.get("GRAVAME_GRAU_PENHOR")
     pledge_pairs = None
@@ -6224,81 +7867,108 @@ def check_gravame_graph(
         pledge_root = resolve(pledge, "NUM_IF_GRAVAME")
         pledge_guarantee = resolve(pledge, "NUM_IF_GARANTIA")
         if pledge_id and pledge_root and pledge_guarantee:
-            out.append(_gravame_edge(
-                "2i.pledge.edge", root_parents, pledge, pledge_root, pledge_id, sample,
-            ))
-            pledge_pairs = _ccb_active(pledge).select(
-                _canon_key_col(F.col(pledge_root)).alias("root_id"),
-                _canon_key_col(F.col(pledge_guarantee)).alias("operation_if"),
-            ).dropDuplicates()
+            out.append(
+                _gravame_edge(
+                    "2i.pledge.edge",
+                    root_parents,
+                    pledge,
+                    pledge_root,
+                    pledge_id,
+                    sample,
+                )
+            )
+            pledge_pairs = (
+                _ccb_active(pledge)
+                .select(
+                    _canon_key_col(F.col(pledge_root)).alias("root_id"),
+                    _canon_key_col(F.col(pledge_guarantee)).alias("operation_if"),
+                )
+                .dropDuplicates()
+            )
         else:
-            out.append(_ccb_unavailable(
-                "2i.pledge.availability",
-                ["GRAVAME_GRAU_PENHOR ID/NUM_IF_GRAVAME/NUM_IF_GARANTIA"],
-                SEV_WARN,
-            ))
+            out.append(
+                _ccb_unavailable(
+                    "2i.pledge.availability",
+                    ["GRAVAME_GRAU_PENHOR ID/NUM_IF_GRAVAME/NUM_IF_GARANTIA"],
+                    SEV_WARN,
+                )
+            )
     chain = _gravame_operation_chain(tables, roots)
     if chain is not None:
         operation_targets = _ccb_active(tables["OPERACAO"]).select(
             _canon_key_col(F.col(operation_cols["NUM_ID_OPERACAO"])).alias("operation_id"),
             _canon_key_col(F.col(operation_cols["NUM_IF"])).alias("operation_if"),
-            _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
-            .alias("route_id"),
+            _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias("route_id"),
         )
         known_routes = ("15394", "15512", "15422", "15464", "15035", "15046")
         known_operations = operation_targets.where(F.col("route_id").isin(*known_routes))
         chain_ids = chain.select("operation_id").dropDuplicates()
         unchained = known_operations.join(chain_ids, "operation_id", "left_anti")
         unchained_count = unchained.count()
-        out.append(Finding(
-            "2i.operation_route_membership", "Gravame operation closure",
-            SEV_ERROR if unchained_count else SEV_INFO, "OPERACAO",
-            unchained_count == 0, count=unchained_count,
-            sample=_sample_keys(unchained, ["operation_id", "operation_if", "route_id"], sample),
-            hint="Attach known 520/527/541/529 route operations to the original-code chain."
-                 if unchained_count else "",
-            message="Known Gravame route operations outside the rooted operation chain.",
-        ))
+        out.append(
+            Finding(
+                "2i.operation_route_membership",
+                "Gravame operation closure",
+                SEV_ERROR if unchained_count else SEV_INFO,
+                "OPERACAO",
+                unchained_count == 0,
+                count=unchained_count,
+                sample=_sample_keys(
+                    unchained, ["operation_id", "operation_if", "route_id"], sample
+                ),
+                hint="Attach known 520/527/541/529 route operations to the original-code chain."
+                if unchained_count
+                else "",
+                message="Known Gravame route operations outside the rooted operation chain.",
+            )
+        )
         attributed = operation_targets.join(
             chain.select("operation_id", "root_id"), "operation_id", "inner"
         )
         root_route_bad = attributed.where(
-            F.col("route_id").isin("15394", "15512")
-            & (F.col("operation_if") != F.col("root_id"))
+            F.col("route_id").isin("15394", "15512") & (F.col("operation_if") != F.col("root_id"))
         )
         root_route_count = root_route_bad.count()
-        out.append(Finding(
-            "2i.root_operation_target", "Gravame operation closure",
-            SEV_ERROR if root_route_count else SEV_INFO, "OPERACAO",
-            root_route_count == 0, count=root_route_count,
-            sample=_sample_keys(
-                root_route_bad, ["root_id", "operation_id", "operation_if", "route_id"], sample
-            ),
-            hint="Keep routes 15394/15512 on the Gravame root NUM_IF."
-                 if root_route_count else "",
-            message="Root-side Gravame operation routes targeting another instrument.",
-        ))
-        external = attributed.where(
-            F.col("route_id").isin("15422", "15464", "15035", "15046")
+        out.append(
+            Finding(
+                "2i.root_operation_target",
+                "Gravame operation closure",
+                SEV_ERROR if root_route_count else SEV_INFO,
+                "OPERACAO",
+                root_route_count == 0,
+                count=root_route_count,
+                sample=_sample_keys(
+                    root_route_bad, ["root_id", "operation_id", "operation_if", "route_id"], sample
+                ),
+                hint="Keep routes 15394/15512 on the Gravame root NUM_IF."
+                if root_route_count
+                else "",
+                message="Root-side Gravame operation routes targeting another instrument.",
+            )
         )
+        external = attributed.where(F.col("route_id").isin("15422", "15464", "15035", "15046"))
         if pledge_pairs is None:
             bad_external = external
         else:
-            bad_external = external.join(
-                pledge_pairs, ["root_id", "operation_if"], "left_anti"
-            )
+            bad_external = external.join(pledge_pairs, ["root_id", "operation_if"], "left_anti")
         external_count = bad_external.count()
-        out.append(Finding(
-            "2i.external_operation_target", "Gravame operation closure",
-            SEV_ERROR if external_count else SEV_INFO, "OPERACAO",
-            external_count == 0, count=external_count,
-            sample=_sample_keys(
-                bad_external, ["root_id", "operation_id", "operation_if"], sample
-            ),
-            hint="Point external chain operations to a pledged NUM_IF_GARANTIA."
-                 if external_count else "",
-            message="External Gravame operations without a matching pledge target.",
-        ))
+        out.append(
+            Finding(
+                "2i.external_operation_target",
+                "Gravame operation closure",
+                SEV_ERROR if external_count else SEV_INFO,
+                "OPERACAO",
+                external_count == 0,
+                count=external_count,
+                sample=_sample_keys(
+                    bad_external, ["root_id", "operation_id", "operation_if"], sample
+                ),
+                hint="Point external chain operations to a pledged NUM_IF_GARANTIA."
+                if external_count
+                else "",
+                message="External Gravame operations without a matching pledge target.",
+            )
+        )
     return out
 
 
@@ -6317,8 +7987,7 @@ def check_gravame_dates(
     }
     missing = [f"INSTRUMENTO_FINANCEIRO.{name}" for name, value in columns.items() if not value]
     missing.extend(
-        f"COMPLEMENTO_CONTRATO.{name}"
-        for name, value in contract_columns.items() if not value
+        f"COMPLEMENTO_CONTRATO.{name}" for name, value in contract_columns.items() if not value
     )
     if missing:
         return [_ccb_unavailable("5i.date_availability", missing)]
@@ -6335,43 +8004,61 @@ def check_gravame_dates(
     )
     parse_bad = None
     for name in ("DAT_EMISSAO", "DAT_REGISTRO", "DAT_VENCIMENTO"):
-        bad = parsed.where(
-            ~_oracle_null_equivalent(F.col(f"{name}_raw")) & F.col(name).isNull()
-        ).select("root_id").withColumn("field", F.lit(name))
+        bad = (
+            parsed.where(~_oracle_null_equivalent(F.col(f"{name}_raw")) & F.col(name).isNull())
+            .select("root_id")
+            .withColumn("field", F.lit(name))
+        )
         parse_bad = bad if parse_bad is None else parse_bad.unionByName(bad)
     contract_parsed = _ccb_active(contract).select(
         _canon_key_col(F.col(contract_columns["NUM_IF"])).alias("root_id"),
         F.col(contract_columns["DAT_INCLUSAO"]).alias("contract_date_raw"),
         _ccb_try_date(contract_columns["DAT_INCLUSAO"]).alias("contract_date"),
     )
-    bad_contract_parse = contract_parsed.where(
-        ~_oracle_null_equivalent(F.col("contract_date_raw"))
-        & F.col("contract_date").isNull()
-    ).select("root_id").withColumn("field", F.lit("COMPLEMENTO_CONTRATO.DAT_INCLUSAO"))
+    bad_contract_parse = (
+        contract_parsed.where(
+            ~_oracle_null_equivalent(F.col("contract_date_raw")) & F.col("contract_date").isNull()
+        )
+        .select("root_id")
+        .withColumn("field", F.lit("COMPLEMENTO_CONTRATO.DAT_INCLUSAO"))
+    )
     parse_bad = parse_bad.unionByName(bad_contract_parse)
     parse_count = parse_bad.count()
-    order_bad = parsed.where(
-        (F.col("DAT_EMISSAO") > F.col("DAT_VENCIMENTO"))
-        | (F.col("DAT_REGISTRO") > F.col("DAT_VENCIMENTO"))
-    ).select("root_id").withColumn("rule", F.lit("root dates <= maturity"))
-    contract_order_bad = contract_parsed.join(
-        parsed.select("root_id", "DAT_VENCIMENTO"), "root_id", "inner"
-    ).where(
-        F.col("contract_date") > F.col("DAT_VENCIMENTO")
-    ).select("root_id").withColumn("rule", F.lit("contract date <= maturity"))
+    order_bad = (
+        parsed.where(
+            (F.col("DAT_EMISSAO") > F.col("DAT_VENCIMENTO"))
+            | (F.col("DAT_REGISTRO") > F.col("DAT_VENCIMENTO"))
+        )
+        .select("root_id")
+        .withColumn("rule", F.lit("root dates <= maturity"))
+    )
+    contract_order_bad = (
+        contract_parsed.join(parsed.select("root_id", "DAT_VENCIMENTO"), "root_id", "inner")
+        .where(F.col("contract_date") > F.col("DAT_VENCIMENTO"))
+        .select("root_id")
+        .withColumn("rule", F.lit("contract date <= maturity"))
+    )
     order_bad = order_bad.unionByName(contract_order_bad)
     order_count = order_bad.count()
     return [
         Finding(
-            "5i.date_parse", "Gravame date coherence", SEV_ERROR if parse_count else SEV_INFO,
-            "INSTRUMENTO_FINANCEIRO", parse_count == 0, count=parse_count,
+            "5i.date_parse",
+            "Gravame date coherence",
+            SEV_ERROR if parse_count else SEV_INFO,
+            "INSTRUMENTO_FINANCEIRO",
+            parse_count == 0,
+            count=parse_count,
             sample=_sample_keys(parse_bad, ["root_id", "field"], sample),
             hint="Export parseable Gravame dates." if parse_count else "",
             message="Malformed nonblank Gravame dates.",
         ),
         Finding(
-            "5i.date_order", "Gravame date coherence", SEV_ERROR if order_count else SEV_INFO,
-            "INSTRUMENTO_FINANCEIRO", order_count == 0, count=order_count,
+            "5i.date_order",
+            "Gravame date coherence",
+            SEV_ERROR if order_count else SEV_INFO,
+            "INSTRUMENTO_FINANCEIRO",
+            order_count == 0,
+            count=order_count,
             sample=_sample_keys(order_bad, ["root_id", "rule"], sample),
             hint="Keep issuance and registration on or before maturity." if order_count else "",
             message="Reversed Gravame root date ranges.",
@@ -6402,7 +8089,8 @@ def check_gravame_registration_profile(
         ),
         "operation_data.NUM_ID_OPERACAO": (
             resolve(operation_data_frame, "NUM_ID_OPERACAO")
-            if operation_data_frame is not None else None
+            if operation_data_frame is not None
+            else None
         ),
         "pledge.NUM_IF_GRAVAME": (
             resolve(pledge, "NUM_IF_GRAVAME") if pledge is not None else None
@@ -6411,34 +8099,41 @@ def check_gravame_registration_profile(
     missing = [name for name, value in required.items() if not value]
     if missing:
         return [_ccb_unavailable("8i.profile.availability", missing, SEV_WARN)]
-    roots = _ccb_active(root).where(
-        _canon_key_col(F.col(required["root.NUM_TIPO_IF"])) == str(profile.num_tipo_if)
-    ).select(
-        _canon_key_col(F.col(required["root.NUM_IF"])).alias("root_id"),
-        F.trim(F.col(required["root.COD_IF"]).cast("string")).alias("business_code"),
+    roots = (
+        _ccb_active(root)
+        .where(_canon_key_col(F.col(required["root.NUM_TIPO_IF"])) == str(profile.num_tipo_if))
+        .select(
+            _canon_key_col(F.col(required["root.NUM_IF"])).alias("root_id"),
+            F.trim(F.col(required["root.COD_IF"]).cast("string")).alias("business_code"),
+        )
     )
     coded_roots = roots.withColumn(
         "code_count", F.count(F.lit(1)).over(Window.partitionBy("business_code"))
     )
     bad_codes = coded_roots.where(
-        F.col("business_code").isNull()
-        | (F.col("business_code") == "")
-        | (F.col("code_count") > 1)
+        F.col("business_code").isNull() | (F.col("business_code") == "") | (F.col("code_count") > 1)
     )
     code_count = bad_codes.count()
-    extensions = _ccb_active(extension).select(
-        _canon_key_col(F.col(required["extension.NUM_IF"])).alias("root_id"),
-        _canon_key_col(F.col(required["extension.NUM_ID_TIPO_CONST_GRAVAME"]))
-        .alias("constitution_type"),
-    ).groupBy("root_id").agg(
-        F.count(F.lit(1)).alias("extension_count"),
-        F.collect_set("constitution_type").alias("constitution_types"),
-    ).withColumn(
-        "constitution_type",
-        F.when(
-            F.size(F.col("constitution_types")) == 1,
-            F.element_at(F.col("constitution_types"), 1),
-        ),
+    extensions = (
+        _ccb_active(extension)
+        .select(
+            _canon_key_col(F.col(required["extension.NUM_IF"])).alias("root_id"),
+            _canon_key_col(F.col(required["extension.NUM_ID_TIPO_CONST_GRAVAME"])).alias(
+                "constitution_type"
+            ),
+        )
+        .groupBy("root_id")
+        .agg(
+            F.count(F.lit(1)).alias("extension_count"),
+            F.collect_set("constitution_type").alias("constitution_types"),
+        )
+        .withColumn(
+            "constitution_type",
+            F.when(
+                F.size(F.col("constitution_types")) == 1,
+                F.element_at(F.col("constitution_types"), 1),
+            ),
+        )
     )
     variants = roots.join(extensions, "root_id", "left")
 
@@ -6452,16 +8147,20 @@ def check_gravame_registration_profile(
         frame = tables.get(table)
         parent = resolve(frame, "NUM_IF") if frame is not None else None
         if frame is None or not parent:
-            return [_ccb_unavailable(
-                "8i.profile.common_availability", [f"{table}.NUM_IF"], SEV_WARN
-            )]
-        per_root = _ccb_active(frame).select(
-            _canon_key_col(F.col(parent)).alias("root_id")
-        ).groupBy("root_id").count().withColumnRenamed("count", output)
+            return [
+                _ccb_unavailable("8i.profile.common_availability", [f"{table}.NUM_IF"], SEV_WARN)
+            ]
+        per_root = (
+            _ccb_active(frame)
+            .select(_canon_key_col(F.col(parent)).alias("root_id"))
+            .groupBy("root_id")
+            .count()
+            .withColumnRenamed("count", output)
+        )
         common = common.join(per_root, "root_id", "left")
-    common = common.join(
-        extensions.select("root_id", "extension_count"), "root_id", "left"
-    ).fillna(0)
+    common = common.join(extensions.select("root_id", "extension_count"), "root_id", "left").fillna(
+        0
+    )
     bad_common = common.where(
         (F.col("contract_count") != 1)
         | (F.col("extension_count") != 1)
@@ -6479,90 +8178,127 @@ def check_gravame_registration_profile(
     operation_id = resolve(operation, "NUM_ID_OPERACAO")
     operation_route = resolve(operation, "NUM_ID_TIPO_OPER_OBJETO_SERV")
     if not operation_id or not operation_route:
-        return [_ccb_unavailable(
-            "8i.profile.route_shape", ["OPERACAO route columns"], SEV_WARN
-        )]
-    route_sets = _ccb_active(operation).select(
-        _canon_key_col(F.col(operation_id)).alias("operation_id"),
-        _canon_key_col(F.col(operation_route)).alias("route_id"),
-    ).join(chain_operations, "operation_id", "inner").groupBy("root_id").agg(
-        F.sort_array(F.collect_set("route_id")).alias("route_ids")
+        return [_ccb_unavailable("8i.profile.route_shape", ["OPERACAO route columns"], SEV_WARN)]
+    route_sets = (
+        _ccb_active(operation)
+        .select(
+            _canon_key_col(F.col(operation_id)).alias("operation_id"),
+            _canon_key_col(F.col(operation_route)).alias("route_id"),
+        )
+        .join(chain_operations, "operation_id", "inner")
+        .groupBy("root_id")
+        .agg(F.sort_array(F.collect_set("route_id")).alias("route_ids"))
     )
 
     def count_child(table: str, output: str) -> DataFrame:
         frame = tables[table]
         parent = resolve(frame, "NUM_ID_OPERACAO")
-        return _ccb_active(frame).select(
-            _canon_key_col(F.col(parent)).alias("operation_id")
-        ).join(chain_operations, "operation_id", "inner").groupBy("root_id").count() \
+        return (
+            _ccb_active(frame)
+            .select(_canon_key_col(F.col(parent)).alias("operation_id"))
+            .join(chain_operations, "operation_id", "inner")
+            .groupBy("root_id")
+            .count()
             .withColumnRenamed("count", output)
+        )
 
     launches = count_child("LANCAMENTO", "launches")
     operation_data = count_child("DADO_OPERACAO", "operation_data")
-    pledges = _ccb_active(pledge).select(
-        _canon_key_col(F.col(required["pledge.NUM_IF_GRAVAME"])).alias("root_id")
-    ).groupBy("root_id").count().withColumnRenamed("count", "pledges")
-    shape = variants.join(operation_counts, "root_id", "left").join(
-        launches, "root_id", "left"
-    ).join(operation_data, "root_id", "left").join(pledges, "root_id", "left").join(
-        route_sets, "root_id", "left"
-    ).fillna(
-        0, ["operations", "launches", "operation_data", "pledges"]
+    pledges = (
+        _ccb_active(pledge)
+        .select(_canon_key_col(F.col(required["pledge.NUM_IF_GRAVAME"])).alias("root_id"))
+        .groupBy("root_id")
+        .count()
+        .withColumnRenamed("count", "pledges")
+    )
+    shape = (
+        variants.join(operation_counts, "root_id", "left")
+        .join(launches, "root_id", "left")
+        .join(operation_data, "root_id", "left")
+        .join(pledges, "root_id", "left")
+        .join(route_sets, "root_id", "left")
+        .fillna(0, ["operations", "launches", "operation_data", "pledges"])
     )
     contract_routes = F.array(F.lit("15394"), F.lit("15512"))
     constitution_routes = F.array(F.lit("15422"), F.lit("15464"))
     transfer_routes = F.array(F.lit("15035"), F.lit("15046"))
     valid = (
-        ((F.col("constitution_type") == "1") & (F.col("operations") == 2)
-         & (F.col("launches") == 2) & (F.col("operation_data") == 0)
-         & (F.col("pledges") == 0) & (F.col("route_ids") == contract_routes))
-        | ((F.col("constitution_type") == "2") & (F.col("operations") == 4)
-           & (F.col("launches") == 4) & (F.col("operation_data") == 12)
-           & (F.col("pledges") == 1) & (F.size(F.col("route_ids")) == 4)
-           & (F.size(F.array_intersect(F.col("route_ids"), contract_routes)) == 2)
-           & (F.size(F.array_intersect(F.col("route_ids"), constitution_routes)) == 1)
-           & (F.size(F.array_intersect(F.col("route_ids"), transfer_routes)) == 1))
+        (F.col("constitution_type") == "1")
+        & (F.col("operations") == 2)
+        & (F.col("launches") == 2)
+        & (F.col("operation_data") == 0)
+        & (F.col("pledges") == 0)
+        & (F.col("route_ids") == contract_routes)
+    ) | (
+        (F.col("constitution_type") == "2")
+        & (F.col("operations") == 4)
+        & (F.col("launches") == 4)
+        & (F.col("operation_data") == 12)
+        & (F.col("pledges") == 1)
+        & (F.size(F.col("route_ids")) == 4)
+        & (F.size(F.array_intersect(F.col("route_ids"), contract_routes)) == 2)
+        & (F.size(F.array_intersect(F.col("route_ids"), constitution_routes)) == 1)
+        & (F.size(F.array_intersect(F.col("route_ids"), transfer_routes)) == 1)
     )
     bad = shape.where(~F.coalesce(valid, F.lit(False)))
     count = bad.count()
     return [
         Finding(
-            "8i.profile.common_shape", "Gravame observed registration profile",
-            SEV_WARN if common_count else SEV_INFO, "INSTRUMENTO_FINANCEIRO",
-            common_count == 0, count=common_count,
+            "8i.profile.common_shape",
+            "Gravame observed registration profile",
+            SEV_WARN if common_count else SEV_INFO,
+            "INSTRUMENTO_FINANCEIRO",
+            common_count == 0,
+            count=common_count,
             sample=_sample_keys(bad_common, ["root_id"], sample),
-            hint="Keep exact common registration cardinalities advisory."
-                 if common_count else "",
+            hint="Keep exact common registration cardinalities advisory." if common_count else "",
             message="Gravame common graph differs from the ten registration snapshots.",
         ),
         Finding(
-            "8i.profile.root_code", "Gravame observed registration profile",
-            SEV_WARN if code_count else SEV_INFO, "INSTRUMENTO_FINANCEIRO",
-            code_count == 0, count=code_count,
+            "8i.profile.root_code",
+            "Gravame observed registration profile",
+            SEV_WARN if code_count else SEV_INFO,
+            "INSTRUMENTO_FINANCEIRO",
+            code_count == 0,
+            count=code_count,
             sample=_sample_keys(bad_codes, ["root_id", "business_code"], sample),
-            hint="Review blank or duplicate active Gravame COD_IF values."
-                 if code_count else "",
+            hint="Review blank or duplicate active Gravame COD_IF values." if code_count else "",
             message="Observed Gravame roots use nonblank unique COD_IF values.",
         ),
         Finding(
-            "8i.profile.variant_shape", "Gravame observed registration profile",
-            SEV_WARN if count else SEV_INFO, "IF_GRVM", count == 0, count=count,
+            "8i.profile.variant_shape",
+            "Gravame observed registration profile",
+            SEV_WARN if count else SEV_INFO,
+            "IF_GRVM",
+            count == 0,
+            count=count,
             sample=_sample_keys(
                 bad,
-                ["root_id", "constitution_type", "operations", "launches",
-                 "operation_data", "pledges", "route_ids"],
+                [
+                    "root_id",
+                    "constitution_type",
+                    "operations",
+                    "launches",
+                    "operation_data",
+                    "pledges",
+                    "route_ids",
+                ],
                 sample,
             ),
             hint="Keep exact contract-only/instrument-backed cardinalities advisory."
-                 if count else "",
+            if count
+            else "",
             message="Gravame graph differs from both observed registration profiles.",
         ),
     ]
 
 
 def check_gravame_target_frames(
-    tables: Dict[str, DataFrame], lookup_frames: Dict[str, DataFrame], sample: int,
-    profile: ValidationProfile, lookup_errors: Optional[Dict[str, str]] = None,
+    tables: Dict[str, DataFrame],
+    lookup_frames: Dict[str, DataFrame],
+    sample: int,
+    profile: ValidationProfile,
+    lookup_errors: Optional[Dict[str, str]] = None,
 ) -> List[Finding]:
     if profile.pipeline != "gravame":
         return []
@@ -6574,48 +8310,76 @@ def check_gravame_target_frames(
         for name in ("NUM_TIPO_IF", "COD_TIPO_IF", "DAT_EXCLUSAO")
     }
     if tipo is None or any(value is None for value in tipo_cols.values()):
-        out.append(_ccb_unavailable(
-            "6i.lookup.tipo_if", [lookup_errors.get("GRAVAME_TIPO_IF", "GRAVAME_TIPO_IF")],
-            SEV_WARN,
-        ))
+        out.append(
+            _ccb_unavailable(
+                "6i.lookup.tipo_if",
+                [lookup_errors.get("GRAVAME_TIPO_IF", "GRAVAME_TIPO_IF")],
+                SEV_WARN,
+            )
+        )
     else:
-        matches = _ccb_active(tipo).where(
-            (_canon_key_col(F.col(tipo_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if))
-            & (F.trim(F.col(tipo_cols["COD_TIPO_IF"]).cast("string")) == "GRVM")
-        ).limit(2).count()
-        out.append(Finding(
-            "6i.lookup.tipo_if", "Gravame target eligibility",
-            SEV_INFO if matches == 1 else SEV_ERROR, "TIPO_IF", matches == 1,
-            count=0 if matches == 1 else matches,
-            hint="Provide exactly one active target TIPO_IF 175/GRVM row."
-                 if matches != 1 else "",
-            message="Target Gravame type identity is active and unambiguous.",
-        ))
+        matches = (
+            _ccb_active(tipo)
+            .where(
+                (_canon_key_col(F.col(tipo_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if))
+                & (F.trim(F.col(tipo_cols["COD_TIPO_IF"]).cast("string")) == "GRVM")
+            )
+            .limit(2)
+            .count()
+        )
+        out.append(
+            Finding(
+                "6i.lookup.tipo_if",
+                "Gravame target eligibility",
+                SEV_INFO if matches == 1 else SEV_ERROR,
+                "TIPO_IF",
+                matches == 1,
+                count=0 if matches == 1 else matches,
+                hint="Provide exactly one active target TIPO_IF 175/GRVM row."
+                if matches != 1
+                else "",
+                message="Target Gravame type identity is active and unambiguous.",
+            )
+        )
     platform = lookup_frames.get("GRAVAME_OBJECT_SERVICE")
     platform_cols = {
         name: resolve(platform, name) if platform is not None else None
         for name in ("COD_OBJETO_SERVICO", "IND_PLATAFORMA_BAIXA")
     }
     if platform is None or any(value is None for value in platform_cols.values()):
-        out.append(_ccb_unavailable(
-            "6i.lookup.platform",
-            [lookup_errors.get("GRAVAME_OBJECT_SERVICE", "GRAVAME_OBJECT_SERVICE")],
-            SEV_WARN,
-        ))
+        out.append(
+            _ccb_unavailable(
+                "6i.lookup.platform",
+                [lookup_errors.get("GRAVAME_OBJECT_SERVICE", "GRAVAME_OBJECT_SERVICE")],
+                SEV_WARN,
+            )
+        )
     else:
-        enabled = platform.where(
-            (F.trim(F.col(platform_cols["COD_OBJETO_SERVICO"]).cast("string")) == "GRVM")
-            & (F.upper(F.trim(F.col(platform_cols["IND_PLATAFORMA_BAIXA"])
-                              .cast("string"))) == "S")
-        ).limit(1).count()
-        out.append(Finding(
-            "6i.lookup.platform", "Gravame target eligibility",
-            SEV_INFO if enabled else SEV_ERROR, "V_OBJETOS_SERVICO", bool(enabled),
-            count=0 if enabled else 1,
-            hint="Enable COD_OBJETO_SERVICO='GRVM' on the baixa platform."
-                 if not enabled else "",
-            message="Target GRVM object service is enabled for baixa.",
-        ))
+        enabled = (
+            platform.where(
+                (F.trim(F.col(platform_cols["COD_OBJETO_SERVICO"]).cast("string")) == "GRVM")
+                & (
+                    F.upper(F.trim(F.col(platform_cols["IND_PLATAFORMA_BAIXA"]).cast("string")))
+                    == "S"
+                )
+            )
+            .limit(1)
+            .count()
+        )
+        out.append(
+            Finding(
+                "6i.lookup.platform",
+                "Gravame target eligibility",
+                SEV_INFO if enabled else SEV_ERROR,
+                "V_OBJETOS_SERVICO",
+                bool(enabled),
+                count=0 if enabled else 1,
+                hint="Enable COD_OBJETO_SERVICO='GRVM' on the baixa platform."
+                if not enabled
+                else "",
+                message="Target GRVM object service is enabled for baixa.",
+            )
+        )
 
     root = tables.get("INSTRUMENTO_FINANCEIRO")
     operation = tables.get("OPERACAO")
@@ -6625,54 +8389,71 @@ def check_gravame_target_frames(
         "root.NUM_TIPO_IF": resolve(root, "NUM_TIPO_IF") if root is not None else None,
         "operation.NUM_IF": resolve(operation, "NUM_IF") if operation is not None else None,
         "operation.route": (
-            resolve(operation, "NUM_ID_TIPO_OPER_OBJETO_SERV")
-            if operation is not None else None
+            resolve(operation, "NUM_ID_TIPO_OPER_OBJETO_SERV") if operation is not None else None
         ),
     }
     route_columns = {
         name: resolve(routes, name) if routes is not None else None
         for name in (
-            "NUM_ID_TIPO_OPER_OBJETO_SERV", "NUM_ID_OBJETO_SERVICO",
+            "NUM_ID_TIPO_OPER_OBJETO_SERV",
+            "NUM_ID_OBJETO_SERVICO",
             "COD_TIPO_OPERACAO",
         )
     }
     missing = [name for name, value in required.items() if not value]
     if missing or routes is None or any(value is None for value in route_columns.values()):
-        out.append(_ccb_unavailable(
-            "6i.lookup.registration_route",
-            missing or [lookup_errors.get("GRAVAME_ROUTES", "GRAVAME_ROUTES")], SEV_WARN,
-        ))
+        out.append(
+            _ccb_unavailable(
+                "6i.lookup.registration_route",
+                missing or [lookup_errors.get("GRAVAME_ROUTES", "GRAVAME_ROUTES")],
+                SEV_WARN,
+            )
+        )
         return out
-    roots = _ccb_active(root).where(
-        _canon_key_col(F.col(required["root.NUM_TIPO_IF"])) == str(profile.num_tipo_if)
-    ).select(_canon_key_col(F.col(required["root.NUM_IF"])).alias("root_id")).dropDuplicates()
-    operations = _ccb_active(operation).select(
-        _canon_key_col(F.col(required["operation.NUM_IF"])).alias("root_id"),
-        _canon_key_col(F.col(required["operation.route"])).alias("route_id"),
-    ).join(roots, "root_id", "inner")
+    roots = (
+        _ccb_active(root)
+        .where(_canon_key_col(F.col(required["root.NUM_TIPO_IF"])) == str(profile.num_tipo_if))
+        .select(_canon_key_col(F.col(required["root.NUM_IF"])).alias("root_id"))
+        .dropDuplicates()
+    )
+    operations = (
+        _ccb_active(operation)
+        .select(
+            _canon_key_col(F.col(required["operation.NUM_IF"])).alias("root_id"),
+            _canon_key_col(F.col(required["operation.route"])).alias("route_id"),
+        )
+        .join(roots, "root_id", "inner")
+    )
     semantics = routes.select(
-        _canon_key_col(F.col(route_columns["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
-        .alias("route_id"),
+        _canon_key_col(F.col(route_columns["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias("route_id"),
         _canon_key_col(F.col(route_columns["NUM_ID_OBJETO_SERVICO"])).alias("object_id"),
-        F.trim(F.col(route_columns["COD_TIPO_OPERACAO"])
-               .cast("string")).alias("operation_type"),
+        F.trim(F.col(route_columns["COD_TIPO_OPERACAO"]).cast("string")).alias("operation_type"),
     ).dropDuplicates(["route_id"])
     registration = operations.join(F.broadcast(semantics), "route_id", "left").where(
         F.col("operation_type") == "520"
     )
-    valid = registration.where(
-        F.col("object_id") == str(profile.object_service_id)
-    ).select("root_id").dropDuplicates()
+    valid = (
+        registration.where(F.col("object_id") == str(profile.object_service_id))
+        .select("root_id")
+        .dropDuplicates()
+    )
     invalid = roots.join(valid, "root_id", "left_anti")
     count = invalid.count()
-    out.append(Finding(
-        "6i.lookup.registration_route", "Gravame target eligibility",
-        SEV_ERROR if count else SEV_INFO, "TIPO_OPER_OBJETO_SERV", count == 0,
-        count=count, sample=_sample_keys(invalid, ["root_id"], sample),
-        hint="Give every active Gravame an approved operation 520 route on object 1132."
-             if count else "",
-        message="Every active Gravame has an approved registration route.",
-    ))
+    out.append(
+        Finding(
+            "6i.lookup.registration_route",
+            "Gravame target eligibility",
+            SEV_ERROR if count else SEV_INFO,
+            "TIPO_OPER_OBJETO_SERV",
+            count == 0,
+            count=count,
+            sample=_sample_keys(invalid, ["root_id"], sample),
+            hint="Give every active Gravame an approved operation 520 route on object 1132."
+            if count
+            else "",
+            message="Every active Gravame has an approved registration route.",
+        )
+    )
     pledge = tables.get("GRAVAME_GRAU_PENHOR")
     pledge_root = resolve(pledge, "NUM_IF_GRAVAME") if pledge is not None else None
     pledge_guarantee = resolve(pledge, "NUM_IF_GARANTIA") if pledge is not None else None
@@ -6693,17 +8474,17 @@ def check_gravame_target_frames(
                 or any(value is None for value in guarantee_columns.values())
                 or not root_registration
             ):
-                out.append(_ccb_unavailable(
-                    "6i.lookup.guarantee",
-                    [lookup_errors.get("GRAVAME_GUARANTEES", "GRAVAME_GUARANTEES")],
-                    SEV_WARN,
-                ))
+                out.append(
+                    _ccb_unavailable(
+                        "6i.lookup.guarantee",
+                        [lookup_errors.get("GRAVAME_GUARANTEES", "GRAVAME_GUARANTEES")],
+                        SEV_WARN,
+                    )
+                )
             else:
                 eligible = _ccb_active(guarantees).select(
-                    _canon_key_col(F.col(guarantee_columns["NUM_IF"]))
-                    .alias("guarantee_id"),
-                    _ccb_try_date(guarantee_columns["DAT_VENCIMENTO"])
-                    .alias("guarantee_maturity"),
+                    _canon_key_col(F.col(guarantee_columns["NUM_IF"])).alias("guarantee_id"),
+                    _ccb_try_date(guarantee_columns["DAT_VENCIMENTO"]).alias("guarantee_maturity"),
                 )
                 registrations = _ccb_active(root).select(
                     _canon_key_col(F.col(required["root.NUM_IF"])).alias("root_id"),
@@ -6718,24 +8499,30 @@ def check_gravame_target_frames(
                     | (F.col("guarantee_maturity") < F.col("registration_date"))
                 )
                 guarantee_count = bad_guarantees.count()
-                out.append(Finding(
-                    "6i.lookup.guarantee", "Gravame target eligibility",
-                    SEV_ERROR if guarantee_count else SEV_INFO,
-                    "INSTRUMENTO_FINANCEIRO", guarantee_count == 0,
-                    count=guarantee_count,
-                    sample=_sample_keys(
-                        bad_guarantees, ["root_id", "guarantee_id"], sample
-                    ),
-                    hint="Use an active, non-matured guaranteed instrument."
-                         if guarantee_count else "",
-                    message="Pledged instruments missing, deleted, malformed, or matured.",
-                ))
+                out.append(
+                    Finding(
+                        "6i.lookup.guarantee",
+                        "Gravame target eligibility",
+                        SEV_ERROR if guarantee_count else SEV_INFO,
+                        "INSTRUMENTO_FINANCEIRO",
+                        guarantee_count == 0,
+                        count=guarantee_count,
+                        sample=_sample_keys(bad_guarantees, ["root_id", "guarantee_id"], sample),
+                        hint="Use an active, non-matured guaranteed instrument."
+                        if guarantee_count
+                        else "",
+                        message="Pledged instruments missing, deleted, malformed, or matured.",
+                    )
+                )
     return out
 
 
 def load_gravame_target_frames(
-    spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame],
-    skip_prefixes: Optional[Sequence[str]] = None, max_route_keys: int = 10_000,
+    spark: SparkSession,
+    cfg: Config,
+    tables: Dict[str, DataFrame],
+    skip_prefixes: Optional[Sequence[str]] = None,
+    max_route_keys: int = 10_000,
 ) -> Tuple[Dict[str, DataFrame], Dict[str, str]]:
     skip_prefixes = list(skip_prefixes or [])
     if _check_group_is_skipped(("6i.lookup",), skip_prefixes):
@@ -6759,8 +8546,9 @@ def load_gravame_target_frames(
         except Exception as exc:  # noqa: BLE001
             errors[name] = str(exc)
     operation = tables.get("OPERACAO")
-    route_col = resolve(operation, "NUM_ID_TIPO_OPER_OBJETO_SERV") \
-        if operation is not None else None
+    route_col = (
+        resolve(operation, "NUM_ID_TIPO_OPER_OBJETO_SERV") if operation is not None else None
+    )
     operation_if = resolve(operation, "NUM_IF") if operation is not None else None
     root = tables.get("INSTRUMENTO_FINANCEIRO")
     root_if = resolve(root, "NUM_IF") if root is not None else None
@@ -6769,18 +8557,23 @@ def load_gravame_target_frames(
     if operation is not None and route_col:
         scoped_operations = operation
         if operation_if and root_if and root_type:
-            gravame_roots = _ccb_active(root).where(
-                _canon_key_col(F.col(root_type)) == "175"
-            ).select(_canon_key_col(F.col(root_if)).alias("root_id"))
-            scoped_operations = _ccb_active(operation).select(
-                F.col(route_col), _canon_key_col(F.col(operation_if)).alias("root_id")
-            ).join(gravame_roots, "root_id", "inner")
+            gravame_roots = (
+                _ccb_active(root)
+                .where(_canon_key_col(F.col(root_type)) == "175")
+                .select(_canon_key_col(F.col(root_if)).alias("root_id"))
+            )
+            scoped_operations = (
+                _ccb_active(operation)
+                .select(F.col(route_col), _canon_key_col(F.col(operation_if)).alias("root_id"))
+                .join(gravame_roots, "root_id", "inner")
+            )
         route_ids = [
             _canon_key(row["route_id"])
-            for row in scoped_operations.select(
-                _canon_key_col(F.col(route_col)).alias("route_id")
-            ).where(F.col("route_id").isNotNull()).dropDuplicates() \
-                .limit(max_route_keys + 1).collect()
+            for row in scoped_operations.select(_canon_key_col(F.col(route_col)).alias("route_id"))
+            .where(F.col("route_id").isNotNull())
+            .dropDuplicates()
+            .limit(max_route_keys + 1)
+            .collect()
         ]
     if len(route_ids) > max_route_keys:
         errors["GRAVAME_ROUTES"] = f"more than {max_route_keys} distinct route keys"
@@ -6789,7 +8582,7 @@ def load_gravame_target_frames(
         try:
             for offset in range(0, len(route_ids), 1000):
                 literals = ", ".join(
-                    _sql_literal(value) for value in route_ids[offset:offset + 1000]
+                    _sql_literal(value) for value in route_ids[offset : offset + 1000]
                 )
                 query = (
                     "SELECT tos.NUM_ID_TIPO_OPER_OBJETO_SERV, tos.NUM_ID_OBJETO_SERVICO, "
@@ -6817,10 +8610,12 @@ def load_gravame_target_frames(
     if pledge is not None and guarantee_col:
         guarantee_ids = [
             _canon_key(row["guarantee_id"])
-            for row in _ccb_active(pledge).select(
-                _canon_key_col(F.col(guarantee_col)).alias("guarantee_id")
-            ).where(F.col("guarantee_id").isNotNull()).dropDuplicates() \
-                .limit(max_route_keys + 1).collect()
+            for row in _ccb_active(pledge)
+            .select(_canon_key_col(F.col(guarantee_col)).alias("guarantee_id"))
+            .where(F.col("guarantee_id").isNotNull())
+            .dropDuplicates()
+            .limit(max_route_keys + 1)
+            .collect()
         ]
     if len(guarantee_ids) > max_route_keys:
         errors["GRAVAME_GUARANTEES"] = (
@@ -6831,7 +8626,7 @@ def load_gravame_target_frames(
         try:
             for offset in range(0, len(guarantee_ids), 1000):
                 literals = ", ".join(
-                    _sql_literal(value) for value in guarantee_ids[offset:offset + 1000]
+                    _sql_literal(value) for value in guarantee_ids[offset : offset + 1000]
                 )
                 query = (
                     "SELECT NUM_IF, DAT_EXCLUSAO, DAT_VENCIMENTO "
@@ -6851,11 +8646,24 @@ def load_gravame_target_frames(
 # Category 0/2e/6e/8e - LCI registration-route evidence
 # ---------------------------------------------------------------------------
 LCI_OUTPUT_TABLES = (
-    "INSTRUMENTO_FINANCEIRO", "TITULO", "CREDITO", "CONDICAO_IF",
-    "JUROS_FIXO", "JUROS_FLUTUANTE", "ATUALIZACAO_POS", "RESGATE",
-    "HISTORICO_PU_CURVA", "EVENTO", "DEPOSITO_AUTOMATICO_IF", "OPERACAO",
-    "DADO_OPERACAO", "LANCAMENTO", "ESPECIFICACAO", "ESPECIFICACAO_COMITENTE",
-    "CARTEIRA_COMITENTE", "CARTEIRA_PARTICIPANTE",
+    "INSTRUMENTO_FINANCEIRO",
+    "TITULO",
+    "CREDITO",
+    "CONDICAO_IF",
+    "JUROS_FIXO",
+    "JUROS_FLUTUANTE",
+    "ATUALIZACAO_POS",
+    "RESGATE",
+    "HISTORICO_PU_CURVA",
+    "EVENTO",
+    "DEPOSITO_AUTOMATICO_IF",
+    "OPERACAO",
+    "DADO_OPERACAO",
+    "LANCAMENTO",
+    "ESPECIFICACAO",
+    "ESPECIFICACAO_COMITENTE",
+    "CARTEIRA_COMITENTE",
+    "CARTEIRA_PARTICIPANTE",
 )
 LCI_CONDITION_SUBTYPES = {
     "2": "JUROS_FIXO",
@@ -6873,8 +8681,11 @@ def _lci_text(column):
 
 def _lci_unavailable(check_id: str, missing: List[str], severity: str = SEV_WARN) -> Finding:
     return Finding(
-        check_id, "LCI", severity,
-        ",".join(sorted({value.split(".")[0] for value in missing})), False,
+        check_id,
+        "LCI",
+        severity,
+        ",".join(sorted({value.split(".")[0] for value in missing})),
+        False,
         hint="Export the complete LCI aggregate or make its bounded target lookup available.",
         message=f"Check unavailable; missing required input: {', '.join(missing)}.",
     )
@@ -6886,35 +8697,54 @@ def check_lci_metadata(
     if profile.pipeline != "lci":
         return []
     if no_oracle:
-        return [Finding(
-            "0.lci_metadata", "Coverage", SEV_WARN, "Oracle metadata", False,
-            hint="Rerun with Oracle access; specs.json is not authoritative for this route.",
-            message="Live Oracle table and PK metadata for the 18-table LCI aggregate is "
-                    "unavailable under --no-oracle (forces PARTIAL).",
-        )]
+        return [
+            Finding(
+                "0.lci_metadata",
+                "Coverage",
+                SEV_WARN,
+                "Oracle metadata",
+                False,
+                hint="Rerun with Oracle access; specs.json is not authoritative for this route.",
+                message="Live Oracle table and PK metadata for the 18-table LCI aggregate is "
+                "unavailable under --no-oracle (forces PARTIAL).",
+            )
+        ]
     missing = [table for table in LCI_OUTPUT_TABLES if table not in meta.tables]
     missing_pk = [
         table for table in LCI_OUTPUT_TABLES if table in meta.tables and not meta.pk.get(table)
     ]
     failed = bool(missing or missing_pk)
-    return [Finding(
-        "0.lci_metadata", "Coverage", SEV_ERROR if failed else SEV_INFO,
-        ",".join(LCI_OUTPUT_TABLES), not failed, count=len(missing) + len(missing_pk),
-        hint="Read live table and PK metadata for every LCI output table; do not fill the "
-             "HISTORICO_PU_CURVA gap from specs.json." if failed else "",
-        message=(f"Missing Oracle table metadata={missing}; missing PK metadata={missing_pk}."
-                 if failed else
-                 "Live Oracle table and PK metadata cover all 18 LCI output tables."),
-    )]
+    return [
+        Finding(
+            "0.lci_metadata",
+            "Coverage",
+            SEV_ERROR if failed else SEV_INFO,
+            ",".join(LCI_OUTPUT_TABLES),
+            not failed,
+            count=len(missing) + len(missing_pk),
+            hint="Read live table and PK metadata for every LCI output table; do not fill the "
+            "HISTORICO_PU_CURVA gap from specs.json."
+            if failed
+            else "",
+            message=(
+                f"Missing Oracle table metadata={missing}; missing PK metadata={missing_pk}."
+                if failed
+                else "Live Oracle table and PK metadata cover all 18 LCI output tables."
+            ),
+        )
+    ]
 
 
 def _lci_edge_findings(
-    check_id: str, parents: DataFrame, child: DataFrame, child_table: str,
-    parent_column: str, child_id_column: str, sample: int,
+    check_id: str,
+    parents: DataFrame,
+    child: DataFrame,
+    child_table: str,
+    parent_column: str,
+    child_id_column: str,
+    sample: int,
 ) -> List[Finding]:
-    parent_counts = parents.groupBy("parent_id").count().withColumnRenamed(
-        "count", "parent_count"
-    )
+    parent_counts = parents.groupBy("parent_id").count().withColumnRenamed("count", "parent_count")
     edges = child.select(
         _canon_key_col(F.col(parent_column)).alias("parent_id"),
         _canon_key_col(F.col(child_id_column)).alias("child_id"),
@@ -6927,20 +8757,27 @@ def _lci_edge_findings(
     duplicate_count = duplicate.count()
     return [
         Finding(
-            f"{check_id}.edge", "LCI graph", SEV_ERROR if count else SEV_INFO,
-            child_table, count == 0, count=count, column=parent_column,
+            f"{check_id}.edge",
+            "LCI graph",
+            SEV_ERROR if count else SEV_INFO,
+            child_table,
+            count == 0,
+            count=count,
+            column=parent_column,
             sample=_sample_keys(bad, ["child_id", "parent_id"], sample),
             hint="Remove the orphan/ambiguous edge or export its one parent." if count else "",
             message="LCI child rows must resolve to exactly one aggregate parent.",
         ),
         Finding(
-            f"{check_id}.duplicate", "LCI graph",
-            SEV_ERROR if duplicate_count else SEV_INFO, child_table,
-            duplicate_count == 0, count=duplicate_count,
+            f"{check_id}.duplicate",
+            "LCI graph",
+            SEV_ERROR if duplicate_count else SEV_INFO,
+            child_table,
+            duplicate_count == 0,
+            count=duplicate_count,
             column=f"{child_id_column},{parent_column}",
             sample=_sample_keys(duplicate, ["child_id", "parent_id"], sample),
-            hint="Keep each physical child-to-parent edge unambiguous."
-                 if duplicate_count else "",
+            hint="Keep each physical child-to-parent edge unambiguous." if duplicate_count else "",
             message="Duplicate LCI physical graph edges.",
         ),
     ]
@@ -6968,7 +8805,8 @@ def check_lci_graph(
         "LANCAMENTO": ("NUM_ID_LANCAMENTO", "NUM_ID_OPERACAO"),
         "ESPECIFICACAO": ("NUM_ID_ESPECIFICACAO", "NUM_ID_OPERACAO"),
         "ESPECIFICACAO_COMITENTE": (
-            "NUM_ID_ESPECIFICACAO_COMITENTE", "NUM_ID_ESPECIFICACAO",
+            "NUM_ID_ESPECIFICACAO_COMITENTE",
+            "NUM_ID_ESPECIFICACAO",
         ),
         "CARTEIRA_COMITENTE": ("NUM_CARTEIRA_COMITENTE", "NUM_IF"),
         "CARTEIRA_PARTICIPANTE": ("NUM_CARTEIRA_PARTICIPANTE", "NUM_IF"),
@@ -6989,42 +8827,61 @@ def check_lci_graph(
         "code_count", F.count(F.lit(1)).over(Window.partitionBy("business_code"))
     )
     bad_codes = coded.where(
-        F.col("business_code").isNull() | (F.col("business_code") == "")
-        | (F.col("code_count") > 1)
+        F.col("business_code").isNull() | (F.col("business_code") == "") | (F.col("code_count") > 1)
     )
     count = bad_codes.count()
-    out = [Finding(
-        "2e.root_code", "LCI graph", SEV_ERROR if count else SEV_INFO,
-        "INSTRUMENTO_FINANCEIRO", count == 0, count=count, column="COD_IF",
-        sample=_sample_keys(bad_codes, ["parent_id", "business_code"], sample),
-        hint="Generate nonblank, unique exact-trimmed active LCI COD_IF values."
-             if count else "",
-        message="Active LCI roots with blank or duplicate case-sensitive COD_IF values.",
-    )]
+    out = [
+        Finding(
+            "2e.root_code",
+            "LCI graph",
+            SEV_ERROR if count else SEV_INFO,
+            "INSTRUMENTO_FINANCEIRO",
+            count == 0,
+            count=count,
+            column="COD_IF",
+            sample=_sample_keys(bad_codes, ["parent_id", "business_code"], sample),
+            hint="Generate nonblank, unique exact-trimmed active LCI COD_IF values."
+            if count
+            else "",
+            message="Active LCI roots with blank or duplicate case-sensitive COD_IF values.",
+        )
+    ]
 
     for table in ("TITULO", "CREDITO"):
         child_col = columns[table]["NUM_IF"]
-        children = tables[table].select(
-            _canon_key_col(F.col(child_col)).alias("parent_id")
-        )
+        children = tables[table].select(_canon_key_col(F.col(child_col)).alias("parent_id"))
         counts = children.groupBy("parent_id").count().withColumnRenamed("count", "child_count")
-        bad = roots.select("parent_id").join(counts, "parent_id", "left").where(
-            F.coalesce(F.col("child_count"), F.lit(0)) != 1
+        bad = (
+            roots.select("parent_id")
+            .join(counts, "parent_id", "left")
+            .where(F.coalesce(F.col("child_count"), F.lit(0)) != 1)
         )
         child_count = bad.count()
-        out.append(Finding(
-            f"2e.one_{table.lower()}", "LCI graph",
-            SEV_ERROR if child_count else SEV_INFO, table, child_count == 0,
-            count=child_count, column="NUM_IF",
-            sample=_sample_keys(bad, ["parent_id"], sample),
-            hint=f"Keep exactly one {table} row per active LCI root."
-                 if child_count else "",
-            message=f"Active LCI roots without exactly one {table} row.",
-        ))
-        out.extend(_lci_edge_findings(
-            f"2e.{table.lower()}", roots.select("parent_id"), tables[table], table,
-            child_col, child_col, sample,
-        ))
+        out.append(
+            Finding(
+                f"2e.one_{table.lower()}",
+                "LCI graph",
+                SEV_ERROR if child_count else SEV_INFO,
+                table,
+                child_count == 0,
+                count=child_count,
+                column="NUM_IF",
+                sample=_sample_keys(bad, ["parent_id"], sample),
+                hint=f"Keep exactly one {table} row per active LCI root." if child_count else "",
+                message=f"Active LCI roots without exactly one {table} row.",
+            )
+        )
+        out.extend(
+            _lci_edge_findings(
+                f"2e.{table.lower()}",
+                roots.select("parent_id"),
+                tables[table],
+                table,
+                child_col,
+                child_col,
+                sample,
+            )
+        )
 
     direct_edges = (
         ("condition", "CONDICAO_IF", "NUM_IF", "NUM_CONDICAO_IF"),
@@ -7033,14 +8890,20 @@ def check_lci_graph(
         ("deposit", "DEPOSITO_AUTOMATICO_IF", "NUM_IF", "NUM_IF"),
         ("operation", "OPERACAO", "NUM_IF", "NUM_ID_OPERACAO"),
         ("wallet_comitente", "CARTEIRA_COMITENTE", "NUM_IF", "NUM_CARTEIRA_COMITENTE"),
-        ("wallet_participante", "CARTEIRA_PARTICIPANTE", "NUM_IF",
-         "NUM_CARTEIRA_PARTICIPANTE"),
+        ("wallet_participante", "CARTEIRA_PARTICIPANTE", "NUM_IF", "NUM_CARTEIRA_PARTICIPANTE"),
     )
     for name, table, parent_name, child_name in direct_edges:
-        out.extend(_lci_edge_findings(
-            f"2e.{name}", roots.select("parent_id"), tables[table], table,
-            columns[table][parent_name], columns[table][child_name], sample,
-        ))
+        out.extend(
+            _lci_edge_findings(
+                f"2e.{name}",
+                roots.select("parent_id"),
+                tables[table],
+                table,
+                columns[table][parent_name],
+                columns[table][child_name],
+                sample,
+            )
+        )
 
     operations = tables["OPERACAO"].select(
         _canon_key_col(F.col(columns["OPERACAO"]["NUM_ID_OPERACAO"])).alias("parent_id")
@@ -7050,20 +8913,31 @@ def check_lci_graph(
         ("launch", "LANCAMENTO", "NUM_ID_LANCAMENTO"),
         ("specification", "ESPECIFICACAO", "NUM_ID_ESPECIFICACAO"),
     ):
-        out.extend(_lci_edge_findings(
-            f"2e.{name}", operations, tables[table], table,
-            columns[table]["NUM_ID_OPERACAO"], columns[table][child_name], sample,
-        ))
+        out.extend(
+            _lci_edge_findings(
+                f"2e.{name}",
+                operations,
+                tables[table],
+                table,
+                columns[table]["NUM_ID_OPERACAO"],
+                columns[table][child_name],
+                sample,
+            )
+        )
     specifications = tables["ESPECIFICACAO"].select(
-        _canon_key_col(F.col(columns["ESPECIFICACAO"]["NUM_ID_ESPECIFICACAO"]))
-        .alias("parent_id")
+        _canon_key_col(F.col(columns["ESPECIFICACAO"]["NUM_ID_ESPECIFICACAO"])).alias("parent_id")
     )
-    out.extend(_lci_edge_findings(
-        "2e.specification_holder", specifications, tables["ESPECIFICACAO_COMITENTE"],
-        "ESPECIFICACAO_COMITENTE",
-        columns["ESPECIFICACAO_COMITENTE"]["NUM_ID_ESPECIFICACAO"],
-        columns["ESPECIFICACAO_COMITENTE"]["NUM_ID_ESPECIFICACAO_COMITENTE"], sample,
-    ))
+    out.extend(
+        _lci_edge_findings(
+            "2e.specification_holder",
+            specifications,
+            tables["ESPECIFICACAO_COMITENTE"],
+            "ESPECIFICACAO_COMITENTE",
+            columns["ESPECIFICACAO_COMITENTE"]["NUM_ID_ESPECIFICACAO"],
+            columns["ESPECIFICACAO_COMITENTE"]["NUM_ID_ESPECIFICACAO_COMITENTE"],
+            sample,
+        )
+    )
     return out
 
 
@@ -7081,9 +8955,7 @@ def check_lci_polymorphism(
         return [_lci_unavailable("2e.condition.availability", missing, SEV_ERROR)]
     condition = _active(tables["CONDICAO_IF"]).select(
         _canon_key_col(F.col(columns["CONDICAO_IF"]["NUM_CONDICAO_IF"])).alias("condition_id"),
-        _lci_text(F.col(columns["CONDICAO_IF"]["COD_TIPO_CONDICAO_IF"])).alias(
-            "condition_type"
-        ),
+        _lci_text(F.col(columns["CONDICAO_IF"]["COD_TIPO_CONDICAO_IF"])).alias("condition_type"),
     )
     membership = None
     for table in LCI_CONDITION_SUBTYPES.values():
@@ -7092,9 +8964,12 @@ def check_lci_polymorphism(
             F.lit(table).alias("physical_table"),
         )
         membership = frame if membership is None else membership.unionByName(frame)
-    counts = membership.groupBy("condition_id").pivot(
-        "physical_table", list(LCI_CONDITION_SUBTYPES.values())
-    ).count().fillna(0)
+    counts = (
+        membership.groupBy("condition_id")
+        .pivot("physical_table", list(LCI_CONDITION_SUBTYPES.values()))
+        .count()
+        .fillna(0)
+    )
     known = condition.where(F.col("condition_type").isin(*LCI_CONDITION_SUBTYPES))
     joined = known.join(counts, "condition_id", "left").fillna(
         0, list(LCI_CONDITION_SUBTYPES.values())
@@ -7105,14 +8980,17 @@ def check_lci_polymorphism(
     joined = joined.withColumn(
         "expected_table", F.create_map(*expected_pairs)[F.col("condition_type")]
     )
-    bad = joined.where(reduce(
-        lambda left, right: left | right,
-        [
-            F.when(F.col("expected_table") == table, F.col(table) != 1)
-            .otherwise(F.col(table) != 0)
-            for table in LCI_CONDITION_SUBTYPES.values()
-        ],
-    ))
+    bad = joined.where(
+        reduce(
+            lambda left, right: left | right,
+            [
+                F.when(F.col("expected_table") == table, F.col(table) != 1).otherwise(
+                    F.col(table) != 0
+                )
+                for table in LCI_CONDITION_SUBTYPES.values()
+            ],
+        )
+    )
     bad_count = bad.count()
     unknown = condition.where(
         F.col("condition_type").isNull()
@@ -7125,27 +9003,42 @@ def check_lci_polymorphism(
     orphan_count = orphan.count()
     return [
         Finding(
-            "2e.condition_polymorphism", "LCI condition polymorphism",
-            SEV_ERROR if bad_count else SEV_INFO, "CONDICAO_IF", bad_count == 0,
-            count=bad_count, column="COD_TIPO_CONDICAO_IF,NUM_CONDICAO_IF",
+            "2e.condition_polymorphism",
+            "LCI condition polymorphism",
+            SEV_ERROR if bad_count else SEV_INFO,
+            "CONDICAO_IF",
+            bad_count == 0,
+            count=bad_count,
+            column="COD_TIPO_CONDICAO_IF,NUM_CONDICAO_IF",
             sample=_sample_keys(bad, ["condition_id", "condition_type"], sample),
             hint="For known LCI types, emit exactly one expected physical row and none in "
-                 "the other known tables." if bad_count else "",
+            "the other known tables."
+            if bad_count
+            else "",
             message="Known LCI conditions with missing, duplicate, or wrong physical subtype.",
         ),
         Finding(
-            "2e.unknown_condition_type", "LCI condition polymorphism",
-            SEV_WARN if unknown_count else SEV_INFO, "CONDICAO_IF", unknown_count == 0,
-            count=unknown_count, column="COD_TIPO_CONDICAO_IF",
+            "2e.unknown_condition_type",
+            "LCI condition polymorphism",
+            SEV_WARN if unknown_count else SEV_INFO,
+            "CONDICAO_IF",
+            unknown_count == 0,
+            count=unknown_count,
+            column="COD_TIPO_CONDICAO_IF",
             sample=_sample_keys(unknown, ["condition_id", "condition_type"], sample),
             hint="Capture another successful LCI variant before assigning a physical mapping."
-                 if unknown_count else "",
+            if unknown_count
+            else "",
             message="LCI condition types outside the four log-proven mappings.",
         ),
         Finding(
-            "2e.subtype_orphan", "LCI condition polymorphism",
-            SEV_ERROR if orphan_count else SEV_INFO, "CONDICAO_IF", orphan_count == 0,
-            count=orphan_count, column="NUM_CONDICAO_IF",
+            "2e.subtype_orphan",
+            "LCI condition polymorphism",
+            SEV_ERROR if orphan_count else SEV_INFO,
+            "CONDICAO_IF",
+            orphan_count == 0,
+            count=orphan_count,
+            column="NUM_CONDICAO_IF",
             sample=_sample_keys(orphan, ["condition_id", "physical_table"], sample),
             hint="Remove subtype rows without a CONDICAO_IF parent." if orphan_count else "",
             message="Known LCI physical subtype rows without a condition parent.",
@@ -7164,9 +9057,15 @@ def _lci_active_target(frame: DataFrame) -> Tuple[Optional[DataFrame], bool]:
 
 
 def _lci_toggle_enabled_roots(roots: DataFrame, toggle: DataFrame) -> Optional[DataFrame]:
-    columns = {name: resolve(toggle, name) for name in (
-        "COD_FTRE_TOG", "IND_FTRE_HAB", "DATA_INIC_VIG_FTRE", "DATA_FIM_VIG_FTRE",
-    )}
+    columns = {
+        name: resolve(toggle, name)
+        for name in (
+            "COD_FTRE_TOG",
+            "IND_FTRE_HAB",
+            "DATA_INIC_VIG_FTRE",
+            "DATA_FIM_VIG_FTRE",
+        )
+    }
     if any(value is None for value in columns.values()):
         return None
     periods = toggle.where(
@@ -7185,8 +9084,14 @@ def _lci_toggle_enabled_roots(roots: DataFrame, toggle: DataFrame) -> Optional[D
 
 
 def _lci_collision_finding(
-    check_id: str, category: str, source: DataFrame, target: Optional[DataFrame],
-    keys: List[str], table: str, sample: int, active_required: bool = True,
+    check_id: str,
+    category: str,
+    source: DataFrame,
+    target: Optional[DataFrame],
+    keys: List[str],
+    table: str,
+    sample: int,
+    active_required: bool = True,
 ) -> Finding:
     if target is None:
         return _lci_unavailable(check_id, [table], SEV_WARN)
@@ -7199,48 +9104,75 @@ def _lci_collision_finding(
         active, supported = _lci_active_target(target)
         if not supported:
             return Finding(
-                check_id, category, SEV_WARN, table, False, column=",".join(keys),
+                check_id,
+                category,
+                SEV_WARN,
+                table,
+                False,
+                column=",".join(keys),
                 hint="Expose DAT_EXCLUSAO or log-proven IND_EXCLUIDO semantics before "
-                     "classifying target rows as active.",
+                "classifying target rows as active.",
                 message="Target wallet/code collision check is unavailable because active-row "
-                        "semantics cannot be reconstructed.",
+                "semantics cannot be reconstructed.",
             )
-    target_keys = active.select(*[
-        _canon_key_col(F.col(target_columns[key])).alias(key) for key in keys
-    ]).dropDuplicates()
+    target_keys = active.select(
+        *[_canon_key_col(F.col(target_columns[key])).alias(key) for key in keys]
+    ).dropDuplicates()
     bad = source.join(F.broadcast(target_keys), keys, "inner")
     count = bad.count()
     return Finding(
-        check_id, category, SEV_ERROR if count else SEV_INFO, table, count == 0,
-        count=count, column=",".join(keys), sample=_sample_keys(bad, keys, sample),
+        check_id,
+        category,
+        SEV_ERROR if count else SEV_INFO,
+        table,
+        count == 0,
+        count=count,
+        column=",".join(keys),
+        sample=_sample_keys(bad, keys, sample),
         hint="Regenerate natural keys that collide with active target rows." if count else "",
         message="Synthetic LCI natural keys colliding with the target.",
     )
 
 
 def check_lci_target_frames(
-    tables: Dict[str, DataFrame], lookup_frames: Dict[str, DataFrame], sample: int,
-    profile: ValidationProfile, lookup_errors: Optional[Dict[str, str]] = None,
+    tables: Dict[str, DataFrame],
+    lookup_frames: Dict[str, DataFrame],
+    sample: int,
+    profile: ValidationProfile,
+    lookup_errors: Optional[Dict[str, str]] = None,
 ) -> List[Finding]:
     if profile.pipeline not in {"lci", "lca"}:
         return []
     lookup_errors = lookup_errors or {}
     requirements = {
         "INSTRUMENTO_FINANCEIRO": (
-            "NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO", "COD_IF", "NUM_ID_LOTE",
+            "NUM_IF",
+            "NUM_TIPO_IF",
+            "DAT_EXCLUSAO",
+            "COD_IF",
+            "NUM_ID_LOTE",
             "DAT_REGISTRO",
         ),
         "DEPOSITO_AUTOMATICO_IF": ("NUM_IF", "NUM_CONTROLE_LANCAMENTO"),
         "OPERACAO": (
-            "NUM_ID_OPERACAO", "NUM_IF", "NUM_ID_TIPO_OPER_OBJETO_SERV", "COD_OPERACAO",
-            "COD_CONTA_PARTE", "COD_CONTA_CONTRAPARTE",
+            "NUM_ID_OPERACAO",
+            "NUM_IF",
+            "NUM_ID_TIPO_OPER_OBJETO_SERV",
+            "COD_OPERACAO",
+            "COD_CONTA_PARTE",
+            "COD_CONTA_CONTRAPARTE",
         ),
         "CARTEIRA_COMITENTE": (
-            "NUM_ID_ENTIDADE", "COD_TIPO_POSICAO_CARTEIRA", "NUM_SISTEMA", "NUM_IF",
+            "NUM_ID_ENTIDADE",
+            "COD_TIPO_POSICAO_CARTEIRA",
+            "NUM_SISTEMA",
+            "NUM_IF",
             "NUM_CONTA_PARTICIPANTE",
         ),
         "CARTEIRA_PARTICIPANTE": (
-            "COD_TIPO_POSICAO_CARTEIRA", "NUM_SISTEMA", "NUM_IF",
+            "COD_TIPO_POSICAO_CARTEIRA",
+            "NUM_SISTEMA",
+            "NUM_IF",
             "NUM_CONTA_PARTICIPANTE",
         ),
     }
@@ -7248,21 +9180,23 @@ def check_lci_target_frames(
     if missing:
         return [_lci_unavailable("6e.lookup.availability", missing, SEV_ERROR)]
     root_cols = columns["INSTRUMENTO_FINANCEIRO"]
-    roots = _active(tables["INSTRUMENTO_FINANCEIRO"]).where(
-        _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if)
-    ).select(
-        _canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"),
-        _canon_key_col(F.col(root_cols["NUM_ID_LOTE"])).alias("lot_id"),
-        _lci_text(F.col(root_cols["COD_IF"])).alias("business_code"),
-        F.to_date(F.col(root_cols["DAT_REGISTRO"])).alias("registration_date"),
+    roots = (
+        _active(tables["INSTRUMENTO_FINANCEIRO"])
+        .where(_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if))
+        .select(
+            _canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"),
+            _canon_key_col(F.col(root_cols["NUM_ID_LOTE"])).alias("lot_id"),
+            _lci_text(F.col(root_cols["COD_IF"])).alias("business_code"),
+            F.to_date(F.col(root_cols["DAT_REGISTRO"])).alias("registration_date"),
+        )
     )
     out: List[Finding] = []
 
     tipo = lookup_frames.get("LCI_TIPO_IF")
     if tipo is None:
-        out.append(_lci_unavailable(
-            "6e.lookup.tipo_if", [lookup_errors.get("LCI_TIPO_IF", "LCI_TIPO_IF")]
-        ))
+        out.append(
+            _lci_unavailable("6e.lookup.tipo_if", [lookup_errors.get("LCI_TIPO_IF", "LCI_TIPO_IF")])
+        )
     else:
         tipo_cols = {name: resolve(tipo, name) for name in ("NUM_TIPO_IF", "COD_TIPO_IF")}
         if any(value is None for value in tipo_cols.values()):
@@ -7272,30 +9206,50 @@ def check_lci_target_frames(
             if not supported:
                 out.append(_lci_unavailable("6e.lookup.tipo_if", ["TIPO_IF.DAT_EXCLUSAO"]))
             else:
-                matches = active_tipo.where(
-                    (_lci_text(F.col(tipo_cols["COD_TIPO_IF"])) == profile.object_service_code)
-                    & (_canon_key_col(F.col(tipo_cols["NUM_TIPO_IF"]))
-                       == str(profile.num_tipo_if))
-                ).limit(2).count()
-                out.append(Finding(
-                    "6e.lookup.tipo_if", "LCI target eligibility",
-                    SEV_INFO if matches == 1 else SEV_ERROR, "TIPO_IF", matches == 1,
-                    count=0 if matches == 1 else matches, column="NUM_TIPO_IF,COD_TIPO_IF",
-                    hint="Provide exactly one active exact-trimmed TIPO_IF LCI row for type 81."
-                         if matches != 1 else "",
-                    message="Active target LCI type resolves the expected root type.",
-                ))
+                matches = (
+                    active_tipo.where(
+                        (_lci_text(F.col(tipo_cols["COD_TIPO_IF"])) == profile.object_service_code)
+                        & (
+                            _canon_key_col(F.col(tipo_cols["NUM_TIPO_IF"]))
+                            == str(profile.num_tipo_if)
+                        )
+                    )
+                    .limit(2)
+                    .count()
+                )
+                out.append(
+                    Finding(
+                        "6e.lookup.tipo_if",
+                        "LCI target eligibility",
+                        SEV_INFO if matches == 1 else SEV_ERROR,
+                        "TIPO_IF",
+                        matches == 1,
+                        count=0 if matches == 1 else matches,
+                        column="NUM_TIPO_IF,COD_TIPO_IF",
+                        hint="Provide exactly one active exact-trimmed TIPO_IF LCI row for type 81."
+                        if matches != 1
+                        else "",
+                        message="Active target LCI type resolves the expected root type.",
+                    )
+                )
 
     lot_frame = lookup_frames.get("LCI_LOTES")
-    lot_columns = {name: resolve(lot_frame, name) if lot_frame is not None else None for name in (
-        "NUM_ID_LOTE", "NUM_ID_TIPO_LOTE", "NUM_CONTA_PARTICIPANTE",
-    )}
+    lot_columns = {
+        name: resolve(lot_frame, name) if lot_frame is not None else None
+        for name in (
+            "NUM_ID_LOTE",
+            "NUM_ID_TIPO_LOTE",
+            "NUM_CONTA_PARTICIPANTE",
+        )
+    }
     lots = None
     if lot_frame is None or any(value is None for value in lot_columns.values()):
-        out.append(_lci_unavailable(
-            "6e.lookup.lot",
-            [lookup_errors.get("LCI_LOTES", "LCI_LOTES required columns")],
-        ))
+        out.append(
+            _lci_unavailable(
+                "6e.lookup.lot",
+                [lookup_errors.get("LCI_LOTES", "LCI_LOTES required columns")],
+            )
+        )
     else:
         active_lots, supported = _lci_active_target(lot_frame)
         if not supported:
@@ -7304,8 +9258,9 @@ def check_lci_target_frames(
             lots = active_lots.select(
                 _canon_key_col(F.col(lot_columns["NUM_ID_LOTE"])).alias("lot_id"),
                 _canon_key_col(F.col(lot_columns["NUM_ID_TIPO_LOTE"])).alias("lot_type"),
-                _canon_key_col(F.col(lot_columns["NUM_CONTA_PARTICIPANTE"]))
-                .alias("issuer_account"),
+                _canon_key_col(F.col(lot_columns["NUM_CONTA_PARTICIPANTE"])).alias(
+                    "issuer_account"
+                ),
             )
             bad = roots.join(lots, "lot_id", "left").where(
                 F.col("issuer_account").isNull()
@@ -7313,52 +9268,79 @@ def check_lci_target_frames(
                 | (F.col("lot_type") != ("2" if profile.pipeline == "lca" else "1"))
             )
             count = bad.count()
-            out.append(Finding(
-                "6e.lookup.lot", "LCI target eligibility", SEV_ERROR if count else SEV_INFO,
-                "LOTE", count == 0, count=count, column="NUM_ID_LOTE,NUM_ID_TIPO_LOTE",
-                sample=_sample_keys(bad, ["root_id", "lot_id", "lot_type"], sample),
-                hint="Point each LCI root to one active target type-1 lot." if count else "",
-                message="LCI roots without an active target type-1 lot.",
-            ))
+            out.append(
+                Finding(
+                    "6e.lookup.lot",
+                    "LCI target eligibility",
+                    SEV_ERROR if count else SEV_INFO,
+                    "LOTE",
+                    count == 0,
+                    count=count,
+                    column="NUM_ID_LOTE,NUM_ID_TIPO_LOTE",
+                    sample=_sample_keys(bad, ["root_id", "lot_id", "lot_type"], sample),
+                    hint="Point each LCI root to one active target type-1 lot." if count else "",
+                    message="LCI roots without an active target type-1 lot.",
+                )
+            )
 
     accounts = lookup_frames.get("LCI_ACCOUNTS")
     account_names = (
-        "NUM_CONTA_PARTICIPANTE", "NUM_ID_SITUACAO_CONTA", "COD_TIPO_ACESSO",
+        "NUM_CONTA_PARTICIPANTE",
+        "NUM_ID_SITUACAO_CONTA",
+        "COD_TIPO_ACESSO",
         "NUM_ID_AREA_ATUACAO",
     )
     account_columns = {
         name: resolve(accounts, name) if accounts is not None else None for name in account_names
     }
     if lots is None or accounts is None or any(value is None for value in account_columns.values()):
-        out.append(_lci_unavailable(
-            "6e.lookup.issuer_account",
-            [lookup_errors.get("LCI_ACCOUNTS", "LCI_ACCOUNTS required columns")],
-        ))
+        out.append(
+            _lci_unavailable(
+                "6e.lookup.issuer_account",
+                [lookup_errors.get("LCI_ACCOUNTS", "LCI_ACCOUNTS required columns")],
+            )
+        )
     else:
-        eligible_accounts = accounts.select(
-            _canon_key_col(F.col(account_columns["NUM_CONTA_PARTICIPANTE"]))
-            .alias("issuer_account"),
-            _canon_key_col(F.col(account_columns["NUM_ID_SITUACAO_CONTA"])).alias("status"),
-            _lci_text(F.col(account_columns["COD_TIPO_ACESSO"])).alias("access"),
-            _canon_key_col(F.col(account_columns["NUM_ID_AREA_ATUACAO"])).alias("area"),
-        ).where(
-            F.col("status").isin("1", "2")
-            & ((F.lit(True)) if profile.pipeline == "lca" else
-               ((F.col("access") == "L") & (F.col("area") == "1")))
-        ).select("issuer_account").dropDuplicates()
+        eligible_accounts = (
+            accounts.select(
+                _canon_key_col(F.col(account_columns["NUM_CONTA_PARTICIPANTE"])).alias(
+                    "issuer_account"
+                ),
+                _canon_key_col(F.col(account_columns["NUM_ID_SITUACAO_CONTA"])).alias("status"),
+                _lci_text(F.col(account_columns["COD_TIPO_ACESSO"])).alias("access"),
+                _canon_key_col(F.col(account_columns["NUM_ID_AREA_ATUACAO"])).alias("area"),
+            )
+            .where(
+                F.col("status").isin("1", "2")
+                & (
+                    (F.lit(True))
+                    if profile.pipeline == "lca"
+                    else ((F.col("access") == "L") & (F.col("area") == "1"))
+                )
+            )
+            .select("issuer_account")
+            .dropDuplicates()
+        )
         bad = roots.join(lots, "lot_id", "left").join(
             F.broadcast(eligible_accounts), "issuer_account", "left_anti"
         )
         count = bad.count()
-        out.append(Finding(
-            "6e.lookup.issuer_account", "LCI target eligibility",
-            SEV_ERROR if count else SEV_INFO, "CONTA_PARTICIPANTE", count == 0,
-            count=count, column="NUM_ID_SITUACAO_CONTA,COD_TIPO_ACESSO,NUM_ID_AREA_ATUACAO",
-            sample=_sample_keys(bad, ["root_id", "issuer_account"], sample),
-            hint="Use issuer status 1|2 with V_FAMILIA_CONTAS access L in area 1."
-                 if count else "",
-            message="LCI lot issuer accounts outside the log-proven target eligibility.",
-        ))
+        out.append(
+            Finding(
+                "6e.lookup.issuer_account",
+                "LCI target eligibility",
+                SEV_ERROR if count else SEV_INFO,
+                "CONTA_PARTICIPANTE",
+                count == 0,
+                count=count,
+                column="NUM_ID_SITUACAO_CONTA,COD_TIPO_ACESSO,NUM_ID_AREA_ATUACAO",
+                sample=_sample_keys(bad, ["root_id", "issuer_account"], sample),
+                hint="Use issuer status 1|2 with V_FAMILIA_CONTAS access L in area 1."
+                if count
+                else "",
+                message="LCI lot issuer accounts outside the log-proven target eligibility.",
+            )
+        )
 
     object_frame = lookup_frames.get("LCI_OBJECT_SERVICE")
     object_ok = False
@@ -7368,18 +9350,28 @@ def check_lci_target_frames(
         low = resolve(object_frame, "IND_PLATAFORMA_BAIXA")
         if code and low:
             object_available = True
-            object_ok = object_frame.where(
-                (_lci_text(F.col(code)) == profile.object_service_code)
-                & (_lci_text(F.col(low)) == "S")
-            ).limit(1).count() == 1
-    out.append(Finding(
-        "6e.lookup.object_service", "LCI target eligibility",
-        SEV_INFO if object_ok else SEV_ERROR if object_available else SEV_WARN,
-        "V_OBJETOS_SERVICO", object_ok,
-        count=0 if object_ok else 1, column="COD_OBJETO_SERVICO,IND_PLATAFORMA_BAIXA",
-        hint="Expose exact code LCI enabled on the low platform." if not object_ok else "",
-        message="Target low-platform LCI object-service evidence.",
-    ))
+            object_ok = (
+                object_frame.where(
+                    (_lci_text(F.col(code)) == profile.object_service_code)
+                    & (_lci_text(F.col(low)) == "S")
+                )
+                .limit(1)
+                .count()
+                == 1
+            )
+    out.append(
+        Finding(
+            "6e.lookup.object_service",
+            "LCI target eligibility",
+            SEV_INFO if object_ok else SEV_ERROR if object_available else SEV_WARN,
+            "V_OBJETOS_SERVICO",
+            object_ok,
+            count=0 if object_ok else 1,
+            column="COD_OBJETO_SERVICO,IND_PLATAFORMA_BAIXA",
+            hint="Expose exact code LCI enabled on the low platform." if not object_ok else "",
+            message="Target low-platform LCI object-service evidence.",
+        )
+    )
 
     operation = tables["OPERACAO"]
     op_cols = columns["OPERACAO"]
@@ -7388,13 +9380,13 @@ def check_lci_target_frames(
         _canon_key_col(F.col(op_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias("route_id"),
         _lci_text(F.col(op_cols["COD_OPERACAO"])).alias("operation_code"),
         F.col(op_cols["COD_CONTA_PARTE"]).cast("string").alias("party_account"),
-        F.col(op_cols["COD_CONTA_CONTRAPARTE"]).cast("string").alias(
-            "counterparty_account"
-        ),
+        F.col(op_cols["COD_CONTA_CONTRAPARTE"]).cast("string").alias("counterparty_account"),
     )
     route_frame = lookup_frames.get("LCI_ROUTES")
     route_names = (
-        "NUM_ID_TIPO_OPER_OBJETO_SERV", "NUM_ID_OBJETO_SERVICO", "COD_TIPO_OPERACAO",
+        "NUM_ID_TIPO_OPER_OBJETO_SERV",
+        "NUM_ID_OBJETO_SERVICO",
+        "COD_TIPO_OPERACAO",
         "IND_DISPONIVEL_IDENTIFICACAO",
     )
     route_columns = {
@@ -7403,86 +9395,98 @@ def check_lci_target_frames(
     }
     if route_frame is None or any(value is None for value in route_columns.values()):
         route_error = lookup_errors.get("LCI_ROUTES", "LCI_ROUTES required columns")
-        out.append(_lci_unavailable(
-            "6e.lookup.route", [route_error]
-        ))
-        out.append(_lci_unavailable(
-            "6e.registration_account_roles", [route_error], SEV_ERROR
-        ))
+        out.append(_lci_unavailable("6e.lookup.route", [route_error]))
+        out.append(_lci_unavailable("6e.registration_account_roles", [route_error], SEV_ERROR))
     else:
-        eligible_routes = route_frame.select(
-            _canon_key_col(F.col(route_columns["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
-            .alias("route_id"),
-            _canon_key_col(F.col(route_columns["NUM_ID_OBJETO_SERVICO"]))
-            .alias("object_service_id"),
-            _lci_text(F.col(route_columns["COD_TIPO_OPERACAO"])).alias("operation_type"),
-            _lci_text(F.col(route_columns["IND_DISPONIVEL_IDENTIFICACAO"]))
-            .alias("identification_available"),
-        ).where(
-            (F.col("object_service_id") == str(profile.object_service_id))
-            & (F.col("operation_type") == "1")
-            & (F.col("identification_available") == "S")
-        ).select("route_id").dropDuplicates()
+        eligible_routes = (
+            route_frame.select(
+                _canon_key_col(F.col(route_columns["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias(
+                    "route_id"
+                ),
+                _canon_key_col(F.col(route_columns["NUM_ID_OBJETO_SERVICO"])).alias(
+                    "object_service_id"
+                ),
+                _lci_text(F.col(route_columns["COD_TIPO_OPERACAO"])).alias("operation_type"),
+                _lci_text(F.col(route_columns["IND_DISPONIVEL_IDENTIFICACAO"])).alias(
+                    "identification_available"
+                ),
+            )
+            .where(
+                (F.col("object_service_id") == str(profile.object_service_id))
+                & (F.col("operation_type") == "1")
+                & (F.col("identification_available") == "S")
+            )
+            .select("route_id")
+            .dropDuplicates()
+        )
         bad = operations.join(F.broadcast(eligible_routes), "route_id", "left_anti")
         count = bad.count()
-        out.append(Finding(
-            "6e.lookup.route", "LCI target eligibility", SEV_ERROR if count else SEV_INFO,
-            "OPERACAO", count == 0, count=count,
-            column="NUM_ID_TIPO_OPER_OBJETO_SERV",
-            sample=_sample_keys(bad, ["operation_id", "route_id"], sample),
-            hint="Use an identification-enabled LCI object-service 75 route with exact "
-                 "operation code 1."
-                 if count else "",
-            message="Synthetic LCI operations using ineligible target route IDs.",
-        ))
-        registration = operations.join(F.broadcast(eligible_routes), "route_id", "inner")
-        account_bad = registration.where(
-            ~F.coalesce(F.col("party_account"), F.lit("")).rlike(
-                r"^[0-9]{5}\.10-[0-9]$"
-            )
-            | ~F.coalesce(F.col("counterparty_account"), F.lit("")).rlike(
-                r"^[0-9]{5}\.40-[0-9]$"
+        out.append(
+            Finding(
+                "6e.lookup.route",
+                "LCI target eligibility",
+                SEV_ERROR if count else SEV_INFO,
+                "OPERACAO",
+                count == 0,
+                count=count,
+                column="NUM_ID_TIPO_OPER_OBJETO_SERV",
+                sample=_sample_keys(bad, ["operation_id", "route_id"], sample),
+                hint="Use an identification-enabled LCI object-service 75 route with exact "
+                "operation code 1."
+                if count
+                else "",
+                message="Synthetic LCI operations using ineligible target route IDs.",
             )
         )
+        registration = operations.join(F.broadcast(eligible_routes), "route_id", "inner")
+        account_bad = registration.where(
+            ~F.coalesce(F.col("party_account"), F.lit("")).rlike(r"^[0-9]{5}\.10-[0-9]$")
+            | ~F.coalesce(F.col("counterparty_account"), F.lit("")).rlike(r"^[0-9]{5}\.40-[0-9]$")
+        )
         account_count = account_bad.count()
-        out.append(Finding(
-            "6e.registration_account_roles",
-            "LCI target eligibility",
-            SEV_ERROR if account_count else SEV_INFO,
-            "OPERACAO",
-            account_count == 0,
-            count=account_count,
-            column="COD_CONTA_PARTE,COD_CONTA_CONTRAPARTE",
-            sample=_sample_keys(
-                account_bad,
-                [
-                    "operation_id",
-                    "party_account",
-                    "counterparty_account",
-                ],
-                sample,
-            ),
-            hint=(
-                "Persist registration party as xxxxx.10-x and counterparty as xxxxx.40-x."
-                if account_count else ""
-            ),
-            message=(
-                "LCI registration operations preserve the observed .10/.40 account roles."
-            ),
-        ))
+        out.append(
+            Finding(
+                "6e.registration_account_roles",
+                "LCI target eligibility",
+                SEV_ERROR if account_count else SEV_INFO,
+                "OPERACAO",
+                account_count == 0,
+                count=account_count,
+                column="COD_CONTA_PARTE,COD_CONTA_CONTRAPARTE",
+                sample=_sample_keys(
+                    account_bad,
+                    [
+                        "operation_id",
+                        "party_account",
+                        "counterparty_account",
+                    ],
+                    sample,
+                ),
+                hint=(
+                    "Persist registration party as xxxxx.10-x and counterparty as xxxxx.40-x."
+                    if account_count
+                    else ""
+                ),
+                message=(
+                    "LCI registration operations preserve the observed .10/.40 account roles."
+                ),
+            )
+        )
 
     target_codes = lookup_frames.get("LCI_ROOT_CODES")
     if target_codes is None or not resolve(target_codes, "COD_IF"):
-        out.append(_lci_unavailable(
-            "6e.collision.cod_if",
-            [lookup_errors.get("LCI_ROOT_CODES", "INSTRUMENTO_FINANCEIRO.COD_IF")],
-        ))
+        out.append(
+            _lci_unavailable(
+                "6e.collision.cod_if",
+                [lookup_errors.get("LCI_ROOT_CODES", "INSTRUMENTO_FINANCEIRO.COD_IF")],
+            )
+        )
     else:
         active_codes, supported = _lci_active_target(target_codes)
         if not supported:
-            out.append(_lci_unavailable(
-                "6e.collision.cod_if", ["INSTRUMENTO_FINANCEIRO.DAT_EXCLUSAO"]
-            ))
+            out.append(
+                _lci_unavailable("6e.collision.cod_if", ["INSTRUMENTO_FINANCEIRO.DAT_EXCLUSAO"])
+            )
         else:
             target_col = resolve(active_codes, "COD_IF")
             existing = active_codes.select(
@@ -7490,37 +9494,56 @@ def check_lci_target_frames(
             ).dropDuplicates()
             bad = roots.join(F.broadcast(existing), "business_code", "inner")
             count = bad.count()
-            out.append(Finding(
-                "6e.collision.cod_if", "LCI target collisions",
-                SEV_ERROR if count else SEV_INFO, "INSTRUMENTO_FINANCEIRO",
-                count == 0, count=count, column="COD_IF",
-                sample=_sample_keys(bad, ["root_id", "business_code"], sample),
-                hint="Allocate an exact-trimmed, case-sensitive COD_IF absent from active target."
-                     if count else "",
-                message="Synthetic active LCI COD_IF collisions with active target roots.",
-            ))
+            out.append(
+                Finding(
+                    "6e.collision.cod_if",
+                    "LCI target collisions",
+                    SEV_ERROR if count else SEV_INFO,
+                    "INSTRUMENTO_FINANCEIRO",
+                    count == 0,
+                    count=count,
+                    column="COD_IF",
+                    sample=_sample_keys(bad, ["root_id", "business_code"], sample),
+                    hint=(
+                        "Allocate an exact-trimmed, case-sensitive COD_IF "
+                        "absent from active target."
+                    )
+                    if count
+                    else "",
+                    message="Synthetic active LCI COD_IF collisions with active target roots.",
+                )
+            )
 
     local_bad = operations.withColumn(
         "code_count", F.count(F.lit(1)).over(Window.partitionBy("operation_code"))
     ).where(
-        F.col("operation_code").isNull() | (F.col("operation_code") == "")
+        F.col("operation_code").isNull()
+        | (F.col("operation_code") == "")
         | (F.col("code_count") > 1)
     )
     count = local_bad.count()
-    out.append(Finding(
-        "6e.operation_code.local", "LCI target collisions",
-        SEV_ERROR if count else SEV_INFO, "OPERACAO", count == 0, count=count,
-        column="COD_OPERACAO",
-        sample=_sample_keys(local_bad, ["operation_id", "operation_code"], sample),
-        hint="Generate nonblank unique exact-trimmed operation codes." if count else "",
-        message="Synthetic LCI operations with blank or duplicate COD_OPERACAO.",
-    ))
+    out.append(
+        Finding(
+            "6e.operation_code.local",
+            "LCI target collisions",
+            SEV_ERROR if count else SEV_INFO,
+            "OPERACAO",
+            count == 0,
+            count=count,
+            column="COD_OPERACAO",
+            sample=_sample_keys(local_bad, ["operation_id", "operation_code"], sample),
+            hint="Generate nonblank unique exact-trimmed operation codes." if count else "",
+            message="Synthetic LCI operations with blank or duplicate COD_OPERACAO.",
+        )
+    )
     target_operation_codes = lookup_frames.get("LCI_OPERATION_CODES")
     if target_operation_codes is None or not resolve(target_operation_codes, "COD_OPERACAO"):
-        out.append(_lci_unavailable(
-            "6e.operation_code.target",
-            [lookup_errors.get("LCI_OPERATION_CODES", "OPERACAO.COD_OPERACAO")],
-        ))
+        out.append(
+            _lci_unavailable(
+                "6e.operation_code.target",
+                [lookup_errors.get("LCI_OPERATION_CODES", "OPERACAO.COD_OPERACAO")],
+            )
+        )
     else:
         target_col = resolve(target_operation_codes, "COD_OPERACAO")
         active_target, supported = _lci_active_target(target_operation_codes)
@@ -7532,48 +9555,67 @@ def check_lci_target_frames(
             ).dropDuplicates()
             bad = operations.join(F.broadcast(existing), "operation_code", "inner")
             count = bad.count()
-            out.append(Finding(
-                "6e.operation_code.target", "LCI target collisions",
-                SEV_ERROR if count else SEV_INFO, "OPERACAO", count == 0, count=count,
-                column="COD_OPERACAO",
-                sample=_sample_keys(bad, ["operation_id", "operation_code"], sample),
-                hint="Regenerate operation codes colliding with active target OPERACAO."
-                     if count else "",
-                message="Synthetic LCI COD_OPERACAO collisions with active target operations.",
-            ))
+            out.append(
+                Finding(
+                    "6e.operation_code.target",
+                    "LCI target collisions",
+                    SEV_ERROR if count else SEV_INFO,
+                    "OPERACAO",
+                    count == 0,
+                    count=count,
+                    column="COD_OPERACAO",
+                    sample=_sample_keys(bad, ["operation_id", "operation_code"], sample),
+                    hint="Regenerate operation codes colliding with active target OPERACAO."
+                    if count
+                    else "",
+                    message="Synthetic LCI COD_OPERACAO collisions with active target operations.",
+                )
+            )
 
     toggle = lookup_frames.get("LCI_TOGGLE")
     if toggle is None:
-        out.append(_lci_unavailable(
-            "6e.meu_numero", [lookup_errors.get("LCI_TOGGLE", "TCTPFEATURE_TOGGLE")]
-        ))
+        out.append(
+            _lci_unavailable(
+                "6e.meu_numero", [lookup_errors.get("LCI_TOGGLE", "TCTPFEATURE_TOGGLE")]
+            )
+        )
     else:
         enabled_roots = _lci_toggle_enabled_roots(roots, toggle)
         if enabled_roots is None:
             out.append(_lci_unavailable("6e.meu_numero", ["LCI_TOGGLE required columns"]))
         elif enabled_roots.limit(1).count() == 0:
-            out.append(Finding(
-                "6e.meu_numero", "LCI target collisions", SEV_INFO,
-                "DEPOSITO_AUTOMATICO_IF", True, column="NUM_CONTROLE_LANCAMENTO",
-                message="VALIDA_MEU_NUMERO_DEPOSITO is disabled for all root DAT_REGISTRO "
-                        "dates; target controls are not required.",
-            ))
+            out.append(
+                Finding(
+                    "6e.meu_numero",
+                    "LCI target collisions",
+                    SEV_INFO,
+                    "DEPOSITO_AUTOMATICO_IF",
+                    True,
+                    column="NUM_CONTROLE_LANCAMENTO",
+                    message="VALIDA_MEU_NUMERO_DEPOSITO is disabled for all root DAT_REGISTRO "
+                    "dates; target controls are not required.",
+                )
+            )
         else:
             dep_cols = columns["DEPOSITO_AUTOMATICO_IF"]
-            deposits = tables["DEPOSITO_AUTOMATICO_IF"].select(
-                _canon_key_col(F.col(dep_cols["NUM_IF"])).alias("root_id"),
-                _lci_text(F.col(dep_cols["NUM_CONTROLE_LANCAMENTO"])).alias("control"),
-            ).join(enabled_roots.select("root_id"), "root_id", "inner")
+            deposits = (
+                tables["DEPOSITO_AUTOMATICO_IF"]
+                .select(
+                    _canon_key_col(F.col(dep_cols["NUM_IF"])).alias("root_id"),
+                    _lci_text(F.col(dep_cols["NUM_CONTROLE_LANCAMENTO"])).alias("control"),
+                )
+                .join(enabled_roots.select("root_id"), "root_id", "inner")
+            )
             local = deposits.withColumn(
                 "control_count", F.count(F.lit(1)).over(Window.partitionBy("control"))
             ).where(
-                F.col("control").isNull() | (F.col("control") == "")
-                | (F.col("control_count") > 1)
+                F.col("control").isNull() | (F.col("control") == "") | (F.col("control_count") > 1)
             )
             target_controls = lookup_frames.get("LCI_CONTROLS")
             target_control_col = (
                 resolve(target_controls, "NUM_CONTROLE_LANCAMENTO")
-                if target_controls is not None else None
+                if target_controls is not None
+                else None
             )
             collision = None
             target_unavailable = target_controls is None or target_control_col is None
@@ -7588,59 +9630,93 @@ def check_lci_target_frames(
             local_count = local.count()
             collision_count = collision.count() if collision is not None else 0
             if target_unavailable:
-                out.append(_lci_unavailable(
-                    "6e.meu_numero", [lookup_errors.get("LCI_CONTROLS", "active OPERACAO controls")]
-                ))
+                out.append(
+                    _lci_unavailable(
+                        "6e.meu_numero",
+                        [lookup_errors.get("LCI_CONTROLS", "active OPERACAO controls")],
+                    )
+                )
             else:
                 bad = local.unionByName(collision, allowMissingColumns=True)
                 count = local_count + collision_count
-                out.append(Finding(
-                    "6e.meu_numero", "LCI target collisions",
-                    SEV_ERROR if count else SEV_INFO, "DEPOSITO_AUTOMATICO_IF",
-                    count == 0, count=count, column="NUM_CONTROLE_LANCAMENTO",
-                    sample=_sample_keys(bad, ["root_id", "control"], sample),
-                    hint="Generate nonblank unique controls absent from active target P1/P2."
-                         if count else "",
-                    message="Toggle-enabled deposits with local or target control collisions.",
-                ))
+                out.append(
+                    Finding(
+                        "6e.meu_numero",
+                        "LCI target collisions",
+                        SEV_ERROR if count else SEV_INFO,
+                        "DEPOSITO_AUTOMATICO_IF",
+                        count == 0,
+                        count=count,
+                        column="NUM_CONTROLE_LANCAMENTO",
+                        sample=_sample_keys(bad, ["root_id", "control"], sample),
+                        hint="Generate nonblank unique controls absent from active target P1/P2."
+                        if count
+                        else "",
+                        message="Toggle-enabled deposits with local or target control collisions.",
+                    )
+                )
 
     wallet_specs = (
         (
-            "comitente", "CARTEIRA_COMITENTE", "LCI_WALLET_COMITENTE",
-            ["NUM_ID_ENTIDADE", "COD_TIPO_POSICAO_CARTEIRA", "NUM_SISTEMA", "NUM_IF",
-             "NUM_CONTA_PARTICIPANTE"],
+            "comitente",
+            "CARTEIRA_COMITENTE",
+            "LCI_WALLET_COMITENTE",
+            [
+                "NUM_ID_ENTIDADE",
+                "COD_TIPO_POSICAO_CARTEIRA",
+                "NUM_SISTEMA",
+                "NUM_IF",
+                "NUM_CONTA_PARTICIPANTE",
+            ],
         ),
         (
-            "participante", "CARTEIRA_PARTICIPANTE", "LCI_WALLET_PARTICIPANTE",
-            ["COD_TIPO_POSICAO_CARTEIRA", "NUM_SISTEMA", "NUM_IF",
-             "NUM_CONTA_PARTICIPANTE"],
+            "participante",
+            "CARTEIRA_PARTICIPANTE",
+            "LCI_WALLET_PARTICIPANTE",
+            ["COD_TIPO_POSICAO_CARTEIRA", "NUM_SISTEMA", "NUM_IF", "NUM_CONTA_PARTICIPANTE"],
         ),
     )
     for name, table, target_name, keys in wallet_specs:
-        source_rows = tables[table].select(*[
-            _canon_key_col(F.col(columns[table][key])).alias(key) for key in keys
-        ])
+        source_rows = tables[table].select(
+            *[_canon_key_col(F.col(columns[table][key])).alias(key) for key in keys]
+        )
         duplicate = source_rows.groupBy(*keys).count().where(F.col("count") > 1)
         duplicate_count = duplicate.count()
-        out.append(Finding(
-            f"6e.wallet.{name}.local", "LCI target collisions",
-            SEV_ERROR if duplicate_count else SEV_INFO, table, duplicate_count == 0,
-            count=duplicate_count, column=",".join(keys),
-            sample=_sample_keys(duplicate, keys, sample),
-            hint="Keep each synthetic wallet natural key unique." if duplicate_count else "",
-            message="Duplicate synthetic LCI wallet natural keys.",
-        ))
+        out.append(
+            Finding(
+                f"6e.wallet.{name}.local",
+                "LCI target collisions",
+                SEV_ERROR if duplicate_count else SEV_INFO,
+                table,
+                duplicate_count == 0,
+                count=duplicate_count,
+                column=",".join(keys),
+                sample=_sample_keys(duplicate, keys, sample),
+                hint="Keep each synthetic wallet natural key unique." if duplicate_count else "",
+                message="Duplicate synthetic LCI wallet natural keys.",
+            )
+        )
         source = source_rows.dropDuplicates()
-        out.append(_lci_collision_finding(
-            f"6e.wallet.{name}", "LCI target collisions", source,
-            lookup_frames.get(target_name), keys, target_name, sample,
-            active_required=name != "comitente",
-        ))
+        out.append(
+            _lci_collision_finding(
+                f"6e.wallet.{name}",
+                "LCI target collisions",
+                source,
+                lookup_frames.get(target_name),
+                keys,
+                target_name,
+                sample,
+                active_required=name != "comitente",
+            )
+        )
     return out
 
 
 def load_lci_target_frames(
-    spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame], maximum: int = 100_000,
+    spark: SparkSession,
+    cfg: Config,
+    tables: Dict[str, DataFrame],
+    maximum: int = 100_000,
     skip_prefixes: Sequence[str] = (),
     profile: Optional[ValidationProfile] = None,
 ) -> Tuple[Dict[str, DataFrame], Dict[str, str]]:
@@ -7666,16 +9742,20 @@ def load_lci_target_frames(
             errors[name] = str(exc)
 
     def collect_values(frame: DataFrame, column, alias: str = "value") -> Optional[List[str]]:
-        rows = frame.select(column.alias(alias)).where(
-            F.col(alias).isNotNull() & (F.trim(F.col(alias).cast("string")) != "")
-        ).dropDuplicates().limit(maximum + 1).collect()
+        rows = (
+            frame.select(column.alias(alias))
+            .where(F.col(alias).isNotNull() & (F.trim(F.col(alias).cast("string")) != ""))
+            .dropDuplicates()
+            .limit(maximum + 1)
+            .collect()
+        )
         if len(rows) > maximum:
             return None
         return [str(row[alias]) for row in rows]
 
     def chunks(values: List[str], size: int = 1000):
         for offset in range(0, len(values), size):
-            yield values[offset:offset + size]
+            yield values[offset : offset + size]
 
     def wanted(check_id: str) -> bool:
         return not _check_is_skipped(check_id, skip_prefixes)
@@ -7685,9 +9765,17 @@ def load_lci_target_frames(
     deposit = tables.get("DEPOSITO_AUTOMATICO_IF")
     if root is None:
         return frames, {"LCI": "INSTRUMENTO_FINANCEIRO unavailable"}
-    root_columns = {name: resolve(root, name) for name in (
-        "NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO", "NUM_ID_LOTE", "COD_IF", "DAT_REGISTRO",
-    )}
+    root_columns = {
+        name: resolve(root, name)
+        for name in (
+            "NUM_IF",
+            "NUM_TIPO_IF",
+            "DAT_EXCLUSAO",
+            "NUM_ID_LOTE",
+            "COD_IF",
+            "DAT_REGISTRO",
+        )
+    }
     if any(root_columns[name] is None for name in ("NUM_IF", "NUM_TIPO_IF", "NUM_ID_LOTE")):
         return frames, {"LCI": "LCI root keys unavailable"}
     active_root = _active(root).where(
@@ -7714,9 +9802,7 @@ def load_lci_target_frames(
             ],
         )
 
-    lot_ids = collect_values(
-        active_root, _canon_key_col(F.col(root_columns["NUM_ID_LOTE"]))
-    )
+    lot_ids = collect_values(active_root, _canon_key_col(F.col(root_columns["NUM_ID_LOTE"])))
     needs_lots = wanted("6e.lookup.lot") or wanted("6e.lookup.issuer_account")
     if lot_ids is None and needs_lots:
         errors["LCI_LOTES"] = f"more than {maximum} distinct synthetic lot IDs"
@@ -7727,7 +9813,8 @@ def load_lci_target_frames(
                 "SELECT NUM_ID_LOTE, NUM_ID_TIPO_LOTE, NUM_CONTA_PARTICIPANTE, "
                 "NUM_TIPO_IF, DAT_EXCLUSAO "
                 f"FROM {cfg.schema}.LOTE WHERE NUM_ID_LOTE IN ("
-                + ", ".join(_sql_literal(value) for value in batch) + ")"
+                + ", ".join(_sql_literal(value) for value in batch)
+                + ")"
                 for batch in chunks(lot_ids)
             ],
             "NUM_ID_LOTE string, NUM_ID_TIPO_LOTE string, "
@@ -7742,18 +9829,21 @@ def load_lci_target_frames(
         run_many(
             "LCI_ACCOUNTS",
             [
-                ("SELECT cp.NUM_CONTA_PARTICIPANTE, cp.NUM_ID_SITUACAO_CONTA, "
-                 "CAST(NULL AS VARCHAR2(1)) COD_TIPO_ACESSO, "
-                 "CAST(NULL AS NUMBER) NUM_ID_AREA_ATUACAO "
-                 f"FROM {cfg.schema}.CONTA_PARTICIPANTE cp "
-                 if profile.pipeline == "lca" else
-                 "SELECT cp.NUM_CONTA_PARTICIPANTE, cp.NUM_ID_SITUACAO_CONTA, "
-                 "vf.COD_TIPO_ACESSO, vf.NUM_ID_AREA_ATUACAO "
-                 f"FROM {cfg.schema}.CONTA_PARTICIPANTE cp "
-                 f"LEFT JOIN {cfg.schema}.V_FAMILIA_CONTAS vf "
-                 "ON vf.COD_CONTA_MEMBRO=cp.COD_CONTA_PARTICIPANTE ")
+                (
+                    "SELECT cp.NUM_CONTA_PARTICIPANTE, cp.NUM_ID_SITUACAO_CONTA, "
+                    "CAST(NULL AS VARCHAR2(1)) COD_TIPO_ACESSO, "
+                    "CAST(NULL AS NUMBER) NUM_ID_AREA_ATUACAO "
+                    f"FROM {cfg.schema}.CONTA_PARTICIPANTE cp "
+                    if profile.pipeline == "lca"
+                    else "SELECT cp.NUM_CONTA_PARTICIPANTE, cp.NUM_ID_SITUACAO_CONTA, "
+                    "vf.COD_TIPO_ACESSO, vf.NUM_ID_AREA_ATUACAO "
+                    f"FROM {cfg.schema}.CONTA_PARTICIPANTE cp "
+                    f"LEFT JOIN {cfg.schema}.V_FAMILIA_CONTAS vf "
+                    "ON vf.COD_CONTA_MEMBRO=cp.COD_CONTA_PARTICIPANTE "
+                )
                 + "WHERE cp.NUM_CONTA_PARTICIPANTE IN ("
-                + ", ".join(_sql_literal(value) for value in batch) + ")"
+                + ", ".join(_sql_literal(value) for value in batch)
+                + ")"
                 for batch in chunks(accounts)
             ],
             "NUM_CONTA_PARTICIPANTE string, NUM_ID_SITUACAO_CONTA string, "
@@ -7762,7 +9852,8 @@ def load_lci_target_frames(
 
     root_codes = (
         collect_values(active_root, _lci_text(F.col(root_columns["COD_IF"])))
-        if root_columns["COD_IF"] else []
+        if root_columns["COD_IF"]
+        else []
     )
     if root_codes is None and wanted("6e.collision.cod_if"):
         errors["LCI_ROOT_CODES"] = f"more than {maximum} distinct synthetic COD_IF values"
@@ -7771,19 +9862,23 @@ def load_lci_target_frames(
             "LCI_ROOT_CODES",
             [
                 f"SELECT COD_IF, DAT_EXCLUSAO FROM {cfg.schema}.INSTRUMENTO_FINANCEIRO "
-                "WHERE TRIM(COD_IF) IN ("
-                + ", ".join(_sql_literal(value) for value in batch) + ")"
+                "WHERE TRIM(COD_IF) IN (" + ", ".join(_sql_literal(value) for value in batch) + ")"
                 for batch in chunks(root_codes)
             ],
             "COD_IF string, DAT_EXCLUSAO string",
         )
 
-    op_columns = {name: resolve(operation, name) if operation is not None else None for name in (
-        "NUM_ID_TIPO_OPER_OBJETO_SERV", "COD_OPERACAO",
-    )}
+    op_columns = {
+        name: resolve(operation, name) if operation is not None else None
+        for name in (
+            "NUM_ID_TIPO_OPER_OBJETO_SERV",
+            "COD_OPERACAO",
+        )
+    }
     route_ids = (
         collect_values(operation, _canon_key_col(F.col(op_columns["NUM_ID_TIPO_OPER_OBJETO_SERV"])))
-        if operation is not None and op_columns["NUM_ID_TIPO_OPER_OBJETO_SERV"] else []
+        if operation is not None and op_columns["NUM_ID_TIPO_OPER_OBJETO_SERV"]
+        else []
     )
     if route_ids is None and wanted("6e.lookup.route"):
         errors["LCI_ROUTES"] = f"more than {maximum} distinct synthetic route IDs"
@@ -7797,7 +9892,8 @@ def load_lci_target_frames(
                 f"JOIN {cfg.schema}.TIPO_OPERACAO op "
                 "ON op.NUM_ID_TIPO_OPERACAO=tos.NUM_ID_TIPO_OPERACAO "
                 "WHERE tos.NUM_ID_TIPO_OPER_OBJETO_SERV IN ("
-                + ", ".join(_sql_literal(value) for value in batch) + ")"
+                + ", ".join(_sql_literal(value) for value in batch)
+                + ")"
                 for batch in chunks(route_ids)
             ],
             "NUM_ID_TIPO_OPER_OBJETO_SERV string, NUM_ID_OBJETO_SERVICO string, "
@@ -7806,19 +9902,19 @@ def load_lci_target_frames(
 
     operation_codes = (
         collect_values(operation, _lci_text(F.col(op_columns["COD_OPERACAO"])))
-        if operation is not None and op_columns["COD_OPERACAO"] else []
+        if operation is not None and op_columns["COD_OPERACAO"]
+        else []
     )
     if operation_codes is None and wanted("6e.operation_code.target"):
-        errors["LCI_OPERATION_CODES"] = (
-            f"more than {maximum} distinct synthetic operation codes"
-        )
+        errors["LCI_OPERATION_CODES"] = f"more than {maximum} distinct synthetic operation codes"
     elif wanted("6e.operation_code.target"):
         run_many(
             "LCI_OPERATION_CODES",
             [
                 f"SELECT COD_OPERACAO, DAT_EXCLUSAO FROM {cfg.schema}.OPERACAO "
                 "WHERE TRIM(COD_OPERACAO) IN ("
-                + ", ".join(_sql_literal(value) for value in batch) + ")"
+                + ", ".join(_sql_literal(value) for value in batch)
+                + ")"
                 for batch in chunks(operation_codes)
             ],
             "COD_OPERACAO string, DAT_EXCLUSAO string",
@@ -7836,9 +9932,7 @@ def load_lci_target_frames(
     controls: Optional[List[str]] = []
     toggle = frames.get("LCI_TOGGLE")
     deposit_if = resolve(deposit, "NUM_IF") if deposit is not None else None
-    deposit_control = (
-        resolve(deposit, "NUM_CONTROLE_LANCAMENTO") if deposit is not None else None
-    )
+    deposit_control = resolve(deposit, "NUM_CONTROLE_LANCAMENTO") if deposit is not None else None
     if toggle is not None and root_columns["DAT_REGISTRO"] and deposit_if and deposit_control:
         root_dates = active_root.select(
             _canon_key_col(F.col(root_columns["NUM_IF"])).alias("root_id"),
@@ -7862,7 +9956,8 @@ def load_lci_target_frames(
                 f"FROM {cfg.schema}.OPERACAO UNION ALL "
                 f"SELECT NUM_CONTROLE_LANCAMENTO_P2, DAT_EXCLUSAO FROM {cfg.schema}.OPERACAO"
                 ") WHERE TRIM(NUM_CONTROLE_LANCAMENTO) IN ("
-                + ", ".join(_sql_literal(value) for value in batch) + ")"
+                + ", ".join(_sql_literal(value) for value in batch)
+                + ")"
                 for batch in chunks(controls)
             ],
             "NUM_CONTROLE_LANCAMENTO string, DAT_EXCLUSAO string",
@@ -7870,14 +9965,22 @@ def load_lci_target_frames(
 
     wallet_specs = (
         (
-            "CARTEIRA_COMITENTE", "LCI_WALLET_COMITENTE",
-            ["NUM_ID_ENTIDADE", "COD_TIPO_POSICAO_CARTEIRA", "NUM_SISTEMA", "NUM_IF",
-             "NUM_CONTA_PARTICIPANTE"], None,
+            "CARTEIRA_COMITENTE",
+            "LCI_WALLET_COMITENTE",
+            [
+                "NUM_ID_ENTIDADE",
+                "COD_TIPO_POSICAO_CARTEIRA",
+                "NUM_SISTEMA",
+                "NUM_IF",
+                "NUM_CONTA_PARTICIPANTE",
+            ],
+            None,
         ),
         (
-            "CARTEIRA_PARTICIPANTE", "LCI_WALLET_PARTICIPANTE",
-            ["COD_TIPO_POSICAO_CARTEIRA", "NUM_SISTEMA", "NUM_IF",
-             "NUM_CONTA_PARTICIPANTE"], "DAT_EXCLUSAO",
+            "CARTEIRA_PARTICIPANTE",
+            "LCI_WALLET_PARTICIPANTE",
+            ["COD_TIPO_POSICAO_CARTEIRA", "NUM_SISTEMA", "NUM_IF", "NUM_CONTA_PARTICIPANTE"],
+            "DAT_EXCLUSAO",
         ),
     )
     for table, target_name, keys, active_column in wallet_specs:
@@ -7889,19 +9992,23 @@ def load_lci_target_frames(
         if frame is None or any(value is None for value in actual.values()):
             errors[target_name] = f"synthetic {table} natural key unavailable"
             continue
-        selected = frame.select(*[
-            _canon_key_col(F.col(actual[key])).alias(key) for key in keys
-        ]).dropna().dropDuplicates().limit(maximum + 1).collect()
+        selected = (
+            frame.select(*[_canon_key_col(F.col(actual[key])).alias(key) for key in keys])
+            .dropna()
+            .dropDuplicates()
+            .limit(maximum + 1)
+            .collect()
+        )
         if len(selected) > maximum:
             errors[target_name] = f"more than {maximum} distinct synthetic wallet keys"
             continue
         queries = []
         for batch_start in range(0, len(selected), 250):
             predicates = []
-            for row in selected[batch_start:batch_start + 250]:
-                predicates.append("(" + " AND ".join(
-                    f"{key}={_sql_literal(str(row[key]))}" for key in keys
-                ) + ")")
+            for row in selected[batch_start : batch_start + 250]:
+                predicates.append(
+                    "(" + " AND ".join(f"{key}={_sql_literal(str(row[key]))}" for key in keys) + ")"
+                )
             if predicates:
                 select_columns = ", ".join(keys + ([active_column] if active_column else []))
                 queries.append(
@@ -7916,7 +10023,10 @@ def load_lci_target_frames(
 
 
 def _lci_profile_bad_constants(
-    table: str, frame: Optional[DataFrame], expected: Dict[str, object], sample: int,
+    table: str,
+    frame: Optional[DataFrame],
+    expected: Dict[str, object],
+    sample: int,
 ) -> Finding:
     check_id = f"8e.profile.{table.lower()}_constants"
     if frame is None:
@@ -7925,17 +10035,24 @@ def _lci_profile_bad_constants(
     missing = [name for name, actual in columns.items() if not actual]
     if missing:
         return _lci_unavailable(check_id, [f"{table}.{name}" for name in missing], SEV_WARN)
-    bad = frame.where(reduce(
-        lambda left, right: left | right,
-        [
-            ~F.coalesce(_canon_key_col(F.col(columns[name])) == str(value), F.lit(False))
-            for name, value in expected.items()
-        ],
-    ))
+    bad = frame.where(
+        reduce(
+            lambda left, right: left | right,
+            [
+                ~F.coalesce(_canon_key_col(F.col(columns[name])) == str(value), F.lit(False))
+                for name, value in expected.items()
+            ],
+        )
+    )
     count = bad.count()
     return Finding(
-        check_id, "LCI observed registration profile", SEV_WARN if count else SEV_INFO,
-        table, count == 0, count=count, column=",".join(expected),
+        check_id,
+        "LCI observed registration profile",
+        SEV_WARN if count else SEV_INFO,
+        table,
+        count == 0,
+        count=count,
+        column=",".join(expected),
         sample=_sample_keys(bad, frame.columns[:1], sample),
         hint="Treat these values as one successful LCI batch observation only." if count else "",
         message="Rows differing from observed LCI registration constants.",
@@ -7943,66 +10060,99 @@ def _lci_profile_bad_constants(
 
 
 def check_lci_registration_profile(
-    tables: Dict[str, DataFrame], sample: int, registration_profile: bool,
+    tables: Dict[str, DataFrame],
+    sample: int,
+    registration_profile: bool,
     profile: ValidationProfile,
 ) -> List[Finding]:
     if profile.pipeline != "lci" or not registration_profile:
         return []
     out = [
         _lci_profile_bad_constants(
-            "INSTRUMENTO_FINANCEIRO", tables.get("INSTRUMENTO_FINANCEIRO"),
+            "INSTRUMENTO_FINANCEIRO",
+            tables.get("INSTRUMENTO_FINANCEIRO"),
             {
-                "NUM_SISTEMA": 55, "NUM_TIPO_IF": 81, "NUM_ID_FORMA_PAGAMENTO": 19,
-                "NUM_ID_MOTIVO_SITUACAO_IF": 22, "COD_SITUACAO_IF": 0,
-                "VAL_NOMINAL_EMISSAO": 1, "VAL_NOMINAL_ATUAL": 1,
-                "VAL_NOMINAL_EM": 1, "VAL_PU_CURVA": 1,
-            }, sample,
+                "NUM_SISTEMA": 55,
+                "NUM_TIPO_IF": 81,
+                "NUM_ID_FORMA_PAGAMENTO": 19,
+                "NUM_ID_MOTIVO_SITUACAO_IF": 22,
+                "COD_SITUACAO_IF": 0,
+                "VAL_NOMINAL_EMISSAO": 1,
+                "VAL_NOMINAL_ATUAL": 1,
+                "VAL_NOMINAL_EM": 1,
+                "VAL_PU_CURVA": 1,
+            },
+            sample,
         ),
         _lci_profile_bad_constants(
-            "TITULO", tables.get("TITULO"),
+            "TITULO",
+            tables.get("TITULO"),
             {
-                "QTD_EMITIDA": 10, "NUM_ID_TIPO_REGIME_TITULO": 2,
-                "IND_FRACIONAMENTO": "N", "NOM_FORMA_TITULO": "ESCRITURAL",
-            }, sample,
+                "QTD_EMITIDA": 10,
+                "NUM_ID_TIPO_REGIME_TITULO": 2,
+                "IND_FRACIONAMENTO": "N",
+                "NOM_FORMA_TITULO": "ESCRITURAL",
+            },
+            sample,
         ),
         _lci_profile_bad_constants(
-            "DEPOSITO_AUTOMATICO_IF", tables.get("DEPOSITO_AUTOMATICO_IF"),
-            {"VAL_PRECO_UNITARIO": 1}, sample,
+            "DEPOSITO_AUTOMATICO_IF",
+            tables.get("DEPOSITO_AUTOMATICO_IF"),
+            {"VAL_PRECO_UNITARIO": 1},
+            sample,
         ),
         _lci_profile_bad_constants(
-            "OPERACAO", tables.get("OPERACAO"),
+            "OPERACAO",
+            tables.get("OPERACAO"),
             {
-                "QTD_OPERACAO": 10, "VAL_PRECO_UNITARIO": 1, "VAL_FINANCEIRO": 10,
-                "COD_SITUACAO_OPERACAO": 402, "NUM_ID_MODALIDADE_LIQUIDACAO": 6,
-            }, sample,
+                "QTD_OPERACAO": 10,
+                "VAL_PRECO_UNITARIO": 1,
+                "VAL_FINANCEIRO": 10,
+                "COD_SITUACAO_OPERACAO": 402,
+                "NUM_ID_MODALIDADE_LIQUIDACAO": 6,
+            },
+            sample,
         ),
         _lci_profile_bad_constants(
-            "ESPECIFICACAO", tables.get("ESPECIFICACAO"),
+            "ESPECIFICACAO",
+            tables.get("ESPECIFICACAO"),
             {
-                "QTD_ESPECIFICAR": 10, "NUM_ID_SITUACAO_ESPECIFICACAO": 2,
+                "QTD_ESPECIFICAR": 10,
+                "NUM_ID_SITUACAO_ESPECIFICACAO": 2,
                 "IND_EXCLUIDO": "N",
-            }, sample,
+            },
+            sample,
         ),
         _lci_profile_bad_constants(
-            "ESPECIFICACAO_COMITENTE", tables.get("ESPECIFICACAO_COMITENTE"),
+            "ESPECIFICACAO_COMITENTE",
+            tables.get("ESPECIFICACAO_COMITENTE"),
             {
-                "QTD_ESPECIFICADA": 10, "VAL_PRECO_UNITARIO": 1,
-                "COD_TIPO_POSICAO_CARTEIRA": 1, "IND_EXCLUIDO": "N",
-            }, sample,
-        ),
-        _lci_profile_bad_constants(
-            "CARTEIRA_COMITENTE", tables.get("CARTEIRA_COMITENTE"),
-            {
-                "QTD_CARTEIRA_COMITENTE": 10, "NUM_SISTEMA": 55,
+                "QTD_ESPECIFICADA": 10,
+                "VAL_PRECO_UNITARIO": 1,
                 "COD_TIPO_POSICAO_CARTEIRA": 1,
-            }, sample,
+                "IND_EXCLUIDO": "N",
+            },
+            sample,
         ),
         _lci_profile_bad_constants(
-            "CARTEIRA_PARTICIPANTE", tables.get("CARTEIRA_PARTICIPANTE"),
+            "CARTEIRA_COMITENTE",
+            tables.get("CARTEIRA_COMITENTE"),
             {
-                "QTD_CARTEIRA_PARTICIPANTE": 10, "NUM_SISTEMA": 55,
+                "QTD_CARTEIRA_COMITENTE": 10,
+                "NUM_SISTEMA": 55,
                 "COD_TIPO_POSICAO_CARTEIRA": 1,
-            }, sample,
+            },
+            sample,
+        ),
+        _lci_profile_bad_constants(
+            "CARTEIRA_PARTICIPANTE",
+            tables.get("CARTEIRA_PARTICIPANTE"),
+            {
+                "QTD_CARTEIRA_PARTICIPANTE": 10,
+                "NUM_SISTEMA": 55,
+                "COD_TIPO_POSICAO_CARTEIRA": 1,
+            },
+            sample,
         ),
     ]
     credit = tables.get("CREDITO")
@@ -8013,48 +10163,68 @@ def check_lci_registration_profile(
         if not value_columns:
             bad = credit.limit(0)
         else:
-            bad = credit.where(reduce(
-                lambda left, right: left | right,
-                [
-                    F.col(column).isNotNull()
-                    & (F.trim(F.col(column).cast("string")) != "")
-                    for column in value_columns
-                ],
-            ))
+            bad = credit.where(
+                reduce(
+                    lambda left, right: left | right,
+                    [
+                        F.col(column).isNotNull() & (F.trim(F.col(column).cast("string")) != "")
+                        for column in value_columns
+                    ],
+                )
+            )
         count = bad.count()
-        out.append(Finding(
-            "8e.profile.credit_mostly_null", "LCI observed registration profile",
-            SEV_WARN if count else SEV_INFO, "CREDITO", count == 0, count=count,
-            column=",".join(value_columns), sample=_sample_keys(bad, [credit.columns[0]], sample),
-            hint="Confirm populated CREDITO attributes against another LCI inclusion route."
-                 if count else "",
-            message="LCI CREDITO product rows differing from the observed mostly-null profile.",
-        ))
+        out.append(
+            Finding(
+                "8e.profile.credit_mostly_null",
+                "LCI observed registration profile",
+                SEV_WARN if count else SEV_INFO,
+                "CREDITO",
+                count == 0,
+                count=count,
+                column=",".join(value_columns),
+                sample=_sample_keys(bad, [credit.columns[0]], sample),
+                hint="Confirm populated CREDITO attributes against another LCI inclusion route."
+                if count
+                else "",
+                message="LCI CREDITO product rows differing from the observed mostly-null profile.",
+            )
+        )
 
     root = tables.get("INSTRUMENTO_FINANCEIRO")
     condition = tables.get("CONDICAO_IF")
     root_key = resolve(root, "NUM_IF") if root is not None else None
     root_type = resolve(root, "NUM_TIPO_IF") if root is not None else None
     condition_root = resolve(condition, "NUM_IF") if condition is not None else None
-    condition_type = (
-        resolve(condition, "COD_TIPO_CONDICAO_IF") if condition is not None else None
-    )
-    if not all((
-        root is not None, condition is not None, root_key, root_type,
-        condition_root, condition_type,
-    )):
-        out.append(_lci_unavailable(
-            "8e.profile.condition_topology", ["INSTRUMENTO_FINANCEIRO/CONDICAO_IF columns"]
-        ))
+    condition_type = resolve(condition, "COD_TIPO_CONDICAO_IF") if condition is not None else None
+    if not all(
+        (
+            root is not None,
+            condition is not None,
+            root_key,
+            root_type,
+            condition_root,
+            condition_type,
+        )
+    ):
+        out.append(
+            _lci_unavailable(
+                "8e.profile.condition_topology", ["INSTRUMENTO_FINANCEIRO/CONDICAO_IF columns"]
+            )
+        )
     else:
-        roots = _active(root).where(
-            _canon_key_col(F.col(root_type)) == "81"
-        ).select(_canon_key_col(F.col(root_key)).alias("root_id"))
-        topology = _active(condition).select(
-            _canon_key_col(F.col(condition_root)).alias("root_id"),
-            _lci_text(F.col(condition_type)).alias("condition_type"),
-        ).groupBy("root_id").agg(
-            F.sort_array(F.collect_list("condition_type")).alias("topology")
+        roots = (
+            _active(root)
+            .where(_canon_key_col(F.col(root_type)) == "81")
+            .select(_canon_key_col(F.col(root_key)).alias("root_id"))
+        )
+        topology = (
+            _active(condition)
+            .select(
+                _canon_key_col(F.col(condition_root)).alias("root_id"),
+                _lci_text(F.col(condition_type)).alias("condition_type"),
+            )
+            .groupBy("root_id")
+            .agg(F.sort_array(F.collect_list("condition_type")).alias("topology"))
         )
         bad = roots.join(topology, "root_id", "left").where(
             ~F.coalesce(
@@ -8065,15 +10235,22 @@ def check_lci_registration_profile(
             )
         )
         count = bad.count()
-        out.append(Finding(
-            "8e.profile.condition_topology", "LCI observed registration profile",
-            SEV_WARN if count else SEV_INFO, "CONDICAO_IF", count == 0, count=count,
-            column="COD_TIPO_CONDICAO_IF",
-            sample=_sample_keys(bad, ["root_id", "topology"], sample),
-            hint="Observed topologies are floating 3+20, fixed 2+20, and indexed 4+2+20."
-                 if count else "",
-            message="LCI roots outside the three observed condition topologies.",
-        ))
+        out.append(
+            Finding(
+                "8e.profile.condition_topology",
+                "LCI observed registration profile",
+                SEV_WARN if count else SEV_INFO,
+                "CONDICAO_IF",
+                count == 0,
+                count=count,
+                column="COD_TIPO_CONDICAO_IF",
+                sample=_sample_keys(bad, ["root_id", "topology"], sample),
+                hint="Observed topologies are floating 3+20, fixed 2+20, and indexed 4+2+20."
+                if count
+                else "",
+                message="LCI roots outside the three observed condition topologies.",
+            )
+        )
 
     subtype_frames = []
     for table, rate_column, observed in (
@@ -8083,59 +10260,83 @@ def check_lci_registration_profile(
         frame = tables.get(table)
         rate = resolve(frame, rate_column) if frame is not None else None
         if frame is None or not rate:
-            out.append(_lci_unavailable(
-                f"8e.profile.{table.lower()}_values", [f"{table}.{rate_column}"]
-            ))
+            out.append(
+                _lci_unavailable(f"8e.profile.{table.lower()}_values", [f"{table}.{rate_column}"])
+            )
             continue
         bad = frame.where(~_canon_key_col(F.col(rate)).isin(*observed))
         count = bad.count()
-        subtype_frames.append(Finding(
-            f"8e.profile.{table.lower()}_values", "LCI observed registration profile",
-            SEV_WARN if count else SEV_INFO, table, count == 0, count=count,
-            column=rate_column, sample=_sample_keys(bad, frame.columns[:1], sample),
-            hint=f"Observed exact normalized rates are {observed}; retain new values as advisory."
-                 if count else "",
-            message="LCI rate values outside the observed batch.",
-        ))
+        subtype_frames.append(
+            Finding(
+                f"8e.profile.{table.lower()}_values",
+                "LCI observed registration profile",
+                SEV_WARN if count else SEV_INFO,
+                table,
+                count == 0,
+                count=count,
+                column=rate_column,
+                sample=_sample_keys(bad, frame.columns[:1], sample),
+                hint=(
+                    f"Observed exact normalized rates are {observed}; "
+                    "retain new values as advisory."
+                )
+                if count
+                else "",
+                message="LCI rate values outside the observed batch.",
+            )
+        )
     out.extend(subtype_frames)
     update = tables.get("ATUALIZACAO_POS")
     update_expected = {
-        "NUM_INDICE_VALORIZACAO": 19, "IND_INCORPORA_ATUALIZACAO": "N",
-        "VAL_PERCENTUAL_PARAMETRO": 100, "COD_TIPO_UNIDADE_TEMPO_APLIC": "D",
-        "COD_TIPO_PRAZO": "COMERCIAL", "COD_DESLOCAMENTO_INDICE": -2,
-        "COD_TIPO_UNIDADE_TEMPO_PART": "M", "COD_TIPO_PRAZO_JUROS_PART": "CORRIDO",
+        "NUM_INDICE_VALORIZACAO": 19,
+        "IND_INCORPORA_ATUALIZACAO": "N",
+        "VAL_PERCENTUAL_PARAMETRO": 100,
+        "COD_TIPO_UNIDADE_TEMPO_APLIC": "D",
+        "COD_TIPO_PRAZO": "COMERCIAL",
+        "COD_DESLOCAMENTO_INDICE": -2,
+        "COD_TIPO_UNIDADE_TEMPO_PART": "M",
+        "COD_TIPO_PRAZO_JUROS_PART": "CORRIDO",
         "NOM_AGENDA_PAGAMENTO": "CONSTANTE",
     }
     if update is not None and update.limit(1).count() == 0:
-        out.append(Finding(
-            "8e.profile.atualizacao_pos_constants", "LCI observed registration profile",
-            SEV_INFO, "ATUALIZACAO_POS", True,
-            message="No indexed LCI rows present; indexed-value advisory is not applicable.",
-        ))
+        out.append(
+            Finding(
+                "8e.profile.atualizacao_pos_constants",
+                "LCI observed registration profile",
+                SEV_INFO,
+                "ATUALIZACAO_POS",
+                True,
+                message="No indexed LCI rows present; indexed-value advisory is not applicable.",
+            )
+        )
     else:
-        out.append(_lci_profile_bad_constants(
-            "ATUALIZACAO_POS", update, update_expected, sample
-        ))
+        out.append(_lci_profile_bad_constants("ATUALIZACAO_POS", update, update_expected, sample))
 
     if root is None or not root_key or not root_type or not resolve(root, "COD_IF"):
         out.append(_lci_unavailable("8e.profile.cod_if_allocator", ["INSTRUMENTO_FINANCEIRO"]))
     else:
         cod_if = resolve(root, "COD_IF")
-        active_lci = _active(root).where(
-            _canon_key_col(F.col(root_type)) == "81"
-        )
+        active_lci = _active(root).where(_canon_key_col(F.col(root_type)) == "81")
         bad = active_lci.where(
             ~F.coalesce(_lci_text(F.col(cod_if)).rlike(r"^[0-9]{2}[A-Z][0-9]{8}$"), F.lit(False))
         )
         count = bad.count()
-        out.append(Finding(
-            "8e.profile.cod_if_allocator", "LCI observed registration profile",
-            SEV_WARN if count else SEV_INFO, "INSTRUMENTO_FINANCEIRO", count == 0,
-            count=count, column="COD_IF", sample=_sample_keys(bad, [root_key, cod_if], sample),
-            hint="The allocator-like format is advisory; do not make it a hard root rule."
-                 if count else "",
-            message="LCI COD_IF values outside the single observed allocator format.",
-        ))
+        out.append(
+            Finding(
+                "8e.profile.cod_if_allocator",
+                "LCI observed registration profile",
+                SEV_WARN if count else SEV_INFO,
+                "INSTRUMENTO_FINANCEIRO",
+                count == 0,
+                count=count,
+                column="COD_IF",
+                sample=_sample_keys(bad, [root_key, cod_if], sample),
+                hint="The allocator-like format is advisory; do not make it a hard root rule."
+                if count
+                else "",
+                message="LCI COD_IF values outside the single observed allocator format.",
+            )
+        )
 
     operation = tables.get("OPERACAO")
     op_id = resolve(operation, "NUM_ID_OPERACAO") if operation is not None else None
@@ -8143,9 +10344,11 @@ def check_lci_registration_profile(
     if root is None or operation is None or not all((root_key, root_type, op_id, op_root)):
         out.append(_lci_unavailable("8e.profile.async_closure", ["LCI closure columns"]))
     else:
-        base = _active(root).where(
-            _canon_key_col(F.col(root_type)) == "81"
-        ).select(_canon_key_col(F.col(root_key)).alias("root_id"))
+        base = (
+            _active(root)
+            .where(_canon_key_col(F.col(root_type)) == "81")
+            .select(_canon_key_col(F.col(root_key)).alias("root_id"))
+        )
 
         def direct_count(table: str, key_name: str, alias: str) -> None:
             frame = tables.get(table)
@@ -8153,9 +10356,12 @@ def check_lci_registration_profile(
             if frame is None or not actual:
                 return
             nonlocal base
-            counts = frame.select(
-                _canon_key_col(F.col(actual)).alias("root_id")
-            ).groupBy("root_id").count().withColumnRenamed("count", alias)
+            counts = (
+                frame.select(_canon_key_col(F.col(actual)).alias("root_id"))
+                .groupBy("root_id")
+                .count()
+                .withColumnRenamed("count", alias)
+            )
             base = base.join(counts, "root_id", "left")
 
         direct_count("HISTORICO_PU_CURVA", "NUM_IF", "history_count")
@@ -8166,40 +10372,67 @@ def check_lci_registration_profile(
         event = tables.get("EVENTO")
         event_root, event_type = (
             (resolve(event, "NUM_IF"), resolve(event, "NUM_TIPO_EVENTO_LEGADO"))
-            if event is not None else (None, None)
+            if event is not None
+            else (None, None)
         )
         if event_root and event_type:
-            event_counts = event.select(
-                _canon_key_col(F.col(event_root)).alias("root_id"),
-                _lci_text(F.col(event_type)).alias("event_type"),
-            ).groupBy("root_id").agg(
-                F.count(F.lit(1)).alias("event_count"),
-                F.sum(F.when(F.col("event_type") == "83", 1).otherwise(0)).alias("event_83"),
-                F.sum(F.when(F.col("event_type") == "85", 1).otherwise(0)).alias("event_85"),
+            event_counts = (
+                event.select(
+                    _canon_key_col(F.col(event_root)).alias("root_id"),
+                    _lci_text(F.col(event_type)).alias("event_type"),
+                )
+                .groupBy("root_id")
+                .agg(
+                    F.count(F.lit(1)).alias("event_count"),
+                    F.sum(F.when(F.col("event_type") == "83", 1).otherwise(0)).alias("event_83"),
+                    F.sum(F.when(F.col("event_type") == "85", 1).otherwise(0)).alias("event_85"),
+                )
             )
             base = base.join(event_counts, "root_id", "left")
         expected_columns = {
-            "history_count": 1, "deposit_count": 1, "operation_count": 1,
-            "wallet_holder_count": 1, "wallet_participant_count": 1,
-            "event_count": 2, "event_83": 1, "event_85": 1,
+            "history_count": 1,
+            "deposit_count": 1,
+            "operation_count": 1,
+            "wallet_holder_count": 1,
+            "wallet_participant_count": 1,
+            "event_count": 2,
+            "event_83": 1,
+            "event_85": 1,
         }
         available = {
             name: value for name, value in expected_columns.items() if name in base.columns
         }
-        bad = base.fillna(0, list(available)).where(reduce(
-            lambda left, right: left | right,
-            [F.col(name) != expected for name, expected in available.items()],
-        )) if available else base
+        bad = (
+            base.fillna(0, list(available)).where(
+                reduce(
+                    lambda left, right: left | right,
+                    [F.col(name) != expected for name, expected in available.items()],
+                )
+            )
+            if available
+            else base
+        )
         count = bad.count()
-        out.append(Finding(
-            "8e.profile.async_closure", "LCI observed registration profile",
-            SEV_WARN if count else SEV_INFO, "LCI aggregate", count == 0, count=count,
-            column=",".join(available), sample=_sample_keys(bad, ["root_id"], sample),
-            hint="Async closure cardinalities are observations; integrity remains hard elsewhere."
-                 if count else "",
-            message="LCI roots differing from observed history/event/deposit/operation/wallet "
-                    "closure cardinalities.",
-        ))
+        out.append(
+            Finding(
+                "8e.profile.async_closure",
+                "LCI observed registration profile",
+                SEV_WARN if count else SEV_INFO,
+                "LCI aggregate",
+                count == 0,
+                count=count,
+                column=",".join(available),
+                sample=_sample_keys(bad, ["root_id"], sample),
+                hint=(
+                    "Async closure cardinalities are observations; "
+                    "integrity remains hard elsewhere."
+                )
+                if count
+                else "",
+                message="LCI roots differing from observed history/event/deposit/operation/wallet "
+                "closure cardinalities.",
+            )
+        )
 
     dado = tables.get("DADO_OPERACAO")
     lancamento = tables.get("LANCAMENTO")
@@ -8213,105 +10446,154 @@ def check_lci_registration_profile(
         "specification holder": (holder, "NUM_ID_ESPECIFICACAO"),
     }
     closure_missing = [
-        name for name, (frame, key) in closure_requirements.items()
+        name
+        for name, (frame, key) in closure_requirements.items()
         if frame is None or not resolve(frame, key)
     ]
     dado_type = resolve(dado, "NUM_ID_TIPO_DADO_OPERACAO") if dado is not None else None
-    spec_id = resolve(specification, "NUM_ID_ESPECIFICACAO") \
-        if specification is not None else None
+    spec_id = resolve(specification, "NUM_ID_ESPECIFICACAO") if specification is not None else None
     if closure_missing or not dado_type or not spec_id:
-        out.append(_lci_unavailable(
-            "8e.profile.operation_closure",
-            closure_missing + (["DADO/ESPECIFICACAO type/key columns"]
-                               if not dado_type or not spec_id else []),
-        ))
+        out.append(
+            _lci_unavailable(
+                "8e.profile.operation_closure",
+                closure_missing
+                + (["DADO/ESPECIFICACAO type/key columns"] if not dado_type or not spec_id else []),
+            )
+        )
     else:
         operation_id = resolve(operation, "NUM_ID_OPERACAO")
-        cluster = operation.select(
-            _canon_key_col(F.col(operation_id)).alias("operation_id")
+        cluster = operation.select(_canon_key_col(F.col(operation_id)).alias("operation_id"))
+        data_counts = (
+            dado.select(
+                _canon_key_col(F.col(resolve(dado, "NUM_ID_OPERACAO"))).alias("operation_id"),
+                _lci_text(F.col(dado_type)).alias("data_type"),
+            )
+            .groupBy("operation_id")
+            .agg(
+                F.count(F.lit(1)).alias("data_count"),
+                F.sum(F.when(F.col("data_type") == "265", 1).otherwise(0)).alias("data_265"),
+                F.sum(F.when(F.col("data_type") == "269", 1).otherwise(0)).alias("data_269"),
+            )
         )
-        data_counts = dado.select(
-            _canon_key_col(F.col(resolve(dado, "NUM_ID_OPERACAO"))).alias("operation_id"),
-            _lci_text(F.col(dado_type)).alias("data_type"),
-        ).groupBy("operation_id").agg(
-            F.count(F.lit(1)).alias("data_count"),
-            F.sum(F.when(F.col("data_type") == "265", 1).otherwise(0)).alias("data_265"),
-            F.sum(F.when(F.col("data_type") == "269", 1).otherwise(0)).alias("data_269"),
+        launch_counts = (
+            lancamento.select(
+                _canon_key_col(F.col(resolve(lancamento, "NUM_ID_OPERACAO"))).alias("operation_id")
+            )
+            .groupBy("operation_id")
+            .count()
+            .withColumnRenamed("count", "launch_count")
         )
-        launch_counts = lancamento.select(
-            _canon_key_col(F.col(resolve(lancamento, "NUM_ID_OPERACAO"))).alias("operation_id")
-        ).groupBy("operation_id").count().withColumnRenamed("count", "launch_count")
         specifications = specification.select(
-            _canon_key_col(F.col(resolve(specification, "NUM_ID_OPERACAO")))
-            .alias("operation_id"),
+            _canon_key_col(F.col(resolve(specification, "NUM_ID_OPERACAO"))).alias("operation_id"),
             _canon_key_col(F.col(spec_id)).alias("specification_id"),
         )
-        specification_counts = specifications.groupBy("operation_id").count().withColumnRenamed(
-            "count", "specification_count"
+        specification_counts = (
+            specifications.groupBy("operation_id")
+            .count()
+            .withColumnRenamed("count", "specification_count")
         )
-        holder_counts = specifications.join(
-            holder.select(
-                _canon_key_col(F.col(resolve(holder, "NUM_ID_ESPECIFICACAO")))
-                .alias("specification_id")
-            ), "specification_id", "inner",
-        ).groupBy("operation_id").count().withColumnRenamed("count", "holder_count")
-        cluster = cluster.join(data_counts, "operation_id", "left").join(
-            launch_counts, "operation_id", "left"
-        ).join(specification_counts, "operation_id", "left").join(
-            holder_counts, "operation_id", "left"
-        ).fillna(0)
+        holder_counts = (
+            specifications.join(
+                holder.select(
+                    _canon_key_col(F.col(resolve(holder, "NUM_ID_ESPECIFICACAO"))).alias(
+                        "specification_id"
+                    )
+                ),
+                "specification_id",
+                "inner",
+            )
+            .groupBy("operation_id")
+            .count()
+            .withColumnRenamed("count", "holder_count")
+        )
+        cluster = (
+            cluster.join(data_counts, "operation_id", "left")
+            .join(launch_counts, "operation_id", "left")
+            .join(specification_counts, "operation_id", "left")
+            .join(holder_counts, "operation_id", "left")
+            .fillna(0)
+        )
         bad = cluster.where(
-            (F.col("data_count") != 2) | (F.col("data_265") != 1)
-            | (F.col("data_269") != 1) | (F.col("launch_count") != 1)
-            | (F.col("specification_count") != 1) | (F.col("holder_count") != 1)
+            (F.col("data_count") != 2)
+            | (F.col("data_265") != 1)
+            | (F.col("data_269") != 1)
+            | (F.col("launch_count") != 1)
+            | (F.col("specification_count") != 1)
+            | (F.col("holder_count") != 1)
         )
         count = bad.count()
-        out.append(Finding(
-            "8e.profile.operation_closure", "LCI observed registration profile",
-            SEV_WARN if count else SEV_INFO, "OPERACAO", count == 0, count=count,
-            column="DADO(265+269),LANCAMENTO,ESPECIFICACAO,ESPECIFICACAO_COMITENTE",
-            sample=_sample_keys(bad, ["operation_id"], sample),
-            hint="Exact async closure counts are advisory; graph integrity remains hard."
-                 if count else "",
-            message="LCI operations differing from the observed 2:1:1:1 async closure.",
-        ))
+        out.append(
+            Finding(
+                "8e.profile.operation_closure",
+                "LCI observed registration profile",
+                SEV_WARN if count else SEV_INFO,
+                "OPERACAO",
+                count == 0,
+                count=count,
+                column="DADO(265+269),LANCAMENTO,ESPECIFICACAO,ESPECIFICACAO_COMITENTE",
+                sample=_sample_keys(bad, ["operation_id"], sample),
+                hint="Exact async closure counts are advisory; graph integrity remains hard."
+                if count
+                else "",
+                message="LCI operations differing from the observed 2:1:1:1 async closure.",
+            )
+        )
 
     date_columns = {
         name: resolve(root, name) if root is not None else None
         for name in (
-            "DAT_REGISTRO", "DAT_EMISSAO", "DAT_PU_CURVA", "DAT_ULTIMA_CORRECAO",
-            "DAT_SITUACAO_IF", "DAT_VAL_NOMINAL_EM",
+            "DAT_REGISTRO",
+            "DAT_EMISSAO",
+            "DAT_PU_CURVA",
+            "DAT_ULTIMA_CORRECAO",
+            "DAT_SITUACAO_IF",
+            "DAT_VAL_NOMINAL_EM",
         )
     }
     if root is None or not root_key or any(value is None for value in date_columns.values()):
-        out.append(_lci_unavailable(
-            "8e.profile.copied_dates", [
-                f"INSTRUMENTO_FINANCEIRO.{name}"
-                for name, actual in date_columns.items() if not actual
-            ] or ["INSTRUMENTO_FINANCEIRO"],
-        ))
+        out.append(
+            _lci_unavailable(
+                "8e.profile.copied_dates",
+                [
+                    f"INSTRUMENTO_FINANCEIRO.{name}"
+                    for name, actual in date_columns.items()
+                    if not actual
+                ]
+                or ["INSTRUMENTO_FINANCEIRO"],
+            )
+        )
     else:
         dates = root.select(
             _canon_key_col(F.col(root_key)).alias("root_id"),
             *[F.to_date(F.col(actual)).alias(name) for name, actual in date_columns.items()],
         )
-        bad = dates.where(reduce(
-            lambda left, right: left | right,
-            [
-                ~F.col("DAT_REGISTRO").eqNullSafe(F.col(name))
-                for name in date_columns if name != "DAT_REGISTRO"
-            ],
-        ))
+        bad = dates.where(
+            reduce(
+                lambda left, right: left | right,
+                [
+                    ~F.col("DAT_REGISTRO").eqNullSafe(F.col(name))
+                    for name in date_columns
+                    if name != "DAT_REGISTRO"
+                ],
+            )
+        )
         count = bad.count()
-        out.append(Finding(
-            "8e.profile.copied_dates", "LCI observed registration profile",
-            SEV_WARN if count else SEV_INFO, "INSTRUMENTO_FINANCEIRO", count == 0,
-            count=count, column=",".join(date_columns),
-            sample=_sample_keys(bad, ["root_id"], sample),
-            hint="Copied business-date equalities are advisory; DAT_INCLUSAO is runtime."
-                 if count else "",
-            message="LCI roots differing from observed DAT_REGISTRO-based copied dates.",
-        ))
+        out.append(
+            Finding(
+                "8e.profile.copied_dates",
+                "LCI observed registration profile",
+                SEV_WARN if count else SEV_INFO,
+                "INSTRUMENTO_FINANCEIRO",
+                count == 0,
+                count=count,
+                column=",".join(date_columns),
+                sample=_sample_keys(bad, ["root_id"], sample),
+                hint="Copied business-date equalities are advisory; DAT_INCLUSAO is runtime."
+                if count
+                else "",
+                message="LCI roots differing from observed DAT_REGISTRO-based copied dates.",
+            )
+        )
 
     if operation is not None:
         quantity = resolve(operation, "QTD_OPERACAO")
@@ -8324,15 +10606,22 @@ def check_lci_registration_profile(
                 != F.expr(f"try_cast(`{financial}` as decimal(38,10))")
             )
             count = bad.count()
-            out.append(Finding(
-                "8e.profile.operation_financial_identity", "LCI observed registration profile",
-                SEV_WARN if count else SEV_INFO, "OPERACAO", count == 0, count=count,
-                column="QTD_OPERACAO,VAL_PRECO_UNITARIO,VAL_FINANCEIRO",
-                sample=_sample_keys(bad, [op_id] if op_id else operation.columns[:1], sample),
-                hint="QTD*PU=VAL_FINANCEIRO is an observed registration relationship."
-                     if count else "",
-                message="Operations differing from the observed financial identity.",
-            ))
+            out.append(
+                Finding(
+                    "8e.profile.operation_financial_identity",
+                    "LCI observed registration profile",
+                    SEV_WARN if count else SEV_INFO,
+                    "OPERACAO",
+                    count == 0,
+                    count=count,
+                    column="QTD_OPERACAO,VAL_PRECO_UNITARIO,VAL_FINANCEIRO",
+                    sample=_sample_keys(bad, [op_id] if op_id else operation.columns[:1], sample),
+                    hint="QTD*PU=VAL_FINANCEIRO is an observed registration relationship."
+                    if count
+                    else "",
+                    message="Operations differing from the observed financial identity.",
+                )
+            )
     return out
 
 
@@ -8353,9 +10642,17 @@ def check_primary_keys(
     """
     cat = "Primary keys"
     if no_oracle:
-        return [Finding("3b.pk_unsupported", cat, SEV_WARN, "*", False,
-                        hint="Run with Oracle metadata to validate primary keys.",
-                        message="PK validation unavailable under --no-oracle (no PK metadata).")]
+        return [
+            Finding(
+                "3b.pk_unsupported",
+                cat,
+                SEV_WARN,
+                "*",
+                False,
+                hint="Run with Oracle metadata to validate primary keys.",
+                message="PK validation unavailable under --no-oracle (no PK metadata).",
+            )
+        ]
     out: List[Finding] = []
     for table, df in tables.items():
         if table == MAPA_CLONE_NUM_IF_TABLE:
@@ -8365,41 +10662,73 @@ def check_primary_keys(
         pk = meta.pk.get(table) or []
         if not pk:
             severity = SEV_WARN if table in PK_METADATA_WARN_TABLES else SEV_ERROR
-            out.append(Finding(
-                "3b.pk_missing_meta", cat, severity, table, False,
-                hint=(
-                    "Oracle declares no PK for this known application-written base table; "
-                    "validate its logical identifier through the generation spec."
-                    if severity == SEV_WARN
-                    else "Table has no primary key in Oracle metadata; confirm it is a real "
-                         "base table before appending."
-                ),
-                message=f"{table} has no PK defined in Oracle metadata.",
-            ))
+            out.append(
+                Finding(
+                    "3b.pk_missing_meta",
+                    cat,
+                    severity,
+                    table,
+                    False,
+                    hint=(
+                        "Oracle declares no PK for this known application-written base table; "
+                        "validate its logical identifier through the generation spec."
+                        if severity == SEV_WARN
+                        else "Table has no primary key in Oracle metadata; confirm it is a real "
+                        "base table before appending."
+                    ),
+                    message=f"{table} has no PK defined in Oracle metadata.",
+                )
+            )
             continue
         resolved = [resolve(df, c) for c in pk]
         missing = [c for c, a in zip(pk, resolved) if not a]
         if missing:
-            out.append(Finding("3b.pk_missing_cols", cat, SEV_ERROR, table, False,
-                               column=",".join(missing),
-                               hint="Export the full PK for every synthetic table.",
-                               message=f"{table} missing PK column(s) {missing}."))
+            out.append(
+                Finding(
+                    "3b.pk_missing_cols",
+                    cat,
+                    SEV_ERROR,
+                    table,
+                    False,
+                    column=",".join(missing),
+                    hint="Export the full PK for every synthetic table.",
+                    message=f"{table} missing PK column(s) {missing}.",
+                )
+            )
             continue
         null_pred = reduce(lambda a, b: a | b, [F.col(c).isNull() for c in resolved])
         null_bad = df.where(null_pred)
         null_c = null_bad.count()
-        out.append(Finding("3b.pk_not_null", cat, SEV_ERROR if null_c else SEV_INFO,
-                           table, null_c == 0, count=null_c, column=",".join(pk),
-                           sample=_sample_keys(null_bad, resolved, sample),
-                           hint="PK columns must be non-null." if null_c else "",
-                           message=f"{table} PK null in {null_c} row(s)."))
+        out.append(
+            Finding(
+                "3b.pk_not_null",
+                cat,
+                SEV_ERROR if null_c else SEV_INFO,
+                table,
+                null_c == 0,
+                count=null_c,
+                column=",".join(pk),
+                sample=_sample_keys(null_bad, resolved, sample),
+                hint="PK columns must be non-null." if null_c else "",
+                message=f"{table} PK null in {null_c} row(s).",
+            )
+        )
         total = df.select(*resolved).count()
         distinct = df.select(*resolved).dropDuplicates().count()
         dup = total - distinct
-        out.append(Finding("3b.pk_unique", cat, SEV_ERROR if dup else SEV_INFO,
-                           table, dup == 0, count=dup, column=",".join(pk),
-                           hint="PK tuple must be unique." if dup else "",
-                           message=f"{table} has {dup} duplicate PK tuple(s)."))
+        out.append(
+            Finding(
+                "3b.pk_unique",
+                cat,
+                SEV_ERROR if dup else SEV_INFO,
+                table,
+                dup == 0,
+                count=dup,
+                column=",".join(pk),
+                hint="PK tuple must be unique." if dup else "",
+                message=f"{table} has {dup} duplicate PK tuple(s).",
+            )
+        )
     return out
 
 
@@ -8411,65 +10740,114 @@ def check_clone_map(
     mapa = tables.get(MAPA_CLONE_NUM_IF_TABLE)
     root = tables.get(SHAPE_ROOT_TABLE)
     if mapa is None:
-        return [Finding("3c.clone_map", cat, SEV_WARN, MAPA_CLONE_NUM_IF_TABLE, False,
-                        hint="Emit MAPA_CLONE_NUM_IF alongside the synthetic tables.",
-                        message="MAPA_CLONE_NUM_IF absent; clone-map integrity unchecked.")]
+        return [
+            Finding(
+                "3c.clone_map",
+                cat,
+                SEV_WARN,
+                MAPA_CLONE_NUM_IF_TABLE,
+                False,
+                hint="Emit MAPA_CLONE_NUM_IF alongside the synthetic tables.",
+                message="MAPA_CLONE_NUM_IF absent; clone-map integrity unchecked.",
+            )
+        ]
     orig = resolve(mapa, "NUM_IF_ORIG") or resolve(mapa, "NUM_IF_ORIGEM")
     novo = resolve(mapa, "NUM_IF_NOVO")
     kcol = resolve(mapa, "K") or resolve(mapa, "__clone_k")
     missing = [n for n, a in (("NUM_IF_ORIG", orig), ("NUM_IF_NOVO", novo)) if not a]
     if missing:
-        return [Finding("3c.clone_map", cat, SEV_ERROR, MAPA_CLONE_NUM_IF_TABLE, False,
-                        column=",".join(missing),
-                        hint="MAPA_CLONE_NUM_IF must carry NUM_IF_ORIG and NUM_IF_NOVO.",
-                        message=f"MAPA_CLONE_NUM_IF missing column(s) {missing}.")]
+        return [
+            Finding(
+                "3c.clone_map",
+                cat,
+                SEV_ERROR,
+                MAPA_CLONE_NUM_IF_TABLE,
+                False,
+                column=",".join(missing),
+                hint="MAPA_CLONE_NUM_IF must carry NUM_IF_ORIG and NUM_IF_NOVO.",
+                message=f"MAPA_CLONE_NUM_IF missing column(s) {missing}.",
+            )
+        ]
     out: List[Finding] = []
     # (NUM_IF_ORIG, K) uniqueness — one synthetic per source instance per K.
     if kcol:
         pair_total = mapa.select(orig, kcol).count()
         pair_distinct = mapa.select(orig, kcol).dropDuplicates().count()
         pair_dup = pair_total - pair_distinct
-        out.append(Finding("3c.clone_map_orig_k_unique", cat,
-                           SEV_ERROR if pair_dup else SEV_INFO, MAPA_CLONE_NUM_IF_TABLE,
-                           pair_dup == 0, count=pair_dup, column="NUM_IF_ORIG,K",
-                           hint="(NUM_IF_ORIG,K) must be unique." if pair_dup else "",
-                           message=f"{pair_dup} duplicate (NUM_IF_ORIG,K) row(s)."))
+        out.append(
+            Finding(
+                "3c.clone_map_orig_k_unique",
+                cat,
+                SEV_ERROR if pair_dup else SEV_INFO,
+                MAPA_CLONE_NUM_IF_TABLE,
+                pair_dup == 0,
+                count=pair_dup,
+                column="NUM_IF_ORIG,K",
+                hint="(NUM_IF_ORIG,K) must be unique." if pair_dup else "",
+                message=f"{pair_dup} duplicate (NUM_IF_ORIG,K) row(s).",
+            )
+        )
     # NUM_IF_NOVO uniqueness.
     novo_total = mapa.select(novo).count()
     novo_distinct = mapa.select(novo).dropDuplicates().count()
     novo_dup = novo_total - novo_distinct
-    out.append(Finding("3c.clone_map_novo_unique", cat,
-                       SEV_ERROR if novo_dup else SEV_INFO, MAPA_CLONE_NUM_IF_TABLE,
-                       novo_dup == 0, count=novo_dup, column="NUM_IF_NOVO",
-                       hint="NUM_IF_NOVO must be unique." if novo_dup else "",
-                       message=f"{novo_dup} duplicate NUM_IF_NOVO value(s)."))
+    out.append(
+        Finding(
+            "3c.clone_map_novo_unique",
+            cat,
+            SEV_ERROR if novo_dup else SEV_INFO,
+            MAPA_CLONE_NUM_IF_TABLE,
+            novo_dup == 0,
+            count=novo_dup,
+            column="NUM_IF_NOVO",
+            hint="NUM_IF_NOVO must be unique." if novo_dup else "",
+            message=f"{novo_dup} duplicate NUM_IF_NOVO value(s).",
+        )
+    )
     if root is not None:
         rkey = resolve(root, SHAPE_ROOT_KEY)
         rtipo = resolve(root, "NUM_TIPO_IF")
         if rkey and rtipo:
-            roots = _active(root.where(F.col(rtipo).cast("long") == profile.num_tipo_if)) \
-                .select(F.col(rkey).cast("long").alias("NUM_IF")).dropDuplicates()
+            roots = (
+                _active(root.where(F.col(rtipo).cast("long") == profile.num_tipo_if))
+                .select(F.col(rkey).cast("long").alias("NUM_IF"))
+                .dropDuplicates()
+            )
             map_novo = mapa.select(F.col(novo).cast("long").alias("NUM_IF")).dropDuplicates()
             # every synthetic root has a map row.
             roots_wo_map = roots.join(map_novo, "NUM_IF", "left_anti")
             c1 = roots_wo_map.count()
-            out.append(Finding("3c.clone_map_covers_roots", cat,
-                               SEV_ERROR if c1 else SEV_INFO, MAPA_CLONE_NUM_IF_TABLE,
-                               c1 == 0, count=c1, column="NUM_IF_NOVO",
-                               sample=_sample_keys(roots_wo_map, ["NUM_IF"], sample),
-                               hint="Every synthetic root needs a clone-map row." if c1 else "",
-                               message=f"{c1} synthetic root(s) missing from MAPA_CLONE_NUM_IF."))
+            out.append(
+                Finding(
+                    "3c.clone_map_covers_roots",
+                    cat,
+                    SEV_ERROR if c1 else SEV_INFO,
+                    MAPA_CLONE_NUM_IF_TABLE,
+                    c1 == 0,
+                    count=c1,
+                    column="NUM_IF_NOVO",
+                    sample=_sample_keys(roots_wo_map, ["NUM_IF"], sample),
+                    hint="Every synthetic root needs a clone-map row." if c1 else "",
+                    message=f"{c1} synthetic root(s) missing from MAPA_CLONE_NUM_IF.",
+                )
+            )
             # no map row points outside the synthetic root output.
             map_wo_root = map_novo.join(roots, "NUM_IF", "left_anti")
             c2 = map_wo_root.count()
-            out.append(Finding("3c.clone_map_no_dangling", cat,
-                               SEV_ERROR if c2 else SEV_INFO, MAPA_CLONE_NUM_IF_TABLE,
-                               c2 == 0, count=c2, column="NUM_IF_NOVO",
-                               sample=_sample_keys(map_wo_root, ["NUM_IF"], sample),
-                               hint="Clone-map NUM_IF_NOVO must exist in the root output."
-                                    if c2 else "",
-                               message=f"{c2} MAPA_CLONE_NUM_IF row(s) point outside the root "
-                                       f"output."))
+            out.append(
+                Finding(
+                    "3c.clone_map_no_dangling",
+                    cat,
+                    SEV_ERROR if c2 else SEV_INFO,
+                    MAPA_CLONE_NUM_IF_TABLE,
+                    c2 == 0,
+                    count=c2,
+                    column="NUM_IF_NOVO",
+                    sample=_sample_keys(map_wo_root, ["NUM_IF"], sample),
+                    hint="Clone-map NUM_IF_NOVO must exist in the root output." if c2 else "",
+                    message=f"{c2} MAPA_CLONE_NUM_IF row(s) point outside the root output.",
+                )
+            )
     return out
 
 
@@ -8487,6 +10865,7 @@ def _canon_key(value) -> str:
     """Canonical string for a key value on either side of the comparison:
     numeric-looking values lose trailing fractional zeros ('123.0000' -> '123')."""
     import re
+
     s = str(value).strip()
     if re.fullmatch(r"-?\d+\.\d*0*", s):
         s = s.rstrip("0").rstrip(".")
@@ -8495,27 +10874,29 @@ def _canon_key(value) -> str:
 
 def _sql_literal(value: str) -> str:
     import re
+
     if re.fullmatch(r"-?\d+(\.\d+)?", value):
         return value
     return "'" + value.replace("'", "''") + "'"
 
 
 def _residual_in_oracle(
-    spark: SparkSession, cfg: Config, fk: ForeignKey, residual: List[tuple],
+    spark: SparkSession,
+    cfg: Config,
+    fk: ForeignKey,
+    residual: List[tuple],
     batch_size: int = 1000,
 ) -> set:
     """Return the subset of residual key-tuples that DO exist in the Oracle parent."""
     exists: set = set()
     cols = ", ".join(fk.parent_cols)
     for i in range(0, len(residual), batch_size):
-        batch = residual[i:i + batch_size]
+        batch = residual[i : i + batch_size]
         if len(fk.parent_cols) == 1:
             lits = ", ".join(_sql_literal(t[0]) for t in batch)
             pred = f"{fk.parent_cols[0]} IN ({lits})"
         else:
-            tuples = ", ".join(
-                "(" + ", ".join(_sql_literal(v) for v in t) + ")" for t in batch
-            )
+            tuples = ", ".join("(" + ", ".join(_sql_literal(v) for v in t) + ")" for t in batch)
             pred = f"({cols}) IN ({tuples})"
         q = f"SELECT DISTINCT {cols} FROM {cfg.schema}.{fk.parent_table} WHERE {pred}"
         for r in _jdbc(spark, cfg, q).collect():
@@ -8524,8 +10905,13 @@ def _residual_in_oracle(
 
 
 def check_referential(
-    spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame], meta: Metadata,
-    sample: int, validate_against: str, max_residual_keys: int,
+    spark: SparkSession,
+    cfg: Config,
+    tables: Dict[str, DataFrame],
+    meta: Metadata,
+    sample: int,
+    validate_against: str,
+    max_residual_keys: int,
     skip_prefixes: Optional[List[str]] = None,
 ) -> Tuple[List[Finding], List[Tuple[str, str, str]]]:
     """Returns (findings, faltantes): faltantes is one (child_table, fk_column,
@@ -8533,11 +10919,11 @@ def check_referential(
     input format of engorda_instrumentos.py --faltantes-parquet (TABELA/COLUNA/
     VALOR), so the generator can prune the sampling domain of instruments whose
     cluster references keys absent from the target."""
+
     def canon(col):
         # Native-function version of _canon_key: numeric-looking values lose
         # trailing fractional zeros; anything else passes through unchanged.
-        stripped = F.regexp_replace(
-            F.regexp_replace(col, r"(\.\d*?)0+$", "$1"), r"\.$", "")
+        stripped = F.regexp_replace(F.regexp_replace(col, r"(\.\d*?)0+$", "$1"), r"\.$", "")
         return F.when(col.rlike(r"^-?\d+\.\d*0*$"), stripped).otherwise(col)
 
     skip_prefixes = skip_prefixes or []
@@ -8547,27 +10933,33 @@ def check_referential(
     out: List[Finding] = []
     faltantes: List[Tuple[str, str, str]] = []
 
-    def append_shared_key_check(table: str, df: DataFrame, fk: ForeignKey,
-                                child_actual: List[str]) -> None:
+    def append_shared_key_check(
+        table: str, df: DataFrame, fk: ForeignKey, child_actual: List[str]
+    ) -> None:
         if skip_shared or not meta.is_shared_key_fk(fk):
             return
         total = df.select(*child_actual).count()
         distinct = df.select(*child_actual).dropDuplicates().count()
         dup = total - distinct
-        out.append(Finding(
-            "3.shared_key_dup", "Referential integrity",
-            SEV_ERROR if dup else SEV_INFO, table, dup == 0, count=dup,
-            column=",".join(fk.child_cols),
-            hint="Shared-key (PK==FK) 1:1 child has duplicate keys; "
-                 "bind_shared_key_children should pair 1:1 with distinct parent keys.",
-            message=f"Duplicate shared-key values in {table}.",
-        ))
+        out.append(
+            Finding(
+                "3.shared_key_dup",
+                "Referential integrity",
+                SEV_ERROR if dup else SEV_INFO,
+                table,
+                dup == 0,
+                count=dup,
+                column=",".join(fk.child_cols),
+                hint="Shared-key (PK==FK) 1:1 child has duplicate keys; "
+                "bind_shared_key_children should pair 1:1 with distinct parent keys.",
+                message=f"Duplicate shared-key values in {table}.",
+            )
+        )
 
     for table, df in tables.items():
         for fk in meta.fks.get(table, []):
             fk_label = (
-                f"{table}.{','.join(fk.child_cols)}->"
-                f"{fk.parent_table}.{','.join(fk.parent_cols)}"
+                f"{table}.{','.join(fk.child_cols)}->{fk.parent_table}.{','.join(fk.parent_cols)}"
             )
             child_actual = [resolve(df, c) for c in fk.child_cols]
             if any(a is None for a in child_actual):
@@ -8576,12 +10968,17 @@ def check_referential(
                 append_shared_key_check(table, df, fk, child_actual)
                 continue
 
-            not_null_all = reduce(lambda a, b: a & b,
-                                  [F.col(a).isNotNull() for a in child_actual])
-            child_keys = df.where(not_null_all).select(
-                *[canon(F.col(a).cast("string")).alias(f"k{i}")
-                  for i, a in enumerate(child_actual)]
-            ).dropDuplicates()
+            not_null_all = reduce(lambda a, b: a & b, [F.col(a).isNotNull() for a in child_actual])
+            child_keys = (
+                df.where(not_null_all)
+                .select(
+                    *[
+                        canon(F.col(a).cast("string")).alias(f"k{i}")
+                        for i, a in enumerate(child_actual)
+                    ]
+                )
+                .dropDuplicates()
+            )
 
             # Stage 1: resolve against the synthetic parent, when present.
             pdf = tables.get(fk.parent_table)
@@ -8589,33 +10986,50 @@ def check_referential(
             if pdf is not None:
                 parent_actual = [resolve(pdf, pc) for pc in fk.parent_cols]
                 if all(parent_actual):
-                    pkeys = pdf.select(
-                        *[canon(F.col(a).cast("string")).alias(f"k{i}")
-                          for i, a in enumerate(parent_actual)]
-                    ).dropna().dropDuplicates()
+                    pkeys = (
+                        pdf.select(
+                            *[
+                                canon(F.col(a).cast("string")).alias(f"k{i}")
+                                for i, a in enumerate(parent_actual)
+                            ]
+                        )
+                        .dropna()
+                        .dropDuplicates()
+                    )
                     residual_df = child_keys.join(
-                        pkeys, [f"k{i}" for i in range(len(child_actual))], "left_anti")
+                        pkeys, [f"k{i}" for i in range(len(child_actual))], "left_anti"
+                    )
 
             residual_started = perf_counter()
-            residual = [tuple(r[f"k{i}"] for i in range(len(child_actual)))
-                        for r in residual_df.limit(max_residual_keys + 1).collect()]
+            residual = [
+                tuple(r[f"k{i}"] for i in range(len(child_actual)))
+                for r in residual_df.limit(max_residual_keys + 1).collect()
+            ]
             logger.info(
                 "[PERF] fk synthetic-residual %s keys=%d elapsed=%.1fs",
-                fk_label, len(residual), perf_counter() - residual_started,
+                fk_label,
+                len(residual),
+                perf_counter() - residual_started,
             )
 
             # Stage 2: push the residual into Oracle (union mode).
             note = ""
             if residual and validate_against == "union" and cfg.jdbc_url:
                 if len(residual) > max_residual_keys:
-                    out.append(Finding(
-                        "3.fk_unresolved", "Referential integrity", SEV_WARN, table,
-                        False, column=",".join(fk.child_cols),
-                        hint="Raise --max-residual-keys or check this FK offline.",
-                        message=f"FK {table}.{list(fk.child_cols)} -> {fk.parent_table}: "
-                                f"more than {max_residual_keys} keys unresolved against "
-                                f"the synthetic output; Oracle lookup skipped.",
-                    ))
+                    out.append(
+                        Finding(
+                            "3.fk_unresolved",
+                            "Referential integrity",
+                            SEV_WARN,
+                            table,
+                            False,
+                            column=",".join(fk.child_cols),
+                            hint="Raise --max-residual-keys or check this FK offline.",
+                            message=f"FK {table}.{list(fk.child_cols)} -> {fk.parent_table}: "
+                            f"more than {max_residual_keys} keys unresolved against "
+                            f"the synthetic output; Oracle lookup skipped.",
+                        )
+                    )
                     continue
                 try:
                     oracle_started = perf_counter()
@@ -8635,48 +11049,63 @@ def check_referential(
                     # Oracle-verified misses on a single-column FK feed the
                     # generator's domain pruning (--faltantes-parquet).
                     if residual and len(fk.child_cols) == 1 and not skip_orphan:
-                        faltantes.extend(
-                            (table, fk.child_cols[0], t[0]) for t in residual)
+                        faltantes.extend((table, fk.child_cols[0], t[0]) for t in residual)
                 except Exception as exc:  # noqa: BLE001
-                    out.append(Finding(
-                        "3.fk_unresolved", "Referential integrity", SEV_WARN, table,
-                        False, column=",".join(fk.child_cols),
-                        hint="Oracle residual lookup failed; FK not fully verified.",
-                        message=f"FK {table}.{list(fk.child_cols)} -> {fk.parent_table}: "
-                                f"{exc}",
-                    ))
+                    out.append(
+                        Finding(
+                            "3.fk_unresolved",
+                            "Referential integrity",
+                            SEV_WARN,
+                            table,
+                            False,
+                            column=",".join(fk.child_cols),
+                            hint="Oracle residual lookup failed; FK not fully verified.",
+                            message=f"FK {table}.{list(fk.child_cols)} -> {fk.parent_table}: {exc}",
+                        )
+                    )
                     continue
             elif residual and pdf is None:
-                out.append(Finding(
-                    "3.fk_unresolved", "Referential integrity", SEV_WARN, table, False,
-                    column=",".join(fk.child_cols),
-                    hint="Parent absent from output and no Oracle connection "
-                         "(use --validate-against union).",
-                    message=f"FK {table}.{list(fk.child_cols)} -> {fk.parent_table}: "
-                            f"{len(residual)} key(s) unverifiable.",
-                ))
+                out.append(
+                    Finding(
+                        "3.fk_unresolved",
+                        "Referential integrity",
+                        SEV_WARN,
+                        table,
+                        False,
+                        column=",".join(fk.child_cols),
+                        hint="Parent absent from output and no Oracle connection "
+                        "(use --validate-against union).",
+                        message=f"FK {table}.{list(fk.child_cols)} -> {fk.parent_table}: "
+                        f"{len(residual)} key(s) unverifiable.",
+                    )
+                )
                 continue
 
             c = len(residual)
             if not skip_orphan:
-                out.append(Finding(
-                    "3.fk_orphan", "Referential integrity",
-                    SEV_ERROR if c else SEV_INFO, table, c == 0, count=c,
-                    column=",".join(fk.child_cols),
-                    sample=[t[0] if len(t) == 1 else list(t) for t in residual[:sample]],
-                    hint="Orphan FK: child value not present in the synthetic output nor in "
-                         "the target Oracle. Check FK remap / fecho / null_orphan_fks.",
-                    message=f"FK {table}.{list(fk.child_cols)} -> "
-                            f"{fk.parent_table}.{list(fk.parent_cols)}{note}",
-                ))
+                out.append(
+                    Finding(
+                        "3.fk_orphan",
+                        "Referential integrity",
+                        SEV_ERROR if c else SEV_INFO,
+                        table,
+                        c == 0,
+                        count=c,
+                        column=",".join(fk.child_cols),
+                        sample=[t[0] if len(t) == 1 else list(t) for t in residual[:sample]],
+                        hint="Orphan FK: child value not present in the synthetic output nor in "
+                        "the target Oracle. Check FK remap / fecho / null_orphan_fks.",
+                        message=f"FK {table}.{list(fk.child_cols)} -> "
+                        f"{fk.parent_table}.{list(fk.parent_cols)}{note}",
+                    )
+                )
 
             # Shared-key 1:1 cardinality (PK == FK).
             append_shared_key_check(table, df, fk, child_actual)
     return out, faltantes
 
 
-def emit_faltantes(spark: SparkSession, path: str,
-                   faltantes: List[Tuple[str, str, str]]) -> None:
+def emit_faltantes(spark: SparkSession, path: str, faltantes: List[Tuple[str, str, str]]) -> None:
     """Write the Oracle-verified orphan keys as a TABELA/COLUNA/VALOR Parquet —
     the input of engorda_instrumentos.py --faltantes-parquet, which prunes the
     sampling domain of instruments whose cluster references these keys.
@@ -8688,8 +11117,9 @@ def emit_faltantes(spark: SparkSession, path: str,
     driver, so a large pre-enumerated file (scripts/enumerate_faltantes.py) at
     `path` is fine."""
     if not faltantes:
-        logger.info("No new Oracle-verified orphan keys; faltantes parquet at %s "
-                    "left untouched.", path)
+        logger.info(
+            "No new Oracle-verified orphan keys; faltantes parquet at %s left untouched.", path
+        )
         return
     new_df = spark.createDataFrame(faltantes, ["TABELA", "COLUNA", "VALOR"]).dropDuplicates()
     prev = None
@@ -8702,25 +11132,42 @@ def emit_faltantes(spark: SparkSession, path: str,
         n_prev = prev.count()
     except Exception as exc:  # noqa: BLE001
         msg = str(exc)
-        if not any(s in msg for s in ("Path does not exist", "PATH_NOT_FOUND",
-                                      "Unable to infer schema", "FileNotFound")):
+        if not any(
+            s in msg
+            for s in (
+                "Path does not exist",
+                "PATH_NOT_FOUND",
+                "Unable to infer schema",
+                "FileNotFound",
+            )
+        ):
             raise
         n_prev = 0
     if prev is not None:
         # Keep only truly-new keys, materialized on the driver BEFORE writing:
         # appending output of a plan that reads `path` to `path` itself is unsafe.
-        rows = [tuple(r) for r in
-                new_df.join(prev, ["TABELA", "COLUNA", "VALOR"], "left_anti").collect()]
+        rows = [
+            tuple(r)
+            for r in new_df.join(prev, ["TABELA", "COLUNA", "VALOR"], "left_anti").collect()
+        ]
         if not rows:
-            logger.info("All orphan key(s) already present in %s (%d total); "
-                        "nothing to append.", path, n_prev)
+            logger.info(
+                "All orphan key(s) already present in %s (%d total); nothing to append.",
+                path,
+                n_prev,
+            )
             return
         new_df = spark.createDataFrame(rows, ["TABELA", "COLUNA", "VALOR"])
     n_new = new_df.count()
     new_df.coalesce(1).write.mode("append" if prev is not None else "overwrite").parquet(path)
-    logger.info("Faltantes parquet at %s: %d new key(s) appended (%d total); rerun "
-                "the generator with --faltantes-parquet %s",
-                path, n_new, n_prev + n_new, path)
+    logger.info(
+        "Faltantes parquet at %s: %d new key(s) appended (%d total); rerun "
+        "the generator with --faltantes-parquet %s",
+        path,
+        n_new,
+        n_prev + n_new,
+        path,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -8753,22 +11200,28 @@ def check_not_null(tables: Dict[str, DataFrame], meta: Metadata, sample: int) ->
                 hint = (
                     "NOT NULL FK column left null -> the rebind/fecho pass should have "
                     "resolved it (parent without synthetic key? cycle edge?)."
-                    if is_fk else
-                    "NOT NULL non-FK column left null -> no pipeline pass generates it; "
+                    if is_fk
+                    else "NOT NULL non-FK column left null -> no pipeline pass generates it; "
                     "it was born null in synthesis/bootstrap/postprocess or came null "
                     "from source. Populate it "
                     "in generation (this is the ORA-01400 class, e.g. COD_MOTIVO)."
                 )
             else:
                 hint = ""
-            out.append(Finding(
-                "4.not_null_fk" if is_fk else "4.not_null_nonfk",
-                "NOT NULL (incl. empty string)",
-                SEV_ERROR if cnt else SEV_INFO, table, cnt == 0, count=cnt, column=col_upper,
-                sample=_sample_keys(bad, pk_cols, sample),
-                hint=hint,
-                message=f"{table}.{col_upper} NOT NULL violated{note}.",
-            ))
+            out.append(
+                Finding(
+                    "4.not_null_fk" if is_fk else "4.not_null_nonfk",
+                    "NOT NULL (incl. empty string)",
+                    SEV_ERROR if cnt else SEV_INFO,
+                    table,
+                    cnt == 0,
+                    count=cnt,
+                    column=col_upper,
+                    sample=_sample_keys(bad, pk_cols, sample),
+                    hint=hint,
+                    message=f"{table}.{col_upper} NOT NULL violated{note}.",
+                )
+            )
     return out
 
 
@@ -8790,14 +11243,21 @@ def check_dates(tables: Dict[str, DataFrame], meta: Metadata, sample: int) -> Li
         violate = (left > right) if op == "<=" else (left >= right)
         bad = df.where(both & violate)
         c = bad.count()
-        out.append(Finding(
-            "5.date_order", "Date coherence",
-            SEV_ERROR if c else SEV_INFO, table, c == 0, count=c, column=f"{lcol}{op}{rcol}",
-            sample=_sample_keys(bad, _pk_cols_for(meta, table, df), sample),
-            hint="Check the engorda date rules (_apply_engorda_business_rules) / "
-                 "prazo de vencimento.",
-            message=f"Rows where NOT ({lcol} {op} {rcol}).",
-        ))
+        out.append(
+            Finding(
+                "5.date_order",
+                "Date coherence",
+                SEV_ERROR if c else SEV_INFO,
+                table,
+                c == 0,
+                count=c,
+                column=f"{lcol}{op}{rcol}",
+                sample=_sample_keys(bad, _pk_cols_for(meta, table, df), sample),
+                hint="Check the engorda date rules (_apply_engorda_business_rules) / "
+                "prazo de vencimento.",
+                message=f"Rows where NOT ({lcol} {op} {rcol}).",
+            )
+        )
     return out
 
 
@@ -8817,20 +11277,31 @@ def check_registration_quantity_reconciliation(
     requirements = {
         "TITULO": ("NUM_IF", "QTD_DEPOSITADA"),
         "OPERACAO": (
-            "NUM_ID_OPERACAO", "NUM_IF", "NUM_ID_TIPO_OPER_OBJETO_SERV",
-            "NUM_CONTA_PARTICIPANTE_P1", "QTD_OPERACAO",
+            "NUM_ID_OPERACAO",
+            "NUM_IF",
+            "NUM_ID_TIPO_OPER_OBJETO_SERV",
+            "NUM_CONTA_PARTICIPANTE_P1",
+            "QTD_OPERACAO",
         ),
         "ESPECIFICACAO": (
-            "NUM_ID_ESPECIFICACAO", "NUM_ID_OPERACAO", "QTD_ESPECIFICAR",
+            "NUM_ID_ESPECIFICACAO",
+            "NUM_ID_OPERACAO",
+            "QTD_ESPECIFICAR",
         ),
         "ESPECIFICACAO_COMITENTE": (
-            "NUM_ID_ESPECIFICACAO", "NUM_ID_ENTIDADE", "QTD_ESPECIFICADA",
+            "NUM_ID_ESPECIFICACAO",
+            "NUM_ID_ENTIDADE",
+            "QTD_ESPECIFICADA",
         ),
         "CARTEIRA_PARTICIPANTE": (
-            "NUM_IF", "NUM_CONTA_PARTICIPANTE", "QTD_CARTEIRA_PARTICIPANTE",
+            "NUM_IF",
+            "NUM_CONTA_PARTICIPANTE",
+            "QTD_CARTEIRA_PARTICIPANTE",
         ),
         "CARTEIRA_COMITENTE": (
-            "NUM_IF", "NUM_CONTA_PARTICIPANTE", "NUM_ID_ENTIDADE",
+            "NUM_IF",
+            "NUM_CONTA_PARTICIPANTE",
+            "NUM_ID_ENTIDADE",
             "QTD_CARTEIRA_COMITENTE",
         ),
     }
@@ -8852,91 +11323,104 @@ def check_registration_quantity_reconciliation(
         missing.append("registration-operation TOS classification")
     if missing:
         return Finding(
-            check_id, cat, SEV_ERROR, "OPERACAO", False,
-            count=len(missing), column=",".join(missing), sample=missing[:sample],
+            check_id,
+            cat,
+            SEV_ERROR,
+            "OPERACAO",
+            False,
+            count=len(missing),
+            column=",".join(missing),
+            sample=missing[:sample],
             hint=f"Export the complete final {product_label} registration quantity graph "
-                 "and load its operation-type lookup.",
+            "and load its operation-type lookup.",
             message=f"{product_label} registration quantity reconciliation unavailable.",
         )
 
     operation = _active(tables["OPERACAO"])
     operation_cols = resolved["OPERACAO"]
-    operations = (
-        operation.select(
-            _canon_key_col(F.col(operation_cols["NUM_ID_OPERACAO"]))
-            .alias("operation_id"),
-            _canon_key_col(F.col(operation_cols["NUM_IF"])).alias("root_id"),
-            _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
-            .alias("registration_tos_id"),
-            _canon_key_col(F.col(operation_cols["NUM_CONTA_PARTICIPANTE_P1"]))
-            .alias("p1_account"),
-            F.col(operation_cols["QTD_OPERACAO"]).cast("decimal(38,10)")
-            .alias("operation_quantity"),
-        )
-        .join(F.broadcast(registration_tos), "registration_tos_id", "leftsemi")
-    )
+    operations = operation.select(
+        _canon_key_col(F.col(operation_cols["NUM_ID_OPERACAO"])).alias("operation_id"),
+        _canon_key_col(F.col(operation_cols["NUM_IF"])).alias("root_id"),
+        _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias(
+            "registration_tos_id"
+        ),
+        _canon_key_col(F.col(operation_cols["NUM_CONTA_PARTICIPANTE_P1"])).alias("p1_account"),
+        F.col(operation_cols["QTD_OPERACAO"]).cast("decimal(38,10)").alias("operation_quantity"),
+    ).join(F.broadcast(registration_tos), "registration_tos_id", "leftsemi")
 
     title_cols = resolved["TITULO"]
-    title_quantities = _active(tables["TITULO"]).select(
-        _canon_key_col(F.col(title_cols["NUM_IF"])).alias("root_id"),
-        F.col(title_cols["QTD_DEPOSITADA"]).cast("decimal(38,10)").alias("quantity"),
-    ).groupBy("root_id").agg(F.sum("quantity").alias("title_quantity"))
+    title_quantities = (
+        _active(tables["TITULO"])
+        .select(
+            _canon_key_col(F.col(title_cols["NUM_IF"])).alias("root_id"),
+            F.col(title_cols["QTD_DEPOSITADA"]).cast("decimal(38,10)").alias("quantity"),
+        )
+        .groupBy("root_id")
+        .agg(F.sum("quantity").alias("title_quantity"))
+    )
 
     specification_cols = resolved["ESPECIFICACAO"]
     specifications = _active(tables["ESPECIFICACAO"]).select(
-        _canon_key_col(F.col(specification_cols["NUM_ID_ESPECIFICACAO"]))
-        .alias("specification_id"),
-        _canon_key_col(F.col(specification_cols["NUM_ID_OPERACAO"]))
-        .alias("operation_id"),
-        F.col(specification_cols["QTD_ESPECIFICAR"]).cast("decimal(38,10)")
-        .alias("quantity"),
+        _canon_key_col(F.col(specification_cols["NUM_ID_ESPECIFICACAO"])).alias("specification_id"),
+        _canon_key_col(F.col(specification_cols["NUM_ID_OPERACAO"])).alias("operation_id"),
+        F.col(specification_cols["QTD_ESPECIFICAR"]).cast("decimal(38,10)").alias("quantity"),
     )
     specification_quantities = specifications.groupBy("operation_id").agg(
         F.sum("quantity").alias("specification_quantity")
     )
 
     holder_cols = resolved["ESPECIFICACAO_COMITENTE"]
-    holders = _active(tables["ESPECIFICACAO_COMITENTE"]).select(
-        _canon_key_col(F.col(holder_cols["NUM_ID_ESPECIFICACAO"]))
-        .alias("specification_id"),
-        _canon_key_col(F.col(holder_cols["NUM_ID_ENTIDADE"])).alias("holder_entity"),
-        F.col(holder_cols["QTD_ESPECIFICADA"]).cast("decimal(38,10)")
-        .alias("quantity"),
-    ).join(specifications.select("specification_id", "operation_id"),
-           "specification_id", "inner")
+    holders = (
+        _active(tables["ESPECIFICACAO_COMITENTE"])
+        .select(
+            _canon_key_col(F.col(holder_cols["NUM_ID_ESPECIFICACAO"])).alias("specification_id"),
+            _canon_key_col(F.col(holder_cols["NUM_ID_ENTIDADE"])).alias("holder_entity"),
+            F.col(holder_cols["QTD_ESPECIFICADA"]).cast("decimal(38,10)").alias("quantity"),
+        )
+        .join(
+            specifications.select("specification_id", "operation_id"), "specification_id", "inner"
+        )
+    )
     holder_quantities = holders.groupBy("operation_id").agg(
         F.sum("quantity").alias("holder_quantity")
     )
 
     participant_cols = resolved["CARTEIRA_PARTICIPANTE"]
-    participant_quantities = _active(tables["CARTEIRA_PARTICIPANTE"]).select(
-        _canon_key_col(F.col(participant_cols["NUM_IF"])).alias("root_id"),
-        _canon_key_col(F.col(participant_cols["NUM_CONTA_PARTICIPANTE"]))
-        .alias("p1_account"),
-        F.col(participant_cols["QTD_CARTEIRA_PARTICIPANTE"])
-        .cast("decimal(38,10)").alias("quantity"),
-    ).groupBy("root_id", "p1_account").agg(
-        F.sum("quantity").alias("participant_wallet_quantity")
+    participant_quantities = (
+        _active(tables["CARTEIRA_PARTICIPANTE"])
+        .select(
+            _canon_key_col(F.col(participant_cols["NUM_IF"])).alias("root_id"),
+            _canon_key_col(F.col(participant_cols["NUM_CONTA_PARTICIPANTE"])).alias("p1_account"),
+            F.col(participant_cols["QTD_CARTEIRA_PARTICIPANTE"])
+            .cast("decimal(38,10)")
+            .alias("quantity"),
+        )
+        .groupBy("root_id", "p1_account")
+        .agg(F.sum("quantity").alias("participant_wallet_quantity"))
     )
 
     holder_wallet_cols = resolved["CARTEIRA_COMITENTE"]
     holder_wallets = _active(tables["CARTEIRA_COMITENTE"]).select(
         _canon_key_col(F.col(holder_wallet_cols["NUM_IF"])).alias("root_id"),
-        _canon_key_col(F.col(holder_wallet_cols["NUM_CONTA_PARTICIPANTE"]))
-        .alias("p1_account"),
-        _canon_key_col(F.col(holder_wallet_cols["NUM_ID_ENTIDADE"]))
-        .alias("holder_entity"),
+        _canon_key_col(F.col(holder_wallet_cols["NUM_CONTA_PARTICIPANTE"])).alias("p1_account"),
+        _canon_key_col(F.col(holder_wallet_cols["NUM_ID_ENTIDADE"])).alias("holder_entity"),
         F.col(holder_wallet_cols["QTD_CARTEIRA_COMITENTE"])
-        .cast("decimal(38,10)").alias("quantity"),
+        .cast("decimal(38,10)")
+        .alias("quantity"),
     )
-    holder_scopes = holders.select("operation_id", "holder_entity").join(
-        operations.select("operation_id", "root_id", "p1_account"),
-        "operation_id", "inner",
-    ).dropDuplicates(["operation_id", "root_id", "p1_account", "holder_entity"])
-    holder_wallet_quantities = holder_scopes.join(
-        holder_wallets, ["root_id", "p1_account", "holder_entity"], "inner"
-    ).groupBy("operation_id").agg(
-        F.sum("quantity").alias("holder_wallet_quantity")
+    holder_scopes = (
+        holders.select("operation_id", "holder_entity")
+        .join(
+            operations.select("operation_id", "root_id", "p1_account"),
+            "operation_id",
+            "inner",
+        )
+        .dropDuplicates(["operation_id", "root_id", "p1_account", "holder_entity"])
+    )
+    holder_wallet_quantities = (
+        holder_scopes.join(holder_wallets, ["root_id", "p1_account", "holder_entity"], "inner")
+        .groupBy("operation_id")
+        .agg(F.sum("quantity").alias("holder_wallet_quantity"))
     )
 
     compared = (
@@ -8947,27 +11431,36 @@ def check_registration_quantity_reconciliation(
         .join(holder_wallet_quantities, "operation_id", "left")
     )
     compared_quantities = (
-        "title_quantity", "specification_quantity", "holder_quantity",
-        "participant_wallet_quantity", "holder_wallet_quantity",
+        "title_quantity",
+        "specification_quantity",
+        "holder_quantity",
+        "participant_wallet_quantity",
+        "holder_wallet_quantity",
     )
-    bad = compared.where(reduce(
-        lambda left, right: left | right,
-        [
-            ~F.col(column).eqNullSafe(F.col("operation_quantity"))
-            for column in compared_quantities
-        ],
-    ))
+    bad = compared.where(
+        reduce(
+            lambda left, right: left | right,
+            [
+                ~F.col(column).eqNullSafe(F.col("operation_quantity"))
+                for column in compared_quantities
+            ],
+        )
+    )
     count = bad.count()
     return Finding(
-        check_id, cat, SEV_ERROR if count else SEV_INFO,
-        "OPERACAO", count == 0, count=count,
+        check_id,
+        cat,
+        SEV_ERROR if count else SEV_INFO,
+        "OPERACAO",
+        count == 0,
+        count=count,
         column="QTD_DEPOSITADA,QTD_OPERACAO,QTD_ESPECIFICAR,QTD_ESPECIFICADA,"
-               "QTD_CARTEIRA_PARTICIPANTE,QTD_CARTEIRA_COMITENTE",
+        "QTD_CARTEIRA_PARTICIPANTE,QTD_CARTEIRA_COMITENTE",
         sample=_sample_keys(bad, ["root_id", "operation_id"], sample),
         hint="Rebuild the final registration cluster from one quantity anchor; do not compare "
-             "historical operations or blank insertion-time QTD_EMITIDA fields.",
+        "historical operations or blank insertion-time QTD_EMITIDA fields.",
         message=f"{product_label} registration operations whose final title, specification, "
-                "and wallet quantities do not reconcile.",
+        "and wallet quantities do not reconcile.",
     )
 
 
@@ -8996,9 +11489,7 @@ def check_required_lookup_frames(
     run_operation = not _check_is_skipped("6.required.operation_tos", skip_prefixes)
     run_platform = not _check_is_skipped("6.required.cdb_platform", skip_prefixes)
     quantity_product = "rdb" if _is_rdb_profile(profile) else "cdb"
-    run_quantity = not _check_is_skipped(
-        f"6.required.{quantity_product}_quantity", skip_prefixes
-    )
+    run_quantity = not _check_is_skipped(f"6.required.{quantity_product}_quantity", skip_prefixes)
     cat = "Required lookup combinations"
     errors = dict(lookup_errors or {})
     lookup_hint = (
@@ -9019,16 +11510,19 @@ def check_required_lookup_frames(
             return None
         return {name: actual for name, actual in resolved.items() if actual}
 
-    tos_semantics_supported = (
-        CAP_LOOKUP_TOS in profile.supported_capabilities or _is_rdb_profile(profile)
+    tos_semantics_supported = CAP_LOOKUP_TOS in profile.supported_capabilities or _is_rdb_profile(
+        profile
     )
-    registration_account_contract = (
-        profile.name in ("cdb", "cdb_simplificado") or _is_rdb_profile(profile)
+    registration_account_contract = profile.name in ("cdb", "cdb_simplificado") or _is_rdb_profile(
+        profile
     )
     registration_account_tos = None
     account_scope_error = None
-    if ((run_account or run_quantity)
-            and profile.account_check_enabled and registration_account_contract):
+    if (
+        (run_account or run_quantity)
+        and profile.account_check_enabled
+        and registration_account_contract
+    ):
         account_tos_cols = target_columns(
             tos_df,
             TIPO_OPER_OBJETO_SERV_TABLE,
@@ -9049,27 +11543,27 @@ def check_required_lookup_frames(
         else:
             registration_account_tos = (
                 tos_df.select(
-                    _canon_key_col(F.col(
-                        account_tos_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]
-                    )).alias("registration_tos_id"),
-                    _canon_key_col(F.col(
-                        account_tos_cols["NUM_ID_TIPO_OPERACAO"]
-                    )).alias("tipo_operacao_id"),
-                    _canon_key_col(F.col(
-                        account_tos_cols["NUM_ID_OBJETO_SERVICO"]
-                    )).alias("objeto_servico_id"),
-                    F.trim(F.col(
-                        account_tos_cols["IND_DISPONIVEL_IDENTIFICACAO"]
-                    ).cast("string")).alias("identification_flag"),
+                    _canon_key_col(F.col(account_tos_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias(
+                        "registration_tos_id"
+                    ),
+                    _canon_key_col(F.col(account_tos_cols["NUM_ID_TIPO_OPERACAO"])).alias(
+                        "tipo_operacao_id"
+                    ),
+                    _canon_key_col(F.col(account_tos_cols["NUM_ID_OBJETO_SERVICO"])).alias(
+                        "objeto_servico_id"
+                    ),
+                    F.trim(
+                        F.col(account_tos_cols["IND_DISPONIVEL_IDENTIFICACAO"]).cast("string")
+                    ).alias("identification_flag"),
                 )
                 .join(
                     tipo_df.select(
-                        _canon_key_col(F.col(
-                            account_tipo_cols["NUM_ID_TIPO_OPERACAO"]
-                        )).alias("tipo_operacao_id"),
-                        F.trim(F.col(
-                            account_tipo_cols["COD_TIPO_OPERACAO"]
-                        ).cast("string")).alias("operation_type_code"),
+                        _canon_key_col(F.col(account_tipo_cols["NUM_ID_TIPO_OPERACAO"])).alias(
+                            "tipo_operacao_id"
+                        ),
+                        F.trim(F.col(account_tipo_cols["COD_TIPO_OPERACAO"]).cast("string")).alias(
+                            "operation_type_code"
+                        ),
                     ),
                     "tipo_operacao_id",
                     "inner",
@@ -9118,11 +11612,13 @@ def check_required_lookup_frames(
                 _canon_key_col(F.col(actual)).alias("account_id"),
                 F.lit(
                     ACCOUNT_ROLE_GROUPS.get((table, column))
-                    if registration_account_contract else None
+                    if registration_account_contract
+                    else None
                 ).alias("expected_group"),
                 (
                     F.trim(F.col(source_code).cast("string"))
-                    if source_code else F.lit(None).cast("string")
+                    if source_code
+                    else F.lit(None).cast("string")
                 ).alias("source_account_code"),
             )
         )
@@ -9131,28 +11627,38 @@ def check_required_lookup_frames(
         account_finding = None
     elif missing_refs:
         account_finding = Finding(
-            "6.required.active_account", cat, SEV_ERROR, CONTA_PARTICIPANTE_TABLE, False,
-            count=len(missing_refs), column=",".join(missing_refs), sample=missing_refs[:sample],
+            "6.required.active_account",
+            cat,
+            SEV_ERROR,
+            CONTA_PARTICIPANTE_TABLE,
+            False,
+            count=len(missing_refs),
+            column=",".join(missing_refs),
+            sample=missing_refs[:sample],
             hint="Export all four approved synthetic account reference columns; do not "
-                 "substitute or broaden the check to other account columns.",
+            "substitute or broaden the check to other account columns.",
             message="Required synthetic account source table/column(s) are missing: "
-                    f"{', '.join(missing_refs)}.",
+            f"{', '.join(missing_refs)}.",
         )
     elif account_scope_error:
         accounts = reduce(lambda left, right: left.unionByName(right), account_parts)
-        has_account_references = accounts.where(
-            F.col("raw_account").isNotNull() & (F.trim(F.col("raw_account")) != "")
-        ).limit(1).count()
+        has_account_references = (
+            accounts.where(F.col("raw_account").isNotNull() & (F.trim(F.col("raw_account")) != ""))
+            .limit(1)
+            .count()
+        )
         account_finding = Finding(
-            "6.required.active_account", cat,
+            "6.required.active_account",
+            cat,
             SEV_ERROR if has_account_references else SEV_INFO,
-            CONTA_PARTICIPANTE_TABLE, not has_account_references,
+            CONTA_PARTICIPANTE_TABLE,
+            not has_account_references,
             hint=lookup_hint if has_account_references else "",
             message=(
                 f"Required {profile.name.upper()} account-role check unavailable: "
                 f"{account_scope_error}."
-                if has_account_references else
-                "No nonblank synthetic account references require target validation."
+                if has_account_references
+                else "No nonblank synthetic account references require target validation."
             ),
         )
     else:
@@ -9183,8 +11689,11 @@ def check_required_lookup_frames(
         )
         if account_cols is None:
             account_finding = Finding(
-                "6.required.active_account", cat, SEV_ERROR,
-                CONTA_PARTICIPANTE_TABLE, False,
+                "6.required.active_account",
+                cat,
+                SEV_ERROR,
+                CONTA_PARTICIPANTE_TABLE,
+                False,
                 sample=_sample_keys(
                     accounts.where(F.col("raw_account").isNotNull()),
                     ["source_table", "source_column", "account_id"],
@@ -9192,29 +11701,28 @@ def check_required_lookup_frames(
                 ),
                 hint=lookup_hint,
                 message="Required active/local account check unavailable: "
-                        f"{CONTA_PARTICIPANTE_TABLE} "
-                        f"{errors[CONTA_PARTICIPANTE_TABLE]}.",
+                f"{CONTA_PARTICIPANTE_TABLE} "
+                f"{errors[CONTA_PARTICIPANTE_TABLE]}.",
             )
         else:
             eligible_accounts = (
                 account_df.select(
-                    _canon_key_col(F.col(account_cols["NUM_CONTA_PARTICIPANTE"]))
-                    .alias("account_id"),
-                    _canon_key_col(F.col(account_cols["NUM_ID_SITUACAO_CONTA"]))
-                    .alias("situation_id"),
-                    F.trim(
-                        F.col(account_cols["COD_CONTA_PARTICIPANTE"]).cast("string")
-                    )
-                    .alias("account_code"),
-                    _canon_key_col(F.col(account_cols["NUM_ID_AREA_ATUACAO"]))
-                    .alias("area_id"),
-                    F.col(account_cols["COD_TIPO_ACESSO"]).cast("string")
-                    .alias("access_type"),
+                    _canon_key_col(F.col(account_cols["NUM_CONTA_PARTICIPANTE"])).alias(
+                        "account_id"
+                    ),
+                    _canon_key_col(F.col(account_cols["NUM_ID_SITUACAO_CONTA"])).alias(
+                        "situation_id"
+                    ),
+                    F.trim(F.col(account_cols["COD_CONTA_PARTICIPANTE"]).cast("string")).alias(
+                        "account_code"
+                    ),
+                    _canon_key_col(F.col(account_cols["NUM_ID_AREA_ATUACAO"])).alias("area_id"),
+                    F.col(account_cols["COD_TIPO_ACESSO"]).cast("string").alias("access_type"),
                 )
                 .where(
-                    F.col("situation_id").isin(*(
-                        ("1", "2") if _is_rdb_profile(profile) else ("1",)
-                    ))
+                    F.col("situation_id").isin(
+                        *(("1", "2") if _is_rdb_profile(profile) else ("1",))
+                    )
                     & F.col("account_code").rlike(r"^[0-9]{5}\.(40|10)-[0-9]$")
                     & (F.col("area_id") == "1")
                     & (F.col("access_type") == "L")
@@ -9222,8 +11730,9 @@ def check_required_lookup_frames(
                 .select(
                     "account_id",
                     F.col("account_code").alias("target_account_code"),
-                    F.regexp_extract(F.col("account_code"), r"\.([0-9]{2})-", 1)
-                    .alias("target_group"),
+                    F.regexp_extract(F.col("account_code"), r"\.([0-9]{2})-", 1).alias(
+                        "target_group"
+                    ),
                 )
                 .where(F.col("account_id").isNotNull())
                 .dropDuplicates(["account_id"])
@@ -9244,19 +11753,27 @@ def check_required_lookup_frames(
                 )
             )
             invalid_accounts = blank_accounts.select(
-                "source_table", "source_column", "account_id",
-                "expected_group", "source_account_code",
+                "source_table",
+                "source_column",
+                "account_id",
+                "expected_group",
+                "source_account_code",
             ).unionByName(
                 invalid_nonblank.select(
-                    "source_table", "source_column", "account_id",
-                    "expected_group", "source_account_code",
+                    "source_table",
+                    "source_column",
+                    "account_id",
+                    "expected_group",
+                    "source_account_code",
                 )
             )
             invalid_account_count = invalid_accounts.count()
             account_finding = Finding(
-                "6.required.active_account", cat,
+                "6.required.active_account",
+                cat,
                 SEV_ERROR if invalid_account_count else SEV_INFO,
-                CONTA_PARTICIPANTE_TABLE, invalid_account_count == 0,
+                CONTA_PARTICIPANTE_TABLE,
+                invalid_account_count == 0,
                 count=invalid_account_count,
                 column=",".join(f"{table}.{column}" for table, column in ACCOUNT_REFERENCES),
                 sample=_sample_keys(
@@ -9268,26 +11785,28 @@ def check_required_lookup_frames(
                     "Use a nonblank target CONTA_PARTICIPANTE with "
                     + (
                         "NUM_ID_SITUACAO_CONTA in (1,2) "
-                        if _is_rdb_profile(profile) else "NUM_ID_SITUACAO_CONTA=1 "
+                        if _is_rdb_profile(profile)
+                        else "NUM_ID_SITUACAO_CONTA=1 "
                     )
                     + "whose COD_CONTA_PARTICIPANTE has a "
                     "V_FAMILIA_CONTAS row with NUM_ID_AREA_ATUACAO=1 and COD_TIPO_ACESSO='L'. "
                     + (
                         "TITULO/P2 must use .40 and DEPOSITO/P1 must use .10. Persisted "
                         "COD_CONTA_PARTE/CONTRAPARTE must match the referenced target account. "
-                        if registration_account_contract else ""
+                        if registration_account_contract
+                        else ""
                     )
-                    +
-                    "The trimmed account code must match ^[0-9]{5}\\.(40|10)-[0-9]$; "
+                    + "The trimmed account code must match ^[0-9]{5}\\.(40|10)-[0-9]$; "
                     + ("" if _is_rdb_profile(profile) else "situation 2 is not eligible.")
-                    if invalid_account_count else ""
+                    if invalid_account_count
+                    else ""
                 ),
                 message=(
                     f"Synthetic {profile.name.upper()} registration-account references must "
                     "resolve to the "
                     "required active/local .10/.40 role and match persisted account codes."
-                    if registration_account_contract else
-                    "Synthetic account references must resolve to an active local-access "
+                    if registration_account_contract
+                    else "Synthetic account references must resolve to an active local-access "
                     "target account whose trimmed code has the required .40/.10 shape."
                 ),
             )
@@ -9320,14 +11839,19 @@ def check_required_lookup_frames(
         elif root_num_if_col is None:
             missing.append("INSTRUMENTO_FINANCEIRO.NUM_IF")
         operation_finding = Finding(
-            "6.required.operation_tos", cat, SEV_ERROR, OPERACAO_TABLE, False,
+            "6.required.operation_tos",
+            cat,
+            SEV_ERROR,
+            OPERACAO_TABLE,
+            False,
             column="NUM_ID_TIPO_OPER_OBJETO_SERV",
             sample=(
                 _sample_keys(op_df, [resolve(op_df, "NUM_ID_OPERACAO")], sample)
-                if op_df is not None and resolve(op_df, "NUM_ID_OPERACAO") else []
+                if op_df is not None and resolve(op_df, "NUM_ID_OPERACAO")
+                else []
             ),
             hint="Export OPERACAO.NUM_IF and NUM_ID_TIPO_OPER_OBJETO_SERV together with "
-                 "INSTRUMENTO_FINANCEIRO.NUM_IF so registration coverage can be checked.",
+            "INSTRUMENTO_FINANCEIRO.NUM_IF so registration coverage can be checked.",
             message=f"Required registration-operation source is missing: {', '.join(missing)}.",
         )
     else:
@@ -9356,16 +11880,20 @@ def check_required_lookup_frames(
         ]
         if unavailable:
             operation_finding = Finding(
-                "6.required.operation_tos", cat, SEV_ERROR, OPERACAO_TABLE, False,
+                "6.required.operation_tos",
+                cat,
+                SEV_ERROR,
+                OPERACAO_TABLE,
+                False,
                 sample=_sample_keys(
                     op_df,
                     [resolve(op_df, "NUM_ID_OPERACAO")]
-                    if resolve(op_df, "NUM_ID_OPERACAO") else [op_tos_col],
+                    if resolve(op_df, "NUM_ID_OPERACAO")
+                    else [op_tos_col],
                     sample,
                 ),
                 hint=lookup_hint,
-                message="Required operation TOS check unavailable: "
-                        f"{'; '.join(unavailable)}.",
+                message=f"Required operation TOS check unavailable: {'; '.join(unavailable)}.",
             )
         else:
             operations = op_df.select(
@@ -9375,21 +11903,24 @@ def check_required_lookup_frames(
             )
             tos_semantics = (
                 tos_df.select(
-                    _canon_key_col(F.col(tos_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
-                    .alias("tos_id"),
-                    _canon_key_col(F.col(tos_cols["NUM_ID_TIPO_OPERACAO"]))
-                    .alias("tipo_operacao_id"),
-                    _canon_key_col(F.col(tos_cols["NUM_ID_OBJETO_SERVICO"]))
-                    .alias("objeto_servico_id"),
-                    F.trim(
-                        F.col(tos_cols["IND_DISPONIVEL_IDENTIFICACAO"]).cast("string")
-                    ).alias("identification_flag"),
+                    _canon_key_col(F.col(tos_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias("tos_id"),
+                    _canon_key_col(F.col(tos_cols["NUM_ID_TIPO_OPERACAO"])).alias(
+                        "tipo_operacao_id"
+                    ),
+                    _canon_key_col(F.col(tos_cols["NUM_ID_OBJETO_SERVICO"])).alias(
+                        "objeto_servico_id"
+                    ),
+                    F.trim(F.col(tos_cols["IND_DISPONIVEL_IDENTIFICACAO"]).cast("string")).alias(
+                        "identification_flag"
+                    ),
                 )
                 .join(
                     tipo_df.select(
-                        _canon_key_col(F.col(tipo_cols["NUM_ID_TIPO_OPERACAO"]))
-                        .alias("tipo_operacao_id"),
-                        F.col(tipo_cols["COD_TIPO_OPERACAO"]).cast("string")
+                        _canon_key_col(F.col(tipo_cols["NUM_ID_TIPO_OPERACAO"])).alias(
+                            "tipo_operacao_id"
+                        ),
+                        F.col(tipo_cols["COD_TIPO_OPERACAO"])
+                        .cast("string")
                         .alias("operation_type_code"),
                     ),
                     "tipo_operacao_id",
@@ -9400,8 +11931,7 @@ def check_required_lookup_frames(
             )
             registration_operations = (
                 operations.where(
-                    F.col("raw_tos_id").isNotNull()
-                    & (F.trim(F.col("raw_tos_id")) != "")
+                    F.col("raw_tos_id").isNotNull() & (F.trim(F.col("raw_tos_id")) != "")
                 )
                 .join(F.broadcast(tos_semantics), "tos_id", "inner")
                 .where(F.col("operation_type_code") == "1")
@@ -9435,15 +11965,16 @@ def check_required_lookup_frames(
             missing_registration_ifs = active_roots.join(
                 F.broadcast(valid_registration_ifs), "num_if", "left_anti"
             )
-            invalid_ifs = (
-                invalid_registration_ifs.unionByName(missing_registration_ifs)
-                .dropDuplicates(["num_if"])
-            )
+            invalid_ifs = invalid_registration_ifs.unionByName(
+                missing_registration_ifs
+            ).dropDuplicates(["num_if"])
             invalid_if_count = invalid_ifs.count()
             operation_finding = Finding(
-                "6.required.operation_tos", cat,
+                "6.required.operation_tos",
+                cat,
                 SEV_ERROR if invalid_if_count else SEV_INFO,
-                OPERACAO_TABLE, invalid_if_count == 0,
+                OPERACAO_TABLE,
+                invalid_if_count == 0,
                 count=invalid_if_count,
                 column="NUM_IF,NUM_ID_TIPO_OPER_OBJETO_SERV",
                 sample=_sample_keys(invalid_ifs, ["num_if"], sample),
@@ -9452,20 +11983,25 @@ def check_required_lookup_frames(
                     "target TOS joins to TIPO_OPERACAO.COD_TIPO_OPERACAO='1', "
                     f"NUM_ID_OBJETO_SERVICO={profile.object_service_id}, and trimmed "
                     "IND_DISPONIVEL_IDENTIFICACAO='S'. Historical operation types are allowed."
-                    if invalid_if_count else ""
+                    if invalid_if_count
+                    else ""
                 ),
                 message="Every synthetic root must have an approved registration-operation "
-                        "TOS; historical operation types are not constrained by this check.",
+                "TOS; historical operation types are not constrained by this check.",
             )
 
     if run_operation and not tos_semantics_supported:
         operation_finding = Finding(
-            "6.required.operation_tos", cat, SEV_WARN, OPERACAO_TABLE, False,
+            "6.required.operation_tos",
+            cat,
+            SEV_WARN,
+            OPERACAO_TABLE,
+            False,
             column="NUM_ID_TIPO_OPER_OBJETO_SERV",
             hint="Capture RDB TIPO_OPER_OBJETO_SERV rows and their operation type and "
-                 "identification flags before enabling this check; do not reuse CDB literals.",
+            "identification flags before enabling this check; do not reuse CDB literals.",
             message=f"TOS operation type and identification semantics are not validated for "
-                    f"product {profile.name} (unresolved target evidence).",
+            f"product {profile.name} (unresolved target evidence).",
         )
 
     cdb_cols = (
@@ -9474,64 +12010,86 @@ def check_required_lookup_frames(
             V_OBJETOS_SERVICO_TABLE,
             ["COD_OBJETO_SERVICO", "IND_PLATAFORMA_BAIXA"],
         )
-        if run_platform else None
+        if run_platform
+        else None
     )
     if not run_platform:
         platform_finding = None
     elif cdb_cols is None:
         platform_finding = Finding(
-            "6.required.cdb_platform", cat, SEV_ERROR, V_OBJETOS_SERVICO_TABLE, False,
+            "6.required.cdb_platform",
+            cat,
+            SEV_ERROR,
+            V_OBJETOS_SERVICO_TABLE,
+            False,
             hint=lookup_hint,
             message="Required CDB platform check unavailable: "
-                    f"{V_OBJETOS_SERVICO_TABLE} {errors[V_OBJETOS_SERVICO_TABLE]}.",
+            f"{V_OBJETOS_SERVICO_TABLE} {errors[V_OBJETOS_SERVICO_TABLE]}.",
         )
     else:
-        eligible_cdb_count = cdb_object_df.where(
-            (F.col(cdb_cols["COD_OBJETO_SERVICO"]).cast("string") == "CDB")
-            & (
-                F.trim(F.col(cdb_cols["IND_PLATAFORMA_BAIXA"]).cast("string"))
-                == "S"
+        eligible_cdb_count = (
+            cdb_object_df.where(
+                (F.col(cdb_cols["COD_OBJETO_SERVICO"]).cast("string") == "CDB")
+                & (F.trim(F.col(cdb_cols["IND_PLATAFORMA_BAIXA"]).cast("string")) == "S")
             )
-        ).limit(1).count()
+            .limit(1)
+            .count()
+        )
         platform_finding = Finding(
-            "6.required.cdb_platform", cat,
+            "6.required.cdb_platform",
+            cat,
             SEV_INFO if eligible_cdb_count else SEV_ERROR,
-            V_OBJETOS_SERVICO_TABLE, bool(eligible_cdb_count),
+            V_OBJETOS_SERVICO_TABLE,
+            bool(eligible_cdb_count),
             count=0 if eligible_cdb_count else 1,
             column="COD_OBJETO_SERVICO,IND_PLATAFORMA_BAIXA",
             hint=(
                 "Ensure target V_OBJETOS_SERVICO exposes COD_OBJETO_SERVICO='CDB' with "
                 "trimmed IND_PLATAFORMA_BAIXA='S'."
-                if not eligible_cdb_count else ""
+                if not eligible_cdb_count
+                else ""
             ),
             message="Target CDB object service must be enabled for the baixa platform.",
         )
 
     if run_account and not profile.account_check_enabled:
         account_finding = Finding(
-            "6.required.active_account", cat, SEV_WARN, CONTA_PARTICIPANTE_TABLE, False,
+            "6.required.active_account",
+            cat,
+            SEV_WARN,
+            CONTA_PARTICIPANTE_TABLE,
+            False,
             hint="Capture the RDB/target account-eligibility rule before enabling this check; "
-                 "do not reuse the CDB situacao/access/area/code literals.",
+            "do not reuse the CDB situacao/access/area/code literals.",
             message=f"Account eligibility not validated for product {profile.name} "
-                    "(unresolved evidence).",
+            "(unresolved evidence).",
         )
     if run_platform and not (profile.platform_check_enabled and profile.object_service_code):
         platform_finding = Finding(
-            "6.required.cdb_platform", cat, SEV_WARN, V_OBJETOS_SERVICO_TABLE, False,
+            "6.required.cdb_platform",
+            cat,
+            SEV_WARN,
+            V_OBJETOS_SERVICO_TABLE,
+            False,
             hint="Capture the target object-service platform code/flag for this product "
-                 "before enabling this check.",
+            "before enabling this check.",
             message=f"Object-service platform not validated for product {profile.name} "
-                    "(unresolved COD_OBJETO_SERVICO/IND_PLATAFORMA_BAIXA).",
+            "(unresolved COD_OBJETO_SERVICO/IND_PLATAFORMA_BAIXA).",
         )
     quantity_finding = (
         check_registration_quantity_reconciliation(
             tables, registration_account_tos, sample, quantity_product
         )
-        if run_quantity and registration_account_contract else None
+        if run_quantity and registration_account_contract
+        else None
     )
     return [
-        finding for finding in (
-            account_finding, operation_finding, platform_finding, quantity_finding,
+        finding
+        for finding in (
+            account_finding,
+            operation_finding,
+            platform_finding,
+            quantity_finding,
         )
         if finding is not None
     ]
@@ -9554,20 +12112,24 @@ def check_lookup_combo_frames(
     run_tos = not _check_is_skipped("6.combo.tos_fk", skip_prefixes)
     run_compatibility = not _check_is_skipped("6.combo.cdb_compatibility", skip_prefixes)
     run_sem_modalidade = not _check_is_skipped("6.combo.sem_modalidade", skip_prefixes)
-    run_identification = not _check_is_skipped(
-        "6.combo.identification_availability", skip_prefixes
-    )
+    run_identification = not _check_is_skipped("6.combo.identification_availability", skip_prefixes)
     if not any((run_tos, run_compatibility, run_sem_modalidade, run_identification)):
         return []
     cat = "Lookup combinations"
     if CAP_LOOKUP_TOS not in profile.supported_capabilities:
-        return [Finding(
-            "6.combo.unsupported", cat, SEV_WARN, OPERACAO_TABLE, False,
-            hint="Capture RDB TOS, operation-type, identification, and modalidade rows before "
-                 "enabling lookup-combination validation.",
-            message=f"Lookup-combination semantics are unsupported for product {profile.name}; "
-                    "CDB literals were not evaluated.",
-        )]
+        return [
+            Finding(
+                "6.combo.unsupported",
+                cat,
+                SEV_WARN,
+                OPERACAO_TABLE,
+                False,
+                hint="Capture RDB TOS, operation-type, identification, and modalidade rows before "
+                "enabling lookup-combination validation.",
+                message=f"Lookup-combination semantics are unsupported for product {profile.name}; "
+                "CDB literals were not evaluated.",
+            )
+        ]
     errors = dict(lookup_errors or {})
     tos_col = resolve(op_df, "NUM_ID_TIPO_OPER_OBJETO_SERV")
     mod_col = resolve(op_df, "NUM_ID_MODALIDADE_LIQUIDACAO")
@@ -9581,15 +12143,21 @@ def check_lookup_combo_frames(
         if not actual
     ]
     if missing_op_cols:
-        return [Finding(
-            "6.combo.required_columns", cat, SEV_WARN, OPERACAO_TABLE, False,
-            column=",".join(missing_op_cols),
-            hint="Regenerate/export OPERACAO with its physical "
-                 "NUM_ID_TIPO_OPER_OBJETO_SERV and NUM_ID_MODALIDADE_LIQUIDACAO columns; "
-                 "do not invent NUM_ID_TIPO_OPERACAO on OPERACAO.",
-            message="OPERACAO lacks required Category 6 lookup column(s): "
-                    f"{', '.join(missing_op_cols)}.",
-        )]
+        return [
+            Finding(
+                "6.combo.required_columns",
+                cat,
+                SEV_WARN,
+                OPERACAO_TABLE,
+                False,
+                column=",".join(missing_op_cols),
+                hint="Regenerate/export OPERACAO with its physical "
+                "NUM_ID_TIPO_OPER_OBJETO_SERV and NUM_ID_MODALIDADE_LIQUIDACAO columns; "
+                "do not invent NUM_ID_TIPO_OPERACAO on OPERACAO.",
+                message="OPERACAO lacks required Category 6 lookup column(s): "
+                f"{', '.join(missing_op_cols)}.",
+            )
+        ]
 
     select_cols = [
         _norm_code(F.col(tos_col)).alias("tos_id"),
@@ -9631,7 +12199,8 @@ def check_lookup_combo_frames(
             V_PARAMETRO_SIC_TABLE,
             ["NUM_ID_TIPO_OPER_OBJETO_SERV", "NUM_TIPO_IF", "NUM_ID_OBJETO_SERVICO"],
         )
-        if run_compatibility else None
+        if run_compatibility
+        else None
     )
     tipo_cols = (
         target_columns(
@@ -9639,7 +12208,8 @@ def check_lookup_combo_frames(
             TIPO_OPERACAO_TABLE,
             ["NUM_ID_TIPO_OPERACAO", "IND_SEM_MODALIDADE_INFOHUB"],
         )
-        if run_sem_modalidade else None
+        if run_sem_modalidade
+        else None
     )
 
     if tos_cols is None:
@@ -9650,7 +12220,11 @@ def check_lookup_combo_frames(
         )
         return [
             Finding(
-                check_id, cat, SEV_WARN, OPERACAO_TABLE, False,
+                check_id,
+                cat,
+                SEV_WARN,
+                OPERACAO_TABLE,
+                False,
                 hint=lookup_hint,
                 message=f"{message} unavailable: {TIPO_OPER_OBJETO_SERV_TABLE} {reason}.",
             )
@@ -9663,48 +12237,63 @@ def check_lookup_combo_frames(
             if not _check_is_skipped(check_id, skip_prefixes)
         ]
 
-    tos = tos_df.select(
-        _norm_code(F.col(tos_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias("tos_id"),
-        _norm_code(F.col(tos_cols["NUM_ID_TIPO_OPERACAO"])).alias("tipo_operacao_id"),
-        _norm_code(F.col(tos_cols["NUM_ID_OBJETO_SERVICO"])).alias("objeto_servico_id"),
-        F.trim(F.col(tos_cols["IND_DISPONIVEL_IDENTIFICACAO"]).cast("string"))
-        .alias("identificacao_flag"),
-    ).where(F.col("tos_id").isNotNull()).dropDuplicates(["tos_id"])
+    tos = (
+        tos_df.select(
+            _norm_code(F.col(tos_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias("tos_id"),
+            _norm_code(F.col(tos_cols["NUM_ID_TIPO_OPERACAO"])).alias("tipo_operacao_id"),
+            _norm_code(F.col(tos_cols["NUM_ID_OBJETO_SERVICO"])).alias("objeto_servico_id"),
+            F.trim(F.col(tos_cols["IND_DISPONIVEL_IDENTIFICACAO"]).cast("string")).alias(
+                "identificacao_flag"
+            ),
+        )
+        .where(F.col("tos_id").isNotNull())
+        .dropDuplicates(["tos_id"])
+    )
 
     out: List[Finding] = []
     if run_tos:
         missing_tos = operations.join(F.broadcast(tos.select("tos_id")), "tos_id", "left_anti")
         missing_tos_count = missing_tos.count()
-        out.append(Finding(
-            "6.combo.tos_fk", cat, SEV_ERROR if missing_tos_count else SEV_INFO,
-            OPERACAO_TABLE, missing_tos_count == 0, count=missing_tos_count,
-            column="NUM_ID_TIPO_OPER_OBJETO_SERV",
-            sample=_sample_keys(missing_tos, sample_cols, sample),
-            hint="Preserve or recover the transaction's exact static TOS FK, or prune source "
-                 "operations unsupported by the target; otherwise ask the QAB configuration "
-                 "owner to seed that exact mapping. Do not bind to an arbitrary valid TOS row.",
-            message=f"Synthetic non-null TOS IDs absent from target "
-                    f"{TIPO_OPER_OBJETO_SERV_TABLE}.",
-        ))
+        out.append(
+            Finding(
+                "6.combo.tos_fk",
+                cat,
+                SEV_ERROR if missing_tos_count else SEV_INFO,
+                OPERACAO_TABLE,
+                missing_tos_count == 0,
+                count=missing_tos_count,
+                column="NUM_ID_TIPO_OPER_OBJETO_SERV",
+                sample=_sample_keys(missing_tos, sample_cols, sample),
+                hint="Preserve or recover the transaction's exact static TOS FK, or prune source "
+                "operations unsupported by the target; otherwise ask the QAB configuration "
+                "owner to seed that exact mapping. Do not bind to an arbitrary valid TOS row.",
+                message=f"Synthetic non-null TOS IDs absent from target "
+                f"{TIPO_OPER_OBJETO_SERV_TABLE}.",
+            )
+        )
 
     resolved_ops = operations.join(F.broadcast(tos), "tos_id", "inner")
 
     if run_compatibility and sic_cols is None:
-        out.append(Finding(
-            "6.combo.cdb_compatibility", cat, SEV_WARN, OPERACAO_TABLE, False,
-            hint="Check Oracle JDBC credentials/schema, SELECT grants, and target view/table "
-                 "availability, then rerun against QAB.",
-            message=f"CDB compatibility check unavailable: {V_PARAMETRO_SIC_TABLE} "
-                    f"{errors[V_PARAMETRO_SIC_TABLE]}.",
-        ))
+        out.append(
+            Finding(
+                "6.combo.cdb_compatibility",
+                cat,
+                SEV_WARN,
+                OPERACAO_TABLE,
+                False,
+                hint="Check Oracle JDBC credentials/schema, SELECT grants, and target view/table "
+                "availability, then rerun against QAB.",
+                message=f"CDB compatibility check unavailable: {V_PARAMETRO_SIC_TABLE} "
+                f"{errors[V_PARAMETRO_SIC_TABLE]}.",
+            )
+        )
     elif run_compatibility:
         valid_cdb_tos = (
             sic_df.select(
-                _norm_code(F.col(sic_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
-                .alias("tos_id"),
+                _norm_code(F.col(sic_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias("tos_id"),
                 _norm_code(F.col(sic_cols["NUM_TIPO_IF"])).alias("tipo_if"),
-                _norm_code(F.col(sic_cols["NUM_ID_OBJETO_SERVICO"]))
-                .alias("objeto_servico_id"),
+                _norm_code(F.col(sic_cols["NUM_ID_OBJETO_SERVICO"])).alias("objeto_servico_id"),
             )
             .where(
                 (F.col("tipo_if") == str(profile.num_tipo_if))
@@ -9716,43 +12305,60 @@ def check_lookup_combo_frames(
         )
         incompatible = resolved_ops.join(F.broadcast(valid_cdb_tos), "tos_id", "left_anti")
         incompatible_count = incompatible.count()
-        out.append(Finding(
-            "6.combo.cdb_compatibility", cat,
-            SEV_WARN if incompatible_count else SEV_INFO,
-            OPERACAO_TABLE, incompatible_count == 0, count=incompatible_count,
-            column="NUM_ID_TIPO_OPER_OBJETO_SERV",
-            sample=_sample_keys(incompatible, sample_cols, sample),
-            hint=f"Use or preserve a TOS mapping exposed by target {V_PARAMETRO_SIC_TABLE} "
-                 f"for NUM_TIPO_IF={profile.num_tipo_if} and "
-                 f"NUM_ID_OBJETO_SERVICO={profile.object_service_id}, or prune unsupported "
-                 "source operations. Otherwise align the underlying QAB configuration; "
-                 f"{V_PARAMETRO_SIC_TABLE} is a view and must not be updated directly.",
-            message=f"Resolved operation TOS mappings incompatible with {profile.name} "
-                    "service configuration.",
-        ))
+        out.append(
+            Finding(
+                "6.combo.cdb_compatibility",
+                cat,
+                SEV_WARN if incompatible_count else SEV_INFO,
+                OPERACAO_TABLE,
+                incompatible_count == 0,
+                count=incompatible_count,
+                column="NUM_ID_TIPO_OPER_OBJETO_SERV",
+                sample=_sample_keys(incompatible, sample_cols, sample),
+                hint=f"Use or preserve a TOS mapping exposed by target {V_PARAMETRO_SIC_TABLE} "
+                f"for NUM_TIPO_IF={profile.num_tipo_if} and "
+                f"NUM_ID_OBJETO_SERVICO={profile.object_service_id}, or prune unsupported "
+                "source operations. Otherwise align the underlying QAB configuration; "
+                f"{V_PARAMETRO_SIC_TABLE} is a view and must not be updated directly.",
+                message=f"Resolved operation TOS mappings incompatible with {profile.name} "
+                "service configuration.",
+            )
+        )
 
     if run_sem_modalidade and profile.sem_modalidade_ids is None:
-        out.append(Finding(
-            "6.combo.sem_modalidade", cat, SEV_WARN, OPERACAO_TABLE, False,
-            hint="Confirm the sem-modalidade IDs for this product before enabling the check; "
-                 "do not reuse the CDB IDs.",
-            message=f"Sem-modalidade check not validated for product {profile.name} "
-                    "(unresolved modalidade IDs).",
-        ))
+        out.append(
+            Finding(
+                "6.combo.sem_modalidade",
+                cat,
+                SEV_WARN,
+                OPERACAO_TABLE,
+                False,
+                hint="Confirm the sem-modalidade IDs for this product before enabling the check; "
+                "do not reuse the CDB IDs.",
+                message=f"Sem-modalidade check not validated for product {profile.name} "
+                "(unresolved modalidade IDs).",
+            )
+        )
     elif run_sem_modalidade and tipo_cols is None:
-        out.append(Finding(
-            "6.combo.sem_modalidade", cat, SEV_WARN, OPERACAO_TABLE, False,
-            hint="Check Oracle JDBC credentials/schema, SELECT grants, and target view/table "
-                 "availability, then rerun against QAB.",
-            message=f"Sem-modalidade check unavailable: {TIPO_OPERACAO_TABLE} "
-                    f"{errors[TIPO_OPERACAO_TABLE]}.",
-        ))
+        out.append(
+            Finding(
+                "6.combo.sem_modalidade",
+                cat,
+                SEV_WARN,
+                OPERACAO_TABLE,
+                False,
+                hint="Check Oracle JDBC credentials/schema, SELECT grants, and target view/table "
+                "availability, then rerun against QAB.",
+                message=f"Sem-modalidade check unavailable: {TIPO_OPERACAO_TABLE} "
+                f"{errors[TIPO_OPERACAO_TABLE]}.",
+            )
+        )
     elif run_sem_modalidade:
         tipo_operacao = tipo_operacao_df.select(
-            _norm_code(F.col(tipo_cols["NUM_ID_TIPO_OPERACAO"]))
-            .alias("tipo_operacao_id"),
-            F.trim(F.col(tipo_cols["IND_SEM_MODALIDADE_INFOHUB"]).cast("string"))
-            .alias("sem_modalidade_flag"),
+            _norm_code(F.col(tipo_cols["NUM_ID_TIPO_OPERACAO"])).alias("tipo_operacao_id"),
+            F.trim(F.col(tipo_cols["IND_SEM_MODALIDADE_INFOHUB"]).cast("string")).alias(
+                "sem_modalidade_flag"
+            ),
         ).dropDuplicates(["tipo_operacao_id"])
         sem_modalidade = resolved_ops.where(
             F.col("modalidade_id").isin(*[str(value) for value in profile.sem_modalidade_ids])
@@ -9761,42 +12367,55 @@ def check_lookup_combo_frames(
             F.coalesce(F.col("sem_modalidade_flag"), F.lit("")) != "S"
         )
         invalid_sem_count = invalid_sem_modalidade.count()
-        out.append(Finding(
-            "6.combo.sem_modalidade", cat,
-            SEV_WARN if invalid_sem_count else SEV_INFO,
-            OPERACAO_TABLE, invalid_sem_count == 0, count=invalid_sem_count,
-            column="NUM_ID_MODALIDADE_LIQUIDACAO,IND_SEM_MODALIDADE_INFOHUB",
-            sample=_sample_keys(invalid_sem_modalidade, sample_cols, sample),
-            hint=f"Do not renumber fixed modalidade IDs {profile.sem_modalidade_ids}. "
-                 "Preserve a source-compatible modalidade/type pair, or ask the QAB "
-                 "configuration owner to correct TIPO_OPERACAO.IND_SEM_MODALIDADE_INFOHUB "
-                 "only when valid.",
-            message="Sem-modalidade operation types are not enabled in TIPO_OPERACAO.",
-        ))
+        out.append(
+            Finding(
+                "6.combo.sem_modalidade",
+                cat,
+                SEV_WARN if invalid_sem_count else SEV_INFO,
+                OPERACAO_TABLE,
+                invalid_sem_count == 0,
+                count=invalid_sem_count,
+                column="NUM_ID_MODALIDADE_LIQUIDACAO,IND_SEM_MODALIDADE_INFOHUB",
+                sample=_sample_keys(invalid_sem_modalidade, sample_cols, sample),
+                hint=f"Do not renumber fixed modalidade IDs {profile.sem_modalidade_ids}. "
+                "Preserve a source-compatible modalidade/type pair, or ask the QAB "
+                "configuration owner to correct TIPO_OPERACAO.IND_SEM_MODALIDADE_INFOHUB "
+                "only when valid.",
+                message="Sem-modalidade operation types are not enabled in TIPO_OPERACAO.",
+            )
+        )
 
     if run_identification:
-        unavailable = resolved_ops.where(
-            F.coalesce(F.col("identificacao_flag"), F.lit("")) != "S"
-        )
+        unavailable = resolved_ops.where(F.coalesce(F.col("identificacao_flag"), F.lit("")) != "S")
         unavailable_count = unavailable.count()
-        out.append(Finding(
-            "6.combo.identification_availability", cat,
-            SEV_WARN if unavailable_count else SEV_INFO,
-            OPERACAO_TABLE, unavailable_count == 0, count=unavailable_count,
-            column="IND_DISPONIVEL_IDENTIFICACAO",
-            sample=_sample_keys(unavailable, sample_cols, sample),
-            hint="Use or preserve a target CDB TOS row with "
-                 "IND_DISPONIVEL_IDENTIFICACAO='S', or ask the QAB configuration owner to "
-                 "align target static configuration; do not arbitrarily rewrite transaction "
-                 "FKs.",
-            message="Resolved TOS mappings are unavailable for identification.",
-        ))
+        out.append(
+            Finding(
+                "6.combo.identification_availability",
+                cat,
+                SEV_WARN if unavailable_count else SEV_INFO,
+                OPERACAO_TABLE,
+                unavailable_count == 0,
+                count=unavailable_count,
+                column="IND_DISPONIVEL_IDENTIFICACAO",
+                sample=_sample_keys(unavailable, sample_cols, sample),
+                hint="Use or preserve a target CDB TOS row with "
+                "IND_DISPONIVEL_IDENTIFICACAO='S', or ask the QAB configuration owner to "
+                "align target static configuration; do not arbitrarily rewrite transaction "
+                "FKs.",
+                message="Resolved TOS mappings are unavailable for identification.",
+            )
+        )
     return out
 
 
 def check_lookup_combos(
-    spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame], meta: Metadata, sample: int,
-    max_account_keys: int = 1_000_000, profile: Optional["ValidationProfile"] = None,
+    spark: SparkSession,
+    cfg: Config,
+    tables: Dict[str, DataFrame],
+    meta: Metadata,
+    sample: int,
+    max_account_keys: int = 1_000_000,
+    profile: Optional["ValidationProfile"] = None,
     skip_prefixes: Optional[List[str]] = None,
 ) -> List[Finding]:
     if profile is None:
@@ -9823,18 +12442,30 @@ def check_lookup_combos(
     if not run_combo:
         existing = []
     elif op_df is None:
-        existing = [Finding(
-            "6.combo", "Lookup combinations", SEV_INFO, OPERACAO_TABLE, True,
-            message="OPERACAO not in output; combo check skipped.",
-        )]
+        existing = [
+            Finding(
+                "6.combo",
+                "Lookup combinations",
+                SEV_INFO,
+                OPERACAO_TABLE,
+                True,
+                message="OPERACAO not in output; combo check skipped.",
+            )
+        ]
     elif not cfg.jdbc_url:
-        existing = [Finding(
-            "6.combo.no_jdbc", "Lookup combinations", SEV_WARN, OPERACAO_TABLE, False,
-            hint="Configure and verify Oracle JDBC credentials/schema, SELECT grants, and "
-                  "target view/table availability, then rerun against QAB.",
-            message="No Oracle connection; cannot resolve valid "
-                    f"(tipo_operacao, modalidade, servico) combinations for {profile.name}.",
-        )]
+        existing = [
+            Finding(
+                "6.combo.no_jdbc",
+                "Lookup combinations",
+                SEV_WARN,
+                OPERACAO_TABLE,
+                False,
+                hint="Configure and verify Oracle JDBC credentials/schema, SELECT grants, and "
+                "target view/table availability, then rerun against QAB.",
+                message="No Oracle connection; cannot resolve valid "
+                f"(tipo_operacao, modalidade, servico) combinations for {profile.name}.",
+            )
+        ]
     else:
         existing = []
 
@@ -9844,17 +12475,19 @@ def check_lookup_combos(
     if registration_lookup_supported and (
         run_combo or run_required_operation or run_required_account or run_required_quantity
     ):
-        queries.update({
-            TIPO_OPER_OBJETO_SERV_TABLE: (
-                "SELECT NUM_ID_TIPO_OPER_OBJETO_SERV, NUM_ID_TIPO_OPERACAO, "
-                "NUM_ID_OBJETO_SERVICO, IND_DISPONIVEL_IDENTIFICACAO "
-                f"FROM {cfg.schema}.{TIPO_OPER_OBJETO_SERV_TABLE}"
-            ),
-            TIPO_OPERACAO_TABLE: (
-                "SELECT NUM_ID_TIPO_OPERACAO, IND_SEM_MODALIDADE_INFOHUB, COD_TIPO_OPERACAO "
-                f"FROM {cfg.schema}.{TIPO_OPERACAO_TABLE}"
-            ),
-        })
+        queries.update(
+            {
+                TIPO_OPER_OBJETO_SERV_TABLE: (
+                    "SELECT NUM_ID_TIPO_OPER_OBJETO_SERV, NUM_ID_TIPO_OPERACAO, "
+                    "NUM_ID_OBJETO_SERVICO, IND_DISPONIVEL_IDENTIFICACAO "
+                    f"FROM {cfg.schema}.{TIPO_OPER_OBJETO_SERV_TABLE}"
+                ),
+                TIPO_OPERACAO_TABLE: (
+                    "SELECT NUM_ID_TIPO_OPERACAO, IND_SEM_MODALIDADE_INFOHUB, COD_TIPO_OPERACAO "
+                    f"FROM {cfg.schema}.{TIPO_OPERACAO_TABLE}"
+                ),
+            }
+        )
     if run_combo and profile.sic_enabled:
         queries[V_PARAMETRO_SIC_TABLE] = (
             "SELECT DISTINCT NUM_ID_TIPO_OPER_OBJETO_SERV, NUM_TIPO_IF, "
@@ -9883,9 +12516,13 @@ def check_lookup_combos(
     else:
         errors.update({table: "No Oracle connection" for table in queries})
 
-    account_sources_available = run_required_account and profile.account_check_enabled and all(
-        tables.get(table) is not None and resolve(tables[table], column) is not None
-        for table, column in ACCOUNT_REFERENCES
+    account_sources_available = (
+        run_required_account
+        and profile.account_check_enabled
+        and all(
+            tables.get(table) is not None and resolve(tables[table], column) is not None
+            for table, column in ACCOUNT_REFERENCES
+        )
     )
     account_keys: List[str] = []
     if account_sources_available:
@@ -9899,20 +12536,21 @@ def check_lookup_combos(
         ):
             registration_tos_ids = (
                 tos_lookup.select(
-                    _canon_key_col(F.col("NUM_ID_TIPO_OPER_OBJETO_SERV"))
-                    .alias("registration_tos_id"),
+                    _canon_key_col(F.col("NUM_ID_TIPO_OPER_OBJETO_SERV")).alias(
+                        "registration_tos_id"
+                    ),
                     _canon_key_col(F.col("NUM_ID_TIPO_OPERACAO")).alias("tipo_operacao_id"),
-                    _canon_key_col(F.col("NUM_ID_OBJETO_SERVICO"))
-                    .alias("objeto_servico_id"),
-                    F.trim(F.col("IND_DISPONIVEL_IDENTIFICACAO").cast("string"))
-                    .alias("identification_flag"),
+                    _canon_key_col(F.col("NUM_ID_OBJETO_SERVICO")).alias("objeto_servico_id"),
+                    F.trim(F.col("IND_DISPONIVEL_IDENTIFICACAO").cast("string")).alias(
+                        "identification_flag"
+                    ),
                 )
                 .join(
                     tipo_lookup.select(
-                        _canon_key_col(F.col("NUM_ID_TIPO_OPERACAO"))
-                        .alias("tipo_operacao_id"),
-                        F.trim(F.col("COD_TIPO_OPERACAO").cast("string"))
-                        .alias("operation_type_code"),
+                        _canon_key_col(F.col("NUM_ID_TIPO_OPERACAO")).alias("tipo_operacao_id"),
+                        F.trim(F.col("COD_TIPO_OPERACAO").cast("string")).alias(
+                            "operation_type_code"
+                        ),
                     ),
                     "tipo_operacao_id",
                     "inner",
@@ -9929,8 +12567,7 @@ def check_lookup_combos(
         for table, column in ACCOUNT_REFERENCES:
             source = tables[table]
             if table == OPERACAO_TABLE and (
-                profile.name in ("cdb", "cdb_simplificado")
-                or _is_rdb_profile(profile)
+                profile.name in ("cdb", "cdb_simplificado") or _is_rdb_profile(profile)
             ):
                 operation_tos = resolve(source, "NUM_ID_TIPO_OPER_OBJETO_SERV")
                 if registration_tos_ids is None or operation_tos is None:
@@ -9942,15 +12579,16 @@ def check_lookup_combos(
                     "registration_tos_id",
                     "leftsemi",
                 )
-            key_frames.append(source.select(
-                _canon_key_col(F.col(resolve(source, column))).alias("key")
-            ))
-        distinct_keys = reduce(lambda left, right: left.unionByName(right), key_frames).where(
-            F.col("key").isNotNull() & (F.trim(F.col("key")) != "")
-        ).dropDuplicates()
+            key_frames.append(
+                source.select(_canon_key_col(F.col(resolve(source, column))).alias("key"))
+            )
+        distinct_keys = (
+            reduce(lambda left, right: left.unionByName(right), key_frames)
+            .where(F.col("key").isNotNull() & (F.trim(F.col("key")) != ""))
+            .dropDuplicates()
+        )
         account_keys = [
-            _canon_key(row["key"])
-            for row in distinct_keys.limit(max_account_keys + 1).collect()
+            _canon_key(row["key"]) for row in distinct_keys.limit(max_account_keys + 1).collect()
         ]
 
     if account_sources_available and not account_keys:
@@ -9970,7 +12608,7 @@ def check_lookup_combos(
         try:
             for offset in range(0, len(account_keys), 1000):
                 literals = ", ".join(
-                    _sql_literal(value) for value in account_keys[offset:offset + 1000]
+                    _sql_literal(value) for value in account_keys[offset : offset + 1000]
                 )
                 query = (
                     "SELECT cp.NUM_CONTA_PARTICIPANTE, cp.NUM_ID_SITUACAO_CONTA, "
@@ -9985,9 +12623,7 @@ def check_lookup_combos(
                 rows = remote.collect()
                 account_schema = account_schema or remote.schema
                 account_rows.extend(rows)
-            lookups[CONTA_PARTICIPANTE_TABLE] = spark.createDataFrame(
-                account_rows, account_schema
-            )
+            lookups[CONTA_PARTICIPANTE_TABLE] = spark.createDataFrame(account_rows, account_schema)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Category 6 account lookup load failed: %s", exc)
             errors[CONTA_PARTICIPANTE_TABLE] = str(exc)
@@ -10018,7 +12654,8 @@ def check_lookup_combos(
             errors,
             skip_prefixes,
         )
-        if run_required else []
+        if run_required
+        else []
     )
     return existing + required
 
@@ -10027,22 +12664,44 @@ def check_lookup_combos(
 # Category 0/2g/6g/8g - LCA registration-route evidence
 # ---------------------------------------------------------------------------
 LCA_OUTPUT_TABLES = (
-    "ENTIDADE", "REPRESENTANTE_IF", "INSTRUMENTO_FINANCEIRO", "TITULO", "IF_LCA",
-    "CREDITO", "GARANTIA", "CONDICAO_IF", "AMORTIZACAO", "JUROS_FLUTUANTE", "SPREAD",
-    "RESGATE", "EVENTO", "DEPOSITO_AUTOMATICO_IF", "OPERACAO", "DADO_OPERACAO",
-    "LANCAMENTO", "ESPECIFICACAO", "ESPECIFICACAO_COMITENTE", "CARTEIRA_COMITENTE",
+    "ENTIDADE",
+    "REPRESENTANTE_IF",
+    "INSTRUMENTO_FINANCEIRO",
+    "TITULO",
+    "IF_LCA",
+    "CREDITO",
+    "GARANTIA",
+    "CONDICAO_IF",
+    "AMORTIZACAO",
+    "JUROS_FLUTUANTE",
+    "SPREAD",
+    "RESGATE",
+    "EVENTO",
+    "DEPOSITO_AUTOMATICO_IF",
+    "OPERACAO",
+    "DADO_OPERACAO",
+    "LANCAMENTO",
+    "ESPECIFICACAO",
+    "ESPECIFICACAO_COMITENTE",
+    "CARTEIRA_COMITENTE",
     "CARTEIRA_PARTICIPANTE",
 )
 LCA_CONDITION_SUBTYPES = {
-    "1": "AMORTIZACAO", "3": "JUROS_FLUTUANTE", "5": "SPREAD", "20": "RESGATE",
+    "1": "AMORTIZACAO",
+    "3": "JUROS_FLUTUANTE",
+    "5": "SPREAD",
+    "20": "RESGATE",
 }
 LCA_MEU_NUMERO_TOGGLE = "VALIDA_MEU_NUMERO_DEPOSITO"
 
 
 def _lca_unavailable(check_id: str, missing: Sequence[str], severity: str = SEV_WARN) -> Finding:
     return Finding(
-        check_id, "LCA", severity,
-        ",".join(sorted({value.split(".")[0] for value in missing})), False,
+        check_id,
+        "LCA",
+        severity,
+        ",".join(sorted({value.split(".")[0] for value in missing})),
+        False,
         hint="Export the complete LCA aggregate or make its bounded target lookup available.",
         message=f"Check unavailable; missing required input: {', '.join(missing)}.",
     )
@@ -10054,35 +12713,54 @@ def check_lca_metadata(
     if profile.pipeline != "lca":
         return []
     if no_oracle:
-        return [Finding(
-            "0.lca_metadata", "Coverage", SEV_WARN, "Oracle metadata", False,
-            hint="Rerun with Oracle access; specs.json omits IF_LCA/GARANTIA and marks "
-                 "ENTIDADE/REPRESENTANTE_IF static.",
-            message="Live Oracle table and PK metadata for all 21 LCA output tables is "
-                    "unavailable under --no-oracle (forces PARTIAL).",
-        )]
+        return [
+            Finding(
+                "0.lca_metadata",
+                "Coverage",
+                SEV_WARN,
+                "Oracle metadata",
+                False,
+                hint="Rerun with Oracle access; specs.json omits IF_LCA/GARANTIA and marks "
+                "ENTIDADE/REPRESENTANTE_IF static.",
+                message="Live Oracle table and PK metadata for all 21 LCA output tables is "
+                "unavailable under --no-oracle (forces PARTIAL).",
+            )
+        ]
     missing = [table for table in LCA_OUTPUT_TABLES if table not in meta.tables]
     missing_pk = [
         table for table in LCA_OUTPUT_TABLES if table in meta.tables and not meta.pk.get(table)
     ]
     failed = bool(missing or missing_pk)
-    return [Finding(
-        "0.lca_metadata", "Coverage", SEV_ERROR if failed else SEV_INFO,
-        ",".join(LCA_OUTPUT_TABLES), not failed, count=len(missing) + len(missing_pk),
-        hint="Use live metadata for every LCA output table; specs.json is not authoritative."
-             if failed else "",
-        message=(f"Missing Oracle table metadata={missing}; missing PK metadata={missing_pk}."
-                 if failed else "Live Oracle table and PK metadata cover all 21 LCA tables."),
-    )]
+    return [
+        Finding(
+            "0.lca_metadata",
+            "Coverage",
+            SEV_ERROR if failed else SEV_INFO,
+            ",".join(LCA_OUTPUT_TABLES),
+            not failed,
+            count=len(missing) + len(missing_pk),
+            hint="Use live metadata for every LCA output table; specs.json is not authoritative."
+            if failed
+            else "",
+            message=(
+                f"Missing Oracle table metadata={missing}; missing PK metadata={missing_pk}."
+                if failed
+                else "Live Oracle table and PK metadata cover all 21 LCA tables."
+            ),
+        )
+    ]
 
 
 def _lca_edge_findings(
-    check_id: str, parents: DataFrame, child: DataFrame, child_table: str,
-    parent_column: str, child_id_column: str, sample: int,
+    check_id: str,
+    parents: DataFrame,
+    child: DataFrame,
+    child_table: str,
+    parent_column: str,
+    child_id_column: str,
+    sample: int,
 ) -> List[Finding]:
-    parent_counts = parents.groupBy("parent_id").count().withColumnRenamed(
-        "count", "parent_count"
-    )
+    parent_counts = parents.groupBy("parent_id").count().withColumnRenamed("count", "parent_count")
     edges = child.select(
         _canon_key_col(F.col(parent_column)).alias("parent_id"),
         _canon_key_col(F.col(child_id_column)).alias("child_id"),
@@ -10094,20 +12772,27 @@ def _lca_edge_findings(
     count, duplicate_count = bad.count(), duplicate.count()
     return [
         Finding(
-            f"{check_id}.edge", "LCA graph", SEV_ERROR if count else SEV_INFO,
-            child_table, count == 0, count=count, column=parent_column,
+            f"{check_id}.edge",
+            "LCA graph",
+            SEV_ERROR if count else SEV_INFO,
+            child_table,
+            count == 0,
+            count=count,
+            column=parent_column,
             sample=_sample_keys(bad, ["child_id", "parent_id"], sample),
             hint="Remove the orphan/ambiguous edge or export its one parent." if count else "",
             message="LCA child rows must resolve to exactly one aggregate parent.",
         ),
         Finding(
-            f"{check_id}.duplicate", "LCA graph",
-            SEV_ERROR if duplicate_count else SEV_INFO, child_table,
-            duplicate_count == 0, count=duplicate_count,
+            f"{check_id}.duplicate",
+            "LCA graph",
+            SEV_ERROR if duplicate_count else SEV_INFO,
+            child_table,
+            duplicate_count == 0,
+            count=duplicate_count,
             column=f"{child_id_column},{parent_column}",
             sample=_sample_keys(duplicate, ["child_id", "parent_id"], sample),
-            hint="Keep each physical child-to-parent edge unambiguous."
-                 if duplicate_count else "",
+            hint="Keep each physical child-to-parent edge unambiguous." if duplicate_count else "",
             message="Duplicate LCA physical graph edges.",
         ),
     ]
@@ -10138,7 +12823,8 @@ def check_lca_graph(
         "LANCAMENTO": ("NUM_ID_LANCAMENTO", "NUM_ID_OPERACAO"),
         "ESPECIFICACAO": ("NUM_ID_ESPECIFICACAO", "NUM_ID_OPERACAO"),
         "ESPECIFICACAO_COMITENTE": (
-            "NUM_ID_ESPECIFICACAO_COMITENTE", "NUM_ID_ESPECIFICACAO",
+            "NUM_ID_ESPECIFICACAO_COMITENTE",
+            "NUM_ID_ESPECIFICACAO",
         ),
         "CARTEIRA_COMITENTE": ("NUM_CARTEIRA_COMITENTE", "NUM_IF"),
         "CARTEIRA_PARTICIPANTE": ("NUM_CARTEIRA_PARTICIPANTE", "NUM_IF"),
@@ -10147,85 +12833,136 @@ def check_lca_graph(
     if missing:
         return [_lca_unavailable("2g.graph.availability", missing, SEV_ERROR)]
     root_cols = columns["INSTRUMENTO_FINANCEIRO"]
-    roots = _active(tables["INSTRUMENTO_FINANCEIRO"]).where(
-        _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == "96"
-    ).select(
-        _canon_key_col(F.col(root_cols["NUM_IF"])).alias("parent_id"),
-        _lci_text(F.col(root_cols["COD_IF"])).alias("business_code"),
+    roots = (
+        _active(tables["INSTRUMENTO_FINANCEIRO"])
+        .where(_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == "96")
+        .select(
+            _canon_key_col(F.col(root_cols["NUM_IF"])).alias("parent_id"),
+            _lci_text(F.col(root_cols["COD_IF"])).alias("business_code"),
+        )
     )
     coded = roots.withColumn(
         "code_count", F.count(F.lit(1)).over(Window.partitionBy("business_code"))
     )
     bad_codes = coded.where(
-        F.col("business_code").isNull() | (F.col("business_code") == "")
-        | (F.col("code_count") > 1)
+        F.col("business_code").isNull() | (F.col("business_code") == "") | (F.col("code_count") > 1)
     )
     count = bad_codes.count()
-    out = [Finding(
-        "2g.root_code", "LCA graph", SEV_ERROR if count else SEV_INFO,
-        "INSTRUMENTO_FINANCEIRO", count == 0, count=count, column="COD_IF",
-        sample=_sample_keys(bad_codes, ["parent_id", "business_code"], sample),
-        hint="Generate nonblank unique exact-trimmed active LCA COD_IF values."
-             if count else "",
-        message="Active LCA roots with blank or duplicate case-sensitive COD_IF values.",
-    )]
+    out = [
+        Finding(
+            "2g.root_code",
+            "LCA graph",
+            SEV_ERROR if count else SEV_INFO,
+            "INSTRUMENTO_FINANCEIRO",
+            count == 0,
+            count=count,
+            column="COD_IF",
+            sample=_sample_keys(bad_codes, ["parent_id", "business_code"], sample),
+            hint="Generate nonblank unique exact-trimmed active LCA COD_IF values."
+            if count
+            else "",
+            message="Active LCA roots with blank or duplicate case-sensitive COD_IF values.",
+        )
+    ]
     for table in ("TITULO", "IF_LCA", "CREDITO", "GARANTIA"):
         parent_col = columns[table]["NUM_IF"]
         children = tables[table].select(_canon_key_col(F.col(parent_col)).alias("parent_id"))
         counts = children.groupBy("parent_id").count().withColumnRenamed("count", "child_count")
-        bad = roots.select("parent_id").join(counts, "parent_id", "left").where(
-            F.coalesce(F.col("child_count"), F.lit(0)) != 1
+        bad = (
+            roots.select("parent_id")
+            .join(counts, "parent_id", "left")
+            .where(F.coalesce(F.col("child_count"), F.lit(0)) != 1)
         )
         child_count = bad.count()
-        out.append(Finding(
-            f"2g.one_{table.lower()}", "LCA graph", SEV_ERROR if child_count else SEV_INFO,
-            table, child_count == 0, count=child_count, column="NUM_IF",
-            sample=_sample_keys(bad, ["parent_id"], sample),
-            hint=f"Keep exactly one {table} row per active LCA root." if child_count else "",
-            message=f"Active LCA roots without exactly one {table} row.",
-        ))
+        out.append(
+            Finding(
+                f"2g.one_{table.lower()}",
+                "LCA graph",
+                SEV_ERROR if child_count else SEV_INFO,
+                table,
+                child_count == 0,
+                count=child_count,
+                column="NUM_IF",
+                sample=_sample_keys(bad, ["parent_id"], sample),
+                hint=f"Keep exactly one {table} row per active LCA root." if child_count else "",
+                message=f"Active LCA roots without exactly one {table} row.",
+            )
+        )
         child_id = columns[table].get("NUM_ID_GARANTIA", parent_col)
-        out.extend(_lca_edge_findings(
-            f"2g.{table.lower()}", roots.select("parent_id"), tables[table], table,
-            parent_col, child_id, sample,
-        ))
+        out.extend(
+            _lca_edge_findings(
+                f"2g.{table.lower()}",
+                roots.select("parent_id"),
+                tables[table],
+                table,
+                parent_col,
+                child_id,
+                sample,
+            )
+        )
     entities = tables["ENTIDADE"].select(
         _canon_key_col(F.col(columns["ENTIDADE"]["NUM_ID_ENTIDADE"])).alias("parent_id")
     )
     representatives = tables["REPRESENTANTE_IF"].select(
         _canon_key_col(F.col(columns["REPRESENTANTE_IF"]["NUM_ID_ENTIDADE"])).alias("parent_id")
     )
-    out.extend(_lca_edge_findings(
-        "2g.representative", entities, tables["REPRESENTANTE_IF"], "REPRESENTANTE_IF",
-        columns["REPRESENTANTE_IF"]["NUM_ID_ENTIDADE"],
-        columns["REPRESENTANTE_IF"]["NUM_ID_ENTIDADE"], sample,
-    ))
-    out.extend(_lca_edge_findings(
-        "2g.depositor_origin", representatives, tables["IF_LCA"], "IF_LCA",
-        columns["IF_LCA"]["NUM_ID_ENT_DEPOSITARIO_ORIG"], columns["IF_LCA"]["NUM_IF"], sample,
-    ))
+    out.extend(
+        _lca_edge_findings(
+            "2g.representative",
+            entities,
+            tables["REPRESENTANTE_IF"],
+            "REPRESENTANTE_IF",
+            columns["REPRESENTANTE_IF"]["NUM_ID_ENTIDADE"],
+            columns["REPRESENTANTE_IF"]["NUM_ID_ENTIDADE"],
+            sample,
+        )
+    )
+    out.extend(
+        _lca_edge_findings(
+            "2g.depositor_origin",
+            representatives,
+            tables["IF_LCA"],
+            "IF_LCA",
+            columns["IF_LCA"]["NUM_ID_ENT_DEPOSITARIO_ORIG"],
+            columns["IF_LCA"]["NUM_IF"],
+            sample,
+        )
+    )
     direct_edges = (
         ("condition", "CONDICAO_IF", "NUM_IF", "NUM_CONDICAO_IF"),
         ("event", "EVENTO", "NUM_IF", "NUM_EVENTO"),
         ("deposit", "DEPOSITO_AUTOMATICO_IF", "NUM_IF", "NUM_IF"),
         ("operation", "OPERACAO", "NUM_IF", "NUM_ID_OPERACAO"),
         ("wallet_comitente", "CARTEIRA_COMITENTE", "NUM_IF", "NUM_CARTEIRA_COMITENTE"),
-        ("wallet_participante", "CARTEIRA_PARTICIPANTE", "NUM_IF",
-         "NUM_CARTEIRA_PARTICIPANTE"),
+        ("wallet_participante", "CARTEIRA_PARTICIPANTE", "NUM_IF", "NUM_CARTEIRA_PARTICIPANTE"),
     )
     for name, table, parent_name, child_name in direct_edges:
-        out.extend(_lca_edge_findings(
-            f"2g.{name}", roots.select("parent_id"), tables[table], table,
-            columns[table][parent_name], columns[table][child_name], sample,
-        ))
+        out.extend(
+            _lca_edge_findings(
+                f"2g.{name}",
+                roots.select("parent_id"),
+                tables[table],
+                table,
+                columns[table][parent_name],
+                columns[table][child_name],
+                sample,
+            )
+        )
     conditions = tables["CONDICAO_IF"].select(
         _canon_key_col(F.col(columns["CONDICAO_IF"]["NUM_CONDICAO_IF"])).alias("parent_id")
     )
     for table in LCA_CONDITION_SUBTYPES.values():
-        out.extend(_lca_edge_findings(
-            f"2g.{table.lower()}", conditions, tables[table], table,
-            columns[table]["NUM_CONDICAO_IF"], columns[table]["NUM_CONDICAO_IF"], sample,
-        ))
+        out.extend(
+            _lca_edge_findings(
+                f"2g.{table.lower()}",
+                conditions,
+                tables[table],
+                table,
+                columns[table]["NUM_CONDICAO_IF"],
+                columns[table]["NUM_CONDICAO_IF"],
+                sample,
+            )
+        )
     operations = tables["OPERACAO"].select(
         _canon_key_col(F.col(columns["OPERACAO"]["NUM_ID_OPERACAO"])).alias("parent_id")
     )
@@ -10234,20 +12971,31 @@ def check_lca_graph(
         ("launch", "LANCAMENTO", "NUM_ID_LANCAMENTO"),
         ("specification", "ESPECIFICACAO", "NUM_ID_ESPECIFICACAO"),
     ):
-        out.extend(_lca_edge_findings(
-            f"2g.{name}", operations, tables[table], table,
-            columns[table]["NUM_ID_OPERACAO"], columns[table][child_name], sample,
-        ))
+        out.extend(
+            _lca_edge_findings(
+                f"2g.{name}",
+                operations,
+                tables[table],
+                table,
+                columns[table]["NUM_ID_OPERACAO"],
+                columns[table][child_name],
+                sample,
+            )
+        )
     specifications = tables["ESPECIFICACAO"].select(
-        _canon_key_col(F.col(columns["ESPECIFICACAO"]["NUM_ID_ESPECIFICACAO"]))
-        .alias("parent_id")
+        _canon_key_col(F.col(columns["ESPECIFICACAO"]["NUM_ID_ESPECIFICACAO"])).alias("parent_id")
     )
-    out.extend(_lca_edge_findings(
-        "2g.specification_holder", specifications, tables["ESPECIFICACAO_COMITENTE"],
-        "ESPECIFICACAO_COMITENTE",
-        columns["ESPECIFICACAO_COMITENTE"]["NUM_ID_ESPECIFICACAO"],
-        columns["ESPECIFICACAO_COMITENTE"]["NUM_ID_ESPECIFICACAO_COMITENTE"], sample,
-    ))
+    out.extend(
+        _lca_edge_findings(
+            "2g.specification_holder",
+            specifications,
+            tables["ESPECIFICACAO_COMITENTE"],
+            "ESPECIFICACAO_COMITENTE",
+            columns["ESPECIFICACAO_COMITENTE"]["NUM_ID_ESPECIFICACAO"],
+            columns["ESPECIFICACAO_COMITENTE"]["NUM_ID_ESPECIFICACAO_COMITENTE"],
+            sample,
+        )
+    )
     return out
 
 
@@ -10265,9 +13013,7 @@ def check_lca_polymorphism(
         return [_lca_unavailable("2g.condition.availability", missing, SEV_ERROR)]
     condition = _active(tables["CONDICAO_IF"]).select(
         _canon_key_col(F.col(columns["CONDICAO_IF"]["NUM_CONDICAO_IF"])).alias("condition_id"),
-        _lci_text(F.col(columns["CONDICAO_IF"]["COD_TIPO_CONDICAO_IF"])).alias(
-            "condition_type"
-        ),
+        _lci_text(F.col(columns["CONDICAO_IF"]["COD_TIPO_CONDICAO_IF"])).alias("condition_type"),
     )
     membership = None
     for table in LCA_CONDITION_SUBTYPES.values():
@@ -10284,41 +13030,63 @@ def check_lca_polymorphism(
     for code, table in LCA_CONDITION_SUBTYPES.items():
         pairs.extend((F.lit(code), F.lit(table)))
     joined = joined.withColumn("expected_table", F.create_map(*pairs)[F.col("condition_type")])
-    bad = joined.where(reduce(
-        lambda left, right: left | right,
-        [F.when(F.col("expected_table") == table, F.col(table) != 1)
-         .otherwise(F.col(table) != 0) for table in subtype_tables],
-    ))
+    bad = joined.where(
+        reduce(
+            lambda left, right: left | right,
+            [
+                F.when(F.col("expected_table") == table, F.col(table) != 1).otherwise(
+                    F.col(table) != 0
+                )
+                for table in subtype_tables
+            ],
+        )
+    )
     unknown = condition.where(
-        F.col("condition_type").isNull() | (F.col("condition_type") == "")
+        F.col("condition_type").isNull()
+        | (F.col("condition_type") == "")
         | ~F.col("condition_type").isin(*LCA_CONDITION_SUBTYPES)
     )
-    orphan = membership.join(condition.select("condition_id").dropDuplicates(),
-                             "condition_id", "left_anti")
+    orphan = membership.join(
+        condition.select("condition_id").dropDuplicates(), "condition_id", "left_anti"
+    )
     bad_count, unknown_count, orphan_count = bad.count(), unknown.count(), orphan.count()
     return [
         Finding(
-            "2g.condition_polymorphism", "LCA condition polymorphism",
-            SEV_ERROR if bad_count else SEV_INFO, "CONDICAO_IF", bad_count == 0,
-            count=bad_count, column="COD_TIPO_CONDICAO_IF,NUM_CONDICAO_IF",
+            "2g.condition_polymorphism",
+            "LCA condition polymorphism",
+            SEV_ERROR if bad_count else SEV_INFO,
+            "CONDICAO_IF",
+            bad_count == 0,
+            count=bad_count,
+            column="COD_TIPO_CONDICAO_IF,NUM_CONDICAO_IF",
             sample=_sample_keys(bad, ["condition_id", "condition_type"], sample),
             hint="Emit exactly one expected known physical row and no wrong known row."
-                 if bad_count else "",
+            if bad_count
+            else "",
             message="Known LCA conditions with missing, duplicate, or wrong physical subtype.",
         ),
         Finding(
-            "2g.unknown_condition_type", "LCA condition polymorphism",
-            SEV_WARN if unknown_count else SEV_INFO, "CONDICAO_IF", unknown_count == 0,
-            count=unknown_count, column="COD_TIPO_CONDICAO_IF",
+            "2g.unknown_condition_type",
+            "LCA condition polymorphism",
+            SEV_WARN if unknown_count else SEV_INFO,
+            "CONDICAO_IF",
+            unknown_count == 0,
+            count=unknown_count,
+            column="COD_TIPO_CONDICAO_IF",
             sample=_sample_keys(unknown, ["condition_id", "condition_type"], sample),
             hint="Capture another successful LCA variant before assigning a mapping."
-                 if unknown_count else "",
+            if unknown_count
+            else "",
             message="LCA condition types outside the four log-proven mappings.",
         ),
         Finding(
-            "2g.subtype_orphan", "LCA condition polymorphism",
-            SEV_ERROR if orphan_count else SEV_INFO, "CONDICAO_IF", orphan_count == 0,
-            count=orphan_count, column="NUM_CONDICAO_IF",
+            "2g.subtype_orphan",
+            "LCA condition polymorphism",
+            SEV_ERROR if orphan_count else SEV_INFO,
+            "CONDICAO_IF",
+            orphan_count == 0,
+            count=orphan_count,
+            column="NUM_CONDICAO_IF",
             sample=_sample_keys(orphan, ["condition_id", "physical_table"], sample),
             hint="Remove subtype rows without a CONDICAO_IF parent." if orphan_count else "",
             message="Known LCA physical subtype rows without a condition parent.",
@@ -10334,8 +13102,10 @@ def _lca_from_lci_finding(finding: Finding) -> Finding:
         category=finding.category.replace("LCI", "LCA"),
         table=finding.table.replace("LCI_", "LCA_"),
         message=finding.message.replace("LCI", "LCA").replace("type-1 lot", "type-2 lot"),
-        hint=finding.hint.replace("LCI", "LCA").replace("type-1 lot", "type-2 lot")
-        .replace("type 81", "type 96").replace("object-service 75", "object-service 843"),
+        hint=finding.hint.replace("LCI", "LCA")
+        .replace("type-1 lot", "type-2 lot")
+        .replace("type 81", "type 96")
+        .replace("object-service 75", "object-service 843"),
     )
     if adapted.check_id == "6g.lookup.issuer_account":
         adapted = replace(
@@ -10347,17 +13117,24 @@ def _lca_from_lci_finding(finding: Finding) -> Finding:
 
 
 def check_lca_target_frames(
-    tables: Dict[str, DataFrame], frames: Dict[str, DataFrame], sample: int,
-    profile: ValidationProfile, errors: Optional[Dict[str, str]] = None,
+    tables: Dict[str, DataFrame],
+    frames: Dict[str, DataFrame],
+    sample: int,
+    profile: ValidationProfile,
+    errors: Optional[Dict[str, str]] = None,
 ) -> List[Finding]:
     if profile.pipeline != "lca":
         return []
     errors = errors or {}
     mapping = {
-        "LCA_TIPO_IF": "LCI_TIPO_IF", "LCA_LOTES": "LCI_LOTES",
-        "LCA_ACCOUNTS": "LCI_ACCOUNTS", "LCA_OBJECT_SERVICE": "LCI_OBJECT_SERVICE",
-        "LCA_ROUTES": "LCI_ROUTES", "LCA_ROOT_CODES": "LCI_ROOT_CODES",
-        "LCA_TOGGLE": "LCI_TOGGLE", "LCA_CONTROLS": "LCI_CONTROLS",
+        "LCA_TIPO_IF": "LCI_TIPO_IF",
+        "LCA_LOTES": "LCI_LOTES",
+        "LCA_ACCOUNTS": "LCI_ACCOUNTS",
+        "LCA_OBJECT_SERVICE": "LCI_OBJECT_SERVICE",
+        "LCA_ROUTES": "LCI_ROUTES",
+        "LCA_ROOT_CODES": "LCI_ROOT_CODES",
+        "LCA_TOGGLE": "LCI_TOGGLE",
+        "LCA_CONTROLS": "LCI_CONTROLS",
         "LCA_OPERATION_CODES": "LCI_OPERATION_CODES",
         "LCA_WALLET_COMITENTE": "LCI_WALLET_COMITENTE",
         "LCA_WALLET_PARTICIPANTE": "LCI_WALLET_PARTICIPANTE",
@@ -10384,9 +13161,11 @@ def check_lca_target_frames(
     if lots is not None and all((lot_id, lot_type_if, root is not None, root_lot, root_type)):
         active_lots, supported = _lci_active_target(lots)
         if supported:
-            roots = _active(root).where(
-                _canon_key_col(F.col(root_type)) == "96"
-            ).select(_canon_key_col(F.col(root_lot)).alias("lot_id"))
+            roots = (
+                _active(root)
+                .where(_canon_key_col(F.col(root_type)) == "96")
+                .select(_canon_key_col(F.col(root_lot)).alias("lot_id"))
+            )
             target = active_lots.select(
                 _canon_key_col(F.col(lot_id)).alias("lot_id"),
                 _canon_key_col(F.col(lot_type_if)).alias("lot_root_type"),
@@ -10395,21 +13174,24 @@ def check_lca_target_frames(
                 F.col("lot_root_type").isNull() | (F.col("lot_root_type") != "96")
             )
             count = bad.count()
-            out.append(Finding(
-                "6g.lookup.lot_root_type", "LCA target eligibility",
-                SEV_ERROR if count else SEV_INFO, "LOTE", count == 0, count=count,
-                column="LOTE.NUM_TIPO_IF", sample=_sample_keys(bad, ["lot_id"], sample),
-                hint="Use a persisted type-96 LCA lot root." if count else "",
-                message="LCA target lots retain the persisted compatible root type.",
-            ))
+            out.append(
+                Finding(
+                    "6g.lookup.lot_root_type",
+                    "LCA target eligibility",
+                    SEV_ERROR if count else SEV_INFO,
+                    "LOTE",
+                    count == 0,
+                    count=count,
+                    column="LOTE.NUM_TIPO_IF",
+                    sample=_sample_keys(bad, ["lot_id"], sample),
+                    hint="Use a persisted type-96 LCA lot root." if count else "",
+                    message="LCA target lots retain the persisted compatible root type.",
+                )
+            )
         else:
-            out.append(_lca_unavailable(
-                "6g.lookup.lot_root_type", ["LCA_LOTES.DAT_EXCLUSAO"]
-            ))
+            out.append(_lca_unavailable("6g.lookup.lot_root_type", ["LCA_LOTES.DAT_EXCLUSAO"]))
     else:
-        out.append(_lca_unavailable(
-            "6g.lookup.lot_root_type", ["LCA_LOTES.NUM_TIPO_IF"]
-        ))
+        out.append(_lca_unavailable("6g.lookup.lot_root_type", ["LCA_LOTES.NUM_TIPO_IF"]))
     credit = tables.get("CREDITO")
     credit_if = resolve(credit, "NUM_IF") if credit is not None else None
     credit_municipality = resolve(credit, "NUM_ID_MUNICIPIO") if credit is not None else None
@@ -10421,8 +13203,17 @@ def check_lca_target_frames(
     municipality_active = (
         resolve(municipalities, "IND_EXCLUIDO") if municipalities is not None else None
     )
-    if all((credit is not None, credit_if, credit_municipality, municipalities is not None,
-            municipality_id, municipality_uf, municipality_active)):
+    if all(
+        (
+            credit is not None,
+            credit_if,
+            credit_municipality,
+            municipalities is not None,
+            municipality_id,
+            municipality_uf,
+            municipality_active,
+        )
+    ):
         references = credit.select(
             _canon_key_col(F.col(credit_if)).alias("root_id"),
             _canon_key_col(F.col(credit_municipality)).alias("municipality_id"),
@@ -10437,33 +13228,51 @@ def check_lca_target_frames(
             F.col("uf_id").isNull()
         )
         count = bad.count()
-        out.append(Finding(
-            "6g.lookup.municipality", "LCA target eligibility",
-            SEV_ERROR if count else SEV_INFO, "MUNICIPIO", count == 0, count=count,
-            column="CREDITO.NUM_ID_MUNICIPIO,IND_EXCLUIDO",
-            sample=_sample_keys(bad, ["root_id", "municipality_id"], sample),
-            hint="Resolve each nonnull CREDITO municipality to active IND_EXCLUIDO='N'."
-                 if count else "",
-            message="LCA CREDITO municipality references are active.",
-        ))
+        out.append(
+            Finding(
+                "6g.lookup.municipality",
+                "LCA target eligibility",
+                SEV_ERROR if count else SEV_INFO,
+                "MUNICIPIO",
+                count == 0,
+                count=count,
+                column="CREDITO.NUM_ID_MUNICIPIO,IND_EXCLUIDO",
+                sample=_sample_keys(bad, ["root_id", "municipality_id"], sample),
+                hint="Resolve each nonnull CREDITO municipality to active IND_EXCLUIDO='N'."
+                if count
+                else "",
+                message="LCA CREDITO municipality references are active.",
+            )
+        )
         ufs = frames.get("LCA_UFS")
         uf_id = resolve(ufs, "NUM_ID_UF") if ufs is not None else None
         uf_active = resolve(ufs, "IND_EXCLUIDO") if ufs is not None else None
         if ufs is not None and uf_id and uf_active:
-            active_ufs = ufs.where(_lci_text(F.col(uf_active)) == "N").select(
-                _canon_key_col(F.col(uf_id)).alias("uf_id")
-            ).dropDuplicates()
+            active_ufs = (
+                ufs.where(_lci_text(F.col(uf_active)) == "N")
+                .select(_canon_key_col(F.col(uf_id)).alias("uf_id"))
+                .dropDuplicates()
+            )
             bad = references.join(active_municipalities, "municipality_id", "inner").join(
                 F.broadcast(active_ufs), "uf_id", "left_anti"
             )
             count = bad.count()
-            out.append(Finding(
-                "6g.lookup.uf", "LCA target eligibility", SEV_ERROR if count else SEV_INFO,
-                "UF", count == 0, count=count, column="MUNICIPIO.NUM_ID_UF,IND_EXCLUIDO",
-                sample=_sample_keys(bad, ["root_id", "municipality_id", "uf_id"], sample),
-                hint="Resolve each municipality to active UF IND_EXCLUIDO='N'." if count else "",
-                message="LCA municipality UF references are active.",
-            ))
+            out.append(
+                Finding(
+                    "6g.lookup.uf",
+                    "LCA target eligibility",
+                    SEV_ERROR if count else SEV_INFO,
+                    "UF",
+                    count == 0,
+                    count=count,
+                    column="MUNICIPIO.NUM_ID_UF,IND_EXCLUIDO",
+                    sample=_sample_keys(bad, ["root_id", "municipality_id", "uf_id"], sample),
+                    hint="Resolve each municipality to active UF IND_EXCLUIDO='N'."
+                    if count
+                    else "",
+                    message="LCA municipality UF references are active.",
+                )
+            )
         else:
             out.append(_lca_unavailable("6g.lookup.uf", ["LCA_UFS"]))
     else:
@@ -10472,7 +13281,10 @@ def check_lca_target_frames(
 
 
 def load_lca_target_frames(
-    spark: SparkSession, cfg: Config, tables: Dict[str, DataFrame], maximum: int = 100_000,
+    spark: SparkSession,
+    cfg: Config,
+    tables: Dict[str, DataFrame],
+    maximum: int = 100_000,
     skip_prefixes: Sequence[str] = (),
 ) -> Tuple[Dict[str, DataFrame], Dict[str, str]]:
     """Bounded LCA target setup; skipped 6g prefixes never issue JDBC."""
@@ -10481,19 +13293,21 @@ def load_lca_target_frames(
         spark, cfg, tables, maximum, lci_skips, VALIDATION_PROFILES["lca"]
     )
     reverse = {
-        "LCI_TIPO_IF": "LCA_TIPO_IF", "LCI_LOTES": "LCA_LOTES",
-        "LCI_ACCOUNTS": "LCA_ACCOUNTS", "LCI_OBJECT_SERVICE": "LCA_OBJECT_SERVICE",
-        "LCI_ROUTES": "LCA_ROUTES", "LCI_ROOT_CODES": "LCA_ROOT_CODES",
-        "LCI_TOGGLE": "LCA_TOGGLE", "LCI_CONTROLS": "LCA_CONTROLS",
+        "LCI_TIPO_IF": "LCA_TIPO_IF",
+        "LCI_LOTES": "LCA_LOTES",
+        "LCI_ACCOUNTS": "LCA_ACCOUNTS",
+        "LCI_OBJECT_SERVICE": "LCA_OBJECT_SERVICE",
+        "LCI_ROUTES": "LCA_ROUTES",
+        "LCI_ROOT_CODES": "LCA_ROOT_CODES",
+        "LCI_TOGGLE": "LCA_TOGGLE",
+        "LCI_CONTROLS": "LCA_CONTROLS",
         "LCI_OPERATION_CODES": "LCA_OPERATION_CODES",
         "LCI_WALLET_COMITENTE": "LCA_WALLET_COMITENTE",
         "LCI_WALLET_PARTICIPANTE": "LCA_WALLET_PARTICIPANTE",
     }
     out = {reverse[name]: frame for name, frame in frames.items() if name in reverse}
     out_errors = {reverse.get(name, name): value for name, value in errors.items()}
-    want_municipality = not _check_is_skipped(
-        "6g.lookup.municipality", list(skip_prefixes)
-    )
+    want_municipality = not _check_is_skipped("6g.lookup.municipality", list(skip_prefixes))
     want_uf = not _check_is_skipped("6g.lookup.uf", list(skip_prefixes))
     if not want_municipality and not want_uf:
         return out, out_errors
@@ -10502,22 +13316,28 @@ def load_lca_target_frames(
     if municipality is None:
         out_errors["LCA_MUNICIPALITIES"] = "CREDITO.NUM_ID_MUNICIPIO unavailable"
         return out, out_errors
-    values = [str(row[0]) for row in credit.select(
-        _canon_key_col(F.col(municipality)).alias("id")
-    ).where(F.col("id").isNotNull() & (F.col("id") != "")).dropDuplicates()
-        .limit(maximum + 1).collect()]
+    values = [
+        str(row[0])
+        for row in credit.select(_canon_key_col(F.col(municipality)).alias("id"))
+        .where(F.col("id").isNotNull() & (F.col("id") != ""))
+        .dropDuplicates()
+        .limit(maximum + 1)
+        .collect()
+    ]
     if len(values) > maximum:
         out_errors["LCA_MUNICIPALITIES"] = f"more than {maximum} municipality IDs"
         return out, out_errors
     municipality_rows, municipality_schema = [], None
     try:
         for offset in range(0, len(values), 1000):
-            batch = values[offset:offset + 1000]
+            batch = values[offset : offset + 1000]
             frame = _jdbc(
-                spark, cfg,
+                spark,
+                cfg,
                 "SELECT NUM_ID_MUNICIPIO, NUM_ID_UF, IND_EXCLUIDO "
                 f"FROM {cfg.schema}.MUNICIPIO WHERE NUM_ID_MUNICIPIO IN ("
-                + ", ".join(_sql_literal(value) for value in batch) + ")",
+                + ", ".join(_sql_literal(value) for value in batch)
+                + ")",
             )
             municipality_schema = municipality_schema or frame.schema
             municipality_rows.extend(frame.collect())
@@ -10531,29 +13351,42 @@ def load_lca_target_frames(
             )
         if not want_uf:
             return out, out_errors
-        uf_values = [str(row[0]) for row in out["LCA_MUNICIPALITIES"].select(
-            _canon_key_col(F.col(resolve(out["LCA_MUNICIPALITIES"], "NUM_ID_UF")))
-            .alias("uf_id")
-        ).where(F.col("uf_id").isNotNull()).dropDuplicates().limit(maximum + 1).collect()]
+        uf_values = [
+            str(row[0])
+            for row in out["LCA_MUNICIPALITIES"]
+            .select(
+                _canon_key_col(F.col(resolve(out["LCA_MUNICIPALITIES"], "NUM_ID_UF"))).alias(
+                    "uf_id"
+                )
+            )
+            .where(F.col("uf_id").isNotNull())
+            .dropDuplicates()
+            .limit(maximum + 1)
+            .collect()
+        ]
         if len(uf_values) > maximum:
             out_errors["LCA_UFS"] = f"more than {maximum} UF IDs"
         elif uf_values:
             out["LCA_UFS"] = _jdbc(
-                spark, cfg, "SELECT NUM_ID_UF, IND_EXCLUIDO "
+                spark,
+                cfg,
+                "SELECT NUM_ID_UF, IND_EXCLUIDO "
                 f"FROM {cfg.schema}.UF WHERE NUM_ID_UF IN ("
-                + ", ".join(_sql_literal(value) for value in uf_values) + ")",
+                + ", ".join(_sql_literal(value) for value in uf_values)
+                + ")",
             )
         else:
-            out["LCA_UFS"] = spark.createDataFrame(
-                [], "NUM_ID_UF string, IND_EXCLUIDO string"
-            )
+            out["LCA_UFS"] = spark.createDataFrame([], "NUM_ID_UF string, IND_EXCLUIDO string")
     except Exception as exc:  # noqa: BLE001
         out_errors["LCA_MUNICIPALITIES"] = str(exc)
     return out, out_errors
 
 
 def check_lca_registration_profile(
-    tables: Dict[str, DataFrame], sample: int, enabled: bool, profile: ValidationProfile,
+    tables: Dict[str, DataFrame],
+    sample: int,
+    enabled: bool,
+    profile: ValidationProfile,
 ) -> List[Finding]:
     if profile.pipeline != "lca" or not enabled:
         return []
@@ -10565,110 +13398,187 @@ def check_lca_registration_profile(
             return _lca_unavailable(check_id, [table])
         actual = {name: resolve(frame, name) for name in expected}
         if any(column is None for column in actual.values()):
-            return _lca_unavailable(check_id, [f"{table}.{name}" for name, column in actual.items()
-                                                if column is None])
-        bad = frame.where(reduce(
-            lambda left, right: left | right,
-            [~F.coalesce(_canon_key_col(F.col(actual[name])) == str(value), F.lit(False))
-             for name, value in expected.items()],
-        ))
+            return _lca_unavailable(
+                check_id, [f"{table}.{name}" for name, column in actual.items() if column is None]
+            )
+        bad = frame.where(
+            reduce(
+                lambda left, right: left | right,
+                [
+                    ~F.coalesce(_canon_key_col(F.col(actual[name])) == str(value), F.lit(False))
+                    for name, value in expected.items()
+                ],
+            )
+        )
         count = bad.count()
         return Finding(
-            check_id, "LCA observed registration profile", SEV_WARN if count else SEV_INFO,
-            table, count == 0, count=count, column=",".join(expected),
+            check_id,
+            "LCA observed registration profile",
+            SEV_WARN if count else SEV_INFO,
+            table,
+            count == 0,
+            count=count,
+            column=",".join(expected),
             sample=_sample_keys(bad, frame.columns[:1], sample),
             hint="Treat lca_inclusao.log values as advisory." if count else "",
             message="Rows differing from observed LCA registration constants.",
         )
 
     out = [
-        constants("INSTRUMENTO_FINANCEIRO", {
-            "NUM_SISTEMA": 55, "NUM_TIPO_IF": 96, "NUM_ID_FORMA_PAGAMENTO": 267,
-            "NUM_ID_MOTIVO_SITUACAO_IF": 7, "COD_SITUACAO_IF": 0,
-            "VAL_NOMINAL_EMISSAO": 500, "VAL_NOMINAL_ATUAL": 500,
-            "VAL_NOMINAL_EM": 500, "VAL_PU_CURVA": 500, "IND_AGENDA_CONSTANTE": "S",
-        }),
-        constants("TITULO", {
-            "QTD_EMITIDA": 1, "NUM_ID_TIPO_REGIME_TITULO": 2,
-            "NUM_ID_VEICULO_GARANTIDOR": 1, "IND_FRACIONAMENTO": "N",
-            "NOM_FORMA_TITULO": "ESCRITURAL",
-        }),
-        constants("IF_LCA", {
-            "IND_MANUT_UNILATERAL_GARANTIAS": "S", "IND_LIQUIDACAO_ANTECIPADA": "N",
-        }),
+        constants(
+            "INSTRUMENTO_FINANCEIRO",
+            {
+                "NUM_SISTEMA": 55,
+                "NUM_TIPO_IF": 96,
+                "NUM_ID_FORMA_PAGAMENTO": 267,
+                "NUM_ID_MOTIVO_SITUACAO_IF": 7,
+                "COD_SITUACAO_IF": 0,
+                "VAL_NOMINAL_EMISSAO": 500,
+                "VAL_NOMINAL_ATUAL": 500,
+                "VAL_NOMINAL_EM": 500,
+                "VAL_PU_CURVA": 500,
+                "IND_AGENDA_CONSTANTE": "S",
+            },
+        ),
+        constants(
+            "TITULO",
+            {
+                "QTD_EMITIDA": 1,
+                "NUM_ID_TIPO_REGIME_TITULO": 2,
+                "NUM_ID_VEICULO_GARANTIDOR": 1,
+                "IND_FRACIONAMENTO": "N",
+                "NOM_FORMA_TITULO": "ESCRITURAL",
+            },
+        ),
+        constants(
+            "IF_LCA",
+            {
+                "IND_MANUT_UNILATERAL_GARANTIAS": "S",
+                "IND_LIQUIDACAO_ANTECIPADA": "N",
+            },
+        ),
         constants("CREDITO", {"NUM_ID_TIPO_CREDITO": 11, "NUM_ID_MUNICIPIO": 339}),
         constants("GARANTIA", {"NUM_ID_TIPO_GARANTIA": 16}),
         constants("AMORTIZACAO", {"VAL_TAXA_AMORTIZACAO": 10}),
-        constants("JUROS_FLUTUANTE", {
-            "NUM_INDICE_VALORIZACAO": 4, "VAL_PERCENTUAL_TAXA_JUROS": 100,
-        }),
+        constants(
+            "JUROS_FLUTUANTE",
+            {
+                "NUM_INDICE_VALORIZACAO": 4,
+                "VAL_PERCENTUAL_TAXA_JUROS": 100,
+            },
+        ),
         constants("SPREAD", {"VAL_TAXA_SPREAD": 1.56}),
         constants("RESGATE", {"COD_COND_RESGATE": "SEM TABELA"}),
     ]
-    root, condition, event = (tables.get(name) for name in (
-        "INSTRUMENTO_FINANCEIRO", "CONDICAO_IF", "EVENTO"
-    ))
+    root, condition, event = (
+        tables.get(name) for name in ("INSTRUMENTO_FINANCEIRO", "CONDICAO_IF", "EVENTO")
+    )
     root_key = resolve(root, "NUM_IF") if root is not None else None
     root_type = resolve(root, "NUM_TIPO_IF") if root is not None else None
     condition_root = resolve(condition, "NUM_IF") if condition is not None else None
     condition_type = resolve(condition, "COD_TIPO_CONDICAO_IF") if condition is not None else None
-    if all((root is not None, condition is not None, root_key, root_type,
-            condition_root, condition_type)):
-        roots = _active(root).where(_canon_key_col(F.col(root_type)) == "96").select(
-            _canon_key_col(F.col(root_key)).alias("root_id")
+    if all(
+        (
+            root is not None,
+            condition is not None,
+            root_key,
+            root_type,
+            condition_root,
+            condition_type,
         )
-        topology = condition.select(
-            _canon_key_col(F.col(condition_root)).alias("root_id"),
-            _lci_text(F.col(condition_type)).alias("condition_type"),
-        ).groupBy("root_id").agg(F.sort_array(F.collect_list("condition_type")).alias("topology"))
+    ):
+        roots = (
+            _active(root)
+            .where(_canon_key_col(F.col(root_type)) == "96")
+            .select(_canon_key_col(F.col(root_key)).alias("root_id"))
+        )
+        topology = (
+            condition.select(
+                _canon_key_col(F.col(condition_root)).alias("root_id"),
+                _lci_text(F.col(condition_type)).alias("condition_type"),
+            )
+            .groupBy("root_id")
+            .agg(F.sort_array(F.collect_list("condition_type")).alias("topology"))
+        )
         bad = roots.join(topology, "root_id", "left").where(
-            ~F.coalesce(F.col("topology") == F.array(
-                F.lit("1"), F.lit("20"), F.lit("3"), F.lit("5")
-            ), F.lit(False))
+            ~F.coalesce(
+                F.col("topology") == F.array(F.lit("1"), F.lit("20"), F.lit("3"), F.lit("5")),
+                F.lit(False),
+            )
         )
         count = bad.count()
-        out.append(Finding(
-            "8g.profile.condition_topology", "LCA observed registration profile",
-            SEV_WARN if count else SEV_INFO, "CONDICAO_IF", count == 0, count=count,
-            column="COD_TIPO_CONDICAO_IF", sample=_sample_keys(bad, ["root_id"], sample),
-            hint="Observed topology 1+3+5+20 is advisory." if count else "",
-            message="LCA roots outside the observed condition topology.",
-        ))
+        out.append(
+            Finding(
+                "8g.profile.condition_topology",
+                "LCA observed registration profile",
+                SEV_WARN if count else SEV_INFO,
+                "CONDICAO_IF",
+                count == 0,
+                count=count,
+                column="COD_TIPO_CONDICAO_IF",
+                sample=_sample_keys(bad, ["root_id"], sample),
+                hint="Observed topology 1+3+5+20 is advisory." if count else "",
+                message="LCA roots outside the observed condition topology.",
+            )
+        )
     else:
-        out.append(_lca_unavailable(
-            "8g.profile.condition_topology",
-            ["INSTRUMENTO_FINANCEIRO/CONDICAO_IF required columns"],
-        ))
+        out.append(
+            _lca_unavailable(
+                "8g.profile.condition_topology",
+                ["INSTRUMENTO_FINANCEIRO/CONDICAO_IF required columns"],
+            )
+        )
     event_root = resolve(event, "NUM_IF") if event is not None else None
     event_type = resolve(event, "NUM_TIPO_EVENTO_LEGADO") if event is not None else None
     if all((root is not None, event is not None, root_key, root_type, event_root, event_type)):
-        roots = _active(root).where(_canon_key_col(F.col(root_type)) == "96").select(
-            _canon_key_col(F.col(root_key)).alias("root_id")
+        roots = (
+            _active(root)
+            .where(_canon_key_col(F.col(root_type)) == "96")
+            .select(_canon_key_col(F.col(root_key)).alias("root_id"))
         )
-        counts = event.select(
-            _canon_key_col(F.col(event_root)).alias("root_id"),
-            _canon_key_col(F.col(event_type)).alias("event_type"),
-        ).groupBy("root_id").agg(
-            F.count(F.lit(1)).alias("total"),
-            F.sum(F.when(F.col("event_type") == "83", 1).otherwise(0)).alias("type83"),
-            F.sum(F.when(F.col("event_type") == "84", 1).otherwise(0)).alias("type84"),
-            F.sum(F.when(F.col("event_type") == "85", 1).otherwise(0)).alias("type85"),
+        counts = (
+            event.select(
+                _canon_key_col(F.col(event_root)).alias("root_id"),
+                _canon_key_col(F.col(event_type)).alias("event_type"),
+            )
+            .groupBy("root_id")
+            .agg(
+                F.count(F.lit(1)).alias("total"),
+                F.sum(F.when(F.col("event_type") == "83", 1).otherwise(0)).alias("type83"),
+                F.sum(F.when(F.col("event_type") == "84", 1).otherwise(0)).alias("type84"),
+                F.sum(F.when(F.col("event_type") == "85", 1).otherwise(0)).alias("type85"),
+            )
         )
-        bad = roots.join(counts, "root_id", "left").fillna(0).where(
-            (F.col("total") != 20) | (F.col("type83") != 10)
-            | (F.col("type84") != 9) | (F.col("type85") != 1)
+        bad = (
+            roots.join(counts, "root_id", "left")
+            .fillna(0)
+            .where(
+                (F.col("total") != 20)
+                | (F.col("type83") != 10)
+                | (F.col("type84") != 9)
+                | (F.col("type85") != 1)
+            )
         )
         count = bad.count()
-        out.append(Finding(
-            "8g.profile.event_dml_counts", "LCA observed registration profile",
-            SEV_WARN if count else SEV_INFO, "EVENTO", count == 0, count=count,
-            column="NUM_TIPO_EVENTO_LEGADO",
-            sample=_sample_keys(bad, ["root_id", "total", "type83", "type84", "type85"], sample),
-            hint="Logger says 8 amortizations, but DML has 9 type-84 rows; never harden this."
-                 if count else "",
-            message="Observed event DML is total20/type83=10/type84=9/type85=1; logger says "
-                    "8 amortizations while physical DML has 9.",
-        ))
+        out.append(
+            Finding(
+                "8g.profile.event_dml_counts",
+                "LCA observed registration profile",
+                SEV_WARN if count else SEV_INFO,
+                "EVENTO",
+                count == 0,
+                count=count,
+                column="NUM_TIPO_EVENTO_LEGADO",
+                sample=_sample_keys(
+                    bad, ["root_id", "total", "type83", "type84", "type85"], sample
+                ),
+                hint="Logger says 8 amortizations, but DML has 9 type-84 rows; never harden this."
+                if count
+                else "",
+                message="Observed event DML is total20/type83=10/type84=9/type85=1; logger says "
+                "8 amortizations while physical DML has 9.",
+            )
+        )
         closure = roots
         for table, root_column, alias in (
             ("DEPOSITO_AUTOMATICO_IF", "NUM_IF", "deposit_count"),
@@ -10679,9 +13589,12 @@ def check_lca_registration_profile(
             frame = tables.get(table)
             actual = resolve(frame, root_column) if frame is not None else None
             if actual:
-                per_root = frame.select(
-                    _canon_key_col(F.col(actual)).alias("root_id")
-                ).groupBy("root_id").count().withColumnRenamed("count", alias)
+                per_root = (
+                    frame.select(_canon_key_col(F.col(actual)).alias("root_id"))
+                    .groupBy("root_id")
+                    .count()
+                    .withColumnRenamed("count", alias)
+                )
                 closure = closure.join(per_root, "root_id", "left")
             else:
                 closure = closure.withColumn(alias, F.lit(0))
@@ -10700,76 +13613,103 @@ def check_lca_registration_profile(
                 ("ESPECIFICACAO", "specification_count"),
             ):
                 frame = tables.get(table)
-                child_operation = resolve(frame, "NUM_ID_OPERACAO") \
-                    if frame is not None else None
+                child_operation = resolve(frame, "NUM_ID_OPERACAO") if frame is not None else None
                 if child_operation:
-                    per_root = frame.select(
-                        _canon_key_col(F.col(child_operation)).alias("operation_id")
-                    ).join(operation_bridge, "operation_id", "inner").groupBy(
-                        "root_id"
-                    ).count().withColumnRenamed("count", alias)
+                    per_root = (
+                        frame.select(_canon_key_col(F.col(child_operation)).alias("operation_id"))
+                        .join(operation_bridge, "operation_id", "inner")
+                        .groupBy("root_id")
+                        .count()
+                        .withColumnRenamed("count", alias)
+                    )
                     closure = closure.join(per_root, "root_id", "left")
                 else:
                     closure = closure.withColumn(alias, F.lit(0))
             specification = tables.get("ESPECIFICACAO")
             holder = tables.get("ESPECIFICACAO_COMITENTE")
-            specification_id = resolve(specification, "NUM_ID_ESPECIFICACAO") \
-                if specification is not None else None
-            specification_operation = resolve(specification, "NUM_ID_OPERACAO") \
-                if specification is not None else None
-            holder_specification = resolve(holder, "NUM_ID_ESPECIFICACAO") \
-                if holder is not None else None
+            specification_id = (
+                resolve(specification, "NUM_ID_ESPECIFICACAO")
+                if specification is not None
+                else None
+            )
+            specification_operation = (
+                resolve(specification, "NUM_ID_OPERACAO") if specification is not None else None
+            )
+            holder_specification = (
+                resolve(holder, "NUM_ID_ESPECIFICACAO") if holder is not None else None
+            )
             if specification_id and specification_operation and holder_specification:
                 specification_roots = specification.select(
                     _canon_key_col(F.col(specification_id)).alias("specification_id"),
-                    _canon_key_col(F.col(specification_operation))
-                    .alias("operation_id"),
+                    _canon_key_col(F.col(specification_operation)).alias("operation_id"),
                 ).join(operation_bridge, "operation_id", "inner")
-                holder_counts = holder.select(
-                    _canon_key_col(F.col(holder_specification)).alias("specification_id")
-                ).join(specification_roots, "specification_id", "inner").groupBy(
-                    "root_id"
-                ).count().withColumnRenamed("count", "holder_count")
+                holder_counts = (
+                    holder.select(
+                        _canon_key_col(F.col(holder_specification)).alias("specification_id")
+                    )
+                    .join(specification_roots, "specification_id", "inner")
+                    .groupBy("root_id")
+                    .count()
+                    .withColumnRenamed("count", "holder_count")
+                )
                 closure = closure.join(holder_counts, "root_id", "left")
             else:
                 closure = closure.withColumn("holder_count", F.lit(0))
         else:
             for column in (
-                "data_count", "launch_count", "specification_count", "holder_count",
+                "data_count",
+                "launch_count",
+                "specification_count",
+                "holder_count",
             ):
                 closure = closure.withColumn(column, F.lit(0))
         count_columns = [
-            "deposit_count", "operation_count", "wallet_holder_count",
-            "wallet_participant_count", "launch_count", "specification_count", "holder_count",
+            "deposit_count",
+            "operation_count",
+            "wallet_holder_count",
+            "wallet_participant_count",
+            "launch_count",
+            "specification_count",
+            "holder_count",
         ]
         closure = closure.fillna(0, count_columns + ["data_count"])
         closure_bad = closure.where(
             reduce(
                 lambda left, right: left | right,
-                [F.col(column) != 1 for column in count_columns]
-                + [F.col("data_count") != 2],
+                [F.col(column) != 1 for column in count_columns] + [F.col("data_count") != 2],
             )
         )
         closure_count = closure_bad.count()
-        out.append(Finding(
-            "8g.profile.async_closure", "LCA observed registration profile",
-            SEV_WARN if closure_count else SEV_INFO, "OPERACAO", closure_count == 0,
-            count=closure_count, column=",".join(count_columns + ["data_count"]),
-            sample=_sample_keys(closure_bad, ["root_id"], sample),
-            hint=("Observed one deposit/operation/lancamento/specification/wallet closure and "
-                  "two DADO rows are advisory asynchronous state, never hard."
-                  if closure_count else ""),
-            message="LCA asynchronous closure differs from the observed 1/1/2/1/1/1/1 state.",
-        ))
+        out.append(
+            Finding(
+                "8g.profile.async_closure",
+                "LCA observed registration profile",
+                SEV_WARN if closure_count else SEV_INFO,
+                "OPERACAO",
+                closure_count == 0,
+                count=closure_count,
+                column=",".join(count_columns + ["data_count"]),
+                sample=_sample_keys(closure_bad, ["root_id"], sample),
+                hint=(
+                    "Observed one deposit/operation/lancamento/specification/wallet closure and "
+                    "two DADO rows are advisory asynchronous state, never hard."
+                    if closure_count
+                    else ""
+                ),
+                message="LCA asynchronous closure differs from the observed 1/1/2/1/1/1/1 state.",
+            )
+        )
         data = tables.get("DADO_OPERACAO")
         data_operation = resolve(data, "NUM_ID_OPERACAO") if data is not None else None
         data_type = resolve(data, "NUM_ID_TIPO_DADO_OPERACAO") if data is not None else None
         if data_operation and data_type and operation_bridge is not None:
-            data_types = data.select(
-                _canon_key_col(F.col(data_operation)).alias("operation_id"),
-                _canon_key_col(F.col(data_type)).alias("data_type"),
-            ).groupBy("operation_id").agg(
-                F.sort_array(F.collect_list("data_type")).alias("data_types")
+            data_types = (
+                data.select(
+                    _canon_key_col(F.col(data_operation)).alias("operation_id"),
+                    _canon_key_col(F.col(data_type)).alias("data_type"),
+                )
+                .groupBy("operation_id")
+                .agg(F.sort_array(F.collect_list("data_type")).alias("data_types"))
             )
             bad = operation_bridge.join(data_types, "operation_id", "left").where(
                 ~F.coalesce(
@@ -10777,25 +13717,35 @@ def check_lca_registration_profile(
                 )
             )
             count = bad.count()
-            out.append(Finding(
-                "8g.profile.operation_data_types", "LCA observed registration profile",
-                SEV_WARN if count else SEV_INFO, "DADO_OPERACAO", count == 0, count=count,
-                column="NUM_ID_TIPO_DADO_OPERACAO",
-                sample=_sample_keys(bad, ["root_id", "operation_id", "data_types"], sample),
-                hint="The observed exact 287+288 pair is advisory." if count else "",
-                message="LCA operation data differs from observed types 287+288.",
-            ))
+            out.append(
+                Finding(
+                    "8g.profile.operation_data_types",
+                    "LCA observed registration profile",
+                    SEV_WARN if count else SEV_INFO,
+                    "DADO_OPERACAO",
+                    count == 0,
+                    count=count,
+                    column="NUM_ID_TIPO_DADO_OPERACAO",
+                    sample=_sample_keys(bad, ["root_id", "operation_id", "data_types"], sample),
+                    hint="The observed exact 287+288 pair is advisory." if count else "",
+                    message="LCA operation data differs from observed types 287+288.",
+                )
+            )
         else:
-            out.append(_lca_unavailable(
-                "8g.profile.operation_data_types", ["DADO_OPERACAO/OPERACAO required columns"]
-            ))
+            out.append(
+                _lca_unavailable(
+                    "8g.profile.operation_data_types", ["DADO_OPERACAO/OPERACAO required columns"]
+                )
+            )
     else:
         missing = ["INSTRUMENTO_FINANCEIRO/EVENTO required columns"]
-        out.extend([
-            _lca_unavailable("8g.profile.event_dml_counts", missing),
-            _lca_unavailable("8g.profile.async_closure", missing),
-            _lca_unavailable("8g.profile.operation_data_types", missing),
-        ])
+        out.extend(
+            [
+                _lca_unavailable("8g.profile.event_dml_counts", missing),
+                _lca_unavailable("8g.profile.async_closure", missing),
+                _lca_unavailable("8g.profile.operation_data_types", missing),
+            ]
+        )
     return out
 
 
@@ -10838,56 +13788,127 @@ SHAPE_FILTERED: Dict[str, Tuple[str, str, str]] = {
     "CONDICAO_IF_TIPO14": ("CONDICAO_IF", "COD_TIPO_CONDICAO_IF", "14"),
     "CONDICAO_IF_TIPO20": ("CONDICAO_IF", "COD_TIPO_CONDICAO_IF", "20"),
     "TCTPCRONOGRAMA_CCB_TIPO83": (
-        "TCTPCRONOGRAMA_CCB", "NUM_TIPO_EVENTO_LEGADO", "83",
+        "TCTPCRONOGRAMA_CCB",
+        "NUM_TIPO_EVENTO_LEGADO",
+        "83",
     ),
     "TCTPCRONOGRAMA_CCB_TIPO84": (
-        "TCTPCRONOGRAMA_CCB", "NUM_TIPO_EVENTO_LEGADO", "84",
+        "TCTPCRONOGRAMA_CCB",
+        "NUM_TIPO_EVENTO_LEGADO",
+        "84",
     ),
     "TCTPCRONOGRAMA_CCB_TIPO85": (
-        "TCTPCRONOGRAMA_CCB", "NUM_TIPO_EVENTO_LEGADO", "85",
+        "TCTPCRONOGRAMA_CCB",
+        "NUM_TIPO_EVENTO_LEGADO",
+        "85",
     ),
     "TCTPCRONOGRAMA_CCB_TIPO90": (
-        "TCTPCRONOGRAMA_CCB", "NUM_TIPO_EVENTO_LEGADO", "90",
+        "TCTPCRONOGRAMA_CCB",
+        "NUM_TIPO_EVENTO_LEGADO",
+        "90",
     ),
     "TCTPCRONOGRAMA_CCB_TIPO157": (
-        "TCTPCRONOGRAMA_CCB", "NUM_TIPO_EVENTO_LEGADO", "157",
+        "TCTPCRONOGRAMA_CCB",
+        "NUM_TIPO_EVENTO_LEGADO",
+        "157",
     ),
 }
 DEFAULT_SHAPE_METRICS: List[str] = [
-    "TITULO", "CREDITO", "CONDICAO_IF", "RESGATE", "JUROS_FLUTUANTE", "JUROS_FIXO",
-    "ATUALIZACAO_POS", "ATUALIZACAO_PRE", "SPREAD",
-    "EVENTO", "EVENTO_TIPO83", "EVENTO_TIPO85",
-    "OPERACAO", "DADO_OPERACAO", "LANCAMENTO", "DEPOSITO_AUTOMATICO_IF",
-    "CARTEIRA_COMITENTE", "CARTEIRA_PARTICIPANTE",
+    "TITULO",
+    "CREDITO",
+    "CONDICAO_IF",
+    "RESGATE",
+    "JUROS_FLUTUANTE",
+    "JUROS_FIXO",
+    "ATUALIZACAO_POS",
+    "ATUALIZACAO_PRE",
+    "SPREAD",
+    "EVENTO",
+    "EVENTO_TIPO83",
+    "EVENTO_TIPO85",
+    "OPERACAO",
+    "DADO_OPERACAO",
+    "LANCAMENTO",
+    "DEPOSITO_AUTOMATICO_IF",
+    "CARTEIRA_COMITENTE",
+    "CARTEIRA_PARTICIPANTE",
 ]
 LCI_SHAPE_METRICS = [
-    metric for metric in DEFAULT_SHAPE_METRICS
-    if metric not in {"ATUALIZACAO_PRE", "SPREAD"}
+    metric for metric in DEFAULT_SHAPE_METRICS if metric not in {"ATUALIZACAO_PRE", "SPREAD"}
 ]
 LCA_SHAPE_METRICS = [
-    "ENTIDADE", "REPRESENTANTE_IF", "TITULO", "IF_LCA", "CREDITO", "GARANTIA",
-    "CONDICAO_IF", "CONDICAO_IF_TIPO1", "CONDICAO_IF_TIPO3", "CONDICAO_IF_TIPO5",
-    "CONDICAO_IF_TIPO20", "AMORTIZACAO", "JUROS_FLUTUANTE", "SPREAD", "RESGATE",
-    "EVENTO", "EVENTO_TIPO83", "EVENTO_TIPO84", "EVENTO_TIPO85", "DEPOSITO",
-    "OPERACAO", "DADO_OPERACAO", "LANCAMENTO", "ESPECIFICACAO",
-    "ESPECIFICACAO_COMITENTE", "CARTEIRA_COMITENTE", "CARTEIRA_PARTICIPANTE",
+    "ENTIDADE",
+    "REPRESENTANTE_IF",
+    "TITULO",
+    "IF_LCA",
+    "CREDITO",
+    "GARANTIA",
+    "CONDICAO_IF",
+    "CONDICAO_IF_TIPO1",
+    "CONDICAO_IF_TIPO3",
+    "CONDICAO_IF_TIPO5",
+    "CONDICAO_IF_TIPO20",
+    "AMORTIZACAO",
+    "JUROS_FLUTUANTE",
+    "SPREAD",
+    "RESGATE",
+    "EVENTO",
+    "EVENTO_TIPO83",
+    "EVENTO_TIPO84",
+    "EVENTO_TIPO85",
+    "DEPOSITO",
+    "OPERACAO",
+    "DADO_OPERACAO",
+    "LANCAMENTO",
+    "ESPECIFICACAO",
+    "ESPECIFICACAO_COMITENTE",
+    "CARTEIRA_COMITENTE",
+    "CARTEIRA_PARTICIPANTE",
 ]
 CCB_SHAPE_METRICS = [
-    "TITULO", "CREDITO", "TCTPIF_CCB", "CONDICAO_IF", "CONDICAO_IF_TIPO1",
-    "CONDICAO_IF_TIPO2", "CONDICAO_IF_TIPO4", "CONDICAO_IF_TIPO5",
-    "CONDICAO_IF_TIPO14", "CONDICAO_IF_TIPO20", "AMORTIZACAO", "JUROS_FIXO",
-    "ATUALIZACAO_POS", "ATUALIZACAO_PRE", "SPREAD", "RESGATE",
-    "TCTPCRONOGRAMA_CCB", "TCTPCRONOGRAMA_CCB_TIPO83",
-    "TCTPCRONOGRAMA_CCB_TIPO84", "TCTPCRONOGRAMA_CCB_TIPO85",
-    "TCTPCRONOGRAMA_CCB_TIPO90", "TCTPCRONOGRAMA_CCB_TIPO157",
-    "HISTORICO_PU_CURVA", "HISTORICO_IF_TITULO", "ALTERACAO_IF", "OPERACAO",
-    "LANCAMENTO", "GARANTIA", "TCTPCADEIA_IPOC",
+    "TITULO",
+    "CREDITO",
+    "TCTPIF_CCB",
+    "CONDICAO_IF",
+    "CONDICAO_IF_TIPO1",
+    "CONDICAO_IF_TIPO2",
+    "CONDICAO_IF_TIPO4",
+    "CONDICAO_IF_TIPO5",
+    "CONDICAO_IF_TIPO14",
+    "CONDICAO_IF_TIPO20",
+    "AMORTIZACAO",
+    "JUROS_FIXO",
+    "ATUALIZACAO_POS",
+    "ATUALIZACAO_PRE",
+    "SPREAD",
+    "RESGATE",
+    "TCTPCRONOGRAMA_CCB",
+    "TCTPCRONOGRAMA_CCB_TIPO83",
+    "TCTPCRONOGRAMA_CCB_TIPO84",
+    "TCTPCRONOGRAMA_CCB_TIPO85",
+    "TCTPCRONOGRAMA_CCB_TIPO90",
+    "TCTPCRONOGRAMA_CCB_TIPO157",
+    "HISTORICO_PU_CURVA",
+    "HISTORICO_IF_TITULO",
+    "ALTERACAO_IF",
+    "OPERACAO",
+    "LANCAMENTO",
+    "GARANTIA",
+    "TCTPCADEIA_IPOC",
 ]
 GRAVAME_SHAPE_METRICS = [
-    "COMPLEMENTO_CONTRATO", "IF_GRVM", "PARAMETRO_PONTA", "CONTA_GRAVAME",
-    "ARQUIVO_TRANSF_GRAVAME", "ARQUIVO_TRANSF_CONTEUDO_GRAVAME", "ARQUIVO_IF",
-    "PROTOCOLO", "OPERACAO_GRAVAME_CHAIN", "LANCAMENTO_GRAVAME_CHAIN",
-    "DADO_OPERACAO_GRAVAME_CHAIN", "GRAVAME_GRAU_PENHOR",
+    "COMPLEMENTO_CONTRATO",
+    "IF_GRVM",
+    "PARAMETRO_PONTA",
+    "CONTA_GRAVAME",
+    "ARQUIVO_TRANSF_GRAVAME",
+    "ARQUIVO_TRANSF_CONTEUDO_GRAVAME",
+    "ARQUIVO_IF",
+    "PROTOCOLO",
+    "OPERACAO_GRAVAME_CHAIN",
+    "LANCAMENTO_GRAVAME_CHAIN",
+    "DADO_OPERACAO_GRAVAME_CHAIN",
+    "GRAVAME_GRAU_PENHOR",
 ]
 SHAPE_METRICS_BY_PIPELINE = {
     "instrumento_financeiro": DEFAULT_SHAPE_METRICS,
@@ -10956,40 +13977,63 @@ def _shape_counts(
                 entity_key = resolve(df, "NUM_ID_ENTIDADE")
                 rep_key = (
                     resolve(representative, "NUM_ID_ENTIDADE")
-                    if representative is not None else None
+                    if representative is not None
+                    else None
                 )
                 lca_entity = (
-                    resolve(if_lca, "NUM_ID_ENT_DEPOSITARIO_ORIG")
-                    if if_lca is not None else None
+                    resolve(if_lca, "NUM_ID_ENT_DEPOSITARIO_ORIG") if if_lca is not None else None
                 )
                 lca_if = resolve(if_lca, SHAPE_ROOT_KEY) if if_lca is not None else None
-                if all((if_lca is not None, representative is not None, entity_key,
-                        rep_key, lca_entity, lca_if)):
+                if all(
+                    (
+                        if_lca is not None,
+                        representative is not None,
+                        entity_key,
+                        rep_key,
+                        lca_entity,
+                        lca_if,
+                    )
+                ):
                     route = _shape_active(if_lca).select(
                         F.col(lca_entity).cast("long").alias("entity_id"),
                         F.col(lca_if).cast("long").alias(SHAPE_ROOT_KEY),
                     )
                     child = df.select(F.col(entity_key).cast("long").alias("entity_id"))
                     if name == "ENTIDADE":
-                        reps = _shape_active(representative).select(
-                            F.col(rep_key).cast("long").alias("entity_id")
-                        ).dropDuplicates()
+                        reps = (
+                            _shape_active(representative)
+                            .select(F.col(rep_key).cast("long").alias("entity_id"))
+                            .dropDuplicates()
+                        )
                         child = child.join(reps, "entity_id", "inner")
                     keyed = child.join(route, "entity_id", "inner").select(SHAPE_ROOT_KEY)
             elif name == "ESPECIFICACAO_COMITENTE":
                 specification = tables.get("ESPECIFICACAO")
                 operation = tables.get("OPERACAO")
                 child_spec = resolve(df, "NUM_ID_ESPECIFICACAO")
-                spec_key = resolve(specification, "NUM_ID_ESPECIFICACAO") \
-                    if specification is not None else None
-                spec_operation = resolve(specification, "NUM_ID_OPERACAO") \
-                    if specification is not None else None
-                operation_key = resolve(operation, "NUM_ID_OPERACAO") \
-                    if operation is not None else None
-                operation_if = resolve(operation, SHAPE_ROOT_KEY) \
-                    if operation is not None else None
-                if all((specification is not None, operation is not None, child_spec,
-                        spec_key, spec_operation, operation_key, operation_if)):
+                spec_key = (
+                    resolve(specification, "NUM_ID_ESPECIFICACAO")
+                    if specification is not None
+                    else None
+                )
+                spec_operation = (
+                    resolve(specification, "NUM_ID_OPERACAO") if specification is not None else None
+                )
+                operation_key = (
+                    resolve(operation, "NUM_ID_OPERACAO") if operation is not None else None
+                )
+                operation_if = resolve(operation, SHAPE_ROOT_KEY) if operation is not None else None
+                if all(
+                    (
+                        specification is not None,
+                        operation is not None,
+                        child_spec,
+                        spec_key,
+                        spec_operation,
+                        operation_key,
+                        operation_if,
+                    )
+                ):
                     specifications = _shape_active(specification).select(
                         F.col(spec_key).cast("long").alias("spec_id"),
                         F.col(spec_operation).cast("long").alias("operation_id"),
@@ -10998,26 +14042,34 @@ def _shape_counts(
                         F.col(operation_key).cast("long").alias("operation_id"),
                         F.col(operation_if).cast("long").alias(SHAPE_ROOT_KEY),
                     )
-                    keyed = df.select(
-                        F.col(child_spec).cast("long").alias("spec_id")
-                    ).join(specifications, "spec_id", "inner").join(
-                        operations, "operation_id", "inner"
-                    ).select(SHAPE_ROOT_KEY)
+                    keyed = (
+                        df.select(F.col(child_spec).cast("long").alias("spec_id"))
+                        .join(specifications, "spec_id", "inner")
+                        .join(operations, "operation_id", "inner")
+                        .select(SHAPE_ROOT_KEY)
+                    )
             elif name == "HISTORICO_IF_TITULO":
                 root = tables.get(SHAPE_ROOT_TABLE)
                 child_code = resolve(df, "COD_IF")
                 root_code = resolve(root, "COD_IF") if root is not None else None
                 root_key = resolve(root, SHAPE_ROOT_KEY) if root is not None else None
                 if all((root is not None, child_code, root_code, root_key)):
-                    root_codes = _shape_active(root).select(
-                        F.trim(F.col(root_code).cast("string")).alias("business_code"),
-                        F.col(root_key).cast("long").alias(SHAPE_ROOT_KEY),
-                    ).join(universe, SHAPE_ROOT_KEY, "leftsemi")
-                    keyed = df.select(
-                        F.trim(F.col(child_code).cast("string")).alias("business_code")
-                    ).join(root_codes, "business_code", "inner").select(SHAPE_ROOT_KEY)
+                    root_codes = (
+                        _shape_active(root)
+                        .select(
+                            F.trim(F.col(root_code).cast("string")).alias("business_code"),
+                            F.col(root_key).cast("long").alias(SHAPE_ROOT_KEY),
+                        )
+                        .join(universe, SHAPE_ROOT_KEY, "leftsemi")
+                    )
+                    keyed = (
+                        df.select(F.trim(F.col(child_code).cast("string")).alias("business_code"))
+                        .join(root_codes, "business_code", "inner")
+                        .select(SHAPE_ROOT_KEY)
+                    )
             elif name in {
-                "OPERACAO_GRAVAME_CHAIN", "LANCAMENTO_GRAVAME_CHAIN",
+                "OPERACAO_GRAVAME_CHAIN",
+                "LANCAMENTO_GRAVAME_CHAIN",
                 "DADO_OPERACAO_GRAVAME_CHAIN",
             }:
                 roots = universe.select(F.col(SHAPE_ROOT_KEY).cast("string").alias("root_id"))
@@ -11026,46 +14078,53 @@ def _shape_counts(
                 chain = gravame_chain
                 if chain is not None:
                     if name == "OPERACAO_GRAVAME_CHAIN":
-                        keyed = chain.select(
-                            F.col("root_id").cast("long").alias(SHAPE_ROOT_KEY)
-                        )
+                        keyed = chain.select(F.col("root_id").cast("long").alias(SHAPE_ROOT_KEY))
                     else:
                         child_table = (
-                            "LANCAMENTO" if name == "LANCAMENTO_GRAVAME_CHAIN"
-                            else "DADO_OPERACAO"
+                            "LANCAMENTO" if name == "LANCAMENTO_GRAVAME_CHAIN" else "DADO_OPERACAO"
                         )
                         child = tables.get(child_table)
                         child_operation = (
                             resolve(child, "NUM_ID_OPERACAO") if child is not None else None
                         )
                         if child is not None and child_operation:
-                            keyed = _shape_active(child).select(
-                                _canon_key_col(F.col(child_operation)).alias("operation_id")
-                            ).join(
-                                chain.select("operation_id", "root_id"),
-                                "operation_id", "inner",
-                            ).select(F.col("root_id").cast("long").alias(SHAPE_ROOT_KEY))
+                            keyed = (
+                                _shape_active(child)
+                                .select(
+                                    _canon_key_col(F.col(child_operation)).alias("operation_id")
+                                )
+                                .join(
+                                    chain.select("operation_id", "root_id"),
+                                    "operation_id",
+                                    "inner",
+                                )
+                                .select(F.col("root_id").cast("long").alias(SHAPE_ROOT_KEY))
+                            )
             elif name == "GRAVAME_GRAU_PENHOR":
                 pledge_root = resolve(df, "NUM_IF_GRAVAME")
                 if pledge_root:
-                    keyed = df.select(
-                        F.col(pledge_root).cast("long").alias(SHAPE_ROOT_KEY)
-                    )
+                    keyed = df.select(F.col(pledge_root).cast("long").alias(SHAPE_ROOT_KEY))
             elif name == "CONTA_GRAVAME":
                 endpoint = tables.get("PARAMETRO_PONTA")
                 endpoint_if = resolve(endpoint, "NUM_IF") if endpoint is not None else None
                 endpoint_account = resolve(endpoint, "NUM_CONTA") if endpoint is not None else None
                 account_id = resolve(df, "NUM_CONTA")
                 if all((endpoint is not None, endpoint_if, endpoint_account, account_id)):
-                    keyed = _shape_active(endpoint).select(
-                        F.col(endpoint_if).cast("long").alias(SHAPE_ROOT_KEY),
-                        _canon_key_col(F.col(endpoint_account)).alias("account_id"),
-                    ).join(
-                        _shape_active(df).select(
-                            _canon_key_col(F.col(account_id)).alias("account_id")
-                        ),
-                        "account_id", "inner",
-                    ).select(SHAPE_ROOT_KEY)
+                    keyed = (
+                        _shape_active(endpoint)
+                        .select(
+                            F.col(endpoint_if).cast("long").alias(SHAPE_ROOT_KEY),
+                            _canon_key_col(F.col(endpoint_account)).alias("account_id"),
+                        )
+                        .join(
+                            _shape_active(df).select(
+                                _canon_key_col(F.col(account_id)).alias("account_id")
+                            ),
+                            "account_id",
+                            "inner",
+                        )
+                        .select(SHAPE_ROOT_KEY)
+                    )
             elif name in {"ARQUIVO_TRANSF_GRAVAME", "ARQUIVO_TRANSF_CONTEUDO_GRAVAME"}:
                 document = tables.get("ARQUIVO_IF")
                 document_if = resolve(document, "NUM_IF") if document is not None else None
@@ -11074,19 +14133,26 @@ def _shape_counts(
                 )
                 transfer_id = resolve(
                     df,
-                    "NUM_ID_ARQUIVO_TRANSF" if name == "ARQUIVO_TRANSF_GRAVAME"
+                    "NUM_ID_ARQUIVO_TRANSF"
+                    if name == "ARQUIVO_TRANSF_GRAVAME"
                     else "NUM_ID_ARQUIVO_TRANSF_CONT",
                 )
                 if all((document is not None, document_if, document_transfer, transfer_id)):
-                    keyed = _shape_active(document).select(
-                        F.col(document_if).cast("long").alias(SHAPE_ROOT_KEY),
-                        _canon_key_col(F.col(document_transfer)).alias("transfer_id"),
-                    ).join(
-                        _shape_active(df).select(
-                            _canon_key_col(F.col(transfer_id)).alias("transfer_id")
-                        ),
-                        "transfer_id", "inner",
-                    ).select(SHAPE_ROOT_KEY)
+                    keyed = (
+                        _shape_active(document)
+                        .select(
+                            F.col(document_if).cast("long").alias(SHAPE_ROOT_KEY),
+                            _canon_key_col(F.col(document_transfer)).alias("transfer_id"),
+                        )
+                        .join(
+                            _shape_active(df).select(
+                                _canon_key_col(F.col(transfer_id)).alias("transfer_id")
+                            ),
+                            "transfer_id",
+                            "inner",
+                        )
+                        .select(SHAPE_ROOT_KEY)
+                    )
             elif name in SHAPE_VIA:
                 bridge_table, bridge_key = SHAPE_VIA[name]
                 bridge = tables.get(bridge_table)
@@ -11099,8 +14165,11 @@ def _shape_counts(
                             F.col(bk).cast("long").alias("bk"),
                             F.col(bif).cast("long").alias(SHAPE_ROOT_KEY),
                         )
-                        keyed = (df.select(F.col(ck).cast("long").alias("bk"))
-                                 .join(bridge, "bk", "inner").select(SHAPE_ROOT_KEY))
+                        keyed = (
+                            df.select(F.col(ck).cast("long").alias("bk"))
+                            .join(bridge, "bk", "inner")
+                            .select(SHAPE_ROOT_KEY)
+                        )
             else:
                 key = resolve(df, SHAPE_ROOT_KEY)
                 if key:
@@ -11130,7 +14199,9 @@ def _load_shape_baseline(
     ):
         logger.warning(
             "Shape baseline %s was built WITHOUT --apply-filtros-fonte; the comparison "
-            "conflates filter effects with generation distortions.", path)
+            "conflates filter effects with generation distortions.",
+            path,
+        )
     return baseline
 
 
@@ -11150,9 +14221,11 @@ def _current_baseline_identity(tables: Dict[str, DataFrame]) -> dict:
             "source_key_count": None,
             "source_key_fingerprint": None,
         }
-    keys = clone_map.select(
-        F.col(source_key).cast("long").alias(SHAPE_ROOT_KEY)
-    ).where(F.col(SHAPE_ROOT_KEY).isNotNull()).dropDuplicates()
+    keys = (
+        clone_map.select(F.col(source_key).cast("long").alias(SHAPE_ROOT_KEY))
+        .where(F.col(SHAPE_ROOT_KEY).isNotNull())
+        .dropDuplicates()
+    )
     row = keys.agg(
         F.count(F.lit(1)).alias("n"),
         F.sha2(
@@ -11181,8 +14254,10 @@ def _baseline_incompatibility(
     version = baseline.get("schema_version")
     if version is None:
         if profile.name != "cdb_simplificado":
-            return ("legacy untagged baseline (schema_version missing) is only allowed for "
-                    "cdb_simplificado")
+            return (
+                "legacy untagged baseline (schema_version missing) is only allowed for "
+                "cdb_simplificado"
+            )
         return None  # tolerated bridge for the deployed simplificado app
     if int(version) != 2:
         return f"unsupported baseline schema_version={version} (expected 2)"
@@ -11193,18 +14268,28 @@ def _baseline_incompatibility(
     if b_type is not None and int(b_type) != profile.num_tipo_if:
         return f"baseline num_tipo_if={b_type} != profile num_tipo_if={profile.num_tipo_if}"
     required = (
-        "product", "num_tipo_if", "domain_version", "metric_version", "metrics",
-        "map_mode", "source_key_count", "source_key_fingerprint",
+        "product",
+        "num_tipo_if",
+        "domain_version",
+        "metric_version",
+        "metrics",
+        "map_mode",
+        "source_key_count",
+        "source_key_fingerprint",
     )
     missing = [field for field in required if field not in baseline]
     if missing:
         return f"baseline identity field(s) missing: {missing}"
     if int(baseline["domain_version"]) != BASELINE_DOMAIN_VERSION:
-        return (f"baseline domain_version={baseline['domain_version']} != validator "
-                f"domain_version={BASELINE_DOMAIN_VERSION}")
+        return (
+            f"baseline domain_version={baseline['domain_version']} != validator "
+            f"domain_version={BASELINE_DOMAIN_VERSION}"
+        )
     if int(baseline["metric_version"]) != BASELINE_METRIC_VERSION:
-        return (f"baseline metric_version={baseline['metric_version']} != validator "
-                f"metric_version={BASELINE_METRIC_VERSION}")
+        return (
+            f"baseline metric_version={baseline['metric_version']} != validator "
+            f"metric_version={BASELINE_METRIC_VERSION}"
+        )
     expected_metrics = SHAPE_METRICS_BY_PIPELINE.get(profile.pipeline, DEFAULT_SHAPE_METRICS)
     if baseline.get("metrics_skipped"):
         return f"baseline skipped metric(s): {baseline['metrics_skipped']}"
@@ -11213,8 +14298,10 @@ def _baseline_incompatibility(
     if current_identity is not None:
         for field in ("map_mode", "source_key_count", "source_key_fingerprint"):
             if baseline[field] != current_identity.get(field):
-                return (f"baseline {field}={baseline[field]!r} != synthetic output "
-                        f"{field}={current_identity.get(field)!r}")
+                return (
+                    f"baseline {field}={baseline[field]!r} != synthetic output "
+                    f"{field}={current_identity.get(field)!r}"
+                )
     return None
 
 
@@ -11232,24 +14319,38 @@ def check_shapes(
     skip_prefixes = skip_prefixes or []
     run_unseen = not _check_is_skipped("7a.unseen_shapes", skip_prefixes)
     run_drift = not _check_is_skipped("7b.distribution_drift", skip_prefixes)
-    run_op_ratio = (
-        SHAPE_RULE_OP_RATIO in profile.hard_shape_rules
-        and not _check_is_skipped("7c.op_ratio", skip_prefixes)
+    run_op_ratio = SHAPE_RULE_OP_RATIO in profile.hard_shape_rules and not _check_is_skipped(
+        "7c.op_ratio", skip_prefixes
     )
-    run_resgate_max = (
-        SHAPE_RULE_RESGATE_MAX in profile.hard_shape_rules
-        and not _check_is_skipped("7d.resgate_multiplicity", skip_prefixes)
+    run_resgate_max = SHAPE_RULE_RESGATE_MAX in profile.hard_shape_rules and not _check_is_skipped(
+        "7d.resgate_multiplicity", skip_prefixes
     )
     out: List[Finding] = []
     cat = "Shape conformance"
     if not profile.hard_shape_rules and not baseline_path:
-        return [Finding("7.shapes", cat, SEV_INFO, SHAPE_ROOT_TABLE, True,
-                        message=f"No shape rules enabled for product {profile.name}; "
-                                "shape checks skipped (see capability ledger).")]
+        return [
+            Finding(
+                "7.shapes",
+                cat,
+                SEV_INFO,
+                SHAPE_ROOT_TABLE,
+                True,
+                message=f"No shape rules enabled for product {profile.name}; "
+                "shape checks skipped (see capability ledger).",
+            )
+        ]
     universe = _shape_universe(tables, profile.num_tipo_if)
     if universe is None:
-        return [Finding("7.shapes", cat, SEV_INFO, SHAPE_ROOT_TABLE, True,
-                        message="INSTRUMENTO_FINANCEIRO not in output; shape checks skipped.")]
+        return [
+            Finding(
+                "7.shapes",
+                cat,
+                SEV_INFO,
+                SHAPE_ROOT_TABLE,
+                True,
+                message="INSTRUMENTO_FINANCEIRO not in output; shape checks skipped.",
+            )
+        ]
 
     baseline_pct: Optional[dict] = None
     metric_names = SHAPE_METRICS_BY_PIPELINE.get(profile.pipeline, DEFAULT_SHAPE_METRICS)
@@ -11259,37 +14360,55 @@ def check_shapes(
             current_identity = _current_baseline_identity(tables)
             incompat = _baseline_incompatibility(baseline_raw, profile, current_identity)
             if incompat:
-                out.append(Finding("7.baseline_incompatible", cat, SEV_ERROR,
-                                   SHAPE_ROOT_TABLE, False,
-                                   hint="Produce a baseline for THIS product with "
-                                        "profile_cdb_shapes.py --product "
-                                        f"{profile.name}.",
-                                    message=f"Incompatible shape baseline: {incompat}."))
+                out.append(
+                    Finding(
+                        "7.baseline_incompatible",
+                        cat,
+                        SEV_ERROR,
+                        SHAPE_ROOT_TABLE,
+                        False,
+                        hint="Produce a baseline for THIS product with "
+                        "profile_cdb_shapes.py --product "
+                        f"{profile.name}.",
+                        message=f"Incompatible shape baseline: {incompat}.",
+                    )
+                )
                 return out
             shapes = baseline_raw["shapes"]
             baseline_pct = {shape["shape"]: float(shape["pct"]) for shape in shapes}
             if baseline_raw.get("schema_version") is None:
-                metric_names = [
-                    part.split("=", 1)[0] for part in shapes[0]["shape"].split("|")
-                ]
-                out.append(Finding(
-                    "7.baseline_legacy", cat, SEV_WARN, SHAPE_ROOT_TABLE, False,
-                    hint="Regenerate this baseline with schema v2 source-key provenance.",
-                    message="Legacy untagged baseline accepted only for cdb_simplificado; "
-                            "strict shape coverage is unavailable.",
-                ))
+                metric_names = [part.split("=", 1)[0] for part in shapes[0]["shape"].split("|")]
+                out.append(
+                    Finding(
+                        "7.baseline_legacy",
+                        cat,
+                        SEV_WARN,
+                        SHAPE_ROOT_TABLE,
+                        False,
+                        hint="Regenerate this baseline with schema v2 source-key provenance.",
+                        message="Legacy untagged baseline accepted only for cdb_simplificado; "
+                        "strict shape coverage is unavailable.",
+                    )
+                )
             else:
                 metric_names = list(baseline_raw["metrics"])
         except Exception as exc:  # noqa: BLE001
-            out.append(Finding("7.baseline", cat, SEV_ERROR, SHAPE_ROOT_TABLE, False,
-                               hint="Regenerate it with profile_cdb_shapes.py "
-                                    "--apply-filtros-fonte --product for this product.",
-                               message=f"Could not load shape baseline {baseline_path}: {exc}"))
+            out.append(
+                Finding(
+                    "7.baseline",
+                    cat,
+                    SEV_ERROR,
+                    SHAPE_ROOT_TABLE,
+                    False,
+                    hint="Regenerate it with profile_cdb_shapes.py "
+                    "--apply-filtros-fonte --product for this product.",
+                    message=f"Could not load shape baseline {baseline_path}: {exc}",
+                )
+            )
             return out
 
-    run_distribution = (
-        SHAPE_RULE_DISTRIBUTION in profile.hard_shape_rules
-        and (run_unseen or run_drift)
+    run_distribution = SHAPE_RULE_DISTRIBUTION in profile.hard_shape_rules and (
+        run_unseen or run_drift
     )
     if not (run_op_ratio or run_resgate_max or run_distribution):
         return out
@@ -11302,27 +14421,41 @@ def check_shapes(
 
     counts, skipped = _shape_counts(universe, tables, metric_names)
     if skipped:
-        out.append(Finding("7.metrics_skipped", cat, SEV_WARN, ",".join(skipped), False,
-                           hint="Include every metric table/column before comparing shapes.",
-                           message=f"Shape metrics unavailable; distribution comparison stopped: "
-                                   f"{skipped}"))
+        out.append(
+            Finding(
+                "7.metrics_skipped",
+                cat,
+                SEV_WARN,
+                ",".join(skipped),
+                False,
+                hint="Include every metric table/column before comparing shapes.",
+                message=f"Shape metrics unavailable; distribution comparison stopped: {skipped}",
+            )
+        )
         if run_distribution and baseline_path:
             return out
     counts = counts.cache()
     total = counts.count()
     if total == 0:
         counts.unpersist()
-        out.append(Finding("7.shapes", cat, SEV_WARN, SHAPE_ROOT_TABLE, False,
-                           message=f"No active IFs (NUM_TIPO_IF={profile.num_tipo_if}) in the "
-                                   "output."))
+        out.append(
+            Finding(
+                "7.shapes",
+                cat,
+                SEV_WARN,
+                SHAPE_ROOT_TABLE,
+                False,
+                message=f"No active IFs (NUM_TIPO_IF={profile.num_tipo_if}) in the output.",
+            )
+        )
         return out
 
     # 7c - CDB operation closure: each operation owns exactly two data rows and one launch.
-    if (run_op_ratio
-            and all(name in metric_names for name in ("OPERACAO", "DADO_OPERACAO", "LANCAMENTO"))
-            and not any(name in skipped for name in (
-                "OPERACAO", "DADO_OPERACAO", "LANCAMENTO"
-            ))):
+    if (
+        run_op_ratio
+        and all(name in metric_names for name in ("OPERACAO", "DADO_OPERACAO", "LANCAMENTO"))
+        and not any(name in skipped for name in ("OPERACAO", "DADO_OPERACAO", "LANCAMENTO"))
+    ):
         operation = _shape_active(tables["OPERACAO"])
         operation_id = resolve(operation, OPERACAO_KEY_COL)
         operation_root = resolve(operation, SHAPE_ROOT_KEY)
@@ -11345,7 +14478,8 @@ def check_shapes(
                     _norm_code(F.col(data_type)).alias("data_type"),
                     F.upper(F.trim(F.col(data_value).cast("string"))).alias("data_value"),
                 ]
-                if data_type and data_value else []
+                if data_type and data_value
+                else []
             ),
         ).join(operations.select("operation_id"), "operation_id", "leftsemi")
         if data_type and data_value:
@@ -11353,103 +14487,130 @@ def check_shapes(
                 F.count(F.lit(1)).alias("operation_data"),
                 F.sum(F.when(F.col("data_type") == "502", 1).otherwise(0)).alias("data_502"),
                 F.sum(F.when(F.col("data_type") == "503", 1).otherwise(0)).alias("data_503"),
-                F.sum(F.when(
-                    (F.col("data_type") == "503") & (F.col("data_value") == "PF"),
-                    1,
-                ).otherwise(0)).alias("nature_pf"),
+                F.sum(
+                    F.when(
+                        (F.col("data_type") == "503") & (F.col("data_value") == "PF"),
+                        1,
+                    ).otherwise(0)
+                ).alias("nature_pf"),
             )
         else:
-            data_counts = data_rows.groupBy("operation_id").count().withColumnRenamed(
-                "count", "operation_data"
+            data_counts = (
+                data_rows.groupBy("operation_id")
+                .count()
+                .withColumnRenamed("count", "operation_data")
             )
-        launch_counts = launch.select(
-            _canon_key_col(F.col(launch_operation)).alias("operation_id")
-        ).join(
-            operations.select("operation_id"), "operation_id", "leftsemi"
-        ).groupBy("operation_id").count().withColumnRenamed("count", "launches")
-        closure = operations.join(data_counts, "operation_id", "left").join(
-            launch_counts, "operation_id", "left"
-        ).fillna(0, ["operation_data", "launches"])
+        launch_counts = (
+            launch.select(_canon_key_col(F.col(launch_operation)).alias("operation_id"))
+            .join(operations.select("operation_id"), "operation_id", "leftsemi")
+            .groupBy("operation_id")
+            .count()
+            .withColumnRenamed("count", "launches")
+        )
+        closure = (
+            operations.join(data_counts, "operation_id", "left")
+            .join(launch_counts, "operation_id", "left")
+            .fillna(0, ["operation_data", "launches"])
+        )
         n_ops = closure.count()
         if n_ops:
-            bad = closure.where(
-                (F.col("operation_data") != 2) | (F.col("launches") != 1)
-            )
+            bad = closure.where((F.col("operation_data") != 2) | (F.col("launches") != 1))
             c = bad.count()
             pct = 100.0 * c / n_ops
-            out.append(Finding(
-                "7c.op_ratio", cat,
-                SEV_ERROR if pct > op_ratio_tol_pct else SEV_INFO,
-                "OPERACAO", pct <= op_ratio_tol_pct, count=c,
-                column="NUM_ID_OPERACAO,DADO_OPERACAO,LANCAMENTO",
-                sample=_sample_keys(bad, [SHAPE_ROOT_KEY, "operation_id"], sample),
-                hint="Every CDB operação carries exactly 2 DADO_OPERACAO and "
-                     "1 LANCAMENTO. Generate/bind the three tables as one unit per operação.",
-                message=f"CDB operations violating "
-                        f"OPERACAO:DADO_OPERACAO:LANCAMENTO = 1:2:1 "
-                        f"({pct:.1f}% of {n_ops} operations; tolerance "
-                        f"{op_ratio_tol_pct}%).",
-            ))
+            out.append(
+                Finding(
+                    "7c.op_ratio",
+                    cat,
+                    SEV_ERROR if pct > op_ratio_tol_pct else SEV_INFO,
+                    "OPERACAO",
+                    pct <= op_ratio_tol_pct,
+                    count=c,
+                    column="NUM_ID_OPERACAO,DADO_OPERACAO,LANCAMENTO",
+                    sample=_sample_keys(bad, [SHAPE_ROOT_KEY, "operation_id"], sample),
+                    hint="Every CDB operação carries exactly 2 DADO_OPERACAO and "
+                    "1 LANCAMENTO. Generate/bind the three tables as one unit per operação.",
+                    message=f"CDB operations violating "
+                    f"OPERACAO:DADO_OPERACAO:LANCAMENTO = 1:2:1 "
+                    f"({pct:.1f}% of {n_ops} operations; tolerance "
+                    f"{op_ratio_tol_pct}%).",
+                )
+            )
 
             if data_type and data_value:
                 pf_operations = closure.where(F.col("nature_pf") > 0)
                 bad_pf = pf_operations.where(
-                    (F.col("data_502") != 1)
-                    | (F.col("data_503") != 1)
-                    | (F.col("nature_pf") != 1)
+                    (F.col("data_502") != 1) | (F.col("data_503") != 1) | (F.col("nature_pf") != 1)
                 )
                 bad_pf_count = bad_pf.count()
-                out.append(Finding(
-                    "7c.op_data_profile", cat,
-                    SEV_ERROR if bad_pf_count else SEV_INFO,
-                    "DADO_OPERACAO", bad_pf_count == 0, count=bad_pf_count,
-                    column="NUM_ID_TIPO_DADO_OPERACAO,VAL_DADO_ATUAL",
-                    sample=_sample_keys(
-                        bad_pf, [SHAPE_ROOT_KEY, "operation_id"], sample
-                    ),
-                    hint="For the observed PF profile, generate one type 502 document row "
-                         "and one type 503 row whose value is PF.",
-                    message="CDB operations differing from the observed 502=document and "
-                            "503=PF operation-data profile.",
-                ))
+                out.append(
+                    Finding(
+                        "7c.op_data_profile",
+                        cat,
+                        SEV_ERROR if bad_pf_count else SEV_INFO,
+                        "DADO_OPERACAO",
+                        bad_pf_count == 0,
+                        count=bad_pf_count,
+                        column="NUM_ID_TIPO_DADO_OPERACAO,VAL_DADO_ATUAL",
+                        sample=_sample_keys(bad_pf, [SHAPE_ROOT_KEY, "operation_id"], sample),
+                        hint="For the observed PF profile, generate one type 502 document row "
+                        "and one type 503 row whose value is PF.",
+                        message="CDB operations differing from the observed 502=document and "
+                        "503=PF operation-data profile.",
+                    )
+                )
 
                 unvalidated = closure.where(
                     (F.col("operation_data") == 2) & (F.col("nature_pf") == 0)
                 )
                 unvalidated_count = unvalidated.count()
-                out.append(Finding(
-                    "7c.op_data_nature_unvalidated", cat,
-                    SEV_WARN if unvalidated_count else SEV_INFO,
-                    "DADO_OPERACAO", unvalidated_count == 0, count=unvalidated_count,
-                    column="VAL_DADO_ATUAL",
-                    sample=_sample_keys(
-                        unvalidated, [SHAPE_ROOT_KEY, "operation_id"], sample
-                    ),
-                    hint="Capture a successful inclusion log before validating another "
-                         "operation-party nature.",
-                    message="CDB operation-data profiles whose nature is not validated; "
-                            "only PF is currently evidence-backed.",
-                ))
+                out.append(
+                    Finding(
+                        "7c.op_data_nature_unvalidated",
+                        cat,
+                        SEV_WARN if unvalidated_count else SEV_INFO,
+                        "DADO_OPERACAO",
+                        unvalidated_count == 0,
+                        count=unvalidated_count,
+                        column="VAL_DADO_ATUAL",
+                        sample=_sample_keys(unvalidated, [SHAPE_ROOT_KEY, "operation_id"], sample),
+                        hint="Capture a successful inclusion log before validating another "
+                        "operation-party nature.",
+                        message="CDB operation-data profiles whose nature is not validated; "
+                        "only PF is currently evidence-backed.",
+                    )
+                )
             else:
-                out.append(Finding(
-                    "7c.op_data_profile_unavailable", cat, SEV_WARN,
-                    "DADO_OPERACAO", False,
-                    column="NUM_ID_TIPO_DADO_OPERACAO,VAL_DADO_ATUAL",
-                    hint="Include operation-data type and current-value columns.",
-                    message="CDB PF operation-data profile validation unavailable.",
-                ))
+                out.append(
+                    Finding(
+                        "7c.op_data_profile_unavailable",
+                        cat,
+                        SEV_WARN,
+                        "DADO_OPERACAO",
+                        False,
+                        column="NUM_ID_TIPO_DADO_OPERACAO,VAL_DADO_ATUAL",
+                        hint="Include operation-data type and current-value columns.",
+                        message="CDB PF operation-data profile validation unavailable.",
+                    )
+                )
 
     # 7d - CDB simplificado RESGATE multiplicity: schedule rows belong below one parent.
     if run_resgate_max and "RESGATE" in metric_names:
         multi = counts.where(F.col("RESGATE") > 1)
         c = multi.count()
-        out.append(Finding(
-            "7d.resgate_multiplicity", cat,
-            SEV_ERROR if c else SEV_INFO, "RESGATE", c == 0, count=c, column="RESGATE",
-            sample=_sample_keys(multi.select(SHAPE_ROOT_KEY), [SHAPE_ROOT_KEY], sample),
-        hint="Every CDB expects at most one RESGATE parent condition per IF.",
-            message="IFs with more than one RESGATE row.",
-        ))
+        out.append(
+            Finding(
+                "7d.resgate_multiplicity",
+                cat,
+                SEV_ERROR if c else SEV_INFO,
+                "RESGATE",
+                c == 0,
+                count=c,
+                column="RESGATE",
+                sample=_sample_keys(multi.select(SHAPE_ROOT_KEY), [SHAPE_ROOT_KEY], sample),
+                hint="Every CDB expects at most one RESGATE parent condition per IF.",
+                message="IFs with more than one RESGATE row.",
+            )
+        )
 
     # 7a/7b - distribution checks against the baseline profile.
     if SHAPE_RULE_DISTRIBUTION not in profile.hard_shape_rules:
@@ -11459,23 +14620,34 @@ def check_shapes(
         counts.unpersist()
         return out
     if baseline_pct is None:
-        out.append(Finding(
-            "7.baseline", cat, SEV_WARN, SHAPE_ROOT_TABLE, False,
-            hint="Produce it once with: spark-submit profile_cdb_shapes.py "
-                 "--base-uri <raw> --apply-filtros-fonte --report-path <json> "
-                 "and pass it via --shape-baseline.",
-            message="No --shape-baseline given; shape distribution checks skipped.",
-        ))
+        out.append(
+            Finding(
+                "7.baseline",
+                cat,
+                SEV_WARN,
+                SHAPE_ROOT_TABLE,
+                False,
+                hint="Produce it once with: spark-submit profile_cdb_shapes.py "
+                "--base-uri <raw> --apply-filtros-fonte --report-path <json> "
+                "and pass it via --shape-baseline.",
+                message="No --shape-baseline given; shape distribution checks skipped.",
+            )
+        )
         counts.unpersist()
         return out
 
-    sig = F.concat_ws("|", *[
-        F.concat(F.lit(f"{name}="), F.col(name).cast("string")) for name in metric_names
-    ])
-    dist_rows = (counts.withColumn("shape", sig).groupBy("shape")
-                 .agg(F.count(F.lit(1)).alias("n"),
-                      F.slice(F.collect_list(F.col(SHAPE_ROOT_KEY)), 1, sample).alias("ids"))
-                 .collect())
+    sig = F.concat_ws(
+        "|", *[F.concat(F.lit(f"{name}="), F.col(name).cast("string")) for name in metric_names]
+    )
+    dist_rows = (
+        counts.withColumn("shape", sig)
+        .groupBy("shape")
+        .agg(
+            F.count(F.lit(1)).alias("n"),
+            F.slice(F.collect_list(F.col(SHAPE_ROOT_KEY)), 1, sample).alias("ids"),
+        )
+        .collect()
+    )
     syn_pct = {r["shape"]: 100.0 * r["n"] / total for r in dist_rows}
     syn_ids = {r["shape"]: [int(x) for x in (r["ids"] or [])] for r in dist_rows}
 
@@ -11485,42 +14657,62 @@ def check_shapes(
             key=lambda kv: -kv[1],
         )
         unseen_mass = sum(p for _, p in unseen)
-        out.append(Finding(
-            "7a.unseen_shapes", cat,
-            SEV_ERROR if unseen_mass > unseen_tol_pct else SEV_INFO,
-            SHAPE_ROOT_TABLE, unseen_mass <= unseen_tol_pct,
-            count=len(unseen), column="shape",
-            sample=[{"shape": s, "pct": round(p, 3), "sample_num_if": syn_ids[s][:5]}
-                    for s, p in unseen[:sample]],
-            hint="These per-IF cardinality combinations never occur in the (filtered) "
-                 "production data — the generator invented them. Per-IF cluster sampling "
-                 "eliminates this class by construction.",
-            message=f"{unseen_mass:.1f}% of synthetic IFs have a shape absent from the "
-                    f"baseline (tolerance {unseen_tol_pct}%).",
-        ))
+        out.append(
+            Finding(
+                "7a.unseen_shapes",
+                cat,
+                SEV_ERROR if unseen_mass > unseen_tol_pct else SEV_INFO,
+                SHAPE_ROOT_TABLE,
+                unseen_mass <= unseen_tol_pct,
+                count=len(unseen),
+                column="shape",
+                sample=[
+                    {"shape": s, "pct": round(p, 3), "sample_num_if": syn_ids[s][:5]}
+                    for s, p in unseen[:sample]
+                ],
+                hint="These per-IF cardinality combinations never occur in the (filtered) "
+                "production data — the generator invented them. Per-IF cluster sampling "
+                "eliminates this class by construction.",
+                message=f"{unseen_mass:.1f}% of synthetic IFs have a shape absent from the "
+                f"baseline (tolerance {unseen_tol_pct}%).",
+            )
+        )
 
     if run_drift:
-        tvd = 0.5 * sum(
-            abs(syn_pct.get(s, 0.0) - baseline_pct.get(s, 0.0))
-            for s in set(syn_pct) | set(baseline_pct)
-        ) / 100.0
+        tvd = (
+            0.5
+            * sum(
+                abs(syn_pct.get(s, 0.0) - baseline_pct.get(s, 0.0))
+                for s in set(syn_pct) | set(baseline_pct)
+            )
+            / 100.0
+        )
         drifted = sorted(
             set(syn_pct) | set(baseline_pct),
             key=lambda s: -abs(syn_pct.get(s, 0.0) - baseline_pct.get(s, 0.0)),
         )
-        out.append(Finding(
-            "7b.distribution_drift", cat,
-            SEV_ERROR if tvd > drift_tol else SEV_INFO,
-            SHAPE_ROOT_TABLE, tvd <= drift_tol, column="shape",
-            sample=[{"shape": s,
-                     "synthetic_pct": round(syn_pct.get(s, 0.0), 3),
-                     "baseline_pct": round(baseline_pct.get(s, 0.0), 3)}
-                    for s in drifted[:sample]],
-            hint="The synthetic shape distribution should converge to the filtered-raw "
-                 "baseline. See docs/cdb-shapes-findings.md for the full analysis.",
-            message=f"Total variation distance between synthetic and baseline shape "
-                    f"distributions = {tvd:.3f} (tolerance {drift_tol}).",
-        ))
+        out.append(
+            Finding(
+                "7b.distribution_drift",
+                cat,
+                SEV_ERROR if tvd > drift_tol else SEV_INFO,
+                SHAPE_ROOT_TABLE,
+                tvd <= drift_tol,
+                column="shape",
+                sample=[
+                    {
+                        "shape": s,
+                        "synthetic_pct": round(syn_pct.get(s, 0.0), 3),
+                        "baseline_pct": round(baseline_pct.get(s, 0.0), 3),
+                    }
+                    for s in drifted[:sample]
+                ],
+                hint="The synthetic shape distribution should converge to the filtered-raw "
+                "baseline. See docs/cdb-shapes-findings.md for the full analysis.",
+                message=f"Total variation distance between synthetic and baseline shape "
+                f"distributions = {tvd:.3f} (tolerance {drift_tol}).",
+            )
+        )
 
     counts.unpersist()
     return out
@@ -11634,9 +14826,7 @@ def _cat8_type_mix(
         table for table, df in ((parent_table, parent), (child_table, child)) if df is None
     ]
     if missing_tables:
-        return _cat8_unavailable(
-            check_id, f"{parent_table},{child_table}", missing_tables
-        )
+        return _cat8_unavailable(check_id, f"{parent_table},{child_table}", missing_tables)
 
     pkey = resolve(parent, parent_key)
     ckey = resolve(child, child_key)
@@ -11657,9 +14847,7 @@ def _cat8_type_mix(
     counts = children.groupBy("parent_key").agg(
         F.count(F.lit(1)).alias("total"),
         *[
-            F.sum(F.when(F.col("child_type") == value, 1).otherwise(0)).alias(
-                f"type_{value}"
-            )
+            F.sum(F.when(F.col("child_type") == value, 1).otherwise(0)).alias(f"type_{value}")
             for value in expected_types
         ],
     )
@@ -11695,28 +14883,35 @@ def check_event_condition_families(
     event = tables.get("EVENTO")
     event_required = ("NUM_EVENTO", "NUM_IF", "NUM_TIPO_EVENTO_LEGADO")
     event_cols = {
-        column: resolve(event, column) if event is not None else None
-        for column in event_required
+        column: resolve(event, column) if event is not None else None for column in event_required
     }
-    event_missing = [
-        f"EVENTO.{column}" for column, actual in event_cols.items() if actual is None
-    ]
+    event_missing = [f"EVENTO.{column}" for column, actual in event_cols.items() if actual is None]
     if event_missing:
         return [_cat8_unavailable(check_id, "EVENTO", event_missing)]
-    events = _active(event).select(
-        _canon_key_col(F.col(event_cols["NUM_EVENTO"])).alias("event_id"),
-        _canon_key_col(F.col(event_cols["NUM_IF"])).alias("root_id"),
-        _norm_code(F.col(event_cols["NUM_TIPO_EVENTO_LEGADO"])).alias("event_type"),
-    ).where(F.col("event_type").isin("83", "85"))
+    events = (
+        _active(event)
+        .select(
+            _canon_key_col(F.col(event_cols["NUM_EVENTO"])).alias("event_id"),
+            _canon_key_col(F.col(event_cols["NUM_IF"])).alias("root_id"),
+            _norm_code(F.col(event_cols["NUM_TIPO_EVENTO_LEGADO"])).alias("event_type"),
+        )
+        .where(F.col("event_type").isin("83", "85"))
+    )
     present_event_types = {
         row["event_type"] for row in events.select("event_type").dropDuplicates().collect()
     }
     if not present_event_types:
-        return [Finding(
-            check_id, cat, SEV_INFO, "EVENTO", True,
-            column="NUM_IF,NUM_TIPO_EVENTO_LEGADO",
-            message="No active event 83/85 rows require condition-family validation.",
-        )]
+        return [
+            Finding(
+                check_id,
+                cat,
+                SEV_INFO,
+                "EVENTO",
+                True,
+                column="NUM_IF,NUM_TIPO_EVENTO_LEGADO",
+                message="No active event 83/85 rows require condition-family validation.",
+            )
+        ]
 
     requirements = {
         "CONDICAO_IF": ("NUM_CONDICAO_IF", "NUM_IF", "COD_TIPO_CONDICAO_IF"),
@@ -11740,21 +14935,27 @@ def check_event_condition_families(
             else:
                 resolved[table][column] = actual
     if missing:
-        return [Finding(
-            check_id, cat, SEV_ERROR, "EVENTO", False,
-            count=events.count(), column=",".join(missing), sample=missing[:sample],
-            hint="Include the condition/subtype graph required by the present event types.",
-            message="Event-family validation unavailable while relevant events exist: "
-                    f"{', '.join(missing)}.",
-        )]
+        return [
+            Finding(
+                check_id,
+                cat,
+                SEV_ERROR,
+                "EVENTO",
+                False,
+                count=events.count(),
+                column=",".join(missing),
+                sample=missing[:sample],
+                hint="Include the condition/subtype graph required by the present event types.",
+                message="Event-family validation unavailable while relevant events exist: "
+                f"{', '.join(missing)}.",
+            )
+        ]
 
     condition_cols = resolved["CONDICAO_IF"]
     conditions = _active(tables["CONDICAO_IF"]).select(
-        _canon_key_col(F.col(condition_cols["NUM_CONDICAO_IF"]))
-        .alias("condition_id"),
+        _canon_key_col(F.col(condition_cols["NUM_CONDICAO_IF"])).alias("condition_id"),
         _canon_key_col(F.col(condition_cols["NUM_IF"])).alias("root_id"),
-        _norm_code(F.col(condition_cols["COD_TIPO_CONDICAO_IF"]))
-        .alias("condition_type"),
+        _norm_code(F.col(condition_cols["COD_TIPO_CONDICAO_IF"])).alias("condition_type"),
     )
 
     family_roots = []
@@ -11766,15 +14967,15 @@ def check_event_condition_families(
             continue
         subtype_key = resolved[table]["NUM_CONDICAO_IF"]
         family_roots.append(
-            _active(tables[table]).select(
-                _canon_key_col(F.col(subtype_key)).alias("condition_id")
-            ).join(
+            _active(tables[table])
+            .select(_canon_key_col(F.col(subtype_key)).alias("condition_id"))
+            .join(
                 conditions.where(F.col("condition_type") == condition_type),
                 "condition_id",
                 "inner",
-            ).select(
-                "root_id", F.lit(event_type).alias("event_type")
-            ).dropDuplicates()
+            )
+            .select("root_id", F.lit(event_type).alias("event_type"))
+            .dropDuplicates()
         )
     valid_families = reduce(
         lambda left, right: left.unionByName(right), family_roots
@@ -11782,20 +14983,28 @@ def check_event_condition_families(
     bad = events.join(valid_families, ["root_id", "event_type"], "leftanti")
     count = bad.count()
     product_label = profile.name.upper()
-    return [Finding(
-        check_id, cat, SEV_ERROR if count else SEV_INFO,
-        "EVENTO", count == 0, count=count,
-        column="NUM_IF,NUM_TIPO_EVENTO_LEGADO",
-        sample=_sample_keys(bad, ["event_id", "root_id", "event_type"], sample),
-        hint=f"For {product_label}, event 83 requires a type-3/JUROS_FLUTUANTE condition "
-             "on the same NUM_IF; event 85 requires type-20/RESGATE.",
-        message=f"{product_label} juros/resgate events without their observed condition "
-                "family on the same IF.",
-    )]
+    return [
+        Finding(
+            check_id,
+            cat,
+            SEV_ERROR if count else SEV_INFO,
+            "EVENTO",
+            count == 0,
+            count=count,
+            column="NUM_IF,NUM_TIPO_EVENTO_LEGADO",
+            sample=_sample_keys(bad, ["event_id", "root_id", "event_type"], sample),
+            hint=f"For {product_label}, event 83 requires a type-3/JUROS_FLUTUANTE condition "
+            "on the same NUM_IF; event 85 requires type-20/RESGATE.",
+            message=f"{product_label} juros/resgate events without their observed condition "
+            "family on the same IF.",
+        )
+    ]
 
 
 def check_log_invariants(
-    tables: Dict[str, DataFrame], sample: int, registration_profile: bool = False,
+    tables: Dict[str, DataFrame],
+    sample: int,
+    registration_profile: bool = False,
     profile: Optional["ValidationProfile"] = None,
 ) -> List[Finding]:
     if profile is None:
@@ -11805,19 +15014,14 @@ def check_log_invariants(
         tables, ["NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO", "COD_IF"], profile.num_tipo_if
     )
     if active is None:
-        out.append(
-            _cat8_unavailable("8a.cod_if_unique", "INSTRUMENTO_FINANCEIRO", active_missing)
-        )
+        out.append(_cat8_unavailable("8a.cod_if_unique", "INSTRUMENTO_FINANCEIRO", active_missing))
     else:
         num_if, cod_if = resolve(active, "NUM_IF"), resolve(active, "COD_IF")
         rows = active.select(
             F.col(num_if),
             F.col(cod_if),
             _norm_code(F.col(cod_if)).alias("normalized_cod_if"),
-        ).where(
-            F.col(cod_if).isNotNull()
-            & (_norm_code(F.col(cod_if)) != "")
-        )
+        ).where(F.col(cod_if).isNotNull() & (_norm_code(F.col(cod_if)) != ""))
         duplicates = (
             rows.groupBy("normalized_cod_if")
             .count()
@@ -11854,14 +15058,9 @@ def check_log_invariants(
     else:
         root_cols = {name: resolve(active, name) for name in ("NUM_IF", "COD_IF")}
         op_cols = {
-            name: resolve(operation, name)
-            for name in ("NUM_ID_OPERACAO", "NUM_IF", "COD_IF")
+            name: resolve(operation, name) for name in ("NUM_ID_OPERACAO", "NUM_IF", "COD_IF")
         }
-        missing_match = [
-            name
-            for name, actual in {**root_cols, **op_cols}.items()
-            if not actual
-        ]
+        missing_match = [name for name, actual in {**root_cols, **op_cols}.items() if not actual]
         if missing_match:
             out.append(
                 _cat8_unavailable(
@@ -11876,10 +15075,7 @@ def check_log_invariants(
                     _canon_key_col(F.col(root_cols["NUM_IF"])).alias("normalized_num_if"),
                     F.trim(F.col(root_cols["COD_IF"]).cast("string")).alias("root_cod_if"),
                 )
-                .where(
-                    F.col("normalized_num_if").isNotNull()
-                    & (F.col("normalized_num_if") != "")
-                )
+                .where(F.col("normalized_num_if").isNotNull() & (F.col("normalized_num_if") != ""))
                 .groupBy("normalized_num_if")
                 .agg(
                     F.count(F.lit(1)).alias("root_count"),
@@ -11890,9 +15086,7 @@ def check_log_invariants(
                 F.col(op_cols["NUM_ID_OPERACAO"]).alias("operation_id"),
                 F.col(op_cols["NUM_IF"]).alias("operation_num_if"),
                 _canon_key_col(F.col(op_cols["NUM_IF"])).alias("normalized_num_if"),
-                F.trim(F.col(op_cols["COD_IF"]).cast("string")).alias(
-                    "operation_cod_if"
-                ),
+                F.trim(F.col(op_cols["COD_IF"]).cast("string")).alias("operation_cod_if"),
             )
             compared = operations.join(roots, "normalized_num_if", "left")
             bad = compared.where(
@@ -11921,16 +15115,12 @@ def check_log_invariants(
             )
 
     if operation is None:
-        out.append(
-            _cat8_unavailable("8a.cod_operacao_unique", OPERACAO_TABLE, [OPERACAO_TABLE])
-        )
+        out.append(_cat8_unavailable("8a.cod_operacao_unique", OPERACAO_TABLE, [OPERACAO_TABLE]))
     else:
         cod_operacao = resolve(operation, "COD_OPERACAO")
         if not cod_operacao:
             out.append(
-                _cat8_unavailable(
-                    "8a.cod_operacao_unique", OPERACAO_TABLE, ["COD_OPERACAO"]
-                )
+                _cat8_unavailable("8a.cod_operacao_unique", OPERACAO_TABLE, ["COD_OPERACAO"])
             )
         else:
             op_key = resolve(operation, "NUM_ID_OPERACAO")
@@ -11938,10 +15128,7 @@ def check_log_invariants(
                 *([F.col(op_key)] if op_key else []),
                 F.col(cod_operacao),
                 _norm_code(F.col(cod_operacao)).alias("normalized_cod_operacao"),
-            ).where(
-                F.col(cod_operacao).isNotNull()
-                & (_norm_code(F.col(cod_operacao)) != "")
-            )
+            ).where(F.col(cod_operacao).isNotNull() & (_norm_code(F.col(cod_operacao)) != ""))
             duplicates = (
                 rows.groupBy("normalized_cod_operacao")
                 .count()
@@ -11996,8 +15183,7 @@ def check_log_invariants(
                 reduce(
                     lambda left, right: left & right,
                     [
-                        F.col(column).isNotNull()
-                        & (F.trim(F.col(column).cast("string")) != "")
+                        F.col(column).isNotNull() & (F.trim(F.col(column).cast("string")) != "")
                         for column in tuple_names
                     ],
                 )
@@ -12030,18 +15216,22 @@ def check_log_invariants(
         return out
 
     if active is None:
-        out.append(
-            _cat8_unavailable("8b.cod_if_format", "INSTRUMENTO_FINANCEIRO", active_missing)
-        )
+        out.append(_cat8_unavailable("8b.cod_if_format", "INSTRUMENTO_FINANCEIRO", active_missing))
     elif profile.cod_if_pattern is None:
-        out.append(Finding(
-            "8b.cod_if_format", "Log-derived invariants", SEV_WARN,
-            "INSTRUMENTO_FINANCEIRO", False, column="COD_IF",
-            hint="Capture the target COD_IF registration format for this product before "
-                 "enabling the format check; do not promote an assumed pattern.",
-            message=f"COD_IF format not validated for product {profile.name} "
-                    "(unresolved registration format).",
-        ))
+        out.append(
+            Finding(
+                "8b.cod_if_format",
+                "Log-derived invariants",
+                SEV_WARN,
+                "INSTRUMENTO_FINANCEIRO",
+                False,
+                column="COD_IF",
+                hint="Capture the target COD_IF registration format for this product before "
+                "enabling the format check; do not promote an assumed pattern.",
+                message=f"COD_IF format not validated for product {profile.name} "
+                "(unresolved registration format).",
+            )
+        )
     else:
         num_if, cod_if = resolve(active, "NUM_IF"), resolve(active, "COD_IF")
         valid = F.coalesce(
@@ -12063,9 +15253,7 @@ def check_log_invariants(
         )
 
     if operation is None:
-        out.append(
-            _cat8_unavailable("8b.cod_operacao_format", OPERACAO_TABLE, [OPERACAO_TABLE])
-        )
+        out.append(_cat8_unavailable("8b.cod_operacao_format", OPERACAO_TABLE, [OPERACAO_TABLE]))
     else:
         cod_operacao = resolve(operation, "COD_OPERACAO")
         if not cod_operacao:
@@ -12144,23 +15332,43 @@ def check_log_invariants(
         else:
             out.append(
                 _cat8_type_mix(
-                    tables, "8c.condicao_type_mix", "INSTRUMENTO_FINANCEIRO", "NUM_IF",
-                    "CONDICAO_IF", "NUM_IF", "COD_TIPO_CONDICAO_IF", ("3", "20"), sample,
+                    tables,
+                    "8c.condicao_type_mix",
+                    "INSTRUMENTO_FINANCEIRO",
+                    "NUM_IF",
+                    "CONDICAO_IF",
+                    "NUM_IF",
+                    "COD_TIPO_CONDICAO_IF",
+                    ("3", "20"),
+                    sample,
                     profile_parents,
                 )
             )
             out.append(
                 _cat8_type_mix(
-                    tables, "8c.evento_type_mix", "INSTRUMENTO_FINANCEIRO", "NUM_IF",
-                    "EVENTO", "NUM_IF", "NUM_TIPO_EVENTO_LEGADO", ("83", "85"), sample,
+                    tables,
+                    "8c.evento_type_mix",
+                    "INSTRUMENTO_FINANCEIRO",
+                    "NUM_IF",
+                    "EVENTO",
+                    "NUM_IF",
+                    "NUM_TIPO_EVENTO_LEGADO",
+                    ("83", "85"),
+                    sample,
                     profile_parents,
                 )
             )
     out.append(
         _cat8_type_mix(
-            tables, "8c.dado_operacao_type_mix", OPERACAO_TABLE, "NUM_ID_OPERACAO",
-            DADO_OPERACAO_TABLE, "NUM_ID_OPERACAO", "NUM_ID_TIPO_DADO_OPERACAO",
-            ("502", "503"), sample,
+            tables,
+            "8c.dado_operacao_type_mix",
+            OPERACAO_TABLE,
+            "NUM_ID_OPERACAO",
+            DADO_OPERACAO_TABLE,
+            "NUM_ID_OPERACAO",
+            "NUM_ID_TIPO_DADO_OPERACAO",
+            ("502", "503"),
+            sample,
         )
     )
     return out
@@ -12174,20 +15382,29 @@ def check_osias(
 ) -> List[Finding]:
     """Enforce the narrow product/scenario rules requested by the Osias profile."""
     if not enabled or profile.name not in {
-        "cdb", "ccb", "gravame", "lci", "rdb_resgate",
+        "cdb",
+        "ccb",
+        "gravame",
+        "lci",
+        "rdb_resgate",
     }:
         return []
 
     category = "Osias ERROR profile"
 
     def unavailable(missing: List[str]) -> List[Finding]:
-        return [Finding(
-            f"9.osias.{profile.name}.availability", category, SEV_ERROR,
-            ",".join(sorted({item.split(".")[0] for item in missing})), False,
-            count=len(missing),
-            hint="Export every required table and column before using --osias.",
-            message=f"Osias evidence cannot be established; missing: {', '.join(missing)}.",
-        )]
+        return [
+            Finding(
+                f"9.osias.{profile.name}.availability",
+                category,
+                SEV_ERROR,
+                ",".join(sorted({item.split(".")[0] for item in missing})),
+                False,
+                count=len(missing),
+                hint="Export every required table and column before using --osias.",
+                message=f"Osias evidence cannot be established; missing: {', '.join(missing)}.",
+            )
+        ]
 
     def finding(
         check_id: str,
@@ -12200,10 +15417,16 @@ def check_osias(
     ) -> Finding:
         count = bad.count()
         return Finding(
-            check_id, category, SEV_ERROR if count else SEV_INFO, table, count == 0,
-            count=count, column=column,
+            check_id,
+            category,
+            SEV_ERROR if count else SEV_INFO,
+            table,
+            count == 0,
+            count=count,
+            column=column,
             sample=_sample_keys(bad, keys, sample) if count else [],
-            hint=hint if count else "", message=message,
+            hint=hint if count else "",
+            message=message,
         )
 
     if profile.name == "rdb_resgate":
@@ -12217,18 +15440,26 @@ def check_osias(
             return unavailable(missing)
 
         root_cols = columns["INSTRUMENTO_FINANCEIRO"]
-        roots = tables["INSTRUMENTO_FINANCEIRO"].where(
-            _oracle_null_equivalent(F.col(root_cols["DAT_EXCLUSAO"]))
-            & (_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == "50")
-        ).select(
-            _canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id")
-        ).dropDuplicates()
+        roots = (
+            tables["INSTRUMENTO_FINANCEIRO"]
+            .where(
+                _oracle_null_equivalent(F.col(root_cols["DAT_EXCLUSAO"]))
+                & (_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == "50")
+            )
+            .select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"))
+            .dropDuplicates()
+        )
         operation_cols = columns["OPERACAO"]
-        operations = tables["OPERACAO"].select(
-            _canon_key_col(F.col(operation_cols["NUM_IF"])).alias("root_id"),
-            _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
-            .alias("route_id"),
-        ).join(roots, "root_id", "inner")
+        operations = (
+            tables["OPERACAO"]
+            .select(
+                _canon_key_col(F.col(operation_cols["NUM_IF"])).alias("root_id"),
+                _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias(
+                    "route_id"
+                ),
+            )
+            .join(roots, "root_id", "inner")
+        )
         title_cols = columns["TITULO"]
         titles = tables["TITULO"].select(
             _canon_key_col(F.col(title_cols["NUM_IF"])).alias("root_id"),
@@ -12237,17 +15468,18 @@ def check_osias(
         quantity = F.expr("try_cast(`redeemed_quantity` AS DECIMAL(38,18))")
         return [
             finding(
-                "9.osias.rdb_resgate.route", "OPERACAO",
+                "9.osias.rdb_resgate.route",
+                "OPERACAO",
                 "NUM_ID_TIPO_OPER_OBJETO_SERV",
-                operations.where(
-                    ~F.coalesce(F.col("route_id") == "5177", F.lit(False))
-                ),
+                operations.where(~F.coalesce(F.col("route_id") == "5177", F.lit(False))),
                 ["root_id", "route_id"],
                 "Every operation owned by an RDB resgate root must canonicalize to route 5177.",
                 "Set every owned operation route to canonical ID 5177.",
             ),
             finding(
-                "9.osias.rdb_resgate.redeemed_quantity", "TITULO", "QTD_RESGATADA",
+                "9.osias.rdb_resgate.redeemed_quantity",
+                "TITULO",
+                "QTD_RESGATADA",
                 roots.join(titles, "root_id", "left").where(
                     _oracle_null_equivalent(F.col("redeemed_quantity"))
                     | quantity.isNull()
@@ -12264,7 +15496,9 @@ def check_osias(
             "INSTRUMENTO_FINANCEIRO": ("NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO"),
             "TITULO": ("NUM_IF", "COD_TIPO_ESCALONAMENTO", "QTD_RESGATADA"),
             "CONDICAO_IF": (
-                "NUM_CONDICAO_IF", "NUM_IF", "DAT_EXCLUSAO",
+                "NUM_CONDICAO_IF",
+                "NUM_IF",
+                "DAT_EXCLUSAO",
             ),
             "RESGATE": ("NUM_CONDICAO_IF", "COD_COND_RESGATE", "DAT_EXCLUSAO"),
             "OPERACAO": ("NUM_IF", "NUM_ID_TIPO_OPER_OBJETO_SERV"),
@@ -12274,74 +15508,107 @@ def check_osias(
             return unavailable(missing)
 
         root_cols = columns["INSTRUMENTO_FINANCEIRO"]
-        roots = tables["INSTRUMENTO_FINANCEIRO"].where(
-            _oracle_null_equivalent(F.col(root_cols["DAT_EXCLUSAO"]))
-            & (_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == "49")
-        ).select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id")) \
+        roots = (
+            tables["INSTRUMENTO_FINANCEIRO"]
+            .where(
+                _oracle_null_equivalent(F.col(root_cols["DAT_EXCLUSAO"]))
+                & (_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == "49")
+            )
+            .select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"))
             .dropDuplicates()
+        )
         title_cols = columns["TITULO"]
-        titles = tables["TITULO"].select(
-            _canon_key_col(F.col(title_cols["NUM_IF"])).alias("root_id"),
-            F.col(title_cols["COD_TIPO_ESCALONAMENTO"]).alias("escalation"),
-            F.col(title_cols["QTD_RESGATADA"]).alias("redeemed_quantity"),
-        ).join(roots, "root_id", "inner")
+        titles = (
+            tables["TITULO"]
+            .select(
+                _canon_key_col(F.col(title_cols["NUM_IF"])).alias("root_id"),
+                F.col(title_cols["COD_TIPO_ESCALONAMENTO"]).alias("escalation"),
+                F.col(title_cols["QTD_RESGATADA"]).alias("redeemed_quantity"),
+            )
+            .join(roots, "root_id", "inner")
+        )
         condition_cols = columns["CONDICAO_IF"]
-        conditions = tables["CONDICAO_IF"].where(
-            _oracle_null_equivalent(F.col(condition_cols["DAT_EXCLUSAO"]))
-        ).select(
-            _canon_key_col(F.col(condition_cols["NUM_CONDICAO_IF"]))
-            .alias("condition_id"),
-            _canon_key_col(F.col(condition_cols["NUM_IF"])).alias("root_id"),
-        ).join(roots, "root_id", "inner")
+        conditions = (
+            tables["CONDICAO_IF"]
+            .where(_oracle_null_equivalent(F.col(condition_cols["DAT_EXCLUSAO"])))
+            .select(
+                _canon_key_col(F.col(condition_cols["NUM_CONDICAO_IF"])).alias("condition_id"),
+                _canon_key_col(F.col(condition_cols["NUM_IF"])).alias("root_id"),
+            )
+            .join(roots, "root_id", "inner")
+        )
         resgate_cols = columns["RESGATE"]
-        resgate_paths = tables["RESGATE"].where(
-            _oracle_null_equivalent(F.col(resgate_cols["DAT_EXCLUSAO"]))
-        ).select(
-            _canon_key_col(F.col(resgate_cols["NUM_CONDICAO_IF"])).alias("condition_id"),
-            F.upper(F.trim(F.col(resgate_cols["COD_COND_RESGATE"]).cast("string")))
-            .alias("resgate_mode"),
-        ).join(conditions, "condition_id", "inner")
-        resgate_roots = titles.where(
-            _oracle_null_equivalent(F.col("escalation"))
-        ).select("root_id").join(
-            resgate_paths.where(
-                F.col("resgate_mode").isin("MERCADO", "COM TABELA", "ESPECIFICA")
-            ).select("root_id"),
-            "root_id", "inner",
-        ).dropDuplicates()
-        escalation_roots = titles.where(
-            ~_oracle_null_equivalent(F.col("escalation"))
-        ).select("root_id").join(
-            resgate_paths.where(F.col("resgate_mode") == "SEM TABELA").select("root_id"),
-            "root_id", "inner",
-        ).dropDuplicates()
+        resgate_paths = (
+            tables["RESGATE"]
+            .where(_oracle_null_equivalent(F.col(resgate_cols["DAT_EXCLUSAO"])))
+            .select(
+                _canon_key_col(F.col(resgate_cols["NUM_CONDICAO_IF"])).alias("condition_id"),
+                F.upper(F.trim(F.col(resgate_cols["COD_COND_RESGATE"]).cast("string"))).alias(
+                    "resgate_mode"
+                ),
+            )
+            .join(conditions, "condition_id", "inner")
+        )
+        resgate_roots = (
+            titles.where(_oracle_null_equivalent(F.col("escalation")))
+            .select("root_id")
+            .join(
+                resgate_paths.where(
+                    F.col("resgate_mode").isin("MERCADO", "COM TABELA", "ESPECIFICA")
+                ).select("root_id"),
+                "root_id",
+                "inner",
+            )
+            .dropDuplicates()
+        )
+        escalation_roots = (
+            titles.where(~_oracle_null_equivalent(F.col("escalation")))
+            .select("root_id")
+            .join(
+                resgate_paths.where(F.col("resgate_mode") == "SEM TABELA").select("root_id"),
+                "root_id",
+                "inner",
+            )
+            .dropDuplicates()
+        )
         operation_cols = columns["OPERACAO"]
         operations = tables["OPERACAO"].select(
             _canon_key_col(F.col(operation_cols["NUM_IF"])).alias("root_id"),
-            _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
-            .alias("route_id"),
+            _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias("route_id"),
         )
 
         classified_roots = resgate_roots.unionByName(escalation_roots).dropDuplicates()
-        out = [finding(
-            "9.osias.cdb.scenario", "INSTRUMENTO_FINANCEIRO", "NUM_IF",
-            roots.join(classified_roots, "root_id", "left_anti"), ["root_id"],
-            "Every active full-CDB root must resolve to resgate or escalonamento.",
-            "Include the title, active redemption condition, and scenario discriminator.",
-        )]
+        out = [
+            finding(
+                "9.osias.cdb.scenario",
+                "INSTRUMENTO_FINANCEIRO",
+                "NUM_IF",
+                roots.join(classified_roots, "root_id", "left_anti"),
+                ["root_id"],
+                "Every active full-CDB root must resolve to resgate or escalonamento.",
+                "Include the title, active redemption condition, and scenario discriminator.",
+            )
+        ]
         for scenario, selected_roots in (
-            ("resgate", resgate_roots), ("escalonamento", escalation_roots),
+            ("resgate", resgate_roots),
+            ("escalonamento", escalation_roots),
         ):
             owned = operations.join(selected_roots, "root_id", "inner")
-            bad = owned.where(
-                ~F.coalesce(F.col("route_id") == "4509", F.lit(False))
+            bad = owned.where(~F.coalesce(F.col("route_id") == "4509", F.lit(False)))
+            out.append(
+                finding(
+                    f"9.osias.cdb.{scenario}.route",
+                    "OPERACAO",
+                    "NUM_ID_TIPO_OPER_OBJETO_SERV",
+                    bad,
+                    ["root_id", "route_id"],
+                    (
+                        f"Every operation owned by a CDB {scenario} root "
+                        "must canonicalize to route 4509."
+                    ),
+                    "Set every owned operation route to canonical ID 4509.",
+                )
             )
-            out.append(finding(
-                f"9.osias.cdb.{scenario}.route", "OPERACAO",
-                "NUM_ID_TIPO_OPER_OBJETO_SERV", bad, ["root_id", "route_id"],
-                f"Every operation owned by a CDB {scenario} root must canonicalize to route 4509.",
-                "Set every owned operation route to canonical ID 4509.",
-            ))
 
         quantity = F.expr("try_cast(`redeemed_quantity` AS DECIMAL(38,18))")
         bad_quantity = titles.join(escalation_roots, "root_id", "inner").where(
@@ -12349,24 +15616,39 @@ def check_osias(
             | quantity.isNull()
             | (quantity != F.lit(Decimal(0)))
         )
-        out.append(finding(
-            "9.osias.cdb.escalonamento.redeemed_quantity", "TITULO", "QTD_RESGATADA",
-            bad_quantity, ["root_id", "redeemed_quantity"],
-            "Every title owned by a CDB escalonamento root must have numeric zero QTD_RESGATADA.",
-            "Set QTD_RESGATADA to a nonnull numeric zero.",
-        ))
+        out.append(
+            finding(
+                "9.osias.cdb.escalonamento.redeemed_quantity",
+                "TITULO",
+                "QTD_RESGATADA",
+                bad_quantity,
+                ["root_id", "redeemed_quantity"],
+                (
+                    "Every title owned by a CDB escalonamento root "
+                    "must have numeric zero QTD_RESGATADA."
+                ),
+                "Set QTD_RESGATADA to a nonnull numeric zero.",
+            )
+        )
         return out
 
     if profile.name == "ccb":
         requirements = {
             "INSTRUMENTO_FINANCEIRO": (
-                "NUM_IF", "NUM_TIPO_IF", "NUM_IF_PERTENCE", "DAT_EXCLUSAO",
+                "NUM_IF",
+                "NUM_TIPO_IF",
+                "NUM_IF_PERTENCE",
+                "DAT_EXCLUSAO",
             ),
             "ACTPCCB_CONDICAO_IF": (
-                "NUM_IF", "RENT_INDEXADOR_TAXA_FLU", "FORMA_PAGAMENTO",
+                "NUM_IF",
+                "RENT_INDEXADOR_TAXA_FLU",
+                "FORMA_PAGAMENTO",
             ),
             "OPERACAO": (
-                "NUM_IF", "NUM_ID_TIPO_OPER_OBJETO_SERV", "COD_SITUACAO_OPERACAO",
+                "NUM_IF",
+                "NUM_ID_TIPO_OPER_OBJETO_SERV",
+                "COD_SITUACAO_OPERACAO",
             ),
         }
         columns, missing = _credito_scr_columns(tables, requirements)
@@ -12374,20 +15656,30 @@ def check_osias(
             return unavailable(missing)
 
         root_cols = columns["INSTRUMENTO_FINANCEIRO"]
-        roots = tables["INSTRUMENTO_FINANCEIRO"].where(
-            _oracle_null_equivalent(F.col(root_cols["DAT_EXCLUSAO"]))
-            & _oracle_null_equivalent(F.col(root_cols["NUM_IF_PERTENCE"]))
-            & (_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == "53")
-        ).select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id")) \
+        roots = (
+            tables["INSTRUMENTO_FINANCEIRO"]
+            .where(
+                _oracle_null_equivalent(F.col(root_cols["DAT_EXCLUSAO"]))
+                & _oracle_null_equivalent(F.col(root_cols["NUM_IF_PERTENCE"]))
+                & (_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == "53")
+            )
+            .select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"))
             .dropDuplicates()
+        )
         actp_cols = columns["ACTPCCB_CONDICAO_IF"]
-        variants = tables["ACTPCCB_CONDICAO_IF"].select(
-            _canon_key_col(F.col(actp_cols["NUM_IF"])).alias("root_id"),
-            F.upper(F.trim(F.col(actp_cols["RENT_INDEXADOR_TAXA_FLU"]).cast("string")))
-            .alias("indexer"),
-            F.upper(F.trim(F.col(actp_cols["FORMA_PAGAMENTO"]).cast("string")))
-            .alias("payment"),
-        ).join(roots, "root_id", "inner")
+        variants = (
+            tables["ACTPCCB_CONDICAO_IF"]
+            .select(
+                _canon_key_col(F.col(actp_cols["NUM_IF"])).alias("root_id"),
+                F.upper(F.trim(F.col(actp_cols["RENT_INDEXADOR_TAXA_FLU"]).cast("string"))).alias(
+                    "indexer"
+                ),
+                F.upper(F.trim(F.col(actp_cols["FORMA_PAGAMENTO"]).cast("string"))).alias(
+                    "payment"
+                ),
+            )
+            .join(roots, "root_id", "inner")
+        )
         discriminators = {
             "favcp": ("VCP", "LIQUIDAÇÃO FORA DO ÂMBITO B3"),
             "fapre": ("PREFIXADO", "LIQUIDAÇÃO FORA DO ÂMBITO B3"),
@@ -12396,55 +15688,70 @@ def check_osias(
             "pppre": ("PREFIXADO", "PAGAMENTO DE PARCELAS"),
         }
         selected = {
-            name: variants.where(
-                (F.col("indexer") == indexer) & (F.col("payment") == payment)
-            ).select("root_id").dropDuplicates()
+            name: variants.where((F.col("indexer") == indexer) & (F.col("payment") == payment))
+            .select("root_id")
+            .dropDuplicates()
             for name, (indexer, payment) in discriminators.items()
         }
         operation_cols = columns["OPERACAO"]
         operations = tables["OPERACAO"].select(
             _canon_key_col(F.col(operation_cols["NUM_IF"])).alias("root_id"),
-            _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
-            .alias("route_id"),
-            _canon_key_col(F.col(operation_cols["COD_SITUACAO_OPERACAO"]))
-            .alias("operation_status"),
+            _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias("route_id"),
+            _canon_key_col(F.col(operation_cols["COD_SITUACAO_OPERACAO"])).alias(
+                "operation_status"
+            ),
         )
         classified_roots = None
         for selected_roots in selected.values():
             classified_roots = (
-                selected_roots if classified_roots is None
+                selected_roots
+                if classified_roots is None
                 else classified_roots.unionByName(selected_roots)
             )
         assert classified_roots is not None
         classified_roots = classified_roots.dropDuplicates()
-        out = [finding(
-            "9.osias.ccb.scenario", "ACTPCCB_CONDICAO_IF",
-            "RENT_INDEXADOR_TAXA_FLU,FORMA_PAGAMENTO",
-            roots.join(classified_roots, "root_id", "left_anti"), ["root_id"],
-            "Every active CCB root must resolve to a known generator scenario.",
-            "Include the ACTPCCB condition row and exact scenario discriminators.",
-        )]
+        out = [
+            finding(
+                "9.osias.ccb.scenario",
+                "ACTPCCB_CONDICAO_IF",
+                "RENT_INDEXADOR_TAXA_FLU,FORMA_PAGAMENTO",
+                roots.join(classified_roots, "root_id", "left_anti"),
+                ["root_id"],
+                "Every active CCB root must resolve to a known generator scenario.",
+                "Include the ACTPCCB condition row and exact scenario discriminators.",
+            )
+        ]
         for scenario in ("favcp", "pfpre", "pppre"):
             selected_roots = selected[scenario]
             bad = operations.join(selected_roots, "root_id", "inner").where(
                 ~F.coalesce(F.col("route_id") == "871", F.lit(False))
             )
-            out.append(finding(
-                f"9.osias.ccb.{scenario}.route", "OPERACAO",
-                "NUM_ID_TIPO_OPER_OBJETO_SERV", bad, ["root_id", "route_id"],
-                f"Every operation owned by a CCB {scenario.upper()} root must canonicalize "
-                "to route 871.",
-                "Set every owned operation route to canonical ID 871.",
-            ))
+            out.append(
+                finding(
+                    f"9.osias.ccb.{scenario}.route",
+                    "OPERACAO",
+                    "NUM_ID_TIPO_OPER_OBJETO_SERV",
+                    bad,
+                    ["root_id", "route_id"],
+                    f"Every operation owned by a CCB {scenario.upper()} root must canonicalize "
+                    "to route 871.",
+                    "Set every owned operation route to canonical ID 871.",
+                )
+            )
         bad_status = operations.join(selected["pppre"], "root_id", "inner").where(
             ~F.coalesce(F.col("operation_status") == "43", F.lit(False))
         )
-        out.append(finding(
-            "9.osias.ccb.pppre.operation_status", "OPERACAO", "COD_SITUACAO_OPERACAO",
-            bad_status, ["root_id", "operation_status"],
-            "Every operation owned by a CCB PPPRE root must canonicalize to status 43.",
-            "Set every PPPRE-owned operation status to canonical code 43.",
-        ))
+        out.append(
+            finding(
+                "9.osias.ccb.pppre.operation_status",
+                "OPERACAO",
+                "COD_SITUACAO_OPERACAO",
+                bad_status,
+                ["root_id", "operation_status"],
+                "Every operation owned by a CCB PPPRE root must canonicalize to status 43.",
+                "Set every PPPRE-owned operation status to canonical code 43.",
+            )
+        )
         return out
 
     if profile.name == "gravame":
@@ -12456,30 +15763,45 @@ def check_osias(
         if missing:
             return unavailable(missing)
         root_cols = columns["INSTRUMENTO_FINANCEIRO"]
-        roots = tables["INSTRUMENTO_FINANCEIRO"].where(
-            _oracle_null_equivalent(F.col(root_cols["DAT_EXCLUSAO"]))
-            & (_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == "175")
-        ).select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id")) \
+        roots = (
+            tables["INSTRUMENTO_FINANCEIRO"]
+            .where(
+                _oracle_null_equivalent(F.col(root_cols["DAT_EXCLUSAO"]))
+                & (_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == "175")
+            )
+            .select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"))
             .dropDuplicates()
-        operation_cols = columns["OPERACAO"]
-        owned = tables["OPERACAO"].select(
-            _canon_key_col(F.col(operation_cols["NUM_IF"])).alias("root_id"),
-            _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"]))
-            .alias("route_id"),
-        ).join(roots, "root_id", "inner")
-        bad = owned.where(
-            ~F.coalesce(F.col("route_id").isin("15394", "15512"), F.lit(False))
         )
-        return [finding(
-            "9.osias.gravame.route", "OPERACAO", "NUM_ID_TIPO_OPER_OBJETO_SERV",
-            bad, ["root_id", "route_id"],
-            "Every operation owned by a Gravame root must use route 15394 or 15512.",
-            "Set every owned operation route to canonical ID 15394 or 15512.",
-        )]
+        operation_cols = columns["OPERACAO"]
+        owned = (
+            tables["OPERACAO"]
+            .select(
+                _canon_key_col(F.col(operation_cols["NUM_IF"])).alias("root_id"),
+                _canon_key_col(F.col(operation_cols["NUM_ID_TIPO_OPER_OBJETO_SERV"])).alias(
+                    "route_id"
+                ),
+            )
+            .join(roots, "root_id", "inner")
+        )
+        bad = owned.where(~F.coalesce(F.col("route_id").isin("15394", "15512"), F.lit(False)))
+        return [
+            finding(
+                "9.osias.gravame.route",
+                "OPERACAO",
+                "NUM_ID_TIPO_OPER_OBJETO_SERV",
+                bad,
+                ["root_id", "route_id"],
+                "Every operation owned by a Gravame root must use route 15394 or 15512.",
+                "Set every owned operation route to canonical ID 15394 or 15512.",
+            )
+        ]
 
     requirements = {
         "INSTRUMENTO_FINANCEIRO": (
-            "NUM_IF", "NUM_TIPO_IF", "NUM_ID_LOTE", "DAT_EXCLUSAO",
+            "NUM_IF",
+            "NUM_TIPO_IF",
+            "NUM_ID_LOTE",
+            "DAT_EXCLUSAO",
         ),
         CREDITO_SCR_TABLE: ("NUM_ID_CREDITO_SCR", "NUM_ID_LOTE", "DAT_EXCLUSAO"),
         HISTORICO_CREDITO_SCR_TABLE: ("NUM_ID_CREDITO_SCR",),
@@ -12488,39 +15810,52 @@ def check_osias(
     if missing:
         return unavailable(missing)
     root_cols = columns["INSTRUMENTO_FINANCEIRO"]
-    root_lots = tables["INSTRUMENTO_FINANCEIRO"].where(
-        _oracle_null_equivalent(F.col(root_cols["DAT_EXCLUSAO"]))
-        & (_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == "81")
-    ).select(
-        _canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"),
-        _canon_key_col(F.col(root_cols["NUM_ID_LOTE"])).alias("lot_id"),
-    ).dropDuplicates()
+    root_lots = (
+        tables["INSTRUMENTO_FINANCEIRO"]
+        .where(
+            _oracle_null_equivalent(F.col(root_cols["DAT_EXCLUSAO"]))
+            & (_canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == "81")
+        )
+        .select(
+            _canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"),
+            _canon_key_col(F.col(root_cols["NUM_ID_LOTE"])).alias("lot_id"),
+        )
+        .dropDuplicates()
+    )
     credit_cols = columns[CREDITO_SCR_TABLE]
-    credits = tables[CREDITO_SCR_TABLE].where(
-        _oracle_null_equivalent(F.col(credit_cols["DAT_EXCLUSAO"]))
-    ).select(
-        _canon_key_col(F.col(credit_cols["NUM_ID_CREDITO_SCR"])).alias("credit_id"),
-        _canon_key_col(F.col(credit_cols["NUM_ID_LOTE"])).alias("lot_id"),
+    credits = (
+        tables[CREDITO_SCR_TABLE]
+        .where(_oracle_null_equivalent(F.col(credit_cols["DAT_EXCLUSAO"])))
+        .select(
+            _canon_key_col(F.col(credit_cols["NUM_ID_CREDITO_SCR"])).alias("credit_id"),
+            _canon_key_col(F.col(credit_cols["NUM_ID_LOTE"])).alias("lot_id"),
+        )
     )
-    bad_roots = root_lots.join(
-        credits.select("lot_id").dropDuplicates(), "lot_id", "left_anti"
-    )
+    bad_roots = root_lots.join(credits.select("lot_id").dropDuplicates(), "lot_id", "left_anti")
     selected_credits = credits.dropDuplicates(["credit_id", "lot_id"])
     history_col = columns[HISTORICO_CREDITO_SCR_TABLE]["NUM_ID_CREDITO_SCR"]
-    history_ids = tables[HISTORICO_CREDITO_SCR_TABLE].select(
-        _canon_key_col(F.col(history_col)).alias("credit_id")
-    ).dropDuplicates()
+    history_ids = (
+        tables[HISTORICO_CREDITO_SCR_TABLE]
+        .select(_canon_key_col(F.col(history_col)).alias("credit_id"))
+        .dropDuplicates()
+    )
     bad_credits = selected_credits.join(history_ids, "credit_id", "left_anti")
     return [
         finding(
-            "9.osias.lci.credit_backing", CREDITO_SCR_TABLE, "NUM_ID_LOTE",
-            bad_roots, ["root_id", "lot_id"],
+            "9.osias.lci.credit_backing",
+            CREDITO_SCR_TABLE,
+            "NUM_ID_LOTE",
+            bad_roots,
+            ["root_id", "lot_id"],
             "Each active type-81 root lot must have at least one output CREDITO_SCR master.",
             "Output at least one CREDITO_SCR master for every active LCI root lot.",
         ),
         finding(
-            "9.osias.lci.credit_history", HISTORICO_CREDITO_SCR_TABLE,
-            "NUM_ID_CREDITO_SCR", bad_credits, ["credit_id", "lot_id"],
+            "9.osias.lci.credit_history",
+            HISTORICO_CREDITO_SCR_TABLE,
+            "NUM_ID_CREDITO_SCR",
+            bad_credits,
+            ["credit_id", "lot_id"],
             "Every active CREDITO_SCR master in the LCI output needs history.",
             "Output at least one linked HISTORICO_CREDITO_SCR row per active master.",
         ),
@@ -12530,15 +15865,21 @@ def check_osias(
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
-def emit_report(spark: SparkSession, findings: List[Finding],
-                 report_path: Optional[str], fail_severity: str,
-                 profile: ValidationProfile, resolved_input: str,
-                 table_inventory: List[str], partial_reasons: List[str],
-                 baseline_identity: Optional[dict] = None,
-                 runtime_identity: Optional[dict] = None,
-                 allow_partial: bool = False,
-                 no_oracle: bool = False,
-                 osias: bool = False) -> int:
+def emit_report(
+    spark: SparkSession,
+    findings: List[Finding],
+    report_path: Optional[str],
+    fail_severity: str,
+    profile: ValidationProfile,
+    resolved_input: str,
+    table_inventory: List[str],
+    partial_reasons: List[str],
+    baseline_identity: Optional[dict] = None,
+    runtime_identity: Optional[dict] = None,
+    allow_partial: bool = False,
+    no_oracle: bool = False,
+    osias: bool = False,
+) -> int:
     fail_level = _SEV_ORDER[fail_severity.upper()]
     failing = [f for f in findings if (not f.passed) and _SEV_ORDER[f.severity] >= fail_level]
 
@@ -12570,7 +15911,8 @@ def emit_report(spark: SparkSession, findings: List[Finding],
     print("\n" + "=" * 78)
     roots = {"credito_scr": CREDITO_SCR_TABLE, "dicre": CREDITO_DC_TABLE}
     identity = (
-        f"root={roots[profile.pipeline]}" if profile.pipeline in roots
+        f"root={roots[profile.pipeline]}"
+        if profile.pipeline in roots
         else f"NUM_TIPO_IF={profile.num_tipo_if}"
     )
     print(f"SYNTHETIC OUTPUT VALIDATION — product={profile.name} ({identity})")
@@ -12597,8 +15939,10 @@ def emit_report(spark: SparkSession, findings: List[Finding],
     n_err = sum(1 for f in findings if not f.passed and f.severity == SEV_ERROR)
     n_warn = sum(1 for f in findings if not f.passed and f.severity == SEV_WARN)
     print("\n" + "-" * 78)
-    print(f"SUMMARY: {len(findings)} checks | {n_err} ERROR | {n_warn} WARN | "
-          f"VERDICT={verdict} (fail-severity={fail_severity})")
+    print(
+        f"SUMMARY: {len(findings)} checks | {n_err} ERROR | {n_warn} WARN | "
+        f"VERDICT={verdict} (fail-severity={fail_severity})"
+    )
     if reasons and verdict != "FAIL":
         print("PARTIAL because:")
         for r in reasons:
@@ -12631,8 +15975,9 @@ def emit_report(spark: SparkSession, findings: List[Finding],
             "findings": [f.to_dict() for f in findings],
         }
         try:
-            write_text(spark, report_path,
-                       json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+            write_text(
+                spark, report_path, json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+            )
             logger.info("JSON report written to %s", report_path)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not write report to %s: %s", report_path, exc)
@@ -12645,78 +15990,144 @@ def emit_report(spark: SparkSession, findings: List[Finding],
 # ---------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Validate a synthetic financial product output against application rules.")
-    p.add_argument("--product", required=True, choices=sorted(VALIDATION_PROFILES),
-                   help="Product profile to validate against (selects identity type, object "
-                        "service, domain, and which strict checks are supported).")
-    p.add_argument("--input-base", default=None,
-                   help="Explicit synthetic input tree (local or oci:// URI). Overrides "
-                        "DATAGEN_SYNTHETIC_BASE_URI + DATAGEN_CLONE_PREFIX / profile prefix.")
-    p.add_argument("--tables", default=None,
-                   help="Comma-separated table list (DIAGNOSTIC ONLY: any explicit subset "
-                        "marks coverage partial and can never yield strict PASS).")
-    p.add_argument("--report-path", default=None,
-                   help="Write a JSON report to this path (local or oci:// URI).")
-    p.add_argument("--shape-baseline", default=None,
-                   help="Shape-profile JSON from profile_cdb_shapes.py --apply-filtros-fonte "
-                        "(local or oci:// URI). Enables Cat 1 subtype-map and Cat 7 "
-                        "distribution checks.")
-    p.add_argument("--application-capacity-contract",
-                   default=os.environ.get("DATAGEN_APPLICATION_CAPACITY_CONTRACT") or None,
-                   help="Optional application capacity-contract JSON (local or oci:// URI). "
-                        "Defaults to DATAGEN_APPLICATION_CAPACITY_CONTRACT when set.")
-    p.add_argument("--shape-unseen-tol", type=float, default=1.0,
-                   help="Cat 7a: max %% of synthetic IFs whose shape is absent from the "
-                        "baseline (default 1.0).")
-    p.add_argument("--shape-drift-tol", type=float, default=0.15,
-                   help="Cat 7b: max total variation distance between synthetic and "
-                        "baseline shape distributions, 0-1 (default 0.15).")
-    p.add_argument("--shape-op-ratio-tol", type=float, default=0.0,
-                   help="Cat 7c: max %% of CDB operations violating "
-                        "OPERACAO:DADO_OPERACAO:LANCAMENTO = 1:2:1 (default 0.0).")
-    p.add_argument("--fail-severity", default="error", choices=["error", "warn"],
-                   help="Minimum severity that makes the run exit non-zero.")
-    p.add_argument("--allow-partial", action="store_true",
-                   help="Exit zero for a PARTIAL verdict. FAIL still exits non-zero.")
+        description="Validate a synthetic financial product output against application rules."
+    )
+    p.add_argument(
+        "--product",
+        required=True,
+        choices=sorted(VALIDATION_PROFILES),
+        help="Product profile to validate against (selects identity type, object "
+        "service, domain, and which strict checks are supported).",
+    )
+    p.add_argument(
+        "--input-base",
+        default=None,
+        help="Explicit synthetic input tree (local or oci:// URI). Overrides "
+        "DATAGEN_SYNTHETIC_BASE_URI + DATAGEN_CLONE_PREFIX / profile prefix.",
+    )
+    p.add_argument(
+        "--tables",
+        default=None,
+        help="Comma-separated table list (DIAGNOSTIC ONLY: any explicit subset "
+        "marks coverage partial and can never yield strict PASS).",
+    )
+    p.add_argument(
+        "--report-path",
+        default=None,
+        help="Write a JSON report to this path (local or oci:// URI).",
+    )
+    p.add_argument(
+        "--shape-baseline",
+        default=None,
+        help="Shape-profile JSON from profile_cdb_shapes.py --apply-filtros-fonte "
+        "(local or oci:// URI). Enables Cat 1 subtype-map and Cat 7 "
+        "distribution checks.",
+    )
+    p.add_argument(
+        "--application-capacity-contract",
+        default=os.environ.get("DATAGEN_APPLICATION_CAPACITY_CONTRACT") or None,
+        help="Optional application capacity-contract JSON (local or oci:// URI). "
+        "Defaults to DATAGEN_APPLICATION_CAPACITY_CONTRACT when set.",
+    )
+    p.add_argument(
+        "--shape-unseen-tol",
+        type=float,
+        default=1.0,
+        help="Cat 7a: max %% of synthetic IFs whose shape is absent from the "
+        "baseline (default 1.0).",
+    )
+    p.add_argument(
+        "--shape-drift-tol",
+        type=float,
+        default=0.15,
+        help="Cat 7b: max total variation distance between synthetic and "
+        "baseline shape distributions, 0-1 (default 0.15).",
+    )
+    p.add_argument(
+        "--shape-op-ratio-tol",
+        type=float,
+        default=0.0,
+        help="Cat 7c: max %% of CDB operations violating "
+        "OPERACAO:DADO_OPERACAO:LANCAMENTO = 1:2:1 (default 0.0).",
+    )
+    p.add_argument(
+        "--fail-severity",
+        default="error",
+        choices=["error", "warn"],
+        help="Minimum severity that makes the run exit non-zero.",
+    )
+    p.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Exit zero for a PARTIAL verdict. FAIL still exits non-zero.",
+    )
     p.add_argument("--sample-size", type=int, default=20, help="Offending keys sampled per check.")
-    p.add_argument("--validate-against", default="union", choices=["synthetic", "union"],
-                   help="Resolve FK parents only within the synthetic output, "
-                        "or also against Oracle.")
-    p.add_argument("--max-residual-keys", type=int, default=1_000_000,
-                   help="Max distinct child keys left unresolved by the synthetic output "
-                        "that will be looked up in Oracle via IN-lists; above this the "
-                        "FK is reported unresolved (WARN). Sized for large clone runs: "
-                        "reference FKs like COMITENTE have one residual per distinct "
-                        "child value (~1 per cloned IF).")
-    p.add_argument("--max-parent-keys", type=int, default=None,
-                   help="Deprecated (parent key sets are no longer downloaded); ignored.")
-    p.add_argument("--emit-faltantes", default=None,
-                   help="Write the Oracle-verified orphan keys (Cat 3) as a "
-                        "TABELA/COLUNA/VALOR Parquet at this path/URI — feed it to "
-                        "engorda_instrumentos.py --faltantes-parquet to prune the "
-                        "sampling domain on the next generation run. ACCUMULATES: "
-                        "keys already at the path are kept; only new keys are "
-                        "appended (a shrinking list made the loop non-convergent).")
-    p.add_argument("--skip-check", action="append", default=[],
-                   help="Check-id prefix(es) to skip (repeatable), e.g. 6.combo.")
-    p.add_argument("--no-oracle", action="store_true",
-                   help="Do not read Oracle metadata (limits Categories 3/4/6).")
-    p.add_argument("--verify-subtype-map", action="store_true",
-                   help="Run the expensive best-effort production audit of the static "
-                        "CONDICAO_IF subtype map. Disabled by default; synthetic subtype "
-                        "integrity is always validated by Category 1.")
-    p.add_argument("--registration-profile", action="store_true",
-                   help="Enable Cat 8 current-registration format, persisted-profile, and "
-                        "exact type-mix WARN checks.")
-    p.add_argument("--osias", action="store_true",
-                   help="Enable the opt-in Osias scenario rules as ERROR checks.")
+    p.add_argument(
+        "--validate-against",
+        default="union",
+        choices=["synthetic", "union"],
+        help="Resolve FK parents only within the synthetic output, or also against Oracle.",
+    )
+    p.add_argument(
+        "--max-residual-keys",
+        type=int,
+        default=1_000_000,
+        help="Max distinct child keys left unresolved by the synthetic output "
+        "that will be looked up in Oracle via IN-lists; above this the "
+        "FK is reported unresolved (WARN). Sized for large clone runs: "
+        "reference FKs like COMITENTE have one residual per distinct "
+        "child value (~1 per cloned IF).",
+    )
+    p.add_argument(
+        "--max-parent-keys",
+        type=int,
+        default=None,
+        help="Deprecated (parent key sets are no longer downloaded); ignored.",
+    )
+    p.add_argument(
+        "--emit-faltantes",
+        default=None,
+        help="Write the Oracle-verified orphan keys (Cat 3) as a "
+        "TABELA/COLUNA/VALOR Parquet at this path/URI — feed it to "
+        "engorda_instrumentos.py --faltantes-parquet to prune the "
+        "sampling domain on the next generation run. ACCUMULATES: "
+        "keys already at the path are kept; only new keys are "
+        "appended (a shrinking list made the loop non-convergent).",
+    )
+    p.add_argument(
+        "--skip-check",
+        action="append",
+        default=[],
+        help="Check-id prefix(es) to skip (repeatable), e.g. 6.combo.",
+    )
+    p.add_argument(
+        "--no-oracle",
+        action="store_true",
+        help="Do not read Oracle metadata (limits Categories 3/4/6).",
+    )
+    p.add_argument(
+        "--verify-subtype-map",
+        action="store_true",
+        help="Run the expensive best-effort production audit of the static "
+        "CONDICAO_IF subtype map. Disabled by default; synthetic subtype "
+        "integrity is always validated by Category 1.",
+    )
+    p.add_argument(
+        "--registration-profile",
+        action="store_true",
+        help="Enable Cat 8 current-registration format, persisted-profile, and "
+        "exact type-mix WARN checks.",
+    )
+    p.add_argument(
+        "--osias",
+        action="store_true",
+        help="Enable the opt-in Osias scenario rules as ERROR checks.",
+    )
     return p.parse_args()
 
 
 def create_spark() -> SparkSession:
-    spark = (SparkSession.builder
-             .appName("validate_products")
-             .getOrCreate())
+    spark = SparkSession.builder.appName("validate_products").getOrCreate()
     # Spark 3.5.0 (OCI Data Flow) + AQE + cached DataFrames silently LOSES JOIN
     # ROWS (SPARK-45282, fixed in 3.5.1). This validator caches every synthetic
     # table and joins over them — with AQE on, a check can false-PASS by losing
@@ -12758,7 +16169,8 @@ def main() -> None:
         application_capacities = _timed(
             "setup application capacity contract",
             lambda: load_application_capacity_contract(
-                spark, args.application_capacity_contract,
+                spark,
+                args.application_capacity_contract,
             ),
         )
 
@@ -12783,124 +16195,162 @@ def main() -> None:
     partial_reasons: List[str] = []
     findings += build_capability_findings(profile)
     if only:
-        partial_reasons.append(
-            "diagnostic --tables subset restricts coverage (no strict PASS)")
+        partial_reasons.append("diagnostic --tables subset restricts coverage (no strict PASS)")
     if args.no_oracle:
-        partial_reasons.append(
-            "--no-oracle disables required Oracle-backed metadata checks")
+        partial_reasons.append("--no-oracle disables required Oracle-backed metadata checks")
     if skip_prefixes:
-        partial_reasons.append(
-            f"--skip-check restricts coverage: {sorted(skip_prefixes)}")
+        partial_reasons.append(f"--skip-check restricts coverage: {sorted(skip_prefixes)}")
 
     # Product identity preflight — before any semantic check.
     findings += _timed(
         "category 0 identity",
         lambda: (
             check_credito_scr_identity(tables, profile, args.sample_size)
-            if is_credito_scr else check_dicre_identity(tables, profile, args.sample_size)
-            if is_dicre else check_product_identity(tables, profile, args.sample_size)
+            if is_credito_scr
+            else check_dicre_identity(tables, profile, args.sample_size)
+            if is_dicre
+            else check_product_identity(tables, profile, args.sample_size)
         ),
     )
     findings += _timed(
         "category 0 metadata coverage",
         lambda: (
             check_credito_scr_metadata(meta, args.no_oracle, profile)
-            if is_credito_scr else check_dicre_metadata(meta, args.no_oracle, profile)
-            if is_dicre else check_lci_metadata(meta, args.no_oracle, profile)
-            if is_lci else check_lca_metadata(meta, args.no_oracle, profile)
-            if is_lca else check_ccb_metadata(meta, args.no_oracle, profile)
-            if is_ccb else check_gravame_metadata(meta, args.no_oracle, profile)
-            if is_gravame else []
+            if is_credito_scr
+            else check_dicre_metadata(meta, args.no_oracle, profile)
+            if is_dicre
+            else check_lci_metadata(meta, args.no_oracle, profile)
+            if is_lci
+            else check_lca_metadata(meta, args.no_oracle, profile)
+            if is_lca
+            else check_ccb_metadata(meta, args.no_oracle, profile)
+            if is_ccb
+            else check_gravame_metadata(meta, args.no_oracle, profile)
+            if is_gravame
+            else []
         ),
     )
     if is_credito_scr:
         findings += _run_check_group(
-            "category 2d Credito SCR graph", ("2d.",), skip_prefixes,
+            "category 2d Credito SCR graph",
+            ("2d.",),
+            skip_prefixes,
             lambda: check_credito_scr_graph(tables, args.sample_size, profile),
         )
     elif is_dicre:
         findings += _run_check_group(
-            "category 2f DICRE graph", ("2f.",), skip_prefixes,
-            lambda: check_dicre_graph(tables, args.sample_size, profile)
-            + check_dicre_irop_graph(tables, args.sample_size, profile),
+            "category 2f DICRE graph",
+            ("2f.",),
+            skip_prefixes,
+            lambda: (
+                check_dicre_graph(tables, args.sample_size, profile)
+                + check_dicre_irop_graph(tables, args.sample_size, profile)
+            ),
         )
     else:
         if is_gravame:
             findings += _run_check_group(
-                "category 2i Gravame graph", ("2i.",), skip_prefixes,
+                "category 2i Gravame graph",
+                ("2i.",),
+                skip_prefixes,
                 lambda: check_gravame_graph(tables, args.sample_size, profile),
             )
         elif is_ccb:
             findings += _run_check_group(
-                "category 2h CCB graph", ("2h.",), skip_prefixes,
+                "category 2h CCB graph",
+                ("2h.",),
+                skip_prefixes,
                 lambda: check_ccb_graph(tables, args.sample_size, profile),
             )
         elif is_lci:
             findings += _run_check_group(
-                "category 2e LCI graph", ("2e.",), skip_prefixes,
+                "category 2e LCI graph",
+                ("2e.",),
+                skip_prefixes,
                 lambda: check_lci_graph(tables, args.sample_size, profile),
             )
         elif is_lca:
             findings += _run_check_group(
-                "category 2g LCA graph", ("2g.",), skip_prefixes,
+                "category 2g LCA graph",
+                ("2g.",),
+                skip_prefixes,
                 lambda: check_lca_graph(tables, args.sample_size, profile),
             )
         polymorphism_prefixes = (
             ("2e.condition_polymorphism", "2e.unknown_condition_type", "2e.subtype_orphan")
-            if is_lci else
-            ("2g.condition_polymorphism", "2g.unknown_condition_type", "2g.subtype_orphan")
-            if is_lca else
-            ("2h.condition_polymorphism", "2h.unknown_condition_type", "2h.subtype_orphan")
-            if is_ccb else () if is_gravame else ("1.", "1a.", "1b.", "1c.")
+            if is_lci
+            else ("2g.condition_polymorphism", "2g.unknown_condition_type", "2g.subtype_orphan")
+            if is_lca
+            else ("2h.condition_polymorphism", "2h.unknown_condition_type", "2h.subtype_orphan")
+            if is_ccb
+            else ()
+            if is_gravame
+            else ("1.", "1a.", "1b.", "1c.")
         )
         findings += _run_check_group(
-            "category 1 polymorphism", polymorphism_prefixes, skip_prefixes,
+            "category 1 polymorphism",
+            polymorphism_prefixes,
+            skip_prefixes,
             lambda: (
                 check_lci_polymorphism(tables, args.sample_size, profile)
-                if is_lci else check_lca_polymorphism(tables, args.sample_size, profile)
-                if is_lca else check_ccb_polymorphism(tables, args.sample_size, profile)
-                if is_ccb else [] if is_gravame else check_polymorphism(
-                    tables, meta, args.sample_size
-                )
+                if is_lci
+                else check_lca_polymorphism(tables, args.sample_size, profile)
+                if is_lca
+                else check_ccb_polymorphism(tables, args.sample_size, profile)
+                if is_ccb
+                else []
+                if is_gravame
+                else check_polymorphism(tables, meta, args.sample_size)
             ),
         )
         if args.shape_baseline and not is_gravame:
             findings += _run_check_group(
-                "category 1 baseline subtype verification", ("1.map_snapshot",), skip_prefixes,
+                "category 1 baseline subtype verification",
+                ("1.map_snapshot",),
+                skip_prefixes,
                 lambda: verify_subtype_map_from_baseline(spark, args.shape_baseline),
             )
         if not is_gravame and not args.no_oracle and args.verify_subtype_map:
             findings += _run_check_group(
-                "category 1 Oracle subtype verification", ("1.map_verify",), skip_prefixes,
+                "category 1 Oracle subtype verification",
+                ("1.map_verify",),
+                skip_prefixes,
                 lambda: verify_subtype_map_against_production(spark, cfg),
             )
         elif not is_gravame and not args.no_oracle:
-            logger.info(
-                "Production subtype-map audit skipped; use --verify-subtype-map to run it."
-            )
+            logger.info("Production subtype-map audit skipped; use --verify-subtype-map to run it.")
         if is_ccb:
             findings += _run_check_group(
-                "category 2h CCB variants", ("2h.resgate", "2h.variant"), skip_prefixes,
+                "category 2h CCB variants",
+                ("2h.resgate", "2h.variant"),
+                skip_prefixes,
                 lambda: check_ccb_variant_rules(tables, args.sample_size, profile),
             )
         elif not is_gravame:
             findings += _run_check_group(
-                "category 2 domain", ("2.domain",), skip_prefixes,
+                "category 2 domain",
+                ("2.domain",),
+                skip_prefixes,
                 lambda: check_domain(tables, meta, args.sample_size, profile),
             )
             findings += _run_check_group(
-                "category 2b CDB variants", ("2b.",), skip_prefixes,
+                "category 2b CDB variants",
+                ("2b.",),
+                skip_prefixes,
                 lambda: check_cdb_variant_rules(tables, args.sample_size, profile),
             )
             findings += _run_check_group(
-                "category 2c RDB resgate schedules", ("2c.",), skip_prefixes,
+                "category 2c RDB resgate schedules",
+                ("2c.",),
+                skip_prefixes,
                 lambda: check_rdb_resgate_schedule_rules(tables, args.sample_size, profile),
             )
     if args.max_parent_keys is not None:
-        logger.warning("--max-parent-keys is deprecated and ignored; "
-                       "see --max-residual-keys.")
+        logger.warning("--max-parent-keys is deprecated and ignored; see --max-residual-keys.")
     findings += _run_check_group(
-        "category 9 Osias ERROR profile", ("9.osias.",), skip_prefixes,
+        "category 9 Osias ERROR profile",
+        ("9.osias.",),
+        skip_prefixes,
         lambda: check_osias(tables, args.sample_size, profile, args.osias),
     )
     referential_prefixes = ("3.fk_", "3.shared_key")
@@ -12911,22 +16361,33 @@ def main() -> None:
         ref_findings, faltantes = _timed(
             "category 3 referential",
             lambda: check_referential(
-                spark, cfg, tables, meta, args.sample_size,
-                args.validate_against, args.max_residual_keys, skip_prefixes,
+                spark,
+                cfg,
+                tables,
+                meta,
+                args.sample_size,
+                args.validate_against,
+                args.max_residual_keys,
+                skip_prefixes,
             ),
         )
         ref_findings = [
-            finding for finding in ref_findings
+            finding
+            for finding in ref_findings
             if not _check_is_skipped(finding.check_id, skip_prefixes)
         ]
     findings += ref_findings
     findings += _run_check_group(
-        "category 3b primary keys", ("3b.",), skip_prefixes,
+        "category 3b primary keys",
+        ("3b.",),
+        skip_prefixes,
         lambda: check_primary_keys(tables, meta, args.sample_size, args.no_oracle),
     )
     if not is_non_if:
         findings += _run_check_group(
-            "category 3c clone map", ("3c.",), skip_prefixes,
+            "category 3c clone map",
+            ("3c.",),
+            skip_prefixes,
             lambda: check_clone_map(tables, profile, args.sample_size),
         )
     if args.emit_faltantes and not _check_is_skipped("3.fk_orphan", skip_prefixes):
@@ -12935,36 +16396,51 @@ def main() -> None:
             lambda: emit_faltantes(spark, args.emit_faltantes, faltantes),
         )
     findings += _run_check_group(
-        "category 4 not null", ("4.not_null",), skip_prefixes,
+        "category 4 not null",
+        ("4.not_null",),
+        skip_prefixes,
         lambda: check_not_null(tables, meta, args.sample_size),
     )
     findings += _run_check_group(
-        "category 4 capacity", ("4.capacity",), skip_prefixes,
+        "category 4 capacity",
+        ("4.capacity",),
+        skip_prefixes,
         lambda: check_capacity(tables, meta, application_capacities, args.sample_size),
     )
     findings += _run_check_group(
-        "category 5 dates", ("5.",), skip_prefixes,
+        "category 5 dates",
+        ("5.",),
+        skip_prefixes,
         lambda: check_dates(tables, meta, args.sample_size),
     )
     if is_ccb:
         findings += _run_check_group(
-            "category 5h CCB dates", ("5h.",), skip_prefixes,
+            "category 5h CCB dates",
+            ("5h.",),
+            skip_prefixes,
             lambda: check_ccb_dates(tables, args.sample_size, profile),
         )
     elif is_gravame:
         findings += _run_check_group(
-            "category 5i Gravame dates", ("5i.",), skip_prefixes,
+            "category 5i Gravame dates",
+            ("5i.",),
+            skip_prefixes,
             lambda: check_gravame_dates(tables, args.sample_size, profile),
         )
     if is_credito_scr:
         if args.no_oracle:
-            credito_lookups, credito_lookup_errors = {}, {
-                name: "No Oracle connection"
-                for name in (
-                    "MODALIDADE_CREDITO", "PARAMETRO_BASE_CREDITO",
-                    "TCTPFEATURE_TOGGLE", "CREDITO_SCR_TARGET",
-                )
-            }
+            credito_lookups, credito_lookup_errors = (
+                {},
+                {
+                    name: "No Oracle connection"
+                    for name in (
+                        "MODALIDADE_CREDITO",
+                        "PARAMETRO_BASE_CREDITO",
+                        "TCTPFEATURE_TOGGLE",
+                        "CREDITO_SCR_TARGET",
+                    )
+                },
+            )
         else:
             credito_lookups, credito_lookup_errors = _timed(
                 "category 6d Credito SCR target lookup setup",
@@ -12973,19 +16449,31 @@ def main() -> None:
                 ),
             )
         findings += _run_check_group(
-            "category 6d Credito SCR target lookups", ("6d.",), skip_prefixes,
+            "category 6d Credito SCR target lookups",
+            ("6d.",),
+            skip_prefixes,
             lambda: check_credito_scr_target_frames(
-                tables, credito_lookups.get("MODALIDADE_CREDITO"),
+                tables,
+                credito_lookups.get("MODALIDADE_CREDITO"),
                 credito_lookups.get("PARAMETRO_BASE_CREDITO"),
-                credito_lookups.get("TCTPFEATURE_TOGGLE"), args.sample_size, profile,
-                credito_lookup_errors, credito_lookups.get("CONTA_PARTICIPANTE"),
-                args.registration_profile, credito_lookups.get("CREDITO_SCR_TARGET"),
+                credito_lookups.get("TCTPFEATURE_TOGGLE"),
+                args.sample_size,
+                profile,
+                credito_lookup_errors,
+                credito_lookups.get("CONTA_PARTICIPANTE"),
+                args.registration_profile,
+                credito_lookups.get("CREDITO_SCR_TARGET"),
             ),
         )
         findings += _run_check_group(
-            "category 8d Credito SCR insertion profile", ("8d.",), skip_prefixes,
+            "category 8d Credito SCR insertion profile",
+            ("8d.",),
+            skip_prefixes,
             lambda: check_credito_scr_registration_profile(
-                tables, args.sample_size, args.registration_profile, profile,
+                tables,
+                args.sample_size,
+                args.registration_profile,
+                profile,
             ),
         )
     elif is_dicre:
@@ -12993,28 +16481,46 @@ def main() -> None:
             logger.info("Skipped category 6f DICRE target lookup setup (--skip-check).")
         else:
             if args.no_oracle:
-                dicre_lookups, dicre_lookup_errors = {}, {
-                    name: "No Oracle connection"
-                    for name in (
-                        "DICRE_ACCOUNTS", "DICRE_BASES", "DICRE_IF_COMPATIBILITY",
-                        "DICRE_QUALIFICATIONS", "TCTPFEATURE_TOGGLE", "CREDITO_DC_TARGET",
-                    )
-                }
+                dicre_lookups, dicre_lookup_errors = (
+                    {},
+                    {
+                        name: "No Oracle connection"
+                        for name in (
+                            "DICRE_ACCOUNTS",
+                            "DICRE_BASES",
+                            "DICRE_IF_COMPATIBILITY",
+                            "DICRE_QUALIFICATIONS",
+                            "TCTPFEATURE_TOGGLE",
+                            "CREDITO_DC_TARGET",
+                        )
+                    },
+                )
             else:
                 dicre_lookups, dicre_lookup_errors = _timed(
                     "category 6f DICRE target lookup setup",
                     lambda: load_dicre_target_frames(spark, cfg, tables),
                 )
             findings += _run_check_group(
-                "category 6f DICRE target eligibility", ("6f.",), skip_prefixes,
+                "category 6f DICRE target eligibility",
+                ("6f.",),
+                skip_prefixes,
                 lambda: check_dicre_target_frames(
-                    tables, dicre_lookups, args.sample_size, profile, dicre_lookup_errors,
+                    tables,
+                    dicre_lookups,
+                    args.sample_size,
+                    profile,
+                    dicre_lookup_errors,
                 ),
             )
         findings += _run_check_group(
-            "category 8f DICRE insertion profile", ("8f.",), skip_prefixes,
+            "category 8f DICRE insertion profile",
+            ("8f.",),
+            skip_prefixes,
             lambda: check_dicre_registration_profile(
-                tables, args.sample_size, args.registration_profile, profile,
+                tables,
+                args.sample_size,
+                args.registration_profile,
+                profile,
             ),
         )
     elif is_gravame:
@@ -13022,13 +16528,18 @@ def main() -> None:
             logger.info("Skipped category 6i Gravame target lookup setup (--skip-check).")
         else:
             if args.no_oracle:
-                gravame_lookups, gravame_lookup_errors = {}, {
-                    name: "No Oracle connection"
-                    for name in (
-                        "GRAVAME_TIPO_IF", "GRAVAME_OBJECT_SERVICE", "GRAVAME_ROUTES",
-                        "GRAVAME_GUARANTEES",
-                    )
-                }
+                gravame_lookups, gravame_lookup_errors = (
+                    {},
+                    {
+                        name: "No Oracle connection"
+                        for name in (
+                            "GRAVAME_TIPO_IF",
+                            "GRAVAME_OBJECT_SERVICE",
+                            "GRAVAME_ROUTES",
+                            "GRAVAME_GUARANTEES",
+                        )
+                    },
+                )
             else:
                 gravame_lookups, gravame_lookup_errors = _timed(
                     "category 6i Gravame target lookup setup",
@@ -13037,24 +16548,42 @@ def main() -> None:
                     ),
                 )
             findings += _run_check_group(
-                "category 6i Gravame target eligibility", ("6i.",), skip_prefixes,
+                "category 6i Gravame target eligibility",
+                ("6i.",),
+                skip_prefixes,
                 lambda: check_gravame_target_frames(
-                    tables, gravame_lookups, args.sample_size, profile,
+                    tables,
+                    gravame_lookups,
+                    args.sample_size,
+                    profile,
                     gravame_lookup_errors,
                 ),
             )
         findings += _run_check_group(
-            "category 7 Gravame shapes", ("7.", "7a.", "7b."), skip_prefixes,
+            "category 7 Gravame shapes",
+            ("7.", "7a.", "7b."),
+            skip_prefixes,
             lambda: check_shapes(
-                spark, tables, args.shape_baseline, args.sample_size,
-                args.shape_unseen_tol, args.shape_drift_tol, args.shape_op_ratio_tol, profile,
+                spark,
+                tables,
+                args.shape_baseline,
+                args.sample_size,
+                args.shape_unseen_tol,
+                args.shape_drift_tol,
+                args.shape_op_ratio_tol,
+                profile,
                 skip_prefixes,
             ),
         )
         findings += _run_check_group(
-            "category 8i Gravame insertion profile", ("8i.",), skip_prefixes,
+            "category 8i Gravame insertion profile",
+            ("8i.",),
+            skip_prefixes,
             lambda: check_gravame_registration_profile(
-                tables, args.sample_size, args.registration_profile, profile,
+                tables,
+                args.sample_size,
+                args.registration_profile,
+                profile,
             ),
         )
     elif is_ccb:
@@ -13062,35 +16591,55 @@ def main() -> None:
             logger.info("Skipped category 6h CCB target lookup setup (--skip-check).")
         else:
             if args.no_oracle:
-                ccb_lookups, ccb_lookup_errors = {}, {
-                    name: "No Oracle connection"
-                    for name in ("CCB_TIPO_IF", "CCB_OBJECT_SERVICE", "CCB_ROUTES")
-                }
+                ccb_lookups, ccb_lookup_errors = (
+                    {},
+                    {
+                        name: "No Oracle connection"
+                        for name in ("CCB_TIPO_IF", "CCB_OBJECT_SERVICE", "CCB_ROUTES")
+                    },
+                )
             else:
                 ccb_lookups, ccb_lookup_errors = _timed(
                     "category 6h CCB target lookup setup",
-                    lambda: load_ccb_target_frames(
-                        spark, cfg, tables, skip_prefixes=skip_prefixes
-                    ),
+                    lambda: load_ccb_target_frames(spark, cfg, tables, skip_prefixes=skip_prefixes),
                 )
             findings += _run_check_group(
-                "category 6h CCB target eligibility", ("6h.",), skip_prefixes,
+                "category 6h CCB target eligibility",
+                ("6h.",),
+                skip_prefixes,
                 lambda: check_ccb_target_frames(
-                    tables, ccb_lookups, args.sample_size, profile, ccb_lookup_errors,
+                    tables,
+                    ccb_lookups,
+                    args.sample_size,
+                    profile,
+                    ccb_lookup_errors,
                 ),
             )
         findings += _run_check_group(
-            "category 7 CCB shapes", ("7.", "7a.", "7b."), skip_prefixes,
+            "category 7 CCB shapes",
+            ("7.", "7a.", "7b."),
+            skip_prefixes,
             lambda: check_shapes(
-                spark, tables, args.shape_baseline, args.sample_size,
-                args.shape_unseen_tol, args.shape_drift_tol, args.shape_op_ratio_tol, profile,
+                spark,
+                tables,
+                args.shape_baseline,
+                args.sample_size,
+                args.shape_unseen_tol,
+                args.shape_drift_tol,
+                args.shape_op_ratio_tol,
+                profile,
                 skip_prefixes,
             ),
         )
         findings += _run_check_group(
-            "category 8h CCB insertion profile", ("8h.",), skip_prefixes,
+            "category 8h CCB insertion profile",
+            ("8h.",),
+            skip_prefixes,
             lambda: check_ccb_registration_profile(
-                tables, args.sample_size, args.registration_profile, profile,
+                tables,
+                args.sample_size,
+                args.registration_profile,
+                profile,
             ),
         )
     elif is_lci:
@@ -13098,40 +16647,67 @@ def main() -> None:
             logger.info("Skipped category 6e LCI target lookup setup (--skip-check).")
         else:
             if args.no_oracle:
-                lci_lookups, lci_lookup_errors = {}, {
-                    name: "No Oracle connection"
-                    for name in (
-                        "LCI_TIPO_IF", "LCI_LOTES", "LCI_ACCOUNTS", "LCI_OBJECT_SERVICE",
-                        "LCI_ROUTES", "LCI_ROOT_CODES", "LCI_TOGGLE", "LCI_CONTROLS",
-                        "LCI_OPERATION_CODES", "LCI_WALLET_COMITENTE",
-                        "LCI_WALLET_PARTICIPANTE",
-                    )
-                }
+                lci_lookups, lci_lookup_errors = (
+                    {},
+                    {
+                        name: "No Oracle connection"
+                        for name in (
+                            "LCI_TIPO_IF",
+                            "LCI_LOTES",
+                            "LCI_ACCOUNTS",
+                            "LCI_OBJECT_SERVICE",
+                            "LCI_ROUTES",
+                            "LCI_ROOT_CODES",
+                            "LCI_TOGGLE",
+                            "LCI_CONTROLS",
+                            "LCI_OPERATION_CODES",
+                            "LCI_WALLET_COMITENTE",
+                            "LCI_WALLET_PARTICIPANTE",
+                        )
+                    },
+                )
             else:
                 lci_lookups, lci_lookup_errors = _timed(
                     "category 6e LCI target lookup setup",
-                    lambda: load_lci_target_frames(
-                        spark, cfg, tables, skip_prefixes=skip_prefixes
-                    ),
+                    lambda: load_lci_target_frames(spark, cfg, tables, skip_prefixes=skip_prefixes),
                 )
             findings += _run_check_group(
-                "category 6e LCI target eligibility", ("6e.",), skip_prefixes,
+                "category 6e LCI target eligibility",
+                ("6e.",),
+                skip_prefixes,
                 lambda: check_lci_target_frames(
-                    tables, lci_lookups, args.sample_size, profile, lci_lookup_errors,
+                    tables,
+                    lci_lookups,
+                    args.sample_size,
+                    profile,
+                    lci_lookup_errors,
                 ),
             )
         findings += _run_check_group(
-            "category 7 LCI shapes", ("7.", "7a.", "7b."), skip_prefixes,
+            "category 7 LCI shapes",
+            ("7.", "7a.", "7b."),
+            skip_prefixes,
             lambda: check_shapes(
-                spark, tables, args.shape_baseline, args.sample_size,
-                args.shape_unseen_tol, args.shape_drift_tol, args.shape_op_ratio_tol, profile,
+                spark,
+                tables,
+                args.shape_baseline,
+                args.sample_size,
+                args.shape_unseen_tol,
+                args.shape_drift_tol,
+                args.shape_op_ratio_tol,
+                profile,
                 skip_prefixes,
             ),
         )
         findings += _run_check_group(
-            "category 8e LCI insertion profile", ("8e.",), skip_prefixes,
+            "category 8e LCI insertion profile",
+            ("8e.",),
+            skip_prefixes,
             lambda: check_lci_registration_profile(
-                tables, args.sample_size, args.registration_profile, profile,
+                tables,
+                args.sample_size,
+                args.registration_profile,
+                profile,
             ),
         )
     elif is_lca:
@@ -13139,62 +16715,112 @@ def main() -> None:
             logger.info("Skipped category 6g LCA target lookup setup (--skip-check).")
         else:
             if args.no_oracle:
-                lca_lookups, lca_lookup_errors = {}, {
-                    name: "No Oracle connection"
-                    for name in (
-                        "LCA_TIPO_IF", "LCA_LOTES", "LCA_ACCOUNTS", "LCA_OBJECT_SERVICE",
-                        "LCA_ROUTES", "LCA_ROOT_CODES", "LCA_TOGGLE", "LCA_CONTROLS",
-                        "LCA_OPERATION_CODES", "LCA_WALLET_COMITENTE",
-                        "LCA_WALLET_PARTICIPANTE", "LCA_MUNICIPALITIES", "LCA_UFS",
-                    )
-                }
+                lca_lookups, lca_lookup_errors = (
+                    {},
+                    {
+                        name: "No Oracle connection"
+                        for name in (
+                            "LCA_TIPO_IF",
+                            "LCA_LOTES",
+                            "LCA_ACCOUNTS",
+                            "LCA_OBJECT_SERVICE",
+                            "LCA_ROUTES",
+                            "LCA_ROOT_CODES",
+                            "LCA_TOGGLE",
+                            "LCA_CONTROLS",
+                            "LCA_OPERATION_CODES",
+                            "LCA_WALLET_COMITENTE",
+                            "LCA_WALLET_PARTICIPANTE",
+                            "LCA_MUNICIPALITIES",
+                            "LCA_UFS",
+                        )
+                    },
+                )
             else:
                 lca_lookups, lca_lookup_errors = _timed(
                     "category 6g LCA target lookup setup",
-                    lambda: load_lca_target_frames(
-                        spark, cfg, tables, skip_prefixes=skip_prefixes
-                    ),
+                    lambda: load_lca_target_frames(spark, cfg, tables, skip_prefixes=skip_prefixes),
                 )
             findings += _run_check_group(
-                "category 6g LCA target eligibility", ("6g.",), skip_prefixes,
+                "category 6g LCA target eligibility",
+                ("6g.",),
+                skip_prefixes,
                 lambda: check_lca_target_frames(
-                    tables, lca_lookups, args.sample_size, profile, lca_lookup_errors,
+                    tables,
+                    lca_lookups,
+                    args.sample_size,
+                    profile,
+                    lca_lookup_errors,
                 ),
             )
         findings += _run_check_group(
-            "category 7 LCA shapes", ("7.", "7a.", "7b."), skip_prefixes,
+            "category 7 LCA shapes",
+            ("7.", "7a.", "7b."),
+            skip_prefixes,
             lambda: check_shapes(
-                spark, tables, args.shape_baseline, args.sample_size,
-                args.shape_unseen_tol, args.shape_drift_tol, args.shape_op_ratio_tol, profile,
+                spark,
+                tables,
+                args.shape_baseline,
+                args.sample_size,
+                args.shape_unseen_tol,
+                args.shape_drift_tol,
+                args.shape_op_ratio_tol,
+                profile,
                 skip_prefixes,
             ),
         )
         findings += _run_check_group(
-            "category 8g LCA insertion profile", ("8g.",), skip_prefixes,
+            "category 8g LCA insertion profile",
+            ("8g.",),
+            skip_prefixes,
             lambda: check_lca_registration_profile(
-                tables, args.sample_size, args.registration_profile, profile,
+                tables,
+                args.sample_size,
+                args.registration_profile,
+                profile,
             ),
         )
     else:
         findings += _run_check_group(
-            "category 6 lookup combinations", ("6.required", "6.combo"), skip_prefixes,
+            "category 6 lookup combinations",
+            ("6.required", "6.combo"),
+            skip_prefixes,
             lambda: check_lookup_combos(
-                spark, cfg, tables, meta, args.sample_size, args.max_residual_keys, profile,
+                spark,
+                cfg,
+                tables,
+                meta,
+                args.sample_size,
+                args.max_residual_keys,
+                profile,
                 skip_prefixes,
             ),
         )
         findings += _run_check_group(
-            "category 7 shapes", ("7.", "7a.", "7b.", "7c.", "7d."), skip_prefixes,
+            "category 7 shapes",
+            ("7.", "7a.", "7b.", "7c.", "7d."),
+            skip_prefixes,
             lambda: check_shapes(
-                spark, tables, args.shape_baseline, args.sample_size,
-                args.shape_unseen_tol, args.shape_drift_tol, args.shape_op_ratio_tol, profile,
+                spark,
+                tables,
+                args.shape_baseline,
+                args.sample_size,
+                args.shape_unseen_tol,
+                args.shape_drift_tol,
+                args.shape_op_ratio_tol,
+                profile,
                 skip_prefixes,
             ),
         )
         findings += _run_check_group(
-            "category 8 log invariants", ("8",), skip_prefixes,
+            "category 8 log invariants",
+            ("8",),
+            skip_prefixes,
             lambda: check_log_invariants(
-                tables, args.sample_size, args.registration_profile, profile,
+                tables,
+                args.sample_size,
+                args.registration_profile,
+                profile,
             ),
         )
 
@@ -13203,8 +16829,14 @@ def main() -> None:
         try:
             baseline = json.loads(read_text(spark, args.shape_baseline))
             identity_fields = (
-                "schema_version", "product", "num_tipo_if", "domain_version",
-                "metric_version", "map_mode", "source_key_count", "source_key_fingerprint",
+                "schema_version",
+                "product",
+                "num_tipo_if",
+                "domain_version",
+                "metric_version",
+                "map_mode",
+                "source_key_count",
+                "source_key_fingerprint",
             )
             baseline_identity = {
                 "path": args.shape_baseline,
@@ -13220,9 +16852,18 @@ def main() -> None:
     code = _timed(
         "report emission",
         lambda: emit_report(
-            spark, findings, args.report_path, args.fail_severity, profile,
-            cfg.synthetic_base, list(tables), partial_reasons,
-            baseline_identity, runtime_identity, args.allow_partial, args.no_oracle,
+            spark,
+            findings,
+            args.report_path,
+            args.fail_severity,
+            profile,
+            cfg.synthetic_base,
+            list(tables),
+            partial_reasons,
+            baseline_identity,
+            runtime_identity,
+            args.allow_partial,
+            args.no_oracle,
             args.osias,
         ),
     )

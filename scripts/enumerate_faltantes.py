@@ -46,13 +46,13 @@ canonical key string that engorda_instrumentos._norm_key_col produces
 ('343237623', never '343237623.0000000000'). Drift grows with time: re-run
 this job right before each regeneration.
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import logging
 import os
-import sys
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -197,9 +197,7 @@ def build_domain_keys(tables: Dict[str, DataFrame]) -> DataFrame:
     res = active_rows(tables["RESGATE"], "RESGATE")
     res_col = _ci(res, "COD_COND_RESGATE")
     res_ok = res.where(F.upper(F.trim(F.col(res_col).cast("string"))) == "SEM TABELA")
-    res_keys = res_ok.select(
-        F.col(_ci(res, CONDICAO_IF_KEY)).cast("long").alias(CONDICAO_IF_KEY)
-    )
+    res_keys = res_ok.select(F.col(_ci(res, CONDICAO_IF_KEY)).cast("long").alias(CONDICAO_IF_KEY))
     cif_with_res = (
         cif.select(
             F.col(_ci(cif, CONDICAO_IF_KEY)).cast("long").alias(CONDICAO_IF_KEY),
@@ -239,8 +237,9 @@ def missing_keys(referenced: DataFrame, existing: DataFrame) -> DataFrame:
     return referenced.join(existing, "VALOR", "left_anti")
 
 
-def read_oracle_keys(spark: SparkSession, cfg: Config, table: str, column: str,
-                     partitions: int, fetch_size: int) -> DataFrame:
+def read_oracle_keys(
+    spark: SparkSession, cfg: Config, table: str, column: str, partitions: int, fetch_size: int
+) -> DataFrame:
     """The target's full key set for one parent table, as canonical VALOR
     strings. Partitioned single-column JDBC read (bounds from a MIN/MAX probe);
     falls back to a single-partition read when bounds are unusable."""
@@ -273,17 +272,23 @@ def read_oracle_keys(spark: SparkSession, cfg: Config, table: str, column: str,
             .option("upperBound", str(int(mx)))
             .option("numPartitions", str(partitions))
         )
-        logger.info("Oracle %s.%s: partitioned read, bounds [%s, %s] x %d partitions.",
-                    fq, column, mn, mx, partitions)
+        logger.info(
+            "Oracle %s.%s: partitioned read, bounds [%s, %s] x %d partitions.",
+            fq,
+            column,
+            mn,
+            mx,
+            partitions,
+        )
     else:
-        logger.info("Oracle %s.%s: single-partition read (bounds %s..%s).",
-                    fq, column, mn, mx)
+        logger.info("Oracle %s.%s: single-partition read (bounds %s..%s).", fq, column, mn, mx)
     df = reader.load()
     return df.select(_norm_key(F.col(df.columns[0])).alias("VALOR")).dropDuplicates()
 
 
-def preserved_rows(existing: DataFrame,
-                   replaced_pairs: List[Tuple[str, str]]) -> List[Tuple[str, str, str]]:
+def preserved_rows(
+    existing: DataFrame, replaced_pairs: List[Tuple[str, str]]
+) -> List[Tuple[str, str, str]]:
     """Rows of an existing faltantes file whose (TABELA, COLUNA) — normalized
     the way the generator normalizes them — is NOT among the pairs this job
     replaces. Collected to the driver (materialized) so the same path can be
@@ -302,10 +307,7 @@ def preserved_rows(existing: DataFrame,
         F.col(cm["VALOR"]).cast("string"),
     ).collect()
     replaced = {(_norm_pair(t, c)) for t, c in replaced_pairs}
-    return [
-        (r[0], r[1], r[2]) for r in rows
-        if _norm_pair(r[0] or "", r[1] or "") not in replaced
-    ]
+    return [(r[0], r[1], r[2]) for r in rows if _norm_pair(r[0] or "", r[1] or "") not in replaced]
 
 
 # ---------------------------------------------------------------------------
@@ -317,8 +319,12 @@ def run_selftest(spark: SparkSession) -> None:
     dec = "decimal(22,10)"
     tables = {
         ROOT_TABLE: spark.createDataFrame(
-            [(D(1001), D(49), None), (D(1002), D(49), None), (D(1003), D(22), None),
-             (D(1004), D(49), "2020-01-01")],
+            [
+                (D(1001), D(49), None),
+                (D(1002), D(49), None),
+                (D(1003), D(22), None),
+                (D(1004), D(49), "2020-01-01"),
+            ],
             f"NUM_IF {dec}, NUM_TIPO_IF {dec}, DAT_EXCLUSAO string",
         ),
         "TITULO": spark.createDataFrame(
@@ -336,8 +342,12 @@ def run_selftest(spark: SparkSession) -> None:
         CHILD_TABLE: spark.createDataFrame(
             # 1001 in domain: ent 111 exists / 222 missing; conta 95 exists / 96 missing
             # 1002 out of domain (COM TABELA): ent 333 must NOT appear under 'domain'
-            [(D(1001), D(111), D(95)), (D(1001), D(222), D(96)),
-             (D(1002), D(333), D(95)), (D(1003), D(444), D(95))],
+            [
+                (D(1001), D(111), D(95)),
+                (D(1001), D(222), D(96)),
+                (D(1002), D(333), D(95)),
+                (D(1003), D(444), D(95)),
+            ],
             f"NUM_IF {dec}, NUM_ID_ENTIDADE {dec}, NUM_CONTA {dec}",
         ),
     }
@@ -369,9 +379,11 @@ def run_selftest(spark: SparkSession) -> None:
     # Merge: enumerated pairs are replaced, foreign pairs preserved (incl.
     # schema-qualified TABELA spellings, normalized like the generator does).
     existing = spark.createDataFrame(
-        [("CETIP.CARTEIRA_COMITENTE", "NUM_ID_ENTIDADE", "999"),
-         ("carteira_comitente", "num_conta", "888"),
-         ("OPERACAO", "NUM_ID_TRANSF_ARQ_P1", "7")],
+        [
+            ("CETIP.CARTEIRA_COMITENTE", "NUM_ID_ENTIDADE", "999"),
+            ("carteira_comitente", "num_conta", "888"),
+            ("OPERACAO", "NUM_ID_TRANSF_ARQ_P1", "7"),
+        ],
         "TABELA string, COLUNA string, VALOR string",
     )
     kept = preserved_rows(existing, [(CHILD_TABLE, c) for c, _, _ in TARGETS])
@@ -386,6 +398,7 @@ def run_selftest(spark: SparkSession) -> None:
 def _canon(value) -> str:
     """Python-side twin of _norm_key (validator's _canon_key)."""
     import re
+
     s = str(value).strip()
     if re.fullmatch(r"-?\d+\.\d*0*", s):
         s = s.rstrip("0").rstrip(".")
@@ -399,8 +412,9 @@ def _parse_explain(txt: str) -> List[Tuple[str, List[str]]]:
         if not grupo:
             continue
         if "=" not in grupo:
-            raise SystemExit(f"--explain-keys: bad group {grupo!r} "
-                             "(expected COLUNA=v1,v2;COLUNA2=v3)")
+            raise SystemExit(
+                f"--explain-keys: bad group {grupo!r} (expected COLUNA=v1,v2;COLUNA2=v3)"
+            )
         col, vals = grupo.split("=", 1)
         keys = [_canon(v) for v in vals.split(",") if v.strip()]
         if keys:
@@ -408,16 +422,15 @@ def _parse_explain(txt: str) -> List[Tuple[str, List[str]]]:
     return out
 
 
-def _oracle_in_list(spark: SparkSession, cfg: Config, table: str, column: str,
-                    keys: List[str]) -> set:
+def _oracle_in_list(
+    spark: SparkSession, cfg: Config, table: str, column: str, keys: List[str]
+) -> set:
     """Canonical keys of `keys` that exist in the Oracle parent RIGHT NOW
     (single-partition IN-list probe, same shape as the validator's check)."""
     lits = ", ".join(
-        k if k.lstrip("-").isdigit() else "'" + k.replace("'", "''") + "'"
-        for k in keys
+        k if k.lstrip("-").isdigit() else "'" + k.replace("'", "''") + "'" for k in keys
     )
-    q = (f"(SELECT DISTINCT {column} FROM {cfg.schema}.{table} "
-         f"WHERE {column} IN ({lits})) t")
+    q = f"(SELECT DISTINCT {column} FROM {cfg.schema}.{table} WHERE {column} IN ({lits})) t"
     df = (
         spark.read.format("jdbc")
         .option("url", cfg.jdbc_url)
@@ -451,8 +464,7 @@ def run_explain(spark: SparkSession, cfg: Config, args) -> None:
     if args.mapa:
         m = spark.read.parquet(args.mapa)
         mc = _ci(m, "NUM_IF_ORIG")
-        mapa_orig = (m.select(F.col(mc).cast("long").alias(ROOT_KEY))
-                     .dropDuplicates().cache())
+        mapa_orig = m.select(F.col(mc).cast("long").alias(ROOT_KEY)).dropDuplicates().cache()
 
     faltantes_rows: List[Tuple[Tuple[str, str], str]] = []
     if args.output:
@@ -463,11 +475,11 @@ def run_explain(spark: SparkSession, cfg: Config, args) -> None:
                 (_norm_pair(str(r[0] or ""), str(r[1] or "")), _canon(r[2]))
                 for r in f.select(cm["TABELA"], cm["COLUNA"], cm["VALOR"]).collect()
             ]
-            logger.info("explain: faltantes file at %s has %d row(s).",
-                        args.output, len(faltantes_rows))
+            logger.info(
+                "explain: faltantes file at %s has %d row(s).", args.output, len(faltantes_rows)
+            )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("explain: could not read faltantes at %s (%s)",
-                           args.output, exc)
+            logger.warning("explain: could not read faltantes at %s (%s)", args.output, exc)
 
     root = tables[ROOT_TABLE]
     rk = _ci(root, ROOT_KEY)
@@ -476,23 +488,28 @@ def run_explain(spark: SparkSession, cfg: Config, args) -> None:
     rs = _ci(root, "COD_SITUACAO_IF")
 
     dtypes = dict(root.dtypes)
-    logger.info("explain: root dtypes NUM_IF=%s NUM_TIPO_IF=%s DAT_EXCLUSAO=%s",
-                dtypes.get(rk), dtypes.get(rt), dtypes.get(rx))
+    logger.info(
+        "explain: root dtypes NUM_IF=%s NUM_TIPO_IF=%s DAT_EXCLUSAO=%s",
+        dtypes.get(rk),
+        dtypes.get(rt),
+        dtypes.get(rx),
+    )
 
     def raw_if_rows(ifs) -> list:
         # Evaluated predicates, not just printed values: a literal string "None"
         # in DAT_EXCLUSAO prints exactly like a real NULL but fails isNull().
-        sel = [F.col(rk).cast("long").alias("NUM_IF"),
-               F.col(rt).cast("string").alias("TIPO"),
-               (F.col(rt).cast("long") == CDB_TIPO_IF).alias("TIPO_OK"),
-               F.col(rx).cast("string").alias("EXCLUSAO"),
-               F.col(rx).isNull().alias("EXCL_ISNULL"),
-               F.length(F.col(rx).cast("string")).alias("EXCL_LEN"),
-               F.input_file_name().alias("FILE")]
+        sel = [
+            F.col(rk).cast("long").alias("NUM_IF"),
+            F.col(rt).cast("string").alias("TIPO"),
+            (F.col(rt).cast("long") == CDB_TIPO_IF).alias("TIPO_OK"),
+            F.col(rx).cast("string").alias("EXCLUSAO"),
+            F.col(rx).isNull().alias("EXCL_ISNULL"),
+            F.length(F.col(rx).cast("string")).alias("EXCL_LEN"),
+            F.input_file_name().alias("FILE"),
+        ]
         if rs:
             sel.append(F.col(rs).cast("string").alias("SITUACAO"))
-        return (root.where(F.col(rk).cast("long").isin([int(v) for v in ifs]))
-                .select(*sel).collect())
+        return root.where(F.col(rk).cast("long").isin([int(v) for v in ifs])).select(*sel).collect()
 
     num_if = _ci(child, ROOT_KEY)
     for col_name, keys in groups:
@@ -502,104 +519,160 @@ def run_explain(spark: SparkSession, cfg: Config, args) -> None:
         parent_table, parent_col = parent_by_col[col_name]
         col = _ci(child, col_name)
         rows = (
-            child.select(F.col(num_if).cast("long").alias(ROOT_KEY),
-                         _norm_key(F.col(col)).alias("VALOR"))
+            child.select(
+                F.col(num_if).cast("long").alias(ROOT_KEY), _norm_key(F.col(col)).alias("VALOR")
+            )
             .where(F.col("VALOR").isin(keys))
             .cache()
         )
-        agg = {r["VALOR"]: r for r in rows.groupBy("VALOR").agg(
-            F.count("*").alias("n"),
-            F.countDistinct(ROOT_KEY).alias("ifs"),
-            F.slice(F.collect_set(ROOT_KEY), 1, 5).alias("sample_ifs"),
-        ).collect()}
-        uni = {r["VALOR"]: r["ifs"] for r in
-               rows.join(universe, ROOT_KEY, "leftsemi")
-               .groupBy("VALOR").agg(F.countDistinct(ROOT_KEY).alias("ifs")).collect()}
+        agg = {
+            r["VALOR"]: r
+            for r in rows.groupBy("VALOR")
+            .agg(
+                F.count("*").alias("n"),
+                F.countDistinct(ROOT_KEY).alias("ifs"),
+                F.slice(F.collect_set(ROOT_KEY), 1, 5).alias("sample_ifs"),
+            )
+            .collect()
+        }
+        uni = {
+            r["VALOR"]: r["ifs"]
+            for r in rows.join(universe, ROOT_KEY, "leftsemi")
+            .groupBy("VALOR")
+            .agg(F.countDistinct(ROOT_KEY).alias("ifs"))
+            .collect()
+        }
         batch = {}
         if mapa_orig is not None:
-            batch = {r["VALOR"]: r["ifs"] for r in
-                     rows.join(mapa_orig, ROOT_KEY, "leftsemi")
-                     .groupBy("VALOR").agg(F.countDistinct(ROOT_KEY).alias("ifs")).collect()}
-        ref_now = {r[0] for r in
-                   referenced_keys(child, universe, col_name)
-                   .where(F.col("VALOR").isin(keys)).collect()}
+            batch = {
+                r["VALOR"]: r["ifs"]
+                for r in rows.join(mapa_orig, ROOT_KEY, "leftsemi")
+                .groupBy("VALOR")
+                .agg(F.countDistinct(ROOT_KEY).alias("ifs"))
+                .collect()
+            }
+        ref_now = {
+            r[0]
+            for r in referenced_keys(child, universe, col_name)
+            .where(F.col("VALOR").isin(keys))
+            .collect()
+        }
         ora_now = _oracle_in_list(spark, cfg, parent_table, parent_col, keys)
 
         for k in keys:
             a = agg.get(k)
             print(f"\nKEY {CHILD_TABLE}.{col_name} = {k}  ->  {parent_table}.{parent_col}")
             if a is None:
-                print("  raw rows: 0  <-- key NOT in raw at all: the synthetic value "
-                      "did not come verbatim from raw (remap/mutation?)")
+                print(
+                    "  raw rows: 0  <-- key NOT in raw at all: the synthetic value "
+                    "did not come verbatim from raw (remap/mutation?)"
+                )
             else:
-                line = (f"  raw rows: {a['n']} | distinct NUM_IF: {a['ifs']} | "
-                        f"NUM_IF in universe({args.universe}): {uni.get(k, 0)}")
+                line = (
+                    f"  raw rows: {a['n']} | distinct NUM_IF: {a['ifs']} | "
+                    f"NUM_IF in universe({args.universe}): {uni.get(k, 0)}"
+                )
                 if mapa_orig is not None:
                     line += f" | NUM_IF in batch (mapa): {batch.get(k, 0)}"
                 print(line)
                 print(f"  sample NUM_IF: {[int(v) for v in a['sample_ifs']]}")
                 if_rows = raw_if_rows(a["sample_ifs"])
                 if not if_rows:
-                    print("  raw INSTRUMENTO_FINANCEIRO row(s): NONE — these NUM_IFs "
-                          "have NO row in the raw IF table (export inconsistency: "
-                          "child rows without their instrument).")
+                    print(
+                        "  raw INSTRUMENTO_FINANCEIRO row(s): NONE — these NUM_IFs "
+                        "have NO row in the raw IF table (export inconsistency: "
+                        "child rows without their instrument)."
+                    )
                 for r in if_rows:
-                    print(f"  raw IF row: NUM_IF={r['NUM_IF']} NUM_TIPO_IF={r['TIPO']!r} "
-                          f"TIPO_OK={r['TIPO_OK']} DAT_EXCLUSAO={r['EXCLUSAO']!r} "
-                          f"EXCL_ISNULL={r['EXCL_ISNULL']} EXCL_LEN={r['EXCL_LEN']}"
-                          + (f" COD_SITUACAO_IF={r['SITUACAO']!r}" if rs else ""))
-                    print(f"    file: .../{(r['FILE'] or '').rsplit('/', 2)[-2]}/"
-                          f"{(r['FILE'] or '').rsplit('/', 1)[-1]}")
-                probe = (universe.where(F.col(ROOT_KEY).isin(
-                    [int(v) for v in a["sample_ifs"]])).count())
+                    print(
+                        f"  raw IF row: NUM_IF={r['NUM_IF']} NUM_TIPO_IF={r['TIPO']!r} "
+                        f"TIPO_OK={r['TIPO_OK']} DAT_EXCLUSAO={r['EXCLUSAO']!r} "
+                        f"EXCL_ISNULL={r['EXCL_ISNULL']} EXCL_LEN={r['EXCL_LEN']}"
+                        + (f" COD_SITUACAO_IF={r['SITUACAO']!r}" if rs else "")
+                    )
+                    print(
+                        f"    file: .../{(r['FILE'] or '').rsplit('/', 2)[-2]}/"
+                        f"{(r['FILE'] or '').rsplit('/', 1)[-1]}"
+                    )
+                probe = universe.where(
+                    F.col(ROOT_KEY).isin([int(v) for v in a["sample_ifs"]])
+                ).count()
                 print(f"  direct universe probe for these NUM_IFs: {probe}")
                 if uni.get(k, 0) == 0:
-                    print("  <-- rows exist but NONE of their IFs pass the universe "
-                          "filter: enumeration blind spot (semi-join/universe).")
+                    print(
+                        "  <-- rows exist but NONE of their IFs pass the universe "
+                        "filter: enumeration blind spot (semi-join/universe)."
+                    )
             print(f"  in referenced set (recomputed NOW): {'YES' if k in ref_now else 'NO'}")
-            print(f"  in Oracle {parent_table} NOW:       {'YES' if k in ora_now else 'NO'}"
-                  + ("   <-- exists now; if the gate orphaned it, QAB churned"
-                     if k in ora_now else ""))
+            print(
+                f"  in Oracle {parent_table} NOW:       {'YES' if k in ora_now else 'NO'}"
+                + (
+                    "   <-- exists now; if the gate orphaned it, QAB churned"
+                    if k in ora_now
+                    else ""
+                )
+            )
             hits = sorted({p for (p, v) in faltantes_rows if v == k})
             print(f"  in faltantes file (--output):       {hits if hits else 'NO'}")
             if a is not None and k in ref_now and k not in ora_now and not hits:
-                print("  <-- referenced + missing + NOT in file: the enumeration "
-                      "write lost it (or file was overwritten since).")
+                print(
+                    "  <-- referenced + missing + NOT in file: the enumeration "
+                    "write lost it (or file was overwritten since)."
+                )
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--base-uri", help="Raw export root (folder-per-table parquet).")
-    p.add_argument("--output", help="Faltantes parquet path/URI (TABELA/COLUNA/VALOR). "
-                                    "Enumerated pairs replaced; other pairs preserved.")
-    p.add_argument("--universe", choices=["domain", "all"], default="all",
-                   help="'all' (default) = every active CDB — a strict superset of "
-                        "any sampling domain, so coverage never depends on domain-"
-                        "query fidelity. 'domain' = team FILTRO_BASE reproduction; "
-                        "PROVEN INCOMPLETE 2026-07-25 (generator's product query "
-                        "includes an EVENTO closure this reproduction lacks; the "
-                        "narrower universe missed ~3/4 of the drift keys).")
-    p.add_argument("--jdbc-partitions", type=int, default=32,
-                   help="Partitions for the Oracle key-column reads (default 32).")
-    p.add_argument("--fetch-size", type=int, default=10000,
-                   help="JDBC fetch size (default 10000).")
-    p.add_argument("--report-path", default=None,
-                   help="Optional JSON summary path/URI.")
-    p.add_argument("--self-test", action="store_true",
-                   help="Run the embedded fixture test and exit (no data/Oracle).")
-    p.add_argument("--explain-keys", default=None,
-                   help="Diagnostic mode: 'NUM_CONTA=95440862,95378406;"
-                        "NUM_ID_ENTIDADE=343119127'. For each key, traces raw "
-                        "rows, universe membership, batch membership (--mapa), "
-                        "recomputed referenced set, Oracle existence NOW, and "
-                        "faltantes-file presence (--output). No file is written.")
-    p.add_argument("--mapa", default=None,
-                   help="Optional MAPA_CLONE_NUM_IF path — with --explain-keys, "
-                        "also reports how many of each key's IFs are in the batch.")
+    p.add_argument(
+        "--output",
+        help="Faltantes parquet path/URI (TABELA/COLUNA/VALOR). "
+        "Enumerated pairs replaced; other pairs preserved.",
+    )
+    p.add_argument(
+        "--universe",
+        choices=["domain", "all"],
+        default="all",
+        help="'all' (default) = every active CDB — a strict superset of "
+        "any sampling domain, so coverage never depends on domain-"
+        "query fidelity. 'domain' = team FILTRO_BASE reproduction; "
+        "PROVEN INCOMPLETE 2026-07-25 (generator's product query "
+        "includes an EVENTO closure this reproduction lacks; the "
+        "narrower universe missed ~3/4 of the drift keys).",
+    )
+    p.add_argument(
+        "--jdbc-partitions",
+        type=int,
+        default=32,
+        help="Partitions for the Oracle key-column reads (default 32).",
+    )
+    p.add_argument("--fetch-size", type=int, default=10000, help="JDBC fetch size (default 10000).")
+    p.add_argument("--report-path", default=None, help="Optional JSON summary path/URI.")
+    p.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Run the embedded fixture test and exit (no data/Oracle).",
+    )
+    p.add_argument(
+        "--explain-keys",
+        default=None,
+        help="Diagnostic mode: 'NUM_CONTA=95440862,95378406;"
+        "NUM_ID_ENTIDADE=343119127'. For each key, traces raw "
+        "rows, universe membership, batch membership (--mapa), "
+        "recomputed referenced set, Oracle existence NOW, and "
+        "faltantes-file presence (--output). No file is written.",
+    )
+    p.add_argument(
+        "--mapa",
+        default=None,
+        help="Optional MAPA_CLONE_NUM_IF path — with --explain-keys, "
+        "also reports how many of each key's IFs are in the batch.",
+    )
     args = p.parse_args()
 
     spark = SparkSession.builder.appName("enumerate_faltantes").getOrCreate()
@@ -634,12 +707,20 @@ def main() -> None:
     for child_col, parent_table, parent_col in TARGETS:
         ref = referenced_keys(tables[CHILD_TABLE], universe, child_col).cache()
         n_ref = ref.count()
-        ora = read_oracle_keys(spark, cfg, parent_table, parent_col,
-                               args.jdbc_partitions, args.fetch_size)
+        ora = read_oracle_keys(
+            spark, cfg, parent_table, parent_col, args.jdbc_partitions, args.fetch_size
+        )
         miss = missing_keys(ref, ora).cache()
         n_miss = miss.count()
-        logger.info("%s.%s -> %s.%s: %d referenced, %d MISSING in target.",
-                    CHILD_TABLE, child_col, parent_table, parent_col, n_ref, n_miss)
+        logger.info(
+            "%s.%s -> %s.%s: %d referenced, %d MISSING in target.",
+            CHILD_TABLE,
+            child_col,
+            parent_table,
+            parent_col,
+            n_ref,
+            n_miss,
+        )
         summary["targets"][f"{CHILD_TABLE}.{child_col}"] = {
             "parent": f"{parent_table}.{parent_col}",
             "referenced_keys": n_ref,
@@ -657,12 +738,22 @@ def main() -> None:
     try:
         existing = spark.read.parquet(args.output)
         kept = preserved_rows(existing, [(CHILD_TABLE, c) for c, _, _ in TARGETS])
-        logger.info("Existing faltantes at %s: %d row(s) for other (TABELA, COLUNA) "
-                    "pairs preserved.", args.output, len(kept))
+        logger.info(
+            "Existing faltantes at %s: %d row(s) for other (TABELA, COLUNA) pairs preserved.",
+            args.output,
+            len(kept),
+        )
     except Exception as exc:  # noqa: BLE001
         msg = str(exc)
-        if not any(s in msg for s in ("Path does not exist", "PATH_NOT_FOUND",
-                                      "Unable to infer schema", "FileNotFound")):
+        if not any(
+            s in msg
+            for s in (
+                "Path does not exist",
+                "PATH_NOT_FOUND",
+                "Unable to infer schema",
+                "FileNotFound",
+            )
+        ):
             raise
     if kept:
         result = result.unionByName(
@@ -673,9 +764,13 @@ def main() -> None:
     result.coalesce(4).write.mode("overwrite").parquet(args.output)
     summary["total_rows_written"] = total
     summary["output"] = args.output
-    logger.info("Faltantes parquet written to %s (%d row(s) total). Regenerate with "
-                "--faltantes-parquet %s — any sample is then clean by construction.",
-                args.output, total, args.output)
+    logger.info(
+        "Faltantes parquet written to %s (%d row(s) total). Regenerate with "
+        "--faltantes-parquet %s — any sample is then clean by construction.",
+        args.output,
+        total,
+        args.output,
+    )
 
     print(json.dumps(summary, indent=2, ensure_ascii=False))
     if args.report_path:

@@ -415,17 +415,13 @@ def execute_extent_query(
     raise RuntimeError(
         "Could not generate ROWID chunks from extent metadata. "
         "Ask the DBA for SELECT access to DBA_EXTENTS/ALL_EXTENTS with RELATIVE_FNO, "
-        "BLOCK_ID, and BLOCKS. Failures: "
-        + " | ".join(failures)
+        "BLOCK_ID, and BLOCKS. Failures: " + " | ".join(failures)
     )
 
 
 def rows_to_arrow_table(rows: list[tuple[Any, ...]], schema: pa.Schema) -> pa.Table:
     normalized_rows = [
-        tuple(
-            normalize_value(value, schema.field(index).type)
-            for index, value in enumerate(row)
-        )
+        tuple(normalize_value(value, schema.field(index).type) for index, value in enumerate(row))
         for row in rows
     ]
     column_values = (
@@ -635,9 +631,7 @@ def migrate_table(
 
     for index, chunk in enumerate(chunks, start=1):
         chunk_key = f"{owner}.{table_name}:{index:06d}:{chunk['start_rowid']}:{chunk['end_rowid']}"
-        object_name = (
-            f"{args.prefix.rstrip('/')}/{table_slug}/chunk_{index:06d}.parquet"
-        )
+        object_name = f"{args.prefix.rstrip('/')}/{table_slug}/chunk_{index:06d}.parquet"
         local_file = work_dir / table_slug / f"chunk_{index:06d}.parquet"
 
         if chunk_key in completed_chunks:

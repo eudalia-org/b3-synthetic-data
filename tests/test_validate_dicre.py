@@ -37,11 +37,38 @@ def dicre_tables(spark):
             "DAT_EXCLUSAO string",
         ),
         "CREDITO_DC": spark.createDataFrame(
-            [(
-                1000, "credit.0", 100, None, 53, 7, 4199, "2026-07-17", "IPOC-1",
-                6099, None, None, 6119, 1.0, 1.0, "2026-07-17", "2026-07-17",
-                "2030-04-19", "PJ", 46, 16, 2, 268, 6, "N", "N", "N", 26,
-            )],
+            [
+                (
+                    1000,
+                    "credit.0",
+                    100,
+                    None,
+                    53,
+                    7,
+                    4199,
+                    "2026-07-17",
+                    "IPOC-1",
+                    6099,
+                    None,
+                    None,
+                    6119,
+                    1.0,
+                    1.0,
+                    "2026-07-17",
+                    "2026-07-17",
+                    "2030-04-19",
+                    "PJ",
+                    46,
+                    16,
+                    2,
+                    268,
+                    6,
+                    "N",
+                    "N",
+                    "N",
+                    26,
+                )
+            ],
             "NUM_ID_CREDITO_DC long, COD_CREDITO_DC string, NUM_ID_LOTE long, "
             "DAT_EXCLUSAO string, NUM_TIPO_IF long, NUM_CONTA_CUSTODIANTE long, "
             "NUM_ID_BASE_CREDITO long, DAT_INCLUSAO string, COD_IPOC string, "
@@ -66,9 +93,7 @@ def dicre_tables(spark):
         "TCTPDET_CHAV_IROP_CCB": spark.createDataFrame(
             [(700, "IPOC-1")], "NUM_CHAV_IROP long, COD_IPOC string"
         ),
-        "TCTPDET_CHAV_IROP_CMER": spark.createDataFrame(
-            [], "NUM_CHAV_IROP long, COD_COTR string"
-        ),
+        "TCTPDET_CHAV_IROP_CMER": spark.createDataFrame([], "NUM_CHAV_IROP long, COD_COTR string"),
         "TCTPIROP_ATIV": spark.createDataFrame(
             [(800, 1000, 700)],
             "NUM_IROP_ATIV long, NUM_IDT_CRE_DC long, NUM_CHAV_IROP long",
@@ -113,21 +138,21 @@ def target_frames(spark, target_ipocs=()):
 
 
 def graph_findings(tables):
-    return by_id(validator.check_dicre_graph(
-        tables, 5, validator.VALIDATION_PROFILES["dicre"]
-    ))
+    return by_id(validator.check_dicre_graph(tables, 5, validator.VALIDATION_PROFILES["dicre"]))
 
 
 def irop_findings(tables):
-    return by_id(validator.check_dicre_irop_graph(
-        tables, 5, validator.VALIDATION_PROFILES["dicre"]
-    ))
+    return by_id(
+        validator.check_dicre_irop_graph(tables, 5, validator.VALIDATION_PROFILES["dicre"])
+    )
 
 
 def lookup_findings(tables, frames):
-    return by_id(validator.check_dicre_target_frames(
-        tables, frames, 5, validator.VALIDATION_PROFILES["dicre"]
-    ))
+    return by_id(
+        validator.check_dicre_target_frames(
+            tables, frames, 5, validator.VALIDATION_PROFILES["dicre"]
+        )
+    )
 
 
 def test_dicre_profile_is_isolated_non_if_pipeline():
@@ -146,9 +171,7 @@ def test_dicre_accepts_complete_graph_and_all_root_rows(spark):
         "DAT_EXCLUSAO", validator.F.lit("2026-08-01")
     )
 
-    identity = validator.check_dicre_identity(
-        tables, validator.VALIDATION_PROFILES["dicre"], 5
-    )[0]
+    identity = validator.check_dicre_identity(tables, validator.VALIDATION_PROFILES["dicre"], 5)[0]
 
     assert identity.count == 1
     assert all(finding.passed for finding in graph_findings(tables).values())
@@ -188,16 +211,20 @@ def test_dicre_credit_code_preserves_case_and_dot_zero(spark):
 
 def test_dicre_history_uses_action_one_and_code_plus_canonical_lot(spark):
     tables = dicre_tables(spark)
-    other_action = tables["HISTORICO_CREDITO_DC"].withColumn(
-        "NUM_ID_HISTORICO_CREDITO_DC", validator.F.lit(5001)
-    ).withColumn("NUM_ID_TIPO_ACAO_HIST_CREDITO", validator.F.lit(2))
+    other_action = (
+        tables["HISTORICO_CREDITO_DC"]
+        .withColumn("NUM_ID_HISTORICO_CREDITO_DC", validator.F.lit(5001))
+        .withColumn("NUM_ID_TIPO_ACAO_HIST_CREDITO", validator.F.lit(2))
+    )
     tables["HISTORICO_CREDITO_DC"] = tables["HISTORICO_CREDITO_DC"].union(other_action)
 
     assert graph_findings(tables)["2f.inclusion_history"].passed
 
-    duplicate = tables["HISTORICO_CREDITO_DC"].where(
-        validator.F.col("NUM_ID_TIPO_ACAO_HIST_CREDITO") == 1
-    ).withColumn("NUM_ID_HISTORICO_CREDITO_DC", validator.F.lit(5002))
+    duplicate = (
+        tables["HISTORICO_CREDITO_DC"]
+        .where(validator.F.col("NUM_ID_TIPO_ACAO_HIST_CREDITO") == 1)
+        .withColumn("NUM_ID_HISTORICO_CREDITO_DC", validator.F.lit(5002))
+    )
     tables["HISTORICO_CREDITO_DC"] = tables["HISTORICO_CREDITO_DC"].union(duplicate)
     assert graph_findings(tables)["2f.inclusion_history"].count == 1
 
@@ -259,9 +286,7 @@ def test_dicre_accepts_hard_target_eligibility(spark):
         ("DICRE_QUALIFICATIONS", [(999, 20), (6119, 23)], "6f.lookup.qualifications"),
     ],
 )
-def test_dicre_rejects_hard_target_ineligibility(
-    spark, frame, replacement, check_id
-):
+def test_dicre_rejects_hard_target_ineligibility(spark, frame, replacement, check_id):
     frames = target_frames(spark)
     frames[frame] = spark.createDataFrame(replacement, frames[frame].schema)
 
@@ -287,15 +312,17 @@ def test_dicre_disabled_ipoc_toggle_has_no_target_dependency(spark):
 
 def test_dicre_detects_synthetic_and_active_target_ipoc_collisions(spark):
     tables = dicre_tables(spark)
-    second = tables["CREDITO_DC"].withColumn(
-        "NUM_ID_CREDITO_DC", validator.F.lit(1001)
-    ).withColumn("COD_CREDITO_DC", validator.F.lit("credit-2"))
+    second = (
+        tables["CREDITO_DC"]
+        .withColumn("NUM_ID_CREDITO_DC", validator.F.lit(1001))
+        .withColumn("COD_CREDITO_DC", validator.F.lit("credit-2"))
+    )
     tables["CREDITO_DC"] = tables["CREDITO_DC"].union(second)
 
     synthetic = lookup_findings(tables, target_frames(spark))["6f.lookup.ipoc_unique"]
-    target = lookup_findings(
-        dicre_tables(spark), target_frames(spark, ("IPOC-1",))
-    )["6f.lookup.ipoc_unique"]
+    target = lookup_findings(dicre_tables(spark), target_frames(spark, ("IPOC-1",)))[
+        "6f.lookup.ipoc_unique"
+    ]
 
     assert synthetic.count == 2
     assert target.count == 1
@@ -303,10 +330,11 @@ def test_dicre_detects_synthetic_and_active_target_ipoc_collisions(spark):
 
 def test_dicre_enabled_ipoc_collides_with_synthetic_outside_toggle_period(spark):
     tables = dicre_tables(spark)
-    outside_period = tables["CREDITO_DC"].withColumn(
-        "NUM_ID_CREDITO_DC", validator.F.lit(1001)
-    ).withColumn("COD_CREDITO_DC", validator.F.lit("credit-2")).withColumn(
-        "DAT_INCLUSAO", validator.F.lit("2025-07-17")
+    outside_period = (
+        tables["CREDITO_DC"]
+        .withColumn("NUM_ID_CREDITO_DC", validator.F.lit(1001))
+        .withColumn("COD_CREDITO_DC", validator.F.lit("credit-2"))
+        .withColumn("DAT_INCLUSAO", validator.F.lit("2025-07-17"))
     )
     tables["CREDITO_DC"] = tables["CREDITO_DC"].union(outside_period)
 
@@ -321,12 +349,8 @@ def test_dicre_registration_observations_are_opt_in_warnings(spark):
     profile = validator.VALIDATION_PROFILES["dicre"]
 
     assert validator.check_dicre_registration_profile(tables, 5, False, profile) == []
-    tables["CREDITO_DC"] = tables["CREDITO_DC"].withColumn(
-        "VAL_PU", validator.F.lit(2.0)
-    )
-    findings = by_id(validator.check_dicre_registration_profile(
-        tables, 5, True, profile
-    ))
+    tables["CREDITO_DC"] = tables["CREDITO_DC"].withColumn("VAL_PU", validator.F.lit(2.0))
+    findings = by_id(validator.check_dicre_registration_profile(tables, 5, True, profile))
 
     assert findings["8f.profile.root_constants"].severity == validator.SEV_WARN
     assert findings["8f.profile.history_copied_values"].severity == validator.SEV_WARN
@@ -353,8 +377,14 @@ def test_dicre_metadata_requires_all_eight_tables_and_primary_keys():
 
 def test_dicre_report_displays_credito_dc_root(capsys):
     validator.emit_report(
-        None, [], None, "error", validator.VALIDATION_PROFILES["dicre"],
-        "/input", [], ["test partial"],
+        None,
+        [],
+        None,
+        "error",
+        validator.VALIDATION_PROFILES["dicre"],
+        "/input",
+        [],
+        ["test partial"],
     )
 
     assert "product=dicre (root=CREDITO_DC)" in capsys.readouterr().out
@@ -364,9 +394,7 @@ def test_dicre_rejects_shape_baseline_before_spark_setup(monkeypatch):
     monkeypatch.setattr(
         validator,
         "parse_args",
-        lambda: SimpleNamespace(
-            product="dicre", skip_check=[], shape_baseline="baseline.json"
-        ),
+        lambda: SimpleNamespace(product="dicre", skip_check=[], shape_baseline="baseline.json"),
     )
 
     with pytest.raises(SystemExit, match="non-IF dicre pipeline"):

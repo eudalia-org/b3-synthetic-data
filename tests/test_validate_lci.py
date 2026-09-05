@@ -32,8 +32,7 @@ def by_id(findings):
 def lci_tables(spark):
     return {
         "INSTRUMENTO_FINANCEIRO": spark.createDataFrame(
-            [(1, 81, None, "26G00281662", 100, "2026-07-17", 55, 19, 22, 0,
-              1.0, 1.0, 1.0, 1.0)],
+            [(1, 81, None, "26G00281662", 100, "2026-07-17", 55, 19, 22, 0, 1.0, 1.0, 1.0, 1.0)],
             "NUM_IF long, NUM_TIPO_IF long, DAT_EXCLUSAO string, COD_IF string, "
             "NUM_ID_LOTE long, DAT_REGISTRO string, NUM_SISTEMA long, "
             "NUM_ID_FORMA_PAGAMENTO long, NUM_ID_MOTIVO_SITUACAO_IF long, "
@@ -49,8 +48,7 @@ def lci_tables(spark):
         "CREDITO": spark.createDataFrame([(1,)], "NUM_IF long"),
         "CONDICAO_IF": spark.createDataFrame(
             [(11, 1, "2", None), (12, 1, "20", None)],
-            "NUM_CONDICAO_IF long, NUM_IF long, COD_TIPO_CONDICAO_IF string, "
-            "DAT_EXCLUSAO string",
+            "NUM_CONDICAO_IF long, NUM_IF long, COD_TIPO_CONDICAO_IF string, DAT_EXCLUSAO string",
         ),
         "JUROS_FIXO": spark.createDataFrame(
             [(11, 6.7)], "NUM_CONDICAO_IF long, VAL_TAXA_JUROS_FIXO double"
@@ -94,8 +92,7 @@ def lci_tables(spark):
         ),
         "DADO_OPERACAO": spark.createDataFrame(
             [(51, 41, 265), (52, 41, 269)],
-            "NUM_ID_DADO_OPERACAO long, NUM_ID_OPERACAO long, "
-            "NUM_ID_TIPO_DADO_OPERACAO long",
+            "NUM_ID_DADO_OPERACAO long, NUM_ID_OPERACAO long, NUM_ID_TIPO_DADO_OPERACAO long",
         ),
         "LANCAMENTO": spark.createDataFrame(
             [(61, 41)], "NUM_ID_LANCAMENTO long, NUM_ID_OPERACAO long"
@@ -157,26 +154,26 @@ def target_frames(spark, toggle_period=("2026-01-01", "2026-12-31")):
             [], "COD_OPERACAO string, DAT_EXCLUSAO string"
         ),
         "LCI_WALLET_COMITENTE": spark.createDataFrame(
-            [], "NUM_ID_ENTIDADE long, COD_TIPO_POSICAO_CARTEIRA long, NUM_SISTEMA long, "
+            [],
+            "NUM_ID_ENTIDADE long, COD_TIPO_POSICAO_CARTEIRA long, NUM_SISTEMA long, "
             "NUM_IF long, NUM_CONTA_PARTICIPANTE long, DAT_EXCLUSAO string",
         ),
         "LCI_WALLET_PARTICIPANTE": spark.createDataFrame(
-            [], "COD_TIPO_POSICAO_CARTEIRA long, NUM_SISTEMA long, NUM_IF long, "
+            [],
+            "COD_TIPO_POSICAO_CARTEIRA long, NUM_SISTEMA long, NUM_IF long, "
             "NUM_CONTA_PARTICIPANTE long, DAT_EXCLUSAO string",
         ),
     }
 
 
 def graph_findings(tables):
-    return by_id(validator.check_lci_graph(
-        tables, 5, validator.VALIDATION_PROFILES["lci"]
-    ))
+    return by_id(validator.check_lci_graph(tables, 5, validator.VALIDATION_PROFILES["lci"]))
 
 
 def lookup_findings(tables, frames):
-    return by_id(validator.check_lci_target_frames(
-        tables, frames, 5, validator.VALIDATION_PROFILES["lci"]
-    ))
+    return by_id(
+        validator.check_lci_target_frames(tables, frames, 5, validator.VALIDATION_PROFILES["lci"])
+    )
 
 
 def test_lci_profile_is_generic_if_but_isolated_from_cdb_and_other_aggregates(capsys):
@@ -192,11 +189,24 @@ def test_lci_profile_is_generic_if_but_isolated_from_cdb_and_other_aggregates(ca
     assert profile.unsupported_required() == ()
     assert validator.LCI_MEU_NUMERO_TOGGLE == "VALIDA_MEU_NUMERO_DEPOSITO"
     assert validator.LCI_OUTPUT_TABLES == (
-        "INSTRUMENTO_FINANCEIRO", "TITULO", "CREDITO", "CONDICAO_IF",
-        "JUROS_FIXO", "JUROS_FLUTUANTE", "ATUALIZACAO_POS", "RESGATE",
-        "HISTORICO_PU_CURVA", "EVENTO", "DEPOSITO_AUTOMATICO_IF", "OPERACAO",
-        "DADO_OPERACAO", "LANCAMENTO", "ESPECIFICACAO",
-        "ESPECIFICACAO_COMITENTE", "CARTEIRA_COMITENTE", "CARTEIRA_PARTICIPANTE",
+        "INSTRUMENTO_FINANCEIRO",
+        "TITULO",
+        "CREDITO",
+        "CONDICAO_IF",
+        "JUROS_FIXO",
+        "JUROS_FLUTUANTE",
+        "ATUALIZACAO_POS",
+        "RESGATE",
+        "HISTORICO_PU_CURVA",
+        "EVENTO",
+        "DEPOSITO_AUTOMATICO_IF",
+        "OPERACAO",
+        "DADO_OPERACAO",
+        "LANCAMENTO",
+        "ESPECIFICACAO",
+        "ESPECIFICACAO_COMITENTE",
+        "CARTEIRA_COMITENTE",
+        "CARTEIRA_PARTICIPANTE",
     )
     assert profiler.PRODUCTS["lci"] == {"num_tipo_if": 81, "simplified": True}
     assert [metric.name for metric in profiler.metrics_for_product("lci")] == (
@@ -213,12 +223,10 @@ def test_lci_runs_generic_if_identity_and_simplified_domain(spark):
     tables = lci_tables(spark)
     profile = validator.VALIDATION_PROFILES["lci"]
 
-    assert all(finding.passed for finding in validator.check_product_identity(
-        tables, profile, 5
-    ))
-    assert validator.check_domain(
-        tables, validator.Metadata(set(), {}, {}, {}, {}), 5, profile
-    )[0].passed
+    assert all(finding.passed for finding in validator.check_product_identity(tables, profile, 5))
+    assert validator.check_domain(tables, validator.Metadata(set(), {}, {}, {}, {}), 5, profile)[
+        0
+    ].passed
 
 
 def test_lci_requires_all_output_tables_and_live_pk_metadata(spark):
@@ -230,7 +238,8 @@ def test_lci_requires_all_output_tables_and_live_pk_metadata(spark):
     pks = {table: ["ID"] for table in metadata_tables}
     pks.pop("HISTORICO_PU_CURVA")
     finding = validator.check_lci_metadata(
-        validator.Metadata(metadata_tables, pks, {}, {}, {}), False,
+        validator.Metadata(metadata_tables, pks, {}, {}, {}),
+        False,
         validator.VALIDATION_PROFILES["lci"],
     )[0]
     assert finding.severity == validator.SEV_ERROR
@@ -239,7 +248,8 @@ def test_lci_requires_all_output_tables_and_live_pk_metadata(spark):
 
 def test_lci_no_oracle_metadata_is_explicit_partial():
     finding = validator.check_lci_metadata(
-        validator.Metadata(set(), {}, {}, {}, {}), True,
+        validator.Metadata(set(), {}, {}, {}, {}),
+        True,
         validator.VALIDATION_PROFILES["lci"],
     )[0]
     assert finding.severity == validator.SEV_WARN
@@ -255,15 +265,15 @@ def test_lci_root_code_is_exact_trimmed_case_sensitive_and_preserves_dot_zero(sp
     third = root.withColumn("NUM_IF", validator.F.lit(3)).withColumn(
         "COD_IF", validator.F.lit("CODE.0")
     )
-    tables["INSTRUMENTO_FINANCEIRO"] = root.withColumn(
-        "COD_IF", validator.F.lit("code.0")
-    ).union(second).union(third)
+    tables["INSTRUMENTO_FINANCEIRO"] = (
+        root.withColumn("COD_IF", validator.F.lit("code.0")).union(second).union(third)
+    )
     assert graph_findings(tables)["2e.root_code"].passed
 
     tables["INSTRUMENTO_FINANCEIRO"] = root.union(
-        root.withColumn("NUM_IF", validator.F.lit(2)).withColumn(
-            "COD_IF", validator.F.lit(" 26G00281662 ")
-        ).withColumn("DAT_EXCLUSAO", validator.F.lit(""))
+        root.withColumn("NUM_IF", validator.F.lit(2))
+        .withColumn("COD_IF", validator.F.lit(" 26G00281662 "))
+        .withColumn("DAT_EXCLUSAO", validator.F.lit(""))
     )
     assert graph_findings(tables)["2e.root_code"].count == 2
 
@@ -292,8 +302,7 @@ def test_lci_requires_exactly_one_title_and_credit(spark, table):
         ("DADO_OPERACAO", "NUM_ID_OPERACAO", "2e.operation_data.edge"),
         ("LANCAMENTO", "NUM_ID_OPERACAO", "2e.launch.edge"),
         ("ESPECIFICACAO", "NUM_ID_OPERACAO", "2e.specification.edge"),
-        ("ESPECIFICACAO_COMITENTE", "NUM_ID_ESPECIFICACAO",
-         "2e.specification_holder.edge"),
+        ("ESPECIFICACAO_COMITENTE", "NUM_ID_ESPECIFICACAO", "2e.specification_holder.edge"),
     ],
 )
 def test_lci_rejects_each_log_proven_graph_orphan(spark, table, column, check_id):
@@ -309,9 +318,9 @@ def test_lci_rejects_duplicate_physical_graph_edges(spark):
 
 
 def test_lci_known_condition_polymorphism_accepts_expected_rows(spark):
-    findings = by_id(validator.check_lci_polymorphism(
-        lci_tables(spark), 5, validator.VALIDATION_PROFILES["lci"]
-    ))
+    findings = by_id(
+        validator.check_lci_polymorphism(lci_tables(spark), 5, validator.VALIDATION_PROFILES["lci"])
+    )
     assert findings["2e.condition_polymorphism"].passed
     assert findings["2e.subtype_orphan"].passed
 
@@ -324,9 +333,9 @@ def test_lci_known_condition_polymorphism_rejects_wrong_or_missing_rows(spark, m
         tables["JUROS_FLUTUANTE"] = spark.createDataFrame(
             [(11, 98.0)], tables["JUROS_FLUTUANTE"].schema
         )
-    finding = by_id(validator.check_lci_polymorphism(
-        tables, 5, validator.VALIDATION_PROFILES["lci"]
-    ))["2e.condition_polymorphism"]
+    finding = by_id(
+        validator.check_lci_polymorphism(tables, 5, validator.VALIDATION_PROFILES["lci"])
+    )["2e.condition_polymorphism"]
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 1
 
@@ -339,9 +348,9 @@ def test_lci_unknown_condition_type_warns_without_hard_failure(spark):
             validator.F.col("COD_TIPO_CONDICAO_IF")
         ),
     )
-    findings = by_id(validator.check_lci_polymorphism(
-        tables, 5, validator.VALIDATION_PROFILES["lci"]
-    ))
+    findings = by_id(
+        validator.check_lci_polymorphism(tables, 5, validator.VALIDATION_PROFILES["lci"])
+    )
     assert findings["2e.condition_polymorphism"].passed
     assert findings["2e.unknown_condition_type"].severity == validator.SEV_WARN
 
@@ -352,15 +361,12 @@ def test_lci_unknown_condition_type_warns_without_hard_failure(spark):
         ("LCI_TIPO_IF", "COD_TIPO_IF", "CDB", "6e.lookup.tipo_if"),
         ("LCI_LOTES", "NUM_ID_TIPO_LOTE", 2, "6e.lookup.lot"),
         ("LCI_ACCOUNTS", "NUM_ID_SITUACAO_CONTA", 3, "6e.lookup.issuer_account"),
-        ("LCI_OBJECT_SERVICE", "IND_PLATAFORMA_BAIXA", "N",
-         "6e.lookup.object_service"),
+        ("LCI_OBJECT_SERVICE", "IND_PLATAFORMA_BAIXA", "N", "6e.lookup.object_service"),
         ("LCI_ROUTES", "NUM_ID_OBJETO_SERVICO", 44, "6e.lookup.route"),
         ("LCI_ROUTES", "IND_DISPONIVEL_IDENTIFICACAO", "N", "6e.lookup.route"),
     ],
 )
-def test_lci_rejects_ineligible_target_lot_account_and_route(
-    spark, frame, column, value, check_id
-):
+def test_lci_rejects_ineligible_target_lot_account_and_route(spark, frame, column, value, check_id):
     frames = target_frames(spark)
     frames[frame] = frames[frame].withColumn(column, validator.F.lit(value))
     assert lookup_findings(lci_tables(spark), frames)[check_id].severity == validator.SEV_ERROR
@@ -375,15 +381,11 @@ def test_lci_rejects_ineligible_target_lot_account_and_route(
         ("COD_CONTA_PARTE", " 12345.10-1 "),
     ],
 )
-def test_lci_registration_operation_requires_10_40_account_roles(
-    spark, column, value
-):
+def test_lci_registration_operation_requires_10_40_account_roles(spark, column, value):
     tables = lci_tables(spark)
     tables["OPERACAO"] = tables["OPERACAO"].withColumn(column, validator.F.lit(value))
 
-    finding = lookup_findings(tables, target_frames(spark))[
-        "6e.registration_account_roles"
-    ]
+    finding = lookup_findings(tables, target_frames(spark))["6e.registration_account_roles"]
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 1
 
@@ -392,9 +394,7 @@ def test_lci_account_role_check_fails_closed_without_route_evidence(spark):
     frames = target_frames(spark)
     del frames["LCI_ROUTES"]
 
-    finding = lookup_findings(lci_tables(spark), frames)[
-        "6e.registration_account_roles"
-    ]
+    finding = lookup_findings(lci_tables(spark), frames)["6e.registration_account_roles"]
     assert finding.severity == validator.SEV_ERROR
 
 
@@ -431,9 +431,10 @@ def test_lci_detects_exact_active_target_cod_if_collision(spark):
     frames["LCI_ROOT_CODES"] = spark.createDataFrame(
         [(" 26G00281662 ", None)], frames["LCI_ROOT_CODES"].schema
     )
-    assert lookup_findings(lci_tables(spark), frames)[
-        "6e.collision.cod_if"
-    ].severity == validator.SEV_ERROR
+    assert (
+        lookup_findings(lci_tables(spark), frames)["6e.collision.cod_if"].severity
+        == validator.SEV_ERROR
+    )
 
 
 def test_lci_meu_numero_uses_dat_registro_and_detects_target_collision(spark):
@@ -459,26 +460,23 @@ def test_lci_operation_code_local_and_target_collisions(spark):
     tables = lci_tables(spark)
     duplicate = tables["OPERACAO"].withColumn("NUM_ID_OPERACAO", validator.F.lit(42))
     tables["OPERACAO"] = tables["OPERACAO"].union(duplicate)
-    assert lookup_findings(tables, target_frames(spark))[
-        "6e.operation_code.local"
-    ].count == 2
+    assert lookup_findings(tables, target_frames(spark))["6e.operation_code.local"].count == 2
 
     tables = lci_tables(spark)
     frames = target_frames(spark)
     frames["LCI_OPERATION_CODES"] = spark.createDataFrame(
         [("operation.0", None)], frames["LCI_OPERATION_CODES"].schema
     )
-    assert lookup_findings(tables, frames)[
-        "6e.operation_code.target"
-    ].severity == validator.SEV_ERROR
+    assert (
+        lookup_findings(tables, frames)["6e.operation_code.target"].severity == validator.SEV_ERROR
+    )
 
 
 @pytest.mark.parametrize(
     ("target_name", "source_table", "check_id"),
     [
         ("LCI_WALLET_COMITENTE", "CARTEIRA_COMITENTE", "6e.wallet.comitente"),
-        ("LCI_WALLET_PARTICIPANTE", "CARTEIRA_PARTICIPANTE",
-         "6e.wallet.participante"),
+        ("LCI_WALLET_PARTICIPANTE", "CARTEIRA_PARTICIPANTE", "6e.wallet.participante"),
     ],
 )
 def test_lci_wallet_natural_key_collisions(spark, target_name, source_table, check_id):
@@ -486,8 +484,9 @@ def test_lci_wallet_natural_key_collisions(spark, target_name, source_table, che
     frames = target_frames(spark)
     target = frames[target_name]
     source = tables[source_table]
-    values = tuple(source.select(*[column for column in target.columns if column != "DAT_EXCLUSAO"])
-                   .first()) + (None,)
+    values = tuple(
+        source.select(*[column for column in target.columns if column != "DAT_EXCLUSAO"]).first()
+    ) + (None,)
     frames[target_name] = spark.createDataFrame([values], target.schema)
     assert lookup_findings(tables, frames)[check_id].severity == validator.SEV_ERROR
 
@@ -511,9 +510,7 @@ def test_lci_rejects_duplicate_synthetic_wallet_keys(spark, source_table, check_
 
 def test_lci_wallet_without_active_semantics_is_partial_not_false_pass(spark):
     frames = target_frames(spark)
-    frames["LCI_WALLET_PARTICIPANTE"] = frames["LCI_WALLET_PARTICIPANTE"].drop(
-        "DAT_EXCLUSAO"
-    )
+    frames["LCI_WALLET_PARTICIPANTE"] = frames["LCI_WALLET_PARTICIPANTE"].drop("DAT_EXCLUSAO")
     finding = lookup_findings(lci_tables(spark), frames)["6e.wallet.participante"]
     assert finding.severity == validator.SEV_WARN
     assert not finding.passed
@@ -534,10 +531,18 @@ def test_lci_registration_profile_is_opt_in_and_drift_is_advisory(spark):
 
 
 def test_lci_shape_dispatch_is_supported_without_cdb_hard_ratios(spark):
-    findings = by_id(validator.check_shapes(
-        spark, lci_tables(spark), None, 5, 1.0, 0.15, 5.0,
-        validator.VALIDATION_PROFILES["lci"],
-    ))
+    findings = by_id(
+        validator.check_shapes(
+            spark,
+            lci_tables(spark),
+            None,
+            5,
+            1.0,
+            0.15,
+            5.0,
+            validator.VALIDATION_PROFILES["lci"],
+        )
+    )
     assert findings["7.baseline"].severity == validator.SEV_WARN
     assert "7c.op_ratio" not in findings
 
@@ -548,9 +553,14 @@ def test_lci_target_loader_does_not_read_skipped_prefixes(spark, monkeypatch):
 
     monkeypatch.setattr(validator, "_jdbc", fail_jdbc)
     frames, errors = validator.load_lci_target_frames(
-        spark, SimpleNamespace(schema="CETIP"), lci_tables(spark),
+        spark,
+        SimpleNamespace(schema="CETIP"),
+        lci_tables(spark),
         skip_prefixes=(
-            "6e.lookup", "6e.collision", "6e.operation_code", "6e.meu_numero",
+            "6e.lookup",
+            "6e.collision",
+            "6e.operation_code",
+            "6e.meu_numero",
             "6e.wallet",
         ),
     )

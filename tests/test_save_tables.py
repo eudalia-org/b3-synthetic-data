@@ -29,9 +29,7 @@ class TestValidateIdentifier:
 
 class TestBuildRowidPredicates:
     def test_formats_between_predicates(self):
-        predicates = save_tables.build_rowid_predicates(
-            [(ROWID_A, ROWID_B), (ROWID_C, ROWID_D)]
-        )
+        predicates = save_tables.build_rowid_predicates([(ROWID_A, ROWID_B), (ROWID_C, ROWID_D)])
         assert predicates == [
             f"ROWID BETWEEN '{ROWID_A}' AND '{ROWID_B}'",
             f"ROWID BETWEEN '{ROWID_C}' AND '{ROWID_D}'",
@@ -170,9 +168,7 @@ class TestPartitionBoundsOverrides:
             "CETIP.HISTORY=1900-01-01 00:00:00|2028-01-01 00:00:00"
         )
 
-        assert overrides == {
-            "CETIP.HISTORY": ("1900-01-01 00:00:00", "2028-01-01 00:00:00")
-        }
+        assert overrides == {"CETIP.HISTORY": ("1900-01-01 00:00:00", "2028-01-01 00:00:00")}
 
 
 class TestBuildOracleDatePredicates:
@@ -202,9 +198,7 @@ class TestBuildOracleDatePredicates:
 
 
 class TestLoadSourceDataframe:
-    def test_uses_configured_oracle_date_bounds_without_querying_min_max(
-        self, monkeypatch
-    ):
+    def test_uses_configured_oracle_date_bounds_without_querying_min_max(self, monkeypatch):
         class FakeRead:
             jdbc_call = None
 
@@ -290,9 +284,7 @@ class TestWriteOutputDataframe:
 
         save_tables.write_output_dataframe(FakeSpark(), FakeDataframe(), output_path)
 
-        assert FakeJsc.config.values == {
-            "mapreduce.fileoutputcommitter.algorithm.version": "2"
-        }
+        assert FakeJsc.config.values == {"mapreduce.fileoutputcommitter.algorithm.version": "2"}
         assert deleted == [output_path]
         assert FakeDataframe.write.mode_name == "append"
         assert FakeDataframe.write.path == output_path
@@ -335,6 +327,4 @@ class TestFetchRowidPredicates:
 
     def test_rejects_bad_identifier(self):
         with pytest.raises(ValueError):
-            save_tables.fetch_rowid_predicates(
-                None, {}, "ADMIN", "ORDERS; DROP", num_partitions=4
-            )
+            save_tables.fetch_rowid_predicates(None, {}, "ADMIN", "ORDERS; DROP", num_partitions=4)

@@ -57,9 +57,7 @@ def encode_rowid_component(value: int, width: int) -> str:
     return "".join(reversed(chars))
 
 
-def encode_rowid(
-    data_object_id: int, relative_fno: int, block_id: int, row_number: int
-) -> str:
+def encode_rowid(data_object_id: int, relative_fno: int, block_id: int, row_number: int) -> str:
     """Build a restricted-format ROWID (OOOOOOFFFBBBBBBRRR base-64 layout)."""
     return (
         encode_rowid_component(data_object_id, 6)
@@ -109,9 +107,7 @@ def chunk_extents(
         chunks.append(
             (
                 encode_rowid(data_object_id, current_start[0], current_start[1], 0),
-                encode_rowid(
-                    data_object_id, current_end[0], current_end[1], ROWID_MAX_ROW
-                ),
+                encode_rowid(data_object_id, current_end[0], current_end[1], ROWID_MAX_ROW),
             )
         )
         current_start, current_end, current_blocks = None, None, 0
@@ -219,12 +215,8 @@ def get_extract_env() -> dict[str, str]:
     config["DATAGEN_JDBC_NUM_PARTITIONS"] = os.environ.get(
         "DATAGEN_JDBC_NUM_PARTITIONS", DEFAULT_NUM_PARTITIONS
     )
-    config["DATAGEN_JDBC_PARTITION_COLUMNS"] = os.environ.get(
-        "DATAGEN_JDBC_PARTITION_COLUMNS", ""
-    )
-    config["DATAGEN_JDBC_PARTITION_BOUNDS"] = os.environ.get(
-        "DATAGEN_JDBC_PARTITION_BOUNDS", ""
-    )
+    config["DATAGEN_JDBC_PARTITION_COLUMNS"] = os.environ.get("DATAGEN_JDBC_PARTITION_COLUMNS", "")
+    config["DATAGEN_JDBC_PARTITION_BOUNDS"] = os.environ.get("DATAGEN_JDBC_PARTITION_BOUNDS", "")
     config["DATAGEN_JDBC_READ_TIMEOUT_MS"] = os.environ.get(
         "DATAGEN_JDBC_READ_TIMEOUT_MS", DEFAULT_READ_TIMEOUT_MS
     )
@@ -421,9 +413,7 @@ def fetch_extents(
         try:
             rows = read_rows(spark, properties, query)
         except Exception as exc:
-            logger.debug(
-                "Extent query via %s failed for %s.%s: %s", view, owner, table_name, exc
-            )
+            logger.debug("Extent query via %s failed for %s.%s: %s", view, owner, table_name, exc)
             continue
         if rows:
             return [(int(row[0]), int(row[1]), int(row[2])) for row in rows]
@@ -535,12 +525,10 @@ def build_oracle_date_predicates(
         return f"TO_DATE('{formatted}', 'YYYY-MM-DD HH24:MI:SS')"
 
     predicates = [
-        f"({partition_column} < {oracle_date(boundaries[0])} "
-        f"OR {partition_column} IS NULL)"
+        f"({partition_column} < {oracle_date(boundaries[0])} OR {partition_column} IS NULL)"
     ]
     predicates.extend(
-        f"{partition_column} >= {oracle_date(start)} "
-        f"AND {partition_column} < {oracle_date(end)}"
+        f"{partition_column} >= {oracle_date(start)} AND {partition_column} < {oracle_date(end)}"
         for start, end in zip(boundaries, boundaries[1:])
     )
     predicates.append(f"{partition_column} >= {oracle_date(boundaries[-1])}")
@@ -567,9 +555,7 @@ def load_source_dataframe(
         return reader.load()
 
     owner, table_name = table_owner_and_name(source_user, table)
-    overrides = parse_partition_column_overrides(
-        config["DATAGEN_JDBC_PARTITION_COLUMNS"]
-    )
+    overrides = parse_partition_column_overrides(config["DATAGEN_JDBC_PARTITION_COLUMNS"])
     partition_column = overrides.get(f"{owner}.{table_name}") or overrides.get(table_name)
 
     if partition_column:
@@ -577,9 +563,7 @@ def load_source_dataframe(
         bounds_overrides = parse_partition_bounds_overrides(
             config.get("DATAGEN_JDBC_PARTITION_BOUNDS", "")
         )
-        bounds = bounds_overrides.get(f"{owner}.{table_name}") or bounds_overrides.get(
-            table_name
-        )
+        bounds = bounds_overrides.get(f"{owner}.{table_name}") or bounds_overrides.get(table_name)
         if bounds is None:
             bounds = get_numeric_bounds(spark, properties, source_table, partition_column)
         if bounds:
@@ -600,9 +584,7 @@ def load_source_dataframe(
                     upper_bound,
                     num_partitions,
                 )
-                jdbc_properties = {
-                    key: value for key, value in properties.items() if key != "url"
-                }
+                jdbc_properties = {key: value for key, value in properties.items() if key != "url"}
                 jdbc_properties["fetchsize"] = config["DATAGEN_JDBC_FETCH_SIZE"]
                 return spark.read.jdbc(
                     url=properties["url"],
@@ -636,12 +618,8 @@ def load_source_dataframe(
         predicates = []
 
     if predicates:
-        logger.info(
-            "Reading %s in %d ROWID-range partitions", source_table, len(predicates)
-        )
-        jdbc_properties = {
-            key: value for key, value in properties.items() if key != "url"
-        }
+        logger.info("Reading %s in %d ROWID-range partitions", source_table, len(predicates))
+        jdbc_properties = {key: value for key, value in properties.items() if key != "url"}
         jdbc_properties["fetchsize"] = config["DATAGEN_JDBC_FETCH_SIZE"]
         return spark.read.jdbc(
             url=properties["url"],
@@ -718,9 +696,7 @@ def save_tables(
                     limit,
                 )
         except Exception as exc:
-            logger.exception(
-                "[%d/%d] Failed to save %s: %s", index, total, source_table, exc
-            )
+            logger.exception("[%d/%d] Failed to save %s: %s", index, total, source_table, exc)
             failures.append(source_table)
             if not continue_on_error:
                 raise

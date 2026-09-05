@@ -39,16 +39,76 @@ def spark():
 @pytest.fixture(scope="module")
 def analyzed(spark):
     rows_a = [
-        (1, 10, 11, "2024-01-01", "x", " a ", "a", 1, 0, date(2024, 1, 1),
-         datetime(2024, 1, 1, 0), 1.0),
-        (2, 20, 21, "2024-01-02", "x", "b", "b", 2, 1, date(2024, 1, 2),
-         datetime(2024, 1, 2, 0), float("nan")),
-        (3, 30, 31, "2024-01-03", "x", "c", "c", 2, 2, date(2024, 1, 3),
-         datetime(2024, 1, 3, 0), float("inf")),
-        (4, 40, 41, "2024-01-04", "x", "", "d", 3, 3, date(2024, 1, 4),
-         datetime(2024, 1, 4, 0), float("-inf")),
-        (5, 50, 51, "2024-01-05", "x", None, "e", None, 4, date(2024, 1, 5),
-         datetime(2024, 1, 5, 0), None),
+        (
+            1,
+            10,
+            11,
+            "2024-01-01",
+            "x",
+            " a ",
+            "a",
+            1,
+            0,
+            date(2024, 1, 1),
+            datetime(2024, 1, 1, 0),
+            1.0,
+        ),
+        (
+            2,
+            20,
+            21,
+            "2024-01-02",
+            "x",
+            "b",
+            "b",
+            2,
+            1,
+            date(2024, 1, 2),
+            datetime(2024, 1, 2, 0),
+            float("nan"),
+        ),
+        (
+            3,
+            30,
+            31,
+            "2024-01-03",
+            "x",
+            "c",
+            "c",
+            2,
+            2,
+            date(2024, 1, 3),
+            datetime(2024, 1, 3, 0),
+            float("inf"),
+        ),
+        (
+            4,
+            40,
+            41,
+            "2024-01-04",
+            "x",
+            "",
+            "d",
+            3,
+            3,
+            date(2024, 1, 4),
+            datetime(2024, 1, 4, 0),
+            float("-inf"),
+        ),
+        (
+            5,
+            50,
+            51,
+            "2024-01-05",
+            "x",
+            None,
+            "e",
+            None,
+            4,
+            date(2024, 1, 5),
+            datetime(2024, 1, 5, 0),
+            None,
+        ),
     ]
     rows_b = [
         (1, "b", "a", 1, 0, date(2024, 1, 1), datetime(2024, 1, 1, 0)),
@@ -151,8 +211,7 @@ def test_physical_type_json_is_exact_and_unsupported_types_are_reported(spark):
         ]
     )
     plans = {
-        p.column: p
-        for p in similarity.plan_columns({"T": spark.createDataFrame([], schema)}, {})
+        p.column: p for p in similarity.plan_columns({"T": spark.createDataFrame([], schema)}, {})
     }
     assert plans["i"].type_json != plans["l"].type_json
     assert plans["d1"].type_json != plans["d2"].type_json
@@ -410,8 +469,10 @@ def test_balanced_global_cuts_ignore_row_weight_and_collapse_duplicates(spark):
     assert cuts(1) == cuts(50)
 
     repeated = spark.createDataFrame(
-        [("T", "x", '"double"', "numeric", str(v), float(v), True, False)
-         for v in [0, 0, 0, 0, 1, 1, 1, 1]],
+        [
+            ("T", "x", '"double"', "numeric", str(v), float(v), True, False)
+            for v in [0, 0, 0, 0, 1, 1, 1, 1]
+        ],
         "table string, column string, type_json string, kind string, value string, "
         "psi_value string, is_valid boolean, is_invalid boolean",
     )
@@ -494,14 +555,10 @@ def test_native_psi_preserves_large_longs_decimals_and_timestamp_microseconds(sp
         assert bins[0]["effective_bins"] > 1
     long_edges = json.loads(_pair(analysis, "A", "big", "B", "big")["psi_edges_json"])
     assert all(int(edge) >= base for edge in long_edges)
-    precise_edges = json.loads(
-        _pair(analysis, "A", "precise", "B", "precise")["psi_edges_json"]
-    )
+    precise_edges = json.loads(_pair(analysis, "A", "precise", "B", "precise")["psi_edges_json"])
     assert all(edge.startswith("12345678901234567890.") for edge in precise_edges)
     assert any(not edge.endswith("0000000000") for edge in precise_edges)
-    moment_edges = json.loads(
-        _pair(analysis, "A", "moment", "B", "moment")["psi_edges_json"]
-    )
+    moment_edges = json.loads(_pair(analysis, "A", "moment", "B", "moment")["psi_edges_json"])
     assert len(set(moment_edges)) > 1 and all(edge.isdigit() for edge in moment_edges)
 
 
@@ -511,9 +568,12 @@ def test_dates_timestamps_and_timezone_metadata(analyzed, spark):
     assert profiles[("A", "day")]["route"] == "psi"
     assert profiles[("A", "moment")]["route"] == "psi"
     assert spark.conf.get("spark.sql.session.timeZone") == "UTC"
-    assert analysis.psi_bins.where(F.col("column").isin("day", "moment")).where(
-        F.col("timezone") != "UTC"
-    ).count() == 0
+    assert (
+        analysis.psi_bins.where(F.col("column").isin("day", "moment"))
+        .where(F.col("timezone") != "UTC")
+        .count()
+        == 0
+    )
 
 
 def test_decimal_values_retain_precision_and_scale_in_identity(spark):
@@ -537,10 +597,17 @@ def test_rankings_are_separate_deterministic_and_thresholds_are_inclusive(analyz
     assert report["key_assumptions"]["tables_absent_from_specs"] == ["C"]
     assert "assumed to have no" in report["key_assumptions"]["warning"]
     j_keys = [(r["table_a"], r["column_a"], r["table_b"], r["column_b"]) for r in jaccard]
-    assert j_keys == sorted(j_keys, key=lambda key: (-next(
-        r["jaccard"] for r in jaccard
-        if (r["table_a"], r["column_a"], r["table_b"], r["column_b"]) == key
-    ), key))
+    assert j_keys == sorted(
+        j_keys,
+        key=lambda key: (
+            -next(
+                r["jaccard"]
+                for r in jaccard
+                if (r["table_a"], r["column_a"], r["table_b"], r["column_b"]) == key
+            ),
+            key,
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -605,22 +672,43 @@ def test_immutable_runs_update_latest_last_and_preserve_prior_and_adjacent(
     assert json.loads(similarity.read_text(spark, second.report_uri))["run"] == 2
     pairs = spark.read.parquet(f"{second.run_uri}/pairs")
     required_pair_fields = {
-        "table_a", "column_a", "table_b", "column_b", "type_json", "metric", "mode",
-        "status", "jaccard", "psi", "threshold", "is_match", "sketch_sample_size",
-        "jaccard_interval_low", "jaccard_interval_high",
+        "table_a",
+        "column_a",
+        "table_b",
+        "column_b",
+        "type_json",
+        "metric",
+        "mode",
+        "status",
+        "jaccard",
+        "psi",
+        "threshold",
+        "is_match",
+        "sketch_sample_size",
+        "jaccard_interval_low",
+        "jaccard_interval_high",
     }
     assert required_pair_fields <= set(pairs.columns)
     columns = spark.read.parquet(f"{second.run_uri}/profiles/columns")
     assert {
-        "table", "column", "type_json", "included", "exclusion_reason", "row_count",
-        "non_null_count", "valid_count", "invalid_count", "null_count", "distinct_count",
-        "null_rate", "route", "eligible",
+        "table",
+        "column",
+        "type_json",
+        "included",
+        "exclusion_reason",
+        "row_count",
+        "non_null_count",
+        "valid_count",
+        "invalid_count",
+        "null_count",
+        "distinct_count",
+        "null_rate",
+        "route",
+        "eligible",
     } <= set(columns.columns)
 
 
-def test_failed_immutable_run_leaves_latest_on_previous_run(
-    analyzed, spark, tmp_path, monkeypatch
-):
+def test_failed_immutable_run_leaves_latest_on_previous_run(analyzed, spark, tmp_path, monkeypatch):
     analysis, _ = analyzed
     output = (tmp_path / "immutable-failure").as_uri()
     report = {"summary": {"integrity": analysis.integrity}}
@@ -700,9 +788,7 @@ def test_production_parity_without_local_checkpoint_and_bounded_batches(
         similarity, "_perf_log", lambda phase, **fields: events.append((phase, fields))
     )
     output = (tmp_path / "production").as_uri()
-    actual = similarity.run_production(
-        spark, tables, output, specs=specs, config=config
-    )
+    actual = similarity.run_production(spark, tables, output, specs=specs, config=config)
 
     for expected_df, actual_df in (
         (expected.columns, actual.columns),
@@ -733,10 +819,7 @@ def test_production_parity_without_local_checkpoint_and_bounded_batches(
     exact_batches = sum(phase == "exact_score_batch" for phase, _fields in events)
     partition_reads = [fields for phase, fields in events if phase == "exact_partition_read"]
     assert exact_batches >= 3 and len(partition_reads) == exact_batches
-    assert all(
-        fields["partition_filter"] and fields["profiles"] <= 2
-        for fields in partition_reads
-    )
+    assert all(fields["partition_filter"] and fields["profiles"] <= 2 for fields in partition_reads)
 
 
 def test_production_failure_preserves_final_and_cleans_workspace(spark, tmp_path, monkeypatch):
@@ -750,9 +833,7 @@ def test_production_failure_preserves_final_and_cleans_workspace(spark, tmp_path
         "report_uri": f"{final.as_uri()}/runs/previous/report.json",
         "generated_at": "2026-01-01T00:00:00+00:00",
     }
-    similarity.write_text(
-        spark, f"{final.as_uri()}/LATEST.json", json.dumps(previous_latest)
-    )
+    similarity.write_text(spark, f"{final.as_uri()}/LATEST.json", json.dumps(previous_latest))
     tables = {
         "A": spark.createDataFrame([(1, "a"), (2, "b")], "id long, value string"),
         "B": spark.createDataFrame([(1, "a"), (2, "c")], "id long, value string"),
@@ -771,16 +852,12 @@ def test_production_failure_preserves_final_and_cleans_workspace(spark, tmp_path
             config=similarity.Config(min_nonnull=2),
         )
     assert marker.read_text(encoding="utf-8") == "old"
-    current_latest = json.loads(
-        similarity.read_text(spark, f"{final.as_uri()}/LATEST.json")
-    )
+    current_latest = json.loads(similarity.read_text(spark, f"{final.as_uri()}/LATEST.json"))
     assert current_latest == previous_latest
     assert not list(tmp_path.glob("final.__workspace_*"))
 
 
-def test_production_persists_ineligible_jaccard_values_and_zeroes_empty_counts(
-    spark, tmp_path
-):
+def test_production_persists_ineligible_jaccard_values_and_zeroes_empty_counts(spark, tmp_path):
     tables = {
         "A": spark.createDataFrame([(1, " x ")], "id long, code string"),
         "B": spark.createDataFrame([(1, "x"), (2, "y")], "id long, code string"),
@@ -793,9 +870,7 @@ def test_production_persists_ineligible_jaccard_values_and_zeroes_empty_counts(
         specs={table: {"pk_cols": ["id"]} for table in tables},
         config=similarity.Config(min_nonnull=2, min_distinct=2),
     )
-    profiles = {
-        (row["table"], row["column"]): row for row in result.columns.collect()
-    }
+    profiles = {(row["table"], row["column"]): row for row in result.columns.collect()}
     assert not profiles[("A", "code")]["eligible"]
     assert profiles[("A", "code")]["valid_count"] == 1
     empty = profiles[("C", "code")]

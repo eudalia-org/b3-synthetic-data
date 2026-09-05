@@ -14,7 +14,7 @@ import json
 import sys
 
 # importa do arquivo entregue (precisa estar na mesma pasta ou no PYTHONPATH)
-from ordem_insercao_oracle import ordem_insercao, imprime_relatorio
+from ordem_insercao_oracle import imprime_relatorio, ordem_insercao
 
 
 def carrega_specs(caminho: str) -> dict:
@@ -50,8 +50,6 @@ if __name__ == "__main__":
     main()
 
 
-
-import json
-from ordem_insercao_oracle import ordem_insercao
+# Notebook example using the imports above.
 specs = json.load(open("specs_full.json", encoding="utf-8"))
 ordem = ordem_insercao(specs)["ordem"]

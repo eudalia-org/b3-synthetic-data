@@ -43,8 +43,25 @@ def lca_tables(spark):
             [(500, None)], "NUM_ID_ENTIDADE long, DAT_EXCLUSAO string"
         ),
         "INSTRUMENTO_FINANCEIRO": spark.createDataFrame(
-            [(1, 96, None, "code.0", 1000, "2026-07-17", 55, 267, 7, 0,
-              500.0, 500.0, 500.0, 500.0, "S")],
+            [
+                (
+                    1,
+                    96,
+                    None,
+                    "code.0",
+                    1000,
+                    "2026-07-17",
+                    55,
+                    267,
+                    7,
+                    0,
+                    500.0,
+                    500.0,
+                    500.0,
+                    500.0,
+                    "S",
+                )
+            ],
             "NUM_IF long, NUM_TIPO_IF long, DAT_EXCLUSAO string, COD_IF string, "
             "NUM_ID_LOTE long, DAT_REGISTRO string, NUM_SISTEMA long, "
             "NUM_ID_FORMA_PAGAMENTO long, NUM_ID_MOTIVO_SITUACAO_IF long, "
@@ -76,8 +93,7 @@ def lca_tables(spark):
         ),
         "JUROS_FLUTUANTE": spark.createDataFrame(
             [(12, 4, 100.0)],
-            "NUM_CONDICAO_IF long, NUM_INDICE_VALORIZACAO long, "
-            "VAL_PERCENTUAL_TAXA_JUROS double",
+            "NUM_CONDICAO_IF long, NUM_INDICE_VALORIZACAO long, VAL_PERCENTUAL_TAXA_JUROS double",
         ),
         "SPREAD": spark.createDataFrame(
             [(13, 1.56)], "NUM_CONDICAO_IF long, VAL_TAXA_SPREAD double"
@@ -175,12 +191,14 @@ def target_frames(spark, toggle_period=("2026-01-01", "2026-12-31")):
             [], "COD_OPERACAO string, DAT_EXCLUSAO string"
         ),
         "LCA_WALLET_COMITENTE": spark.createDataFrame(
-            [], "NUM_ID_ENTIDADE long, COD_TIPO_POSICAO_CARTEIRA long, NUM_SISTEMA long, "
-            "NUM_IF long, NUM_CONTA_PARTICIPANTE long"
+            [],
+            "NUM_ID_ENTIDADE long, COD_TIPO_POSICAO_CARTEIRA long, NUM_SISTEMA long, "
+            "NUM_IF long, NUM_CONTA_PARTICIPANTE long",
         ),
         "LCA_WALLET_PARTICIPANTE": spark.createDataFrame(
-            [], "COD_TIPO_POSICAO_CARTEIRA long, NUM_SISTEMA long, NUM_IF long, "
-            "NUM_CONTA_PARTICIPANTE long, DAT_EXCLUSAO string"
+            [],
+            "COD_TIPO_POSICAO_CARTEIRA long, NUM_SISTEMA long, NUM_IF long, "
+            "NUM_CONTA_PARTICIPANTE long, DAT_EXCLUSAO string",
         ),
     }
 
@@ -190,9 +208,9 @@ def graph_findings(tables):
 
 
 def target_findings(tables, frames):
-    return by_id(validator.check_lca_target_frames(
-        tables, frames, 5, validator.VALIDATION_PROFILES["lca"]
-    ))
+    return by_id(
+        validator.check_lca_target_frames(tables, frames, 5, validator.VALIDATION_PROFILES["lca"])
+    )
 
 
 def test_lca_profile_inventory_shape_and_isolation(capsys):
@@ -204,10 +222,26 @@ def test_lca_profile_inventory_shape_and_isolation(capsys):
     assert profile.unsupported_required() == ()
     assert len(validator.LCA_OUTPUT_TABLES) == 21
     assert validator.LCA_OUTPUT_TABLES == (
-        "ENTIDADE", "REPRESENTANTE_IF", "INSTRUMENTO_FINANCEIRO", "TITULO", "IF_LCA",
-        "CREDITO", "GARANTIA", "CONDICAO_IF", "AMORTIZACAO", "JUROS_FLUTUANTE", "SPREAD",
-        "RESGATE", "EVENTO", "DEPOSITO_AUTOMATICO_IF", "OPERACAO", "DADO_OPERACAO",
-        "LANCAMENTO", "ESPECIFICACAO", "ESPECIFICACAO_COMITENTE", "CARTEIRA_COMITENTE",
+        "ENTIDADE",
+        "REPRESENTANTE_IF",
+        "INSTRUMENTO_FINANCEIRO",
+        "TITULO",
+        "IF_LCA",
+        "CREDITO",
+        "GARANTIA",
+        "CONDICAO_IF",
+        "AMORTIZACAO",
+        "JUROS_FLUTUANTE",
+        "SPREAD",
+        "RESGATE",
+        "EVENTO",
+        "DEPOSITO_AUTOMATICO_IF",
+        "OPERACAO",
+        "DADO_OPERACAO",
+        "LANCAMENTO",
+        "ESPECIFICACAO",
+        "ESPECIFICACAO_COMITENTE",
+        "CARTEIRA_COMITENTE",
         "CARTEIRA_PARTICIPANTE",
     )
     assert profiler.PRODUCTS["lca"] == {"num_tipo_if": 96, "simplified": True}
@@ -215,13 +249,33 @@ def test_lca_profile_inventory_shape_and_isolation(capsys):
         validator.LCA_SHAPE_METRICS
     )
     assert validator.LCA_SHAPE_METRICS == [
-        "ENTIDADE", "REPRESENTANTE_IF", "TITULO", "IF_LCA", "CREDITO", "GARANTIA",
-        "CONDICAO_IF", "CONDICAO_IF_TIPO1", "CONDICAO_IF_TIPO3",
-        "CONDICAO_IF_TIPO5", "CONDICAO_IF_TIPO20", "AMORTIZACAO",
-        "JUROS_FLUTUANTE", "SPREAD", "RESGATE", "EVENTO", "EVENTO_TIPO83",
-        "EVENTO_TIPO84", "EVENTO_TIPO85", "DEPOSITO", "OPERACAO", "DADO_OPERACAO",
-        "LANCAMENTO", "ESPECIFICACAO", "ESPECIFICACAO_COMITENTE",
-        "CARTEIRA_COMITENTE", "CARTEIRA_PARTICIPANTE",
+        "ENTIDADE",
+        "REPRESENTANTE_IF",
+        "TITULO",
+        "IF_LCA",
+        "CREDITO",
+        "GARANTIA",
+        "CONDICAO_IF",
+        "CONDICAO_IF_TIPO1",
+        "CONDICAO_IF_TIPO3",
+        "CONDICAO_IF_TIPO5",
+        "CONDICAO_IF_TIPO20",
+        "AMORTIZACAO",
+        "JUROS_FLUTUANTE",
+        "SPREAD",
+        "RESGATE",
+        "EVENTO",
+        "EVENTO_TIPO83",
+        "EVENTO_TIPO84",
+        "EVENTO_TIPO85",
+        "DEPOSITO",
+        "OPERACAO",
+        "DADO_OPERACAO",
+        "LANCAMENTO",
+        "ESPECIFICACAO",
+        "ESPECIFICACAO_COMITENTE",
+        "CARTEIRA_COMITENTE",
+        "CARTEIRA_PARTICIPANTE",
     ]
     assert [metric.name for metric in profiler.metrics_for_product("lci")] == (
         validator.LCI_SHAPE_METRICS
@@ -236,15 +290,20 @@ def test_lca_metadata_requires_every_live_table_and_pk():
     pks = {table: ["ID"] for table in tables}
     pks.pop("IF_LCA")
     finding = validator.check_lca_metadata(
-        validator.Metadata(tables, pks, {}, {}, {}), False,
+        validator.Metadata(tables, pks, {}, {}, {}),
+        False,
         validator.VALIDATION_PROFILES["lca"],
     )[0]
     assert finding.severity == validator.SEV_ERROR
     assert "IF_LCA" in finding.message
-    assert validator.check_lca_metadata(
-        validator.Metadata(set(), {}, {}, {}, {}), True,
-        validator.VALIDATION_PROFILES["lca"],
-    )[0].severity == validator.SEV_WARN
+    assert (
+        validator.check_lca_metadata(
+            validator.Metadata(set(), {}, {}, {}, {}),
+            True,
+            validator.VALIDATION_PROFILES["lca"],
+        )[0].severity
+        == validator.SEV_WARN
+    )
 
 
 def test_lca_exact_root_and_one_each_joined_child(spark):
@@ -277,8 +336,7 @@ def test_lca_exact_root_and_one_each_joined_child(spark):
         ("DADO_OPERACAO", "NUM_ID_OPERACAO", "2g.operation_data.edge"),
         ("LANCAMENTO", "NUM_ID_OPERACAO", "2g.launch.edge"),
         ("ESPECIFICACAO", "NUM_ID_OPERACAO", "2g.specification.edge"),
-        ("ESPECIFICACAO_COMITENTE", "NUM_ID_ESPECIFICACAO",
-         "2g.specification_holder.edge"),
+        ("ESPECIFICACAO_COMITENTE", "NUM_ID_ESPECIFICACAO", "2g.specification_holder.edge"),
     ],
 )
 def test_lca_rejects_every_graph_orphan(spark, table, column, check_id):
@@ -308,9 +366,12 @@ def test_lca_known_and_unknown_polymorphism(spark):
     tables["RESGATE"] = spark.createDataFrame(
         [(13, "SEM TABELA"), (14, "SEM TABELA")], tables["RESGATE"].schema
     )
-    assert by_id(validator.check_lca_polymorphism(tables, 5, profile))[
-        "2g.condition_polymorphism"
-    ].severity == validator.SEV_ERROR
+    assert (
+        by_id(validator.check_lca_polymorphism(tables, 5, profile))[
+            "2g.condition_polymorphism"
+        ].severity
+        == validator.SEV_ERROR
+    )
     tables = lca_tables(spark)
     tables["CONDICAO_IF"] = tables["CONDICAO_IF"].withColumn(
         "COD_TIPO_CONDICAO_IF",
@@ -347,9 +408,15 @@ def test_lca_target_positive_has_no_lci_access_area_assumption(spark):
     findings = target_findings(lca_tables(spark), target_frames(spark))
     assert all(not finding.table.startswith("LCI_") for finding in findings.values())
     for check_id in (
-        "6g.lookup.tipo_if", "6g.lookup.lot", "6g.lookup.lot_root_type",
-        "6g.lookup.issuer_account", "6g.lookup.municipality", "6g.lookup.uf",
-        "6g.lookup.object_service", "6g.lookup.route", "6g.registration_account_roles",
+        "6g.lookup.tipo_if",
+        "6g.lookup.lot",
+        "6g.lookup.lot_root_type",
+        "6g.lookup.issuer_account",
+        "6g.lookup.municipality",
+        "6g.lookup.uf",
+        "6g.lookup.object_service",
+        "6g.lookup.route",
+        "6g.registration_account_roles",
     ):
         assert findings[check_id].passed, findings[check_id]
 
@@ -362,15 +429,11 @@ def test_lca_target_positive_has_no_lci_access_area_assumption(spark):
         ("COD_CONTA_CONTRAPARTE", " 12345.40-1 "),
     ],
 )
-def test_lca_registration_operation_requires_10_40_account_roles(
-    spark, column, value
-):
+def test_lca_registration_operation_requires_10_40_account_roles(spark, column, value):
     tables = lca_tables(spark)
     tables["OPERACAO"] = tables["OPERACAO"].withColumn(column, validator.F.lit(value))
 
-    finding = target_findings(tables, target_frames(spark))[
-        "6g.registration_account_roles"
-    ]
+    finding = target_findings(tables, target_frames(spark))["6g.registration_account_roles"]
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 1
 
@@ -379,9 +442,7 @@ def test_lca_account_role_check_fails_closed_without_route_evidence(spark):
     frames = target_frames(spark)
     del frames["LCA_ROUTES"]
 
-    finding = target_findings(lca_tables(spark), frames)[
-        "6g.registration_account_roles"
-    ]
+    finding = target_findings(lca_tables(spark), frames)["6g.registration_account_roles"]
     assert finding.severity == validator.SEV_ERROR
 
 
@@ -457,17 +518,19 @@ def test_lca_wallet_local_and_target_collisions(spark, target_name, source_table
     frames = target_frames(spark)
     target = frames[target_name]
     source = tables[source_table]
-    values = tuple(source.select(*[column for column in target.columns
-                                   if column != "DAT_EXCLUSAO"]).first())
+    values = tuple(
+        source.select(*[column for column in target.columns if column != "DAT_EXCLUSAO"]).first()
+    )
     if "DAT_EXCLUSAO" in target.columns:
         values += (None,)
     frames[target_name] = spark.createDataFrame([values], target.schema)
     assert target_findings(tables, frames)[check_id].severity == validator.SEV_ERROR
     duplicate = source.withColumn(source.columns[0], validator.F.lit(999))
     tables[source_table] = source.union(duplicate)
-    assert target_findings(tables, target_frames(spark))[
-        f"{check_id}.local"
-    ].severity == validator.SEV_ERROR
+    assert (
+        target_findings(tables, target_frames(spark))[f"{check_id}.local"].severity
+        == validator.SEV_ERROR
+    )
 
 
 def test_lca_registration_profile_is_opt_in_and_event_counts_are_advisory(spark):
@@ -489,9 +552,11 @@ def test_lca_registration_profile_reports_missing_columns_without_crashing(spark
     tables["CONDICAO_IF"] = tables["CONDICAO_IF"].drop("COD_TIPO_CONDICAO_IF")
     tables["OPERACAO"] = tables["OPERACAO"].drop("NUM_ID_OPERACAO")
 
-    findings = by_id(validator.check_lca_registration_profile(
-        tables, 5, True, validator.VALIDATION_PROFILES["lca"]
-    ))
+    findings = by_id(
+        validator.check_lca_registration_profile(
+            tables, 5, True, validator.VALIDATION_PROFILES["lca"]
+        )
+    )
 
     assert findings["8g.profile.condition_topology"].severity == validator.SEV_WARN
     assert findings["8g.profile.async_closure"].severity == validator.SEV_WARN
@@ -502,12 +567,15 @@ def test_lca_registration_profile_reports_event_coverage_independently(spark):
     tables = lca_tables(spark)
     tables["EVENTO"] = tables["EVENTO"].drop("NUM_TIPO_EVENTO_LEGADO")
 
-    findings = by_id(validator.check_lca_registration_profile(
-        tables, 5, True, validator.VALIDATION_PROFILES["lca"]
-    ))
+    findings = by_id(
+        validator.check_lca_registration_profile(
+            tables, 5, True, validator.VALIDATION_PROFILES["lca"]
+        )
+    )
 
     for check_id in (
-        "8g.profile.event_dml_counts", "8g.profile.async_closure",
+        "8g.profile.event_dml_counts",
+        "8g.profile.async_closure",
         "8g.profile.operation_data_types",
     ):
         assert findings[check_id].severity == validator.SEV_WARN
@@ -526,10 +594,18 @@ def test_lca_shape_profiler_prints_without_cdb_reference_sections(spark, capsys)
 
 
 def test_lca_shape_dispatch_and_prefix_aware_loader_no_jdbc(spark, monkeypatch):
-    findings = by_id(validator.check_shapes(
-        spark, lca_tables(spark), None, 5, 1.0, 0.15, 5.0,
-        validator.VALIDATION_PROFILES["lca"],
-    ))
+    findings = by_id(
+        validator.check_shapes(
+            spark,
+            lca_tables(spark),
+            None,
+            5,
+            1.0,
+            0.15,
+            5.0,
+            validator.VALIDATION_PROFILES["lca"],
+        )
+    )
     assert findings["7.baseline"].severity == validator.SEV_WARN
     assert "7c.op_ratio" not in findings
 

@@ -83,18 +83,27 @@ def required_frames(
             return None
         return f"{number:05d}.{group}-{number % 10}"
 
-    operation_rows = operations if operations is not None else [(
-        1, 1, operation_tos, 6, p1_account, p2_account,
-        operation_account_code(p1_account, "10"),
-        operation_account_code(p2_account, "40"),
-    )]
+    operation_rows = (
+        operations
+        if operations is not None
+        else [
+            (
+                1,
+                1,
+                operation_tos,
+                6,
+                p1_account,
+                p2_account,
+                operation_account_code(p1_account, "10"),
+                operation_account_code(p2_account, "40"),
+            )
+        ]
+    )
     operation_rows = [
-        (*row, operation_quantity) if len(row) == 8 else row
-        for row in operation_rows
+        (*row, operation_quantity) if len(row) == 8 else row for row in operation_rows
     ]
     specifications = [
-        (1000 + index, row[0], specification_quantity)
-        for index, row in enumerate(operation_rows)
+        (1000 + index, row[0], specification_quantity) for index, row in enumerate(operation_rows)
     ]
     holders = [
         (specification[0], 2000 + index, holder_quantity)
@@ -122,18 +131,15 @@ def required_frames(
         ),
         "ESPECIFICACAO": spark.createDataFrame(
             specifications,
-            "NUM_ID_ESPECIFICACAO long, NUM_ID_OPERACAO long, "
-            "QTD_ESPECIFICAR long",
+            "NUM_ID_ESPECIFICACAO long, NUM_ID_OPERACAO long, QTD_ESPECIFICAR long",
         ),
         "ESPECIFICACAO_COMITENTE": spark.createDataFrame(
             holders,
-            "NUM_ID_ESPECIFICACAO long, NUM_ID_ENTIDADE long, "
-            "QTD_ESPECIFICADA long",
+            "NUM_ID_ESPECIFICACAO long, NUM_ID_ENTIDADE long, QTD_ESPECIFICADA long",
         ),
         "CARTEIRA_PARTICIPANTE": spark.createDataFrame(
             [(row[1], row[4], participant_wallet_quantity) for row in operation_rows],
-            "NUM_IF long, NUM_CONTA_PARTICIPANTE string, "
-            "QTD_CARTEIRA_PARTICIPANTE long",
+            "NUM_IF long, NUM_CONTA_PARTICIPANTE string, QTD_CARTEIRA_PARTICIPANTE long",
         ),
         "CARTEIRA_COMITENTE": spark.createDataFrame(
             [
@@ -164,8 +170,7 @@ def required_frames(
     )
     tipo_df = spark.createDataFrame(
         tipos if tipos is not None else [("10", "S", "1")],
-        "NUM_ID_TIPO_OPERACAO string, IND_SEM_MODALIDADE_INFOHUB string, "
-        "COD_TIPO_OPERACAO string",
+        "NUM_ID_TIPO_OPERACAO string, IND_SEM_MODALIDADE_INFOHUB string, COD_TIPO_OPERACAO string",
     )
     cdb_object_df = spark.createDataFrame(
         cdb_objects if cdb_objects is not None else [("CDB", "S")],
@@ -246,9 +251,9 @@ def test_sem_modalidade_n_and_null_flags_warn(spark):
         tipos=[(10, "N"), (11, None)],
     )
 
-    finding = by_id(
-        validator.check_lookup_combo_frames(*inputs, sample=5)
-    )["6.combo.sem_modalidade"]
+    finding = by_id(validator.check_lookup_combo_frames(*inputs, sample=5))[
+        "6.combo.sem_modalidade"
+    ]
 
     assert finding.severity == validator.SEV_WARN
     assert finding.count == 2
@@ -264,9 +269,9 @@ def test_unavailable_and_null_identification_flags_warn(spark):
         tipos=[(10, "S")],
     )
 
-    finding = by_id(
-        validator.check_lookup_combo_frames(*inputs, sample=5)
-    )["6.combo.identification_availability"]
+    finding = by_id(validator.check_lookup_combo_frames(*inputs, sample=5))[
+        "6.combo.identification_availability"
+    ]
 
     assert finding.severity == validator.SEV_WARN
     assert finding.count == 2
@@ -283,20 +288,13 @@ def test_missing_lookup_frames_degrade_with_hints(spark):
     )
     op_df, tos_df, _, _ = inputs
 
-    missing_tos = validator.check_lookup_combo_frames(
-        op_df, None, None, None, sample=5
-    )
-    missing_sic_and_tipo = validator.check_lookup_combo_frames(
-        op_df, tos_df, None, None, sample=5
-    )
+    missing_tos = validator.check_lookup_combo_frames(op_df, None, None, None, sample=5)
+    missing_sic_and_tipo = validator.check_lookup_combo_frames(op_df, tos_df, None, None, sample=5)
 
     assert_failed_have_hints(missing_tos)
     assert_failed_have_hints(missing_sic_and_tipo)
     assert all(finding.check_id.startswith("6.combo") for finding in missing_tos)
-    assert all(
-        finding.check_id.startswith("6.combo")
-        for finding in missing_sic_and_tipo
-    )
+    assert all(finding.check_id.startswith("6.combo") for finding in missing_sic_and_tipo)
 
 
 def test_no_jdbc_warns(spark):
@@ -330,8 +328,7 @@ def test_lazy_jdbc_failure_is_caught_and_required_check_errors(spark, monkeypatc
     )
     tipo_df = spark.createDataFrame(
         [(10, "S", "1")],
-        "NUM_ID_TIPO_OPERACAO long, IND_SEM_MODALIDADE_INFOHUB string, "
-        "COD_TIPO_OPERACAO string",
+        "NUM_ID_TIPO_OPERACAO long, IND_SEM_MODALIDADE_INFOHUB string, COD_TIPO_OPERACAO string",
     )
     cdb_df = spark.createDataFrame(
         [("CDB", "S")], "COD_OBJETO_SERVICO string, IND_PLATAFORMA_BAIXA string"
@@ -370,9 +367,7 @@ def test_lazy_jdbc_failure_is_caught_and_required_check_errors(spark, monkeypatc
 def test_missing_required_operation_columns_warn(spark):
     op_df = spark.createDataFrame([(1, 100)], "NUM_ID_OPERACAO long, OTHER_ID long")
 
-    finding = validator.check_lookup_combo_frames(
-        op_df, None, None, None, sample=5
-    )[0]
+    finding = validator.check_lookup_combo_frames(op_df, None, None, None, sample=5)[0]
 
     assert finding.check_id == "6.combo.required_columns"
     assert finding.severity == validator.SEV_WARN
@@ -396,9 +391,7 @@ def test_all_three_required_lookups_pass(spark):
 
 
 def test_operation_type_code_two_fails_required_tos(spark):
-    finding = by_id(required_findings(spark, tipos=[("10", "S", "2")]))[
-        "6.required.operation_tos"
-    ]
+    finding = by_id(required_findings(spark, tipos=[("10", "S", "2")]))["6.required.operation_tos"]
 
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 1
@@ -406,34 +399,47 @@ def test_operation_type_code_two_fails_required_tos(spark):
 
 
 def test_historical_operation_tos_is_ignored_when_registration_exists(spark):
-    findings = by_id(required_findings(
-        spark,
-        operations=[
-            (1, 1, "100", 6, "13", "14", "00013.10-3", "00014.40-4"),
-            (2, 1, "200", 6, "98", "99", "HIST-P1", "HIST-P2"),
-        ],
-        tos=[
-            ("100", "10", "44", "S"),
-            ("200", "20", "45", "N"),
-        ],
-        tipos=[
-            ("10", "S", "1"),
-            ("20", "S", "2"),
-        ],
-    ))
+    findings = by_id(
+        required_findings(
+            spark,
+            operations=[
+                (1, 1, "100", 6, "13", "14", "00013.10-3", "00014.40-4"),
+                (2, 1, "200", 6, "98", "99", "HIST-P1", "HIST-P2"),
+            ],
+            tos=[
+                ("100", "10", "44", "S"),
+                ("200", "20", "45", "N"),
+            ],
+            tipos=[
+                ("10", "S", "1"),
+                ("20", "S", "2"),
+            ],
+        )
+    )
 
     assert findings["6.required.operation_tos"].passed
     assert findings["6.required.active_account"].passed
 
 
 def test_each_cdb_requires_registration_operation(spark):
-    finding = by_id(required_findings(
-        spark,
-        operations=[(
-            1, 1, "100", 6, "13", "14", "00013.10-3", "00014.40-4",
-        )],
-        root_num_ifs=(1, 2),
-    ))["6.required.operation_tos"]
+    finding = by_id(
+        required_findings(
+            spark,
+            operations=[
+                (
+                    1,
+                    1,
+                    "100",
+                    6,
+                    "13",
+                    "14",
+                    "00013.10-3",
+                    "00014.40-4",
+                )
+            ],
+            root_num_ifs=(1, 2),
+        )
+    )["6.required.operation_tos"]
 
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 1
@@ -441,17 +447,19 @@ def test_each_cdb_requires_registration_operation(spark):
 
 
 def test_invalid_registration_is_reported_even_when_another_is_valid(spark):
-    finding = by_id(required_findings(
-        spark,
-        operations=[
-            (1, 1, "100", 6, "13", "14", "00013.10-3", "00014.40-4"),
-            (2, 1, "101", 6, "13", "14", "00013.10-3", "00014.40-4"),
-        ],
-        tos=[
-            ("100", "10", "44", "S"),
-            ("101", "10", "44", None),
-        ],
-    ))["6.required.operation_tos"]
+    finding = by_id(
+        required_findings(
+            spark,
+            operations=[
+                (1, 1, "100", 6, "13", "14", "00013.10-3", "00014.40-4"),
+                (2, 1, "101", 6, "13", "14", "00013.10-3", "00014.40-4"),
+            ],
+            tos=[
+                ("100", "10", "44", "S"),
+                ("101", "10", "44", None),
+            ],
+        )
+    )["6.required.operation_tos"]
 
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 1
@@ -475,9 +483,7 @@ def test_ineligible_or_missing_account_fails(spark, accounts):
         ("14", "1", "00014.40-4", "1", "L"),
     ]
 
-    finding = by_id(required_findings(spark, accounts=accounts))[
-        "6.required.active_account"
-    ]
+    finding = by_id(required_findings(spark, accounts=accounts))["6.required.active_account"]
 
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 1
@@ -490,9 +496,7 @@ def test_each_required_account_source_table_missing_errors(spark, missing_table)
     tables = inputs[0]
     del tables[missing_table]
 
-    findings = by_id(
-        validator.check_required_lookup_frames(tables, *inputs[1:], sample=5)
-    )
+    findings = by_id(validator.check_required_lookup_frames(tables, *inputs[1:], sample=5))
 
     assert findings["6.required.active_account"].severity == validator.SEV_ERROR
     assert_failed_have_hints(findings.values())
@@ -504,9 +508,9 @@ def test_each_required_account_source_column_missing_errors(spark, table, column
     tables = inputs[0]
     tables[table] = tables[table].drop(column)
 
-    finding = by_id(
-        validator.check_required_lookup_frames(tables, *inputs[1:], sample=5)
-    )["6.required.active_account"]
+    finding = by_id(validator.check_required_lookup_frames(tables, *inputs[1:], sample=5))[
+        "6.required.active_account"
+    ]
 
     assert finding.severity == validator.SEV_ERROR
     assert f"{table}.{column}" in finding.message
@@ -516,25 +520,19 @@ def test_each_required_account_source_column_missing_errors(spark, table, column
 def test_unrelated_account_columns_are_ignored(spark):
     inputs = required_frames(spark)
     tables = inputs[0]
-    tables["CREDITO"] = spark.createDataFrame(
-        [(999,)], "NUM_CONTA_PARTICIPANTE long"
-    )
+    tables["CREDITO"] = spark.createDataFrame([(999,)], "NUM_CONTA_PARTICIPANTE long")
     tables["TITULO"] = tables["TITULO"].withColumn("OTHER_ACCOUNT", pyspark.sql.functions.lit(999))
 
-    finding = by_id(
-        validator.check_required_lookup_frames(tables, *inputs[1:], sample=5)
-    )["6.required.active_account"]
+    finding = by_id(validator.check_required_lookup_frames(tables, *inputs[1:], sample=5))[
+        "6.required.active_account"
+    ]
 
     assert finding.passed
 
 
 def test_null_account_is_ignored_but_blank_account_fails(spark):
-    null_finding = by_id(required_findings(spark, title_account=None))[
-        "6.required.active_account"
-    ]
-    blank_finding = by_id(required_findings(spark, title_account="  "))[
-        "6.required.active_account"
-    ]
+    null_finding = by_id(required_findings(spark, title_account=None))["6.required.active_account"]
+    blank_finding = by_id(required_findings(spark, title_account="  "))["6.required.active_account"]
 
     assert null_finding.passed
     assert blank_finding.severity == validator.SEV_ERROR
@@ -543,38 +541,58 @@ def test_null_account_is_ignored_but_blank_account_fails(spark):
 
 
 def test_required_lookup_ids_use_canonical_numeric_keys(spark):
-    finding = by_id(required_findings(spark, title_account="11.000"))[
-        "6.required.active_account"
-    ]
+    finding = by_id(required_findings(spark, title_account="11.000"))["6.required.active_account"]
 
     assert finding.passed
 
 
 def test_cdb_operation_account_roles_are_not_interchangeable(spark):
-    finding = by_id(required_findings(
-        spark,
-        accounts=[
-            ("11", "1", "00011.40-1", "1", "L"),
-            ("12", "1", "00012.10-2", "1", "L"),
-            ("13", "1", "00013.40-3", "1", "L"),
-            ("14", "1", "00014.10-4", "1", "L"),
-        ],
-        operations=[(
-            1, 1, "100", 6, "13", "14", "00013.40-3", "00014.10-4",
-        )],
-    ))["6.required.active_account"]
+    finding = by_id(
+        required_findings(
+            spark,
+            accounts=[
+                ("11", "1", "00011.40-1", "1", "L"),
+                ("12", "1", "00012.10-2", "1", "L"),
+                ("13", "1", "00013.40-3", "1", "L"),
+                ("14", "1", "00014.10-4", "1", "L"),
+            ],
+            operations=[
+                (
+                    1,
+                    1,
+                    "100",
+                    6,
+                    "13",
+                    "14",
+                    "00013.40-3",
+                    "00014.10-4",
+                )
+            ],
+        )
+    )["6.required.active_account"]
 
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 2
 
 
 def test_cdb_operation_denormalized_account_code_must_match_reference(spark):
-    finding = by_id(required_findings(
-        spark,
-        operations=[(
-            1, 1, "100", 6, "13", "14", "99999.10-9", "00014.40-4",
-        )],
-    ))["6.required.active_account"]
+    finding = by_id(
+        required_findings(
+            spark,
+            operations=[
+                (
+                    1,
+                    1,
+                    "100",
+                    6,
+                    "13",
+                    "14",
+                    "99999.10-9",
+                    "00014.40-4",
+                )
+            ],
+        )
+    )["6.required.active_account"]
 
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 1
@@ -592,9 +610,7 @@ def test_cdb_operation_denormalized_account_code_must_match_reference(spark):
     ],
 )
 def test_cdb_registration_quantity_chain_must_reconcile(spark, quantity_override):
-    finding = by_id(required_findings(spark, **quantity_override))[
-        "6.required.cdb_quantity"
-    ]
+    finding = by_id(required_findings(spark, **quantity_override))["6.required.cdb_quantity"]
 
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 1
@@ -613,9 +629,7 @@ def test_malformed_account_code_shape_fails(spark, code):
         ("14", "1", "00014.40-4", "1", "L"),
     ]
 
-    finding = by_id(required_findings(spark, accounts=accounts))[
-        "6.required.active_account"
-    ]
+    finding = by_id(required_findings(spark, accounts=accounts))["6.required.active_account"]
 
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 1
@@ -630,9 +644,7 @@ def test_account_code_trailing_oracle_padding_is_trimmed(spark):
         ("14", "1", "00014.40-4", "1", "L"),
     ]
 
-    finding = by_id(required_findings(spark, accounts=accounts))[
-        "6.required.active_account"
-    ]
+    finding = by_id(required_findings(spark, accounts=accounts))["6.required.active_account"]
 
     assert finding.passed
 
@@ -659,9 +671,7 @@ def test_invalid_required_operation_tos_fails(spark, kwargs):
 
 @pytest.mark.parametrize("objects", [[("CDB", "N")], []], ids=["disabled", "absent"])
 def test_cdb_platform_must_be_enabled(spark, objects):
-    finding = by_id(required_findings(spark, cdb_objects=objects))[
-        "6.required.cdb_platform"
-    ]
+    finding = by_id(required_findings(spark, cdb_objects=objects))["6.required.cdb_platform"]
 
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 1
@@ -714,13 +724,11 @@ def test_required_operation_source_missing_errors(spark, missing):
     if missing == "table":
         del tables["OPERACAO"]
     else:
-        tables["OPERACAO"] = tables["OPERACAO"].drop(
-            "NUM_ID_TIPO_OPER_OBJETO_SERV"
-        )
+        tables["OPERACAO"] = tables["OPERACAO"].drop("NUM_ID_TIPO_OPER_OBJETO_SERV")
 
-    finding = by_id(
-        validator.check_required_lookup_frames(tables, *inputs[1:], sample=5)
-    )["6.required.operation_tos"]
+    finding = by_id(validator.check_required_lookup_frames(tables, *inputs[1:], sample=5))[
+        "6.required.operation_tos"
+    ]
 
     assert finding.severity == validator.SEV_ERROR
     assert_failed_have_hints([finding])
@@ -738,8 +746,7 @@ def test_account_lookup_sql_is_bounded_batched_and_strictly_checked(spark, monke
             (
                 value,
                 "2" if value == "1" else "1",
-                f"{int(value):05d}.{'10' if value in ('1002', '1003') else '40'}-"
-                f"{int(value) % 10}",
+                f"{int(value):05d}.{'10' if value in ('1002', '1003') else '40'}-{int(value) % 10}",
                 "1",
                 "L",
             )
@@ -789,9 +796,7 @@ def test_account_lookup_sql_is_bounded_batched_and_strictly_checked(spark, monke
 def test_account_lookup_over_limit_is_error_without_target_query(spark, monkeypatch):
     inputs = required_frames(spark)
     tables = inputs[0]
-    tables["TITULO"] = spark.createDataFrame(
-        [("11",), ("15",)], "NUM_CONTA_PARTICIPANTE string"
-    )
+    tables["TITULO"] = spark.createDataFrame([("11",), ("15",)], "NUM_CONTA_PARTICIPANTE string")
     queries = []
 
     def fake_jdbc(_spark, _cfg, query):
@@ -801,8 +806,7 @@ def test_account_lookup_over_limit_is_error_without_target_query(spark, monkeypa
         if validator.V_PARAMETRO_SIC_TABLE in query:
             return spark.createDataFrame(
                 [(100, 49, 44)],
-                "NUM_ID_TIPO_OPER_OBJETO_SERV long, NUM_TIPO_IF long, "
-                "NUM_ID_OBJETO_SERVICO long",
+                "NUM_ID_TIPO_OPER_OBJETO_SERV long, NUM_TIPO_IF long, NUM_ID_OBJETO_SERVICO long",
             )
         if validator.V_OBJETOS_SERVICO_TABLE in query:
             return inputs[4]
@@ -896,71 +900,92 @@ def test_empty_account_references_pass_without_account_jdbc_rows(spark, monkeypa
 
 def test_rdb_registration_tos_accounts_and_quantities_are_validated(spark):
     profile = validator.VALIDATION_PROFILES["rdb"]
-    findings = by_id(required_findings(
-        spark,
-        profile=profile,
-        tos=[("100", "10", "45", "S")],
-    ))
+    findings = by_id(
+        required_findings(
+            spark,
+            profile=profile,
+            tos=[("100", "10", "45", "S")],
+        )
+    )
 
     assert findings["6.required.operation_tos"].passed
     assert findings["6.required.active_account"].passed
     assert findings["6.required.rdb_quantity"].passed
     assert findings["6.required.cdb_platform"].severity == validator.SEV_WARN
 
-    wrong_service = by_id(required_findings(
-        spark,
-        profile=profile,
-        tos=[("100", "10", "44", "S")],
-    ))
+    wrong_service = by_id(
+        required_findings(
+            spark,
+            profile=profile,
+            tos=[("100", "10", "44", "S")],
+        )
+    )
     assert wrong_service["6.required.operation_tos"].severity == validator.SEV_ERROR
 
-    wrong_accounts = by_id(required_findings(
-        spark,
-        profile=profile,
-        tos=[("100", "10", "45", "S")],
-        accounts=[
-            ("11", "1", "00011.40-1", "1", "L"),
-            ("12", "1", "00012.10-2", "1", "L"),
-            ("13", "1", "00013.40-3", "1", "L"),
-            ("14", "1", "00014.10-4", "1", "L"),
-        ],
-        operations=[(
-            1, 1, "100", 6, "13", "14", "00013.40-3", "00014.10-4",
-        )],
-    ))
+    wrong_accounts = by_id(
+        required_findings(
+            spark,
+            profile=profile,
+            tos=[("100", "10", "45", "S")],
+            accounts=[
+                ("11", "1", "00011.40-1", "1", "L"),
+                ("12", "1", "00012.10-2", "1", "L"),
+                ("13", "1", "00013.40-3", "1", "L"),
+                ("14", "1", "00014.10-4", "1", "L"),
+            ],
+            operations=[
+                (
+                    1,
+                    1,
+                    "100",
+                    6,
+                    "13",
+                    "14",
+                    "00013.40-3",
+                    "00014.10-4",
+                )
+            ],
+        )
+    )
     assert wrong_accounts["6.required.active_account"].count == 2
 
-    situation_two = by_id(required_findings(
-        spark,
-        profile=profile,
-        tos=[("100", "10", "45", "S")],
-        accounts=[
-            ("11", "2", "00011.40-1", "1", "L"),
-            ("12", "2", "00012.10-2", "1", "L"),
-            ("13", "2", "00013.10-3", "1", "L"),
-            ("14", "2", "00014.40-4", "1", "L"),
-        ],
-    ))
+    situation_two = by_id(
+        required_findings(
+            spark,
+            profile=profile,
+            tos=[("100", "10", "45", "S")],
+            accounts=[
+                ("11", "2", "00011.40-1", "1", "L"),
+                ("12", "2", "00012.10-2", "1", "L"),
+                ("13", "2", "00013.10-3", "1", "L"),
+                ("14", "2", "00014.40-4", "1", "L"),
+            ],
+        )
+    )
     assert situation_two["6.required.active_account"].passed
 
-    unavailable_identification = by_id(required_findings(
-        spark,
-        profile=profile,
-        tos=[("100", "10", "45", "S"), ("101", "10", "45", "N")],
-        operations=[
-            (1, 1, "100", 6, "13", "14", "00013.10-3", "00014.40-4"),
-            (2, 1, "101", 6, "98", "99", "INVALID", "INVALID"),
-        ],
-    ))
+    unavailable_identification = by_id(
+        required_findings(
+            spark,
+            profile=profile,
+            tos=[("100", "10", "45", "S"), ("101", "10", "45", "N")],
+            operations=[
+                (1, 1, "100", 6, "13", "14", "00013.10-3", "00014.40-4"),
+                (2, 1, "101", 6, "98", "99", "INVALID", "INVALID"),
+            ],
+        )
+    )
     assert unavailable_identification["6.required.active_account"].passed
     assert unavailable_identification["6.required.rdb_quantity"].passed
 
-    wrong_quantity = by_id(required_findings(
-        spark,
-        profile=profile,
-        tos=[("100", "10", "45", "S")],
-        title_quantity=50001,
-    ))
+    wrong_quantity = by_id(
+        required_findings(
+            spark,
+            profile=profile,
+            tos=[("100", "10", "45", "S")],
+            title_quantity=50001,
+        )
+    )
     assert wrong_quantity["6.required.rdb_quantity"].severity == validator.SEV_ERROR
 
 
@@ -989,14 +1014,16 @@ def test_rdb_queries_registration_lookups_without_using_cdb_sic(spark, monkeypat
 
     monkeypatch.setattr(validator, "_jdbc", fake_jdbc)
     cfg = validator.Config("unused", "jdbc:oracle:test", "user", "password", "CETIP")
-    findings = by_id(validator.check_lookup_combos(
-        spark,
-        cfg,
-        inputs[0],
-        validator.Metadata(set(), {}, {}, {}, {}),
-        sample=5,
-        profile=profile,
-    ))
+    findings = by_id(
+        validator.check_lookup_combos(
+            spark,
+            cfg,
+            inputs[0],
+            validator.Metadata(set(), {}, {}, {}, {}),
+            sample=5,
+            profile=profile,
+        )
+    )
 
     assert calls
     assert not any(validator.V_PARAMETRO_SIC_TABLE in query for query in calls)

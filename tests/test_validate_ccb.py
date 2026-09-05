@@ -32,8 +32,7 @@ def by_id(findings):
 def ccb_tables(spark):
     return {
         "INSTRUMENTO_FINANCEIRO": spark.createDataFrame(
-            [(1, 53, None, "25K00003006", "2026-08-14", "2026-08-14",
-              "2035-08-17", 8, "N", 55)],
+            [(1, 53, None, "25K00003006", "2026-08-14", "2026-08-14", "2035-08-17", 8, "N", 55)],
             "NUM_IF long, NUM_TIPO_IF long, DAT_EXCLUSAO string, COD_IF string, "
             "DAT_EMISSAO string, DAT_REGISTRO string, DAT_VENCIMENTO string, "
             "NUM_ID_FORMA_PAGAMENTO long, IND_AGENDA_CONSTANTE string, NUM_SISTEMA long",
@@ -45,14 +44,14 @@ def ccb_tables(spark):
         ),
         "CONDICAO_IF": spark.createDataFrame(
             [(11, 1, "4", None), (12, 1, "2", None)],
-            "NUM_CONDICAO_IF long, NUM_IF long, COD_TIPO_CONDICAO_IF string, "
-            "DAT_EXCLUSAO string",
+            "NUM_CONDICAO_IF long, NUM_IF long, COD_TIPO_CONDICAO_IF string, DAT_EXCLUSAO string",
         ),
         "AMORTIZACAO": spark.createDataFrame([], "NUM_CONDICAO_IF long"),
         "ATUALIZACAO_POS": spark.createDataFrame([(11,)], "NUM_CONDICAO_IF long"),
         "ATUALIZACAO_PRE": spark.createDataFrame([], "NUM_CONDICAO_IF long"),
-        "JUROS_FIXO": spark.createDataFrame([(12, 17.479)],
-                                             "NUM_CONDICAO_IF long, VAL_TAXA_JUROS_FIXO double"),
+        "JUROS_FIXO": spark.createDataFrame(
+            [(12, 17.479)], "NUM_CONDICAO_IF long, VAL_TAXA_JUROS_FIXO double"
+        ),
         "SPREAD": spark.createDataFrame([], "NUM_CONDICAO_IF long"),
         "RESGATE": spark.createDataFrame(
             [], "NUM_CONDICAO_IF long, DAT_RESGATE string, COD_TIPO_EXERCICIO string"
@@ -68,20 +67,30 @@ def ccb_tables(spark):
         ),
         "TCTPIF_CCB": spark.createDataFrame(
             [(51, 1, "N", None)],
-            "NUM_ID_IF_CCB long, NUM_IF long, IND_BAIXA_VENCIMENTO string, "
-            "DTHR_EXCLUSAO string",
+            "NUM_ID_IF_CCB long, NUM_IF long, IND_BAIXA_VENCIMENTO string, DTHR_EXCLUSAO string",
         ),
         "TCTPCRONOGRAMA_CCB": spark.createDataFrame(
-            [(61, 1, "90", "2027-08-17", "2027-08-17", "2027-08-17", None,
-              "parcel.1", 19289.0, 2143.0)],
+            [
+                (
+                    61,
+                    1,
+                    "90",
+                    "2027-08-17",
+                    "2027-08-17",
+                    "2027-08-17",
+                    None,
+                    "parcel.1",
+                    19289.0,
+                    2143.0,
+                )
+            ],
             "NUM_EVENTO_CCB long, NUM_IF long, NUM_TIPO_EVENTO_LEGADO string, "
             "DATA_ORIGINAL_EVENTO string, DATA_OCORRENCIA_EVENTO string, "
             "DATA_LIQUIDACAO string, DATA_EXCLUSAO string, COD_PARCELA string, "
             "VAL_EVENTO double, VAL_PU_EVENTO double",
         ),
         "OPERACAO": spark.createDataFrame(
-            [(71, 1, 871, 6, "operation.0", 1, 2, 1.0,
-              "00001.00-1", "00002.40-2")],
+            [(71, 1, 871, 6, "operation.0", 1, 2, 1.0, "00001.00-1", "00002.40-2")],
             "NUM_ID_OPERACAO long, NUM_IF long, NUM_ID_TIPO_OPER_OBJETO_SERV long, "
             "NUM_ID_MODALIDADE_LIQUIDACAO long, COD_OPERACAO string, "
             "COD_TIPO_DEBITO_P1 long, COD_TIPO_DEBITO_P2 long, QTD_OPERACAO double, "
@@ -93,8 +102,7 @@ def ccb_tables(spark):
         "GARANTIA": spark.createDataFrame([], "NUM_ID_GARANTIA long, NUM_IF long"),
         "TCTPCADEIA_IPOC": spark.createDataFrame(
             [],
-            "NUM_CADEIA_IPOC long, NUM_IPOC_ANTERIOR long, NUM_IF long, "
-            "DATA_EXCLUSAO string",
+            "NUM_CADEIA_IPOC long, NUM_IPOC_ANTERIOR long, NUM_IF long, DATA_EXCLUSAO string",
         ),
     }
 
@@ -133,9 +141,9 @@ def test_ccb_profile_is_isolated_and_explicit(capsys):
 
 
 def test_ccb_graph_accepts_observed_no_resgate_registration(spark):
-    findings = by_id(validator.check_ccb_graph(
-        ccb_tables(spark), 5, validator.VALIDATION_PROFILES["ccb"]
-    ))
+    findings = by_id(
+        validator.check_ccb_graph(ccb_tables(spark), 5, validator.VALIDATION_PROFILES["ccb"])
+    )
 
     assert all(finding.passed for finding in findings.values()), findings
 
@@ -146,16 +154,12 @@ def test_ccb_graph_rejects_comitente_branch_and_generic_events(spark):
     tables["ESPECIFICACAO"] = spark.createDataFrame(
         [(91, 71)], "NUM_ID_ESPECIFICACAO long, NUM_ID_OPERACAO long"
     )
-    tables["ESPECIFICACAO_COMITENTE"] = spark.createDataFrame(
-        [(91,)], "NUM_ID_ESPECIFICACAO long"
-    )
+    tables["ESPECIFICACAO_COMITENTE"] = spark.createDataFrame([(91,)], "NUM_ID_ESPECIFICACAO long")
     tables["EVENTO"] = spark.createDataFrame(
         [(101, 1, None)], "NUM_EVENTO long, NUM_IF long, DAT_EXCLUSAO string"
     )
 
-    findings = by_id(validator.check_ccb_graph(
-        tables, 5, validator.VALIDATION_PROFILES["ccb"]
-    ))
+    findings = by_id(validator.check_ccb_graph(tables, 5, validator.VALIDATION_PROFILES["ccb"]))
 
     assert findings["2h.no_comitente_branch"].severity == validator.SEV_ERROR
     assert findings["2h.no_comitente_branch"].count == 1
@@ -168,9 +172,7 @@ def test_ccb_graph_ignores_empty_optional_contamination_tables(spark):
     tables["CARTEIRA_COMITENTE"] = spark.createDataFrame([], "UNRELATED long")
     tables["EVENTO"] = spark.createDataFrame([], "UNRELATED long")
 
-    findings = by_id(validator.check_ccb_graph(
-        tables, 5, validator.VALIDATION_PROFILES["ccb"]
-    ))
+    findings = by_id(validator.check_ccb_graph(tables, 5, validator.VALIDATION_PROFILES["ccb"]))
 
     assert findings["2h.no_comitente_branch"].passed
     assert findings["2h.generic_event_for_ccb"].passed
@@ -178,9 +180,12 @@ def test_ccb_graph_ignores_empty_optional_contamination_tables(spark):
 
 def test_ccb_metadata_is_partial_without_oracle_and_requires_union_metadata():
     profile = validator.VALIDATION_PROFILES["ccb"]
-    assert validator.check_ccb_metadata(
-        validator.Metadata(set(), {}, {}, {}, {}), True, profile
-    )[0].severity == validator.SEV_WARN
+    assert (
+        validator.check_ccb_metadata(validator.Metadata(set(), {}, {}, {}, {}), True, profile)[
+            0
+        ].severity
+        == validator.SEV_WARN
+    )
 
     tables = set(validator.CCB_OUTPUT_TABLES)
     pks = {table: ["ID"] for table in tables if table != "HISTORICO_PU_CURVA"}
@@ -208,9 +213,12 @@ def test_ccb_graph_rejects_orphans(spark, table, column, check_id):
     tables = ccb_tables(spark)
     tables[table] = tables[table].withColumn(column, validator.F.lit(999))
 
-    assert by_id(validator.check_ccb_graph(
-        tables, 5, validator.VALIDATION_PROFILES["ccb"]
-    ))[check_id].severity == validator.SEV_ERROR
+    assert (
+        by_id(validator.check_ccb_graph(tables, 5, validator.VALIDATION_PROFILES["ccb"]))[
+            check_id
+        ].severity
+        == validator.SEV_ERROR
+    )
 
 
 def test_ccb_history_code_and_ipoc_parent_stay_inside_root(spark):
@@ -218,45 +226,51 @@ def test_ccb_history_code_and_ipoc_parent_stay_inside_root(spark):
     tables["HISTORICO_IF_TITULO"] = tables["HISTORICO_IF_TITULO"].withColumn(
         "COD_IF", validator.F.lit("OTHER")
     )
-    assert by_id(validator.check_ccb_graph(
-        tables, 5, validator.VALIDATION_PROFILES["ccb"]
-    ))["2h.title_history.edge"].severity == validator.SEV_ERROR
+    assert (
+        by_id(validator.check_ccb_graph(tables, 5, validator.VALIDATION_PROFILES["ccb"]))[
+            "2h.title_history.edge"
+        ].severity
+        == validator.SEV_ERROR
+    )
 
     tables = ccb_tables(spark)
     tables["TCTPCADEIA_IPOC"] = spark.createDataFrame(
         [(91, 999, 1, None)], tables["TCTPCADEIA_IPOC"].schema
     )
-    assert by_id(validator.check_ccb_graph(
-        tables, 5, validator.VALIDATION_PROFILES["ccb"]
-    ))["2h.ipoc_parent"].severity == validator.SEV_ERROR
+    assert (
+        by_id(validator.check_ccb_graph(tables, 5, validator.VALIDATION_PROFILES["ccb"]))[
+            "2h.ipoc_parent"
+        ].severity
+        == validator.SEV_ERROR
+    )
 
 
 def test_ccb_blank_or_duplicate_root_codes_are_advisory(spark):
     tables = ccb_tables(spark)
     root = tables["INSTRUMENTO_FINANCEIRO"]
-    tables["INSTRUMENTO_FINANCEIRO"] = root.union(
-        root.withColumn("NUM_IF", validator.F.lit(2))
-    )
+    tables["INSTRUMENTO_FINANCEIRO"] = root.union(root.withColumn("NUM_IF", validator.F.lit(2)))
 
-    finding = by_id(validator.check_ccb_registration_profile(
-        tables, 5, True, validator.VALIDATION_PROFILES["ccb"]
-    ))["8h.profile.root_code"]
+    finding = by_id(
+        validator.check_ccb_registration_profile(
+            tables, 5, True, validator.VALIDATION_PROFILES["ccb"]
+        )
+    )["8h.profile.root_code"]
     assert finding.severity == validator.SEV_WARN
     assert finding.count == 2
 
 
 def test_ccb_deleted_schedule_rows_do_not_create_graph_or_variant_failures(spark):
     tables = ccb_tables(spark)
-    tables["TCTPCRONOGRAMA_CCB"] = tables["TCTPCRONOGRAMA_CCB"].withColumn(
-        "NUM_IF", validator.F.lit(999)
-    ).withColumn("DATA_EXCLUSAO", validator.F.lit("2026-08-15"))
+    tables["TCTPCRONOGRAMA_CCB"] = (
+        tables["TCTPCRONOGRAMA_CCB"]
+        .withColumn("NUM_IF", validator.F.lit(999))
+        .withColumn("DATA_EXCLUSAO", validator.F.lit("2026-08-15"))
+    )
 
-    graph = by_id(validator.check_ccb_graph(
-        tables, 5, validator.VALIDATION_PROFILES["ccb"]
-    ))
-    variants = by_id(validator.check_ccb_variant_rules(
-        tables, 5, validator.VALIDATION_PROFILES["ccb"]
-    ))
+    graph = by_id(validator.check_ccb_graph(tables, 5, validator.VALIDATION_PROFILES["ccb"]))
+    variants = by_id(
+        validator.check_ccb_variant_rules(tables, 5, validator.VALIDATION_PROFILES["ccb"])
+    )
     assert graph["2h.schedule.edge"].passed
     assert variants["2h.resgate_baixa_event"].passed
 
@@ -267,9 +281,7 @@ def test_ccb_blank_schedule_exclusion_is_oracle_active(spark):
         "DATA_EXCLUSAO", validator.F.lit("")
     )
 
-    profile = profiler.build_profile(
-        tables, product="ccb", num_tipo_if=53, simplified=False
-    )
+    profile = profiler.build_profile(tables, product="ccb", num_tipo_if=53, simplified=False)
     assert profile["shapes"][0]["counts"]["TCTPCRONOGRAMA_CCB"] == 1
 
 
@@ -297,9 +309,9 @@ def test_ccb_unknown_condition_type_is_advisory(spark):
             validator.F.col("COD_TIPO_CONDICAO_IF")
         ),
     )
-    findings = by_id(validator.check_ccb_polymorphism(
-        tables, 5, validator.VALIDATION_PROFILES["ccb"]
-    ))
+    findings = by_id(
+        validator.check_ccb_polymorphism(tables, 5, validator.VALIDATION_PROFILES["ccb"])
+    )
 
     assert findings["2h.unknown_condition_type"].severity == validator.SEV_WARN
 
@@ -309,9 +321,9 @@ def test_ccb_resgate_baixa_event_correlation_is_advisory(spark):
     tables["TCTPIF_CCB"] = tables["TCTPIF_CCB"].withColumn(
         "IND_BAIXA_VENCIMENTO", validator.F.lit("S")
     )
-    finding = by_id(validator.check_ccb_variant_rules(
-        tables, 5, validator.VALIDATION_PROFILES["ccb"]
-    ))["2h.resgate_baixa_event"]
+    finding = by_id(
+        validator.check_ccb_variant_rules(tables, 5, validator.VALIDATION_PROFILES["ccb"])
+    )["2h.resgate_baixa_event"]
 
     assert finding.severity == validator.SEV_WARN
     assert finding.count == 1
@@ -329,13 +341,15 @@ def test_ccb_resgate_maturity_and_exercise_drift_is_advisory(spark, exercise):
     tables["TCTPIF_CCB"] = tables["TCTPIF_CCB"].withColumn(
         "IND_BAIXA_VENCIMENTO", validator.F.lit("S")
     )
-    tables["TCTPCRONOGRAMA_CCB"] = tables["TCTPCRONOGRAMA_CCB"].withColumn(
-        "NUM_TIPO_EVENTO_LEGADO", validator.F.lit("85")
-    ).withColumn("DATA_ORIGINAL_EVENTO", validator.F.lit("2034-08-17"))
+    tables["TCTPCRONOGRAMA_CCB"] = (
+        tables["TCTPCRONOGRAMA_CCB"]
+        .withColumn("NUM_TIPO_EVENTO_LEGADO", validator.F.lit("85"))
+        .withColumn("DATA_ORIGINAL_EVENTO", validator.F.lit("2034-08-17"))
+    )
 
-    findings = by_id(validator.check_ccb_variant_rules(
-        tables, 5, validator.VALIDATION_PROFILES["ccb"]
-    ))
+    findings = by_id(
+        validator.check_ccb_variant_rules(tables, 5, validator.VALIDATION_PROFILES["ccb"])
+    )
     assert findings["2h.resgate_baixa_event"].passed
     assert findings["2h.resgate_details"].severity == validator.SEV_WARN
 
@@ -367,9 +381,7 @@ def test_ccb_registration_profile_checks_history_alteration_agenda_and_events(sp
     tables["TCTPCRONOGRAMA_CCB"] = tables["TCTPCRONOGRAMA_CCB"].withColumn(
         "NUM_TIPO_EVENTO_LEGADO", validator.F.lit("83")
     )
-    findings = by_id(validator.check_ccb_registration_profile(
-        tables, 5, True, profile
-    ))
+    findings = by_id(validator.check_ccb_registration_profile(tables, 5, True, profile))
 
     assert findings["8h.profile.core_counts"].severity == validator.SEV_WARN
     assert findings["8h.profile.variant_condition_mix"].severity == validator.SEV_WARN
@@ -381,9 +393,11 @@ def test_ccb_unknown_payment_form_is_not_forced_into_observed_matrix(spark):
     tables["INSTRUMENTO_FINANCEIRO"] = tables["INSTRUMENTO_FINANCEIRO"].withColumn(
         "NUM_ID_FORMA_PAGAMENTO", validator.F.lit(999)
     )
-    findings = by_id(validator.check_ccb_registration_profile(
-        tables, 5, True, validator.VALIDATION_PROFILES["ccb"]
-    ))
+    findings = by_id(
+        validator.check_ccb_registration_profile(
+            tables, 5, True, validator.VALIDATION_PROFILES["ccb"]
+        )
+    )
 
     assert findings["8h.profile.variant_condition_mix"].passed
     assert findings["8h.profile.variant_event_mix"].passed
@@ -392,17 +406,20 @@ def test_ccb_unknown_payment_form_is_not_forced_into_observed_matrix(spark):
 
 def test_ccb_schedule_profile_checks_parcels_values_and_original_date(spark):
     tables = ccb_tables(spark)
-    schedule = tables["TCTPCRONOGRAMA_CCB"].withColumn(
-        "COD_PARCELA", validator.F.lit("parcel.1")
-    ).withColumn("VAL_EVENTO", validator.F.lit(-1.0)).withColumn(
-        "DATA_ORIGINAL_EVENTO", validator.F.lit("2040-01-01")
+    schedule = (
+        tables["TCTPCRONOGRAMA_CCB"]
+        .withColumn("COD_PARCELA", validator.F.lit("parcel.1"))
+        .withColumn("VAL_EVENTO", validator.F.lit(-1.0))
+        .withColumn("DATA_ORIGINAL_EVENTO", validator.F.lit("2040-01-01"))
     )
     tables["TCTPCRONOGRAMA_CCB"] = schedule.union(
         schedule.withColumn("NUM_EVENTO_CCB", validator.F.lit(62))
     )
-    findings = by_id(validator.check_ccb_registration_profile(
-        tables, 5, True, validator.VALIDATION_PROFILES["ccb"]
-    ))
+    findings = by_id(
+        validator.check_ccb_registration_profile(
+            tables, 5, True, validator.VALIDATION_PROFILES["ccb"]
+        )
+    )
 
     assert findings["8h.profile.schedule_dates"].severity == validator.SEV_WARN
     assert findings["8h.profile.schedule_parcels"].severity == validator.SEV_WARN
@@ -411,12 +428,12 @@ def test_ccb_schedule_profile_checks_parcels_values_and_original_date(spark):
 
 def test_ccb_schedule_profile_reports_optional_column_coverage(spark):
     tables = ccb_tables(spark)
-    tables["TCTPCRONOGRAMA_CCB"] = tables["TCTPCRONOGRAMA_CCB"].drop(
-        "COD_PARCELA", "VAL_EVENTO"
+    tables["TCTPCRONOGRAMA_CCB"] = tables["TCTPCRONOGRAMA_CCB"].drop("COD_PARCELA", "VAL_EVENTO")
+    findings = by_id(
+        validator.check_ccb_registration_profile(
+            tables, 5, True, validator.VALIDATION_PROFILES["ccb"]
+        )
     )
-    findings = by_id(validator.check_ccb_registration_profile(
-        tables, 5, True, validator.VALIDATION_PROFILES["ccb"]
-    ))
 
     assert findings["8h.profile.schedule_parcels"].severity == validator.SEV_WARN
     assert findings["8h.profile.schedule_values"].severity == validator.SEV_WARN
@@ -430,9 +447,7 @@ def test_ccb_dates_reject_malformed_and_reversed_values(spark):
     tables["CREDITO"] = tables["CREDITO"].withColumn(
         "DAT_INICIO_RENTABILIDADE", validator.F.lit("2036-01-01")
     )
-    findings = by_id(validator.check_ccb_dates(
-        tables, 5, validator.VALIDATION_PROFILES["ccb"]
-    ))
+    findings = by_id(validator.check_ccb_dates(tables, 5, validator.VALIDATION_PROFILES["ccb"]))
 
     assert findings["5h.date_parse"].severity == validator.SEV_ERROR
     assert findings["5h.date_order"].severity == validator.SEV_ERROR
@@ -444,8 +459,7 @@ def test_ccb_dates_reject_malformed_and_reversed_values(spark):
         ("CCB_TIPO_IF", "COD_TIPO_IF", "CDB", "6h.lookup.tipo_if"),
         ("CCB_OBJECT_SERVICE", "IND_PLATAFORMA_BAIXA", "N", "6h.lookup.platform"),
         ("CCB_ROUTES", "NUM_ID_OBJETO_SERVICO", 44, "6h.lookup.registration_route"),
-        ("CCB_ROUTES", "IND_DISPONIVEL_IDENTIFICACAO", "N",
-         "6h.lookup.registration_route"),
+        ("CCB_ROUTES", "IND_DISPONIVEL_IDENTIFICACAO", "N", "6h.lookup.registration_route"),
     ],
 )
 def test_ccb_target_eligibility_rejects_wrong_type_platform_and_route(
@@ -453,17 +467,21 @@ def test_ccb_target_eligibility_rejects_wrong_type_platform_and_route(
 ):
     frames = target_frames(spark)
     frames[frame] = frames[frame].withColumn(column, validator.F.lit(value))
-    findings = by_id(validator.check_ccb_target_frames(
-        ccb_tables(spark), frames, 5, validator.VALIDATION_PROFILES["ccb"]
-    ))
+    findings = by_id(
+        validator.check_ccb_target_frames(
+            ccb_tables(spark), frames, 5, validator.VALIDATION_PROFILES["ccb"]
+        )
+    )
 
     assert findings[check_id].severity == validator.SEV_ERROR
 
 
 def test_ccb_target_check_ignores_historical_nonregistration_operation(spark):
     tables = ccb_tables(spark)
-    historical = tables["OPERACAO"].withColumn("NUM_ID_OPERACAO", validator.F.lit(72)).withColumn(
-        "NUM_ID_TIPO_OPER_OBJETO_SERV", validator.F.lit(999)
+    historical = (
+        tables["OPERACAO"]
+        .withColumn("NUM_ID_OPERACAO", validator.F.lit(72))
+        .withColumn("NUM_ID_TIPO_OPER_OBJETO_SERV", validator.F.lit(999))
     )
     tables["OPERACAO"] = tables["OPERACAO"].union(historical)
     frames = target_frames(spark)
@@ -471,21 +489,21 @@ def test_ccb_target_check_ignores_historical_nonregistration_operation(spark):
         spark.createDataFrame([(999, 999, "1", "N")], frames["CCB_ROUTES"].schema)
     )
 
-    finding = by_id(validator.check_ccb_target_frames(
-        tables, frames, 5, validator.VALIDATION_PROFILES["ccb"]
-    ))["6h.lookup.registration_route"]
+    finding = by_id(
+        validator.check_ccb_target_frames(tables, frames, 5, validator.VALIDATION_PROFILES["ccb"])
+    )["6h.lookup.registration_route"]
     assert finding.passed
 
 
 def test_ccb_registration_account_columns_are_required(spark):
     tables = ccb_tables(spark)
-    tables["OPERACAO"] = tables["OPERACAO"].drop(
-        "COD_CONTA_PARTE", "COD_CONTA_CONTRAPARTE"
-    )
+    tables["OPERACAO"] = tables["OPERACAO"].drop("COD_CONTA_PARTE", "COD_CONTA_CONTRAPARTE")
 
-    finding = by_id(validator.check_ccb_target_frames(
-        tables, target_frames(spark), 5, validator.VALIDATION_PROFILES["ccb"]
-    ))["6h.registration_account_roles"]
+    finding = by_id(
+        validator.check_ccb_target_frames(
+            tables, target_frames(spark), 5, validator.VALIDATION_PROFILES["ccb"]
+        )
+    )["6h.registration_account_roles"]
 
     assert finding.severity == validator.SEV_ERROR
 
@@ -498,13 +516,11 @@ def test_ccb_registration_account_roles_are_strict_but_tos_871_is_advisory(spark
         .withColumn("COD_CONTA_PARTE", validator.F.lit("00001.10-1"))
     )
     frames = target_frames(spark)
-    frames["CCB_ROUTES"] = spark.createDataFrame(
-        [(872, 47, "1", "S")], frames["CCB_ROUTES"].schema
-    )
+    frames["CCB_ROUTES"] = spark.createDataFrame([(872, 47, "1", "S")], frames["CCB_ROUTES"].schema)
 
-    findings = by_id(validator.check_ccb_target_frames(
-        tables, frames, 5, validator.VALIDATION_PROFILES["ccb"]
-    ))
+    findings = by_id(
+        validator.check_ccb_target_frames(tables, frames, 5, validator.VALIDATION_PROFILES["ccb"])
+    )
 
     assert findings["6h.registration_account_roles"].severity == validator.SEV_ERROR
     assert findings["6h.profile.registration_tos"].severity == validator.SEV_WARN
@@ -516,7 +532,9 @@ def test_ccb_target_loader_respects_skip_prefix(spark, monkeypatch):
 
     monkeypatch.setattr(validator, "_jdbc", fail_jdbc)
     frames, errors = validator.load_ccb_target_frames(
-        spark, SimpleNamespace(schema="CETIP"), ccb_tables(spark),
+        spark,
+        SimpleNamespace(schema="CETIP"),
+        ccb_tables(spark),
         skip_prefixes=("6h.lookup",),
     )
     assert frames == {}
@@ -540,9 +558,7 @@ def test_ccb_shape_profiler_and_validator_use_same_metrics(spark):
 
 
 def test_ccb_shape_profile_rejects_cross_product_comparison(spark):
-    ccb = profiler.build_profile(
-        ccb_tables(spark), product="ccb", num_tipo_if=53, simplified=False
-    )
+    ccb = profiler.build_profile(ccb_tables(spark), product="ccb", num_tipo_if=53, simplified=False)
     other = dict(ccb, product="cdb", num_tipo_if=49)
 
     with pytest.raises(ValueError, match="incompatible"):
@@ -550,10 +566,18 @@ def test_ccb_shape_profile_rejects_cross_product_comparison(spark):
 
 
 def test_ccb_shape_dispatch_needs_baseline_but_no_cdb_ratio(spark):
-    findings = by_id(validator.check_shapes(
-        spark, ccb_tables(spark), None, 5, 1.0, 0.15, 5.0,
-        validator.VALIDATION_PROFILES["ccb"],
-    ))
+    findings = by_id(
+        validator.check_shapes(
+            spark,
+            ccb_tables(spark),
+            None,
+            5,
+            1.0,
+            0.15,
+            5.0,
+            validator.VALIDATION_PROFILES["ccb"],
+        )
+    )
 
     assert findings["7.baseline"].severity == validator.SEV_WARN
     assert "7c.op_ratio" not in findings

@@ -48,12 +48,22 @@ import sys
 from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
-
 TABELAS_ALVO = {
-    "INSTRUMENTO_FINANCEIRO", "CONDICAO_IF", "CARTEIRA_COMITENTE",
-    "CARTEIRA_PARTICIPANTE", "CREDITO", "DEPOSITO_AUTOMATICO_IF", "TITULO",
-    "JUROS_FLUTUANTE", "RESGATE", "EVENTO", "OPERACAO", "ESPECIFICACAO",
-    "LANCAMENTO", "DADO_OPERACAO", "ESPECIFICACAO_COMITENTE",
+    "INSTRUMENTO_FINANCEIRO",
+    "CONDICAO_IF",
+    "CARTEIRA_COMITENTE",
+    "CARTEIRA_PARTICIPANTE",
+    "CREDITO",
+    "DEPOSITO_AUTOMATICO_IF",
+    "TITULO",
+    "JUROS_FLUTUANTE",
+    "RESGATE",
+    "EVENTO",
+    "OPERACAO",
+    "ESPECIFICACAO",
+    "LANCAMENTO",
+    "DADO_OPERACAO",
+    "ESPECIFICACAO_COMITENTE",
 }
 
 
@@ -65,9 +75,7 @@ def le_pks(caminho: str) -> Dict[str, List[str]]:
     acc: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
     with open(caminho, newline="", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
-            acc[_norm(row["TABLE_NAME"])].append(
-                (int(row["POSITION"]), _norm(row["COLUMN_NAME"]))
-            )
+            acc[_norm(row["TABLE_NAME"])].append((int(row["POSITION"]), _norm(row["COLUMN_NAME"])))
     return {t: [c for _, c in sorted(v)] for t, v in acc.items()}
 
 
@@ -104,17 +112,20 @@ def le_fks(caminho: str) -> Dict[str, List[dict]]:
         for row in reader:
             cn = _norm(row["CONSTRAINT_NAME"])
             meta[cn] = (_norm(row["CHILD_TABLE"]), _norm(row["PARENT_TABLE"]))
-            cols[cn].append((int(row["COL_POSITION"]),
-                             _norm(row["CHILD_COLUMN"]), _norm(row["PARENT_COLUMN"])))
+            cols[cn].append(
+                (int(row["COL_POSITION"]), _norm(row["CHILD_COLUMN"]), _norm(row["PARENT_COLUMN"]))
+            )
     by_child: Dict[str, List[dict]] = defaultdict(list)
     for cn, (child, parent) in meta.items():
         trips = sorted(cols[cn])
-        by_child[child].append({
-            "columns": [c for _, c, _ in trips],
-            "parent_table": parent,
-            "parent_columns": [p for _, _, p in trips],
-            "_constraint": cn,
-        })
+        by_child[child].append(
+            {
+                "columns": [c for _, c, _ in trips],
+                "parent_table": parent,
+                "parent_columns": [p for _, _, p in trips],
+                "_constraint": cn,
+            }
+        )
     return by_child
 
 
@@ -185,11 +196,13 @@ def gera(
         fk_list = []
         for fk in fks.get(t, []):
             if fk["parent_table"] in conjunto and fk["parent_table"] in pks:
-                fk_list.append({
-                    "columns": fk["columns"],
-                    "parent_table": fk["parent_table"],
-                    "parent_columns": fk["parent_columns"],
-                })
+                fk_list.append(
+                    {
+                        "columns": fk["columns"],
+                        "parent_table": fk["parent_table"],
+                        "parent_columns": fk["parent_columns"],
+                    }
+                )
         if fk_list:
             cfg["foreign_keys"] = sorted(
                 fk_list, key=lambda x: (x["parent_table"], tuple(x["columns"]))
@@ -213,8 +226,7 @@ def gera(
 
     if usar_spark:
         # checa parquet SÓ dos ancestrais do fecho (não das 1600 do schema)
-        sem_parquet = [t for t in ancestrais
-                       if not _tem_parquet_spark(spark, parquet_bases, t)]
+        sem_parquet = [t for t in ancestrais if not _tem_parquet_spark(spark, parquet_bases, t)]
         parquet_desconhecido = []
     elif disp:
         sem_parquet = [t for t in ancestrais if t not in disp]
@@ -228,8 +240,10 @@ def gera(
     print("=" * 84)
     print("SPEC GERADO POR FECHO TRANSITIVO (15 + ancestrais)")
     print("=" * 84)
-    print(f"  tabelas no specs: {len(specs)}  "
-          f"(alvo/não-static: {len(specs)-n_static}, ancestrais/static: {n_static})")
+    print(
+        f"  tabelas no specs: {len(specs)}  "
+        f"(alvo/não-static: {len(specs) - n_static}, ancestrais/static: {n_static})"
+    )
     print(f"  arquivo: {saida}")
 
     print("\n--- Buraco B: alguma das 15 SEM PK no pk_real.csv? ---")
@@ -256,7 +270,7 @@ def gera(
         else:
             print("  OK: todos os ancestrais do fecho têm parquet.")
     else:
-        print(f"  [VERIFICAR] passe spark+parquet_bases ou parquet_disponivel para checar.")
+        print("  [VERIFICAR] passe spark+parquet_bases ou parquet_disponivel para checar.")
         print(f"  Ancestrais do fecho: {parquet_desconhecido}")
 
     print("\n--- Buraco D: NOT NULL das colunas (anula-vs-dropa no engorda) ---")
@@ -266,14 +280,19 @@ def gera(
         print("  risco de ORA-01400 em coluna NOT NULL. Passe cols_real.csv.")
     else:
         com_nn = sorted(t for t in specs if specs[t].get("not_null_cols"))
-        alvo_sem_nn = sorted(t for t in TABELAS_ALVO
-                             if t in specs and not specs[t].get("not_null_cols"))
+        alvo_sem_nn = sorted(
+            t for t in TABELAS_ALVO if t in specs and not specs[t].get("not_null_cols")
+        )
         n_nn = sum(len(specs[t]["not_null_cols"]) for t in com_nn)
-        print(f"  OK: not_null_cols em {len(com_nn)}/{len(specs)} tabela(s), "
-              f"{n_nn} coluna(s) NOT NULL no total.")
+        print(
+            f"  OK: not_null_cols em {len(com_nn)}/{len(specs)} tabela(s), "
+            f"{n_nn} coluna(s) NOT NULL no total."
+        )
         if alvo_sem_nn:
-            print(f"  [VERIFICAR] alvo(s) sem NENHUMA coluna NOT NULL no cols_real "
-                  f"(esperado ao menos a PK): {alvo_sem_nn}")
+            print(
+                f"  [VERIFICAR] alvo(s) sem NENHUMA coluna NOT NULL no cols_real "
+                f"(esperado ao menos a PK): {alvo_sem_nn}"
+            )
 
     # valida JSON
     with open(saida, encoding="utf-8") as f:
@@ -296,5 +315,4 @@ if __name__ == "__main__":
     cols_csv = None if cols_csv == "-" else cols_csv
     saida = sys.argv[4] if len(sys.argv) > 4 else "spec_config.json"
     disp = set(sys.argv[5].split(",")) if len(sys.argv) > 5 else None
-    gera(pk_csv=pk_csv, fk_csv=fk_csv, cols_csv=cols_csv, saida=saida,
-         parquet_disponivel=disp)
+    gera(pk_csv=pk_csv, fk_csv=fk_csv, cols_csv=cols_csv, saida=saida, parquet_disponivel=disp)

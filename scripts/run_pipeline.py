@@ -35,12 +35,20 @@ PUBLIC_STAGES = ("extract", "faltantes", "engorda", "validate", "load", "verify"
 TRACER_STAGES = ("engorda", "validate", "load")
 OVERRIDE_KEYS = {
     "engorda": {
-        "n_instrumentos", "fator_k", "seed", "specs", "meu_numero_prefix",
-        "query_num_if_sql", "no_oracle",
+        "n_instrumentos",
+        "fator_k",
+        "seed",
+        "specs",
+        "meu_numero_prefix",
+        "query_num_if_sql",
+        "no_oracle",
     },
     "validate": {
-        "fail_severity", "validate_against", "shape_baseline",
-        "application_capacity_contract", "no_oracle",
+        "fail_severity",
+        "validate_against",
+        "shape_baseline",
+        "application_capacity_contract",
+        "no_oracle",
     },
     "load": {"specs", "num_partitions", "batch_size"},
 }
@@ -147,9 +155,7 @@ def _build_run_get_command(
     return ["oci", "data-flow", "run", "get", "--run-id", run_id] + auth_builder(opts)
 
 
-def build_run_get_command(
-    run_id: str, opts: Mapping[str, Any] | None = None
-) -> list[str]:
+def build_run_get_command(run_id: str, opts: Mapping[str, Any] | None = None) -> list[str]:
     return _build_run_get_command(run_id, opts, oci_auth_flags)
 
 
@@ -161,9 +167,7 @@ def _build_run_cancel_command(
     return ["oci", "data-flow", "run", "cancel", "--run-id", run_id] + auth_builder(opts)
 
 
-def build_run_cancel_command(
-    run_id: str, opts: Mapping[str, Any] | None = None
-) -> list[str]:
+def build_run_cancel_command(run_id: str, opts: Mapping[str, Any] | None = None) -> list[str]:
     return _build_run_cancel_command(run_id, opts, oci_auth_flags)
 
 
@@ -207,9 +211,7 @@ def _session_command(operation: str, auth: Mapping[str, Any]) -> list[str]:
 def _profile_region(auth: Mapping[str, Any]) -> str | None:
     if auth.get("region"):
         return str(auth["region"])
-    config_file = Path(
-        str(auth.get("config_file") or Path.home() / ".oci" / "config")
-    ).expanduser()
+    config_file = Path(str(auth.get("config_file") or Path.home() / ".oci" / "config")).expanduser()
     parser = ConfigParser(interpolation=None)
     if not parser.read(config_file):
         return None
@@ -255,8 +257,7 @@ def _run(
         return subprocess.run(list(command), **options)
     except subprocess.TimeoutExpired as exc:
         raise OciExecutionError(
-            f"OCI command {_command_label(command)!r} timed out after "
-            f"{timeout_seconds:g}s",
+            f"OCI command {_command_label(command)!r} timed out after {timeout_seconds:g}s",
             stdout=exc.stdout,
             stderr=exc.stderr,
         ) from exc
@@ -266,8 +267,7 @@ def _oci_failure(error: subprocess.CalledProcessError, command: Sequence[str]) -
     detail = str(error.stderr or error.stdout or "").strip().replace("\n", " ")
     suffix = f": {detail[:400]}" if detail else ""
     return OciExecutionError(
-        f"OCI command {_command_label(command)!r} failed with exit code "
-        f"{error.returncode}{suffix}",
+        f"OCI command {_command_label(command)!r} failed with exit code {error.returncode}{suffix}",
         returncode=error.returncode,
         stdout=error.stdout,
         stderr=error.stderr,
@@ -287,8 +287,8 @@ def run_json(
     command = list(command)
     if progress is not None:
         progress.emit(
-            f"[oci] {_command_label(command)} timeout="
-            f"{timeout_seconds:g}s" if timeout_seconds is not None
+            f"[oci] {_command_label(command)} timeout={timeout_seconds:g}s"
+            if timeout_seconds is not None
             else f"[oci] {_command_label(command)} timeout=none"
         )
     try:
@@ -300,9 +300,7 @@ def run_json(
             raise _oci_failure(error, command) from error
         if reauthenticate is not None:
             if progress is not None:
-                progress.emit(
-                    "[auth] OCI command reported expired session; reauthenticating"
-                )
+                progress.emit("[auth] OCI command reported expired session; reauthenticating")
             reauthenticate()
             try:
                 completed = _run(command, timeout_seconds=timeout_seconds)
@@ -374,6 +372,7 @@ def _cancel_run(
 
 def cancel_run(run_id: str, opts: Mapping[str, Any] | None = None) -> str:
     return _cancel_run(run_id, opts, run_json)
+
 
 # Generator product -> validator profile. This registry stays lightweight so the
 # local CLI never imports the Spark-heavy generator or validator modules.
@@ -555,9 +554,9 @@ class ModuleAdapter:
         self.timeout_seconds = timeout_seconds
         self.auth_refresh_seconds = auth_refresh_seconds
         self.progress = progress
-        self._auth_context: tuple[
-            dict[str, Any], bool, Callable[[str], bool], str | None
-        ] | None = None
+        self._auth_context: (
+            tuple[dict[str, Any], bool, Callable[[str], bool], str | None] | None
+        ) = None
         self._auth_lock = threading.RLock()
         self._last_auth_refresh = 0.0
 
@@ -603,14 +602,16 @@ class ModuleAdapter:
                 )
             return
 
-        self._auth_context = (
-            dict(auth), allow_prompt, prompt, application_id
-        )
+        self._auth_context = (dict(auth), allow_prompt, prompt, application_id)
 
         if application_id:
             probe = [
-                "oci", "data-flow", "application", "get",
-                "--application-id", application_id,
+                "oci",
+                "data-flow",
+                "application",
+                "get",
+                "--application-id",
+                application_id,
                 *self._auth_flags(dict(auth)),
             ]
             probe_name = "Data Flow application"
@@ -628,9 +629,7 @@ class ModuleAdapter:
                 raise _oci_failure(error, probe) from error
 
         if self.progress is not None:
-            self.progress.emit(
-                f"[auth] validating security token against {probe_name}"
-            )
+            self.progress.emit(f"[auth] validating security token against {probe_name}")
         probe_valid = probe_auth()
         if probe_valid and not force_refresh:
             self._last_auth_refresh = time.monotonic()
@@ -656,9 +655,7 @@ class ModuleAdapter:
         except (subprocess.CalledProcessError, OciExecutionError):
             refresh_succeeded = False
         if not refresh_succeeded:
-            refresh_error = OciExecutionError(
-                "OCI session refresh did not produce a valid token"
-            )
+            refresh_error = OciExecutionError("OCI session refresh did not produce a valid token")
             if not allow_prompt:
                 raise OciExecutionError(
                     "OCI security-token refresh failed and prompting is disabled "
@@ -670,17 +667,13 @@ class ModuleAdapter:
                     "OCI session refresh failed and browser authentication needs "
                     "--region or a region in the OCI profile"
                 ) from refresh_error
-            if not prompt(
-                "OCI session refresh failed. Start browser authentication now?"
-            ):
+            if not prompt("OCI session refresh failed. Start browser authentication now?"):
                 raise OciExecutionError(
                     "OCI browser authentication was declined by the operator"
                 ) from refresh_error
             authenticate = _session_authenticate_command(auth, region)
             if self.progress is not None:
-                self.progress.emit(
-                    f"[auth] starting OCI browser authentication region={region}"
-                )
+                self.progress.emit(f"[auth] starting OCI browser authentication region={region}")
             self._auth_run(authenticate, interactive=True)
             if not probe_auth():
                 raise OciExecutionError(
@@ -695,10 +688,7 @@ class ModuleAdapter:
         if self._auth_context is None:
             raise OciExecutionError("OCI authentication context is unavailable")
         with self._auth_lock:
-            if (
-                observed_refresh is not None
-                and self._last_auth_refresh > observed_refresh
-            ):
+            if observed_refresh is not None and self._last_auth_refresh > observed_refresh:
                 return
             auth, allow_prompt, prompt, application_id = self._auth_context
             self.ensure_auth(
@@ -720,18 +710,14 @@ class ModuleAdapter:
             if time.monotonic() - self._last_auth_refresh < self.auth_refresh_seconds:
                 return
             if self.progress is not None:
-                self.progress.emit(
-                    "[auth] proactive refresh interval reached during polling"
-                )
+                self.progress.emit("[auth] proactive refresh interval reached during polling")
             self._reauthenticate()
 
     def _compat_operation(self, name: str, default: Callable[..., Any]) -> Callable[..., Any]:
         module = getattr(self, "module", None)
         return getattr(module, name, default) if module is not None else default
 
-    def create_run(
-        self, arguments: Sequence[str], display_name: str, opts: dict[str, Any]
-    ) -> Any:
+    def create_run(self, arguments: Sequence[str], display_name: str, opts: dict[str, Any]) -> Any:
         operation = self._compat_operation("create_run", None)
         if operation is not None:
             return operation(arguments, display_name, opts)
@@ -749,9 +735,7 @@ class ModuleAdapter:
             return operation(run_id, opts)
         return _cancel_run(run_id, opts, self._transport(manage_auth=False))
 
-    def _transport(
-        self, *, manage_auth: bool = True
-    ) -> Callable[[Sequence[str]], dict[str, Any]]:
+    def _transport(self, *, manage_auth: bool = True) -> Callable[[Sequence[str]], dict[str, Any]]:
         operation = self._compat_operation("run_json", None)
         if operation is not None:
             return operation
@@ -811,11 +795,15 @@ class ModuleAdapter:
         if not isinstance(raw_items, list) or not raw_items:
             raise PipelineError(f"OCI input URI does not exist: {uri}")
         inventory = sorted(
-            ({
-                "name": item.get("name"),
-                "etag": item.get("etag"),
-                "size": item.get("size"),
-            } for item in raw_items if isinstance(item, dict)),
+            (
+                {
+                    "name": item.get("name"),
+                    "etag": item.get("etag"),
+                    "size": item.get("size"),
+                }
+                for item in raw_items
+                if isinstance(item, dict)
+            ),
             key=lambda item: (str(item["name"]), str(item["etag"])),
         )
         canonical = json.dumps(inventory, sort_keys=True, separators=(",", ":"))
@@ -872,9 +860,7 @@ class ModuleAdapter:
         self, uri: str, payload: Mapping[str, Any], *, auth: dict[str, str]
     ) -> str:
         try:
-            metadata = self._storage(auth).put(
-                uri, _json_bytes(payload), no_overwrite=True
-            )
+            metadata = self._storage(auth).put(uri, _json_bytes(payload), no_overwrite=True)
         except PreconditionFailed as exc:
             raise PipelineError(f"create-once JSON object already exists: {uri}") from exc
         return metadata.etag
@@ -912,9 +898,7 @@ class ModuleAdapter:
     ) -> _Lease:
         return _quarantine_lease(self._storage(auth), uri, lease, reason)
 
-    def release_load_lease(
-        self, uri: str, lease: _Lease, *, auth: dict[str, str]
-    ) -> None:
+    def release_load_lease(self, uri: str, lease: _Lease, *, auth: dict[str, str]) -> None:
         try:
             self._storage(auth).delete(uri, if_match=lease.etag)
         except (ObjectNotFound, PreconditionFailed) as exc:
@@ -1056,8 +1040,7 @@ class OciCliStorage:
         if any(marker in output for marker in ("status: 404", '"status": 404', "notfound")):
             raise ObjectNotFound("Object Storage object does not exist") from error
         if any(
-            marker in output
-            for marker in ("status: 412", '"status": 412', "preconditionfailed")
+            marker in output for marker in ("status: 412", '"status": 412', "preconditionfailed")
         ):
             raise PreconditionFailed("Object Storage precondition failed") from error
         raise error
@@ -1080,9 +1063,7 @@ class OciCliStorage:
         return ObjectMetadata(etag)
 
     def get(self, uri: str) -> StoredObject:
-        descriptor, temporary = tempfile.mkstemp(
-            prefix="pipeline-reservation-", suffix=".json"
-        )
+        descriptor, temporary = tempfile.mkstemp(prefix="pipeline-reservation-", suffix=".json")
         os.close(descriptor)
         os.unlink(temporary)
         try:
@@ -1110,9 +1091,7 @@ class OciCliStorage:
     ) -> ObjectMetadata:
         if no_overwrite and if_match is not None:
             raise ValueError("put accepts no_overwrite or if_match, not both")
-        descriptor, temporary = tempfile.mkstemp(
-            prefix="pipeline-reservation-", suffix=".json"
-        )
+        descriptor, temporary = tempfile.mkstemp(prefix="pipeline-reservation-", suffix=".json")
         try:
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(data)
@@ -1251,9 +1230,7 @@ def _renew_lease(storage: Storage, uri: str, lease: _Lease, ttl_seconds: int) ->
     return _Lease(payload, metadata.etag)
 
 
-def _quarantine_lease(
-    storage: Storage, uri: str, lease: _Lease, reason: str
-) -> _Lease:
+def _quarantine_lease(storage: Storage, uri: str, lease: _Lease, reason: str) -> _Lease:
     payload = {
         **lease.payload,
         "quarantined": True,
@@ -1403,9 +1380,7 @@ def _validate_selected_lote(
     snapshot_uri = descriptor.get("snapshot_uri")
     if not isinstance(snapshot_uri, str) or not snapshot_uri.strip():
         raise ReservationError("plan.selected_lote.snapshot_uri must be a non-empty string")
-    expected_snapshot_uri = (
-        f"{request_uri.rstrip('/')}.selected-lote/{canonical_snapshot_id}"
-    )
+    expected_snapshot_uri = f"{request_uri.rstrip('/')}.selected-lote/{canonical_snapshot_id}"
     if snapshot_uri != expected_snapshot_uri:
         raise ReservationError(
             "plan.selected_lote.snapshot_uri must derive from request_uri and snapshot_id"
@@ -1414,9 +1389,7 @@ def _validate_selected_lote(
     expected_tables = sorted(plan_tables)
     table_set = descriptor.get("table_set")
     if table_set != expected_tables:
-        raise ReservationError(
-            "plan.selected_lote.table_set must exactly match sorted plan.tables"
-        )
+        raise ReservationError("plan.selected_lote.table_set must exactly match sorted plan.tables")
     snapshot_tables = descriptor.get("tables")
     if not isinstance(snapshot_tables, Mapping) or set(snapshot_tables) != set(expected_tables):
         raise ReservationError("plan.selected_lote.tables must exactly match plan.tables")
@@ -1451,18 +1424,14 @@ def _validate_selected_lote(
             "plan.selected_lote.selective_missing.row_count",
         )
         if not isinstance(selective.get("schema"), dict):
-            raise ReservationError(
-                "plan.selected_lote.selective_missing.schema must be an object"
-            )
+            raise ReservationError("plan.selected_lote.selective_missing.schema must be an object")
     elif dict(selective) != {
         "present": False,
         "path": None,
         "row_count": 0,
         "schema": None,
     }:
-        raise ReservationError(
-            "plan.selected_lote.selective_missing absent contract is invalid"
-        )
+        raise ReservationError("plan.selected_lote.selective_missing absent contract is invalid")
 
 
 def _validate_plan(plan: dict[str, Any], product: str, request_uri: str) -> None:
@@ -1477,9 +1446,7 @@ def _validate_plan(plan: dict[str, Any], product: str, request_uri: str) -> None
         raise ReservationError("engorda plan must contain plan_id")
     body = {key: value for key, value in plan.items() if key != "plan_id"}
     expected_plan_id = hashlib.sha256(
-        json.dumps(
-            body, ensure_ascii=True, sort_keys=True, separators=(",", ":")
-        ).encode("ascii")
+        json.dumps(body, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
     ).hexdigest()
     if plan["plan_id"] != expected_plan_id:
         raise ReservationError("engorda plan_id does not match plan content")
@@ -1490,15 +1457,11 @@ def _validate_plan(plan: dict[str, Any], product: str, request_uri: str) -> None
     for table, table_plan in plan["tables"].items():
         if not isinstance(table, str) or not table or not isinstance(table_plan, Mapping):
             raise ReservationError("engorda plan contains an invalid table entry")
-        _positive_or_zero(
-            table_plan.get("source_count"), f"plan.tables.{table}.source_count"
-        )
+        _positive_or_zero(table_plan.get("source_count"), f"plan.tables.{table}.source_count")
         pk = table_plan.get("pk")
         if not isinstance(pk, Mapping):
             raise ReservationError(f"plan.tables.{table}.pk must be an object")
-        count = _positive_or_zero(
-            pk.get("count_demand"), f"plan.tables.{table}.pk.count_demand"
-        )
+        count = _positive_or_zero(pk.get("count_demand"), f"plan.tables.{table}.pk.count_demand")
         rule = pk.get("rule")
         if rule not in {"OFFSET_PROPRIO", "VIA_PAI"}:
             raise ReservationError(f"plan.tables.{table}.pk.rule is invalid")
@@ -1508,9 +1471,7 @@ def _validate_plan(plan: dict[str, Any], product: str, request_uri: str) -> None
         minimum = pk.get("minimum_start")
         if rule == "OFFSET_PROPRIO":
             if isinstance(minimum, bool) or not isinstance(minimum, int):
-                raise ReservationError(
-                    f"plan.tables.{table}.pk.minimum_start must be an integer"
-                )
+                raise ReservationError(f"plan.tables.{table}.pk.minimum_start must be an integer")
         elif count != 0 or minimum is not None:
             raise ReservationError(f"plan.tables.{table}.pk VIA_PAI must not request a range")
     _validate_selected_lote(plan.get("selected_lote"), plan["tables"], request_uri)
@@ -1597,9 +1558,7 @@ def _validate_ledger(ledger: dict[str, Any], environment: str) -> None:
         "groups",
     }:
         raise ReservationError("ledger.meu_numero must have legacy_prefixes and groups")
-    _validate_prefixes(
-        meu_numero["legacy_prefixes"], "ledger.meu_numero.legacy_prefixes"
-    )
+    _validate_prefixes(meu_numero["legacy_prefixes"], "ledger.meu_numero.legacy_prefixes")
     groups = meu_numero["groups"]
     if not isinstance(groups, dict):
         raise ReservationError("ledger.meu_numero.groups must be an object")
@@ -1608,9 +1567,7 @@ def _validate_ledger(ledger: dict[str, Any], environment: str) -> None:
             operational_date, f"ledger.meu_numero.groups.{operational_date}"
         )
         if not isinstance(date_state, dict):
-            raise ReservationError(
-                f"ledger.meu_numero.groups.{operational_date} must be an object"
-            )
+            raise ReservationError(f"ledger.meu_numero.groups.{operational_date} must be an object")
         for prefix, group_state in date_state.items():
             prefix_location = f"ledger.meu_numero.groups.{operational_date}.{prefix}"
             _validate_meu_numero_prefix(prefix, prefix_location)
@@ -1702,9 +1659,7 @@ def _allocate_artifact(
         if requested_prefix is not None:
             prefix_candidates = (int(requested_prefix),)
         else:
-            prefix_candidates = range(
-                MIN_MEU_NUMERO_PREFIX, MAX_MEU_NUMERO_PREFIX + 1
-            )
+            prefix_candidates = range(MIN_MEU_NUMERO_PREFIX, MAX_MEU_NUMERO_PREFIX + 1)
         for prefix in prefix_candidates:
             key = str(prefix)
             floors = [legacy_prefixes.get(key, 1)]
@@ -1719,11 +1674,7 @@ def _allocate_artifact(
             else:
                 operational_date = meu_plan["operational_date"]
                 group_ids = [group["group_id"] for group in meu_plan["groups"]]
-                prefix_groups = (
-                    meu_state["groups"]
-                    .get(operational_date, {})
-                    .get(key, {})
-                )
+                prefix_groups = meu_state["groups"].get(operational_date, {}).get(key, {})
                 floors.extend(prefix_groups.get(group_id, 1) for group_id in group_ids)
             start = max(floors)
             end = start + meu_count - 1
@@ -1743,9 +1694,7 @@ def _allocate_artifact(
                     legacy_prefixes[key] = end + 1
                 else:
                     prefix_groups = (
-                        meu_state["groups"]
-                        .setdefault(operational_date, {})
-                        .setdefault(key, {})
+                        meu_state["groups"].setdefault(operational_date, {}).setdefault(key, {})
                     )
                     for group_id in group_ids:
                         prefix_groups[group_id] = end + 1
@@ -1827,14 +1776,14 @@ def _existing_reservation(
     if any(payload.get(key) != value for key, value in expected.items()):
         raise ReservationError(f"immutable reservation URI contains a different artifact: {uri}")
     schema_version = payload.get("schema_version")
-    allowed_versions = {1, RESERVATION_SCHEMA_VERSION} if plan["schema_version"] == 2 else {
-        RESERVATION_SCHEMA_VERSION
-    }
+    allowed_versions = (
+        {1, RESERVATION_SCHEMA_VERSION}
+        if plan["schema_version"] == 2
+        else {RESERVATION_SCHEMA_VERSION}
+    )
     meu_numero = payload.get("meu_numero")
     expected_strategy = (
-        "legacy_global_v1"
-        if plan["schema_version"] == 2
-        else "date_account_tos_shared_interval_v1"
+        "legacy_global_v1" if plan["schema_version"] == 2 else "date_account_tos_shared_interval_v1"
     )
     if (
         schema_version not in allowed_versions
@@ -1855,8 +1804,7 @@ def _existing_reservation(
                 f"immutable reservation URI contains a different artifact: {uri}"
             )
         if plan["schema_version"] == 3 and (
-            meu_numero.get("operational_date")
-            != plan["meu_numero"]["operational_date"]
+            meu_numero.get("operational_date") != plan["meu_numero"]["operational_date"]
             or meu_numero.get("group_ids")
             != [group["group_id"] for group in plan["meu_numero"]["groups"]]
         ):
@@ -2043,22 +1991,15 @@ def load_config(path: str | Path) -> dict[str, Any]:
         for stage in TRACER_STAGES:
             stage_options = settings.get(stage, {})
             if not isinstance(stage_options, dict):
-                raise PipelineError(
-                    f"config.products.{product}.{stage} must be an object"
-                )
-            unsupported_options = sorted(
-                set(stage_options) - OVERRIDE_KEYS[stage]
-            )
+                raise PipelineError(f"config.products.{product}.{stage} must be an object")
+            unsupported_options = sorted(set(stage_options) - OVERRIDE_KEYS[stage])
             if unsupported_options:
                 raise PipelineError(
                     f"config.products.{product}.{stage} contains unsupported option(s): "
                     f"{', '.join(unsupported_options)}"
                 )
 
-    if any(
-        "load" in settings["capabilities"]
-        for settings in configured_products.values()
-    ):
+    if any("load" in settings["capabilities"] for settings in configured_products.values()):
         _need_string(applications, "load", "config.applications")
         load = config.get("load")
         if not isinstance(load, dict):
@@ -2076,9 +2017,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
         stage not in TRACER_STAGES or not isinstance(values, dict)
         for stage, values in defaults.items()
     ):
-        raise PipelineError(
-            "config.stage_defaults may contain only engorda/validate/load objects"
-        )
+        raise PipelineError("config.stage_defaults may contain only engorda/validate/load objects")
     return config
 
 
@@ -2105,9 +2044,7 @@ def require_configured_products(config: Mapping[str, Any], products: Sequence[st
         )
 
 
-def resolve_genai_config(
-    config: Mapping[str, Any], *, enabled: bool
-) -> dict[str, str] | None:
+def resolve_genai_config(config: Mapping[str, Any], *, enabled: bool) -> dict[str, str] | None:
     if not enabled:
         return None
     genai = config.get("genai")
@@ -2136,9 +2073,7 @@ def selected_stages(first: str, last: str) -> tuple[str, ...]:
         raise PipelineError(f"reversed stage interval: {first} through {last}")
     interval = PUBLIC_STAGES[PUBLIC_STAGES.index(first) : PUBLIC_STAGES.index(last) + 1]
     if any(stage not in TRACER_STAGES for stage in interval):
-        raise PipelineError(
-            "runner supports only the inclusive engorda through load slice"
-        )
+        raise PipelineError("runner supports only the inclusive engorda through load slice")
     return interval
 
 
@@ -2197,9 +2132,7 @@ def parse_stage_overrides(values: Sequence[str]) -> dict[str, dict[str, dict[str
         key, separator, raw_value = raw.partition("=")
         parts = key.split(".")
         if not separator or len(parts) != 3:
-            raise PipelineError(
-                "--set must use product.stage.key=value"
-            )
+            raise PipelineError("--set must use product.stage.key=value")
         product, stage, option = parts
         if product not in PRODUCTS:
             raise PipelineError(f"--set references unsupported product {product!r}")
@@ -2256,11 +2189,16 @@ def build_engorda_plan_argv(
     if options.get("enable_genai"):
         argv += [
             "--enable-genai",
-            "--genai-policy", str(options["genai_policy"]),
-            "--genai-endpoint-id", str(options["genai_endpoint_id"]),
-            "--genai-compartment-id", str(options["genai_compartment_id"]),
-            "--genai-region", str(options["genai_region"]),
-            "--genai-artifact-root", paths["genai"],
+            "--genai-policy",
+            str(options["genai_policy"]),
+            "--genai-endpoint-id",
+            str(options["genai_endpoint_id"]),
+            "--genai-compartment-id",
+            str(options["genai_compartment_id"]),
+            "--genai-region",
+            str(options["genai_region"]),
+            "--genai-artifact-root",
+            paths["genai"],
         ]
     return argv
 
@@ -2369,15 +2307,24 @@ def build_load_argv(
     if not isinstance(specs, str) or not specs.startswith("oci://"):
         raise PipelineError(f"product {product} requires load.specs as an oci:// URI")
     argv = [
-        "--product", product,
-        "--run-id", pipeline_run_id,
-        "--validation-product", PRODUCTS[product]["validator_product"],
-        "--input-base", synthetic_uri,
-        "--validation-report", validation_report_uri,
-        "--manifest-uri", manifest_uri,
-        "--pipeline-manifest-uri", pipeline_manifest_uri,
-        "--expected-target-schema", target_schema,
-        "--specs", specs,
+        "--product",
+        product,
+        "--run-id",
+        pipeline_run_id,
+        "--validation-product",
+        PRODUCTS[product]["validator_product"],
+        "--input-base",
+        synthetic_uri,
+        "--validation-report",
+        validation_report_uri,
+        "--manifest-uri",
+        manifest_uri,
+        "--pipeline-manifest-uri",
+        pipeline_manifest_uri,
+        "--expected-target-schema",
+        target_schema,
+        "--specs",
+        specs,
         "--skip-validation",
     ]
     for key, flag in (
@@ -2419,8 +2366,7 @@ def build_pipeline_plan(
     unavailable_inputs = sorted(set(products) - set(upstream_products))
     if unavailable_inputs:
         raise PipelineError(
-            "upstream manifest does not cover product(s): "
-            + ", ".join(unavailable_inputs)
+            "upstream manifest does not cover product(s): " + ", ".join(unavailable_inputs)
         )
     stages = selected_stages(args.from_stage, args.to_stage)
     genai_enabled = bool(getattr(args, "enable_genai", False))
@@ -2429,12 +2375,8 @@ def build_pipeline_plan(
     if genai_enabled and "engorda" not in stages:
         raise PipelineError("--enable-genai requires an interval containing engorda")
     genai_config = resolve_genai_config(config, enabled=genai_enabled)
-    if getattr(args, "no_oracle", False) and not {"engorda", "validate"}.intersection(
-        stages
-    ):
-        raise PipelineError(
-            "--no-oracle requires an interval containing engorda or validate"
-        )
+    if getattr(args, "no_oracle", False) and not {"engorda", "validate"}.intersection(stages):
+        raise PipelineError("--no-oracle requires an interval containing engorda or validate")
     for product in products:
         capabilities = config["products"][product]["capabilities"]
         unavailable = [stage for stage in stages if stage not in capabilities]
@@ -2461,14 +2403,11 @@ def build_pipeline_plan(
         if "validate" in stages:
             base_validate_options["no_oracle"] = True
     overrides = parse_stage_overrides(args.set_values)
-    resume_manifests = parse_resume_load_manifests(
-        getattr(args, "resume_load_manifest", ())
-    )
+    resume_manifests = parse_resume_load_manifests(getattr(args, "resume_load_manifest", ()))
     invalid_resumes = sorted(set(resume_manifests) - set(products))
     if invalid_resumes:
         raise PipelineError(
-            "--resume-load-manifest references unselected product(s): "
-            + ", ".join(invalid_resumes)
+            "--resume-load-manifest references unselected product(s): " + ", ".join(invalid_resumes)
         )
     if resume_manifests and "load" not in stages:
         raise PipelineError("--resume-load-manifest requires an interval containing load")
@@ -2499,13 +2438,15 @@ def build_pipeline_plan(
                 )
             if fator_k > GENAI_MAX_FACTOR_K:
                 raise PipelineError(f"GenAI supports fator_k <= {GENAI_MAX_FACTOR_K}")
-            engorda_options.update({
-                "enable_genai": True,
-                "genai_policy": genai_config["policy"],
-                "genai_endpoint_id": genai_config["endpoint_id"],
-                "genai_compartment_id": genai_config["compartment_id"],
-                "genai_region": genai_config["region"],
-            })
+            engorda_options.update(
+                {
+                    "enable_genai": True,
+                    "genai_policy": genai_config["policy"],
+                    "genai_endpoint_id": genai_config["endpoint_id"],
+                    "genai_compartment_id": genai_config["compartment_id"],
+                    "genai_region": genai_config["region"],
+                }
+            )
         validate_options = {
             **base_validate_options,
             **config["products"][product].get("validate", {}),
@@ -2518,9 +2459,7 @@ def build_pipeline_plan(
                 validate_options["no_oracle"] = True
         upstream_synthetic_descriptor: dict[str, Any] | None = None
         if "validate" in stages and "engorda" not in stages:
-            upstream_synthetic_descriptor = _artifact_descriptor(
-                upstream, "synthetic", product
-            )
+            upstream_synthetic_descriptor = _artifact_descriptor(upstream, "synthetic", product)
             upstream_synthetic_descriptor["producer"] = "upstream"
             if (
                 upstream_synthetic_descriptor.get("load_eligible") is False
@@ -2546,9 +2485,7 @@ def build_pipeline_plan(
             ("engorda" in stages and engorda_no_oracle)
             or ("validate" in stages and validate_no_oracle)
         ):
-            raise PipelineError(
-                f"product {product} uses no_oracle and is not eligible for load"
-            )
+            raise PipelineError(f"product {product} uses no_oracle and is not eligible for load")
         paths = _product_paths(run_root, product)
         product_artifacts: dict[str, Any] = {}
         artifacts["products"][product] = product_artifacts
@@ -2559,9 +2496,7 @@ def build_pipeline_plan(
         validation_report_uri: str | None = None
         if "engorda" in stages:
             query_num_if_sql = engorda_options.get("query_num_if_sql")
-            if not isinstance(query_num_if_sql, str) or not query_num_if_sql.startswith(
-                "oci://"
-            ):
+            if not isinstance(query_num_if_sql, str) or not query_num_if_sql.startswith("oci://"):
                 raise PipelineError(
                     f"product {product} requires engorda.query_num_if_sql as an "
                     "oci:// URI; Data Flow cannot read the runner's local SQL file"
@@ -2577,10 +2512,12 @@ def build_pipeline_plan(
                     "producer": "current_run",
                 }
             synthetic_descriptor = product_artifacts["synthetic"]
-            synthetic_descriptor.update({
-                "oracle_access": "disabled" if engorda_no_oracle else "live",
-                "load_eligible": not engorda_no_oracle,
-            })
+            synthetic_descriptor.update(
+                {
+                    "oracle_access": "disabled" if engorda_no_oracle else "live",
+                    "load_eligible": not engorda_no_oracle,
+                }
+            )
             plan_id = f"{product}.engorda.plan"
             reserve_id = f"{product}.engorda.reserve"
             materialize_id = f"{product}.engorda.materialize"
@@ -2631,9 +2568,7 @@ def build_pipeline_plan(
             dependency = materialize_id
         if "validate" in stages:
             if synthetic_descriptor is None:
-                synthetic_descriptor = _artifact_descriptor(
-                    upstream, "synthetic", product
-                )
+                synthetic_descriptor = _artifact_descriptor(upstream, "synthetic", product)
                 synthetic_descriptor["producer"] = "upstream"
             synthetic_uri = synthetic_descriptor["uri"]
             product_artifacts["synthetic"] = dict(synthetic_descriptor)
@@ -2667,9 +2602,7 @@ def build_pipeline_plan(
             validation_report_uri = paths["validation_report"]
         if "load" in stages:
             if synthetic_uri is None:
-                synthetic_descriptor = _artifact_descriptor(
-                    upstream, "synthetic", product
-                )
+                synthetic_descriptor = _artifact_descriptor(upstream, "synthetic", product)
                 synthetic_descriptor["producer"] = "upstream"
                 synthetic_uri = synthetic_descriptor["uri"]
                 product_artifacts["synthetic"] = dict(synthetic_descriptor)
@@ -2681,9 +2614,7 @@ def build_pipeline_plan(
                     f"product {product} synthetic artifact is offline and not eligible for load"
                 )
             if validation_report_uri is None:
-                validation_descriptor = _artifact_descriptor(
-                    upstream, "validation_report", product
-                )
+                validation_descriptor = _artifact_descriptor(upstream, "validation_report", product)
                 validation_descriptor["producer"] = "upstream"
                 validation_report_uri = validation_descriptor["uri"]
                 product_artifacts["validation_report"] = dict(validation_descriptor)
@@ -2743,8 +2674,11 @@ def build_pipeline_plan(
         "data_flow_options": {
             key: getattr(args, key)
             for key in (
-                "num_executors", "driver_shape", "executor_shape",
-                "driver_shape_config", "executor_shape_config",
+                "num_executors",
+                "driver_shape",
+                "executor_shape",
+                "driver_shape_config",
+                "executor_shape_config",
             )
             if getattr(args, key) is not None
         },
@@ -2757,9 +2691,7 @@ def build_pipeline_plan(
         },
         "load_contract": {
             "lease_uri": config.get("load", {}).get("lease_uri"),
-            "lease_ttl_seconds": config.get("load", {}).get(
-                "lease_ttl_seconds", 300
-            ),
+            "lease_ttl_seconds": config.get("load", {}).get("lease_ttl_seconds", 300),
             "claim_root": config.get("load", {}).get("claim_root"),
             "approval_required": "load" in stages,
             "approved": bool(getattr(args, "approve_load", False)),
@@ -2792,7 +2724,10 @@ def _run_id_from_response(response: Any) -> str:
 
 
 def _validation_gate(
-    report: dict[str, Any], *, expected_product: str, expected_input: str,
+    report: dict[str, Any],
+    *,
+    expected_product: str,
+    expected_input: str,
     require_osias: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(report, dict):
@@ -2804,10 +2739,9 @@ def _validation_gate(
         raise PipelineError("validation report counts.error must be an integer")
     product_matches = report.get("product") == expected_product
     resolved_input = report.get("resolved_input")
-    input_matches = (
-        isinstance(resolved_input, str)
-        and resolved_input.rstrip("/") == expected_input.rstrip("/")
-    )
+    input_matches = isinstance(resolved_input, str) and resolved_input.rstrip(
+        "/"
+    ) == expected_input.rstrip("/")
     osias_matches = not require_osias or report.get("osias") is True
     accepted = (
         errors == 0
@@ -2860,8 +2794,7 @@ def _load_manifest_gate(
         and all(isinstance(table, str) and table for table in ordered_tables)
         and isinstance(entries, list)
         and all(isinstance(entry, dict) for entry in entries)
-        and [entry.get("table") for entry in entries if isinstance(entry, dict)]
-        == ordered_tables
+        and [entry.get("table") for entry in entries if isinstance(entry, dict)] == ordered_tables
     )
     entries_valid = inventory_valid and all(
         isinstance(entry.get("owner"), str)
@@ -2889,7 +2822,8 @@ def _load_manifest_gate(
     transformations = manifest.get("transformations")
     transformations_valid = isinstance(transformations, list) and all(
         isinstance(item, dict)
-        and item.get("kind") in {
+        and item.get("kind")
+        in {
             "nullify-self-reference",
             "oracle-audit-substitution",
         }
@@ -2898,12 +2832,7 @@ def _load_manifest_gate(
         and bool(item["columns"])
         for item in transformations
     )
-    accepted = (
-        all(matches.values())
-        and inventory_valid
-        and entries_valid
-        and transformations_valid
-    )
+    accepted = all(matches.values()) and inventory_valid and entries_valid and transformations_valid
     return {
         "accepted": accepted,
         "matches": matches,
@@ -2928,20 +2857,15 @@ def _known_load_succeeded(
         return False
 
 
-def _load_attempt_matches_node(
-    manifest: Mapping[str, Any], node: Mapping[str, Any]
-) -> bool:
+def _load_attempt_matches_node(manifest: Mapping[str, Any], node: Mapping[str, Any]) -> bool:
     return (
         manifest.get("schema_version") == 1
         and manifest.get("kind") == "load-attempt"
         and manifest.get("product") == node["product"]
-        and manifest.get("validation_product")
-        == PRODUCTS[node["product"]]["validator_product"]
-        and str(manifest.get("input_uri", "")).rstrip("/")
-        == node["input_uri"].rstrip("/")
+        and manifest.get("validation_product") == PRODUCTS[node["product"]]["validator_product"]
+        and str(manifest.get("input_uri", "")).rstrip("/") == node["input_uri"].rstrip("/")
         and manifest.get("validation_report_uri") == node["validation_report_uri"]
-        and str(manifest.get("target_schema", "")).upper()
-        == node["target_schema"].upper()
+        and str(manifest.get("target_schema", "")).upper() == node["target_schema"].upper()
         and isinstance(manifest.get("pipeline_manifest_uri"), str)
     )
 
@@ -3010,18 +2934,13 @@ def _prepare_load_attempt(
     )
     normalized_inventory = (
         [table.strip().rsplit(".", 1)[-1].upper() for table in inventory]
-        if isinstance(inventory, list)
-        and all(isinstance(table, str) for table in inventory)
+        if isinstance(inventory, list) and all(isinstance(table, str) for table in inventory)
         else []
     )
-    inventory_owners_match = (
-        isinstance(inventory, list)
-        and all(
-            "." not in table
-            or table.strip().split(".", 1)[0].upper() == node["target_schema"].upper()
-            for table in inventory
-            if isinstance(table, str)
-        )
+    inventory_owners_match = isinstance(inventory, list) and all(
+        "." not in table or table.strip().split(".", 1)[0].upper() == node["target_schema"].upper()
+        for table in inventory
+        if isinstance(table, str)
     )
     validation["inventory_valid"] = (
         report.get("schema_version") == 2
@@ -3032,9 +2951,7 @@ def _prepare_load_attempt(
         and inventory_owners_match
     )
     validation["accepted"] = (
-        validation["accepted"]
-        and validation["load_report_valid"]
-        and validation["inventory_valid"]
+        validation["accepted"] and validation["load_report_valid"] and validation["inventory_valid"]
     )
     if not validation["accepted"]:
         return {"validation": validation, "accepted": False}
@@ -3062,18 +2979,14 @@ def _prepare_load_attempt(
         }
 
     if not adapter.uri_exists(node["claim_uri"], auth=auth):
-        raise PipelineError(
-            f"resume has no load claim for synthetic input {node['input_uri']}"
-        )
+        raise PipelineError(f"resume has no load claim for synthetic input {node['input_uri']}")
     claim = adapter.read_json(node["claim_uri"], auth=auth)
     if (
         claim.get("schema_version") != 1
         or claim.get("kind") != "load-claim"
         or claim.get("environment") != plan["environment"]
-        or
-        claim.get("product") != node["product"]
-        or str(claim.get("input_uri", "")).rstrip("/")
-        != node["input_uri"].rstrip("/")
+        or claim.get("product") != node["product"]
+        or str(claim.get("input_uri", "")).rstrip("/") != node["input_uri"].rstrip("/")
     ):
         raise PipelineError("load claim does not match the resumed product/input")
     _validate_resume_chain(adapter, node, claim, previous_uri, auth)
@@ -3114,18 +3027,14 @@ def _execute_remote_node(
             **runtime_options,
             **auth,
         }
-        progress.emit(
-            f"[launch] {node['id']} attempt={attempt_number}"
-        )
+        progress.emit(f"[launch] {node['id']} attempt={attempt_number}")
         response = adapter.create_run(
             list(node["arguments"]),
             display_name,
             data_flow_options,
         )
         data_flow_run_id = _run_id_from_response(response)
-        progress.emit(
-            f"[submit] {node['id']} attempt={attempt_number} run_id={data_flow_run_id}"
-        )
+        progress.emit(f"[submit] {node['id']} attempt={attempt_number} run_id={data_flow_run_id}")
         attempt = {
             "attempt": attempt_number,
             "run_id": data_flow_run_id,
@@ -3185,9 +3094,7 @@ def _execute_remote_node(
                     return NodeResult("FAILED", attempts, detail)
             elif node["operation"] == "load":
                 manifest = adapter.read_json(node["output_uri"], auth=auth)
-                detail["load_manifest"] = _load_manifest_gate(
-                    manifest, node, pipeline_run_id
-                )
+                detail["load_manifest"] = _load_manifest_gate(manifest, node, pipeline_run_id)
                 if not detail["load_manifest"]["accepted"]:
                     progress.emit(
                         f"[failed] {node['id']} FAILED attempt={attempt_number} "
@@ -3196,14 +3103,11 @@ def _execute_remote_node(
                     return NodeResult("FAILED", attempts, detail)
             describe = getattr(adapter, "describe_uri", None)
             if describe is not None and node.get("output_uri"):
-                detail["output_metadata"] = describe(
-                    node["output_uri"], auth=auth
-                )
+                detail["output_metadata"] = describe(node["output_uri"], auth=auth)
             progress.emit(f"[done] {node['id']} SUCCEEDED")
             return NodeResult("SUCCEEDED", attempts, detail)
         progress.emit(
-            f"[failed] {node['id']} {state} attempt={attempt_number} "
-            f"run_id={data_flow_run_id}"
+            f"[failed] {node['id']} {state} attempt={attempt_number} run_id={data_flow_run_id}"
         )
         if stop.is_set():
             return NodeResult("CANCELLED", attempts, {})
@@ -3245,9 +3149,7 @@ def _execute_load_node(
             progress,
         )
     except Exception as exc:
-        raise AmbiguousLoadState(
-            f"load state is unknown after OCI/Data Flow error: {exc}"
-        ) from exc
+        raise AmbiguousLoadState(f"load state is unknown after OCI/Data Flow error: {exc}") from exc
     return NodeResult(
         result.state,
         result.attempts,
@@ -3263,8 +3165,7 @@ def _execute_reservation_node(
     progress: ProgressReporter,
 ) -> NodeResult:
     progress.emit(
-        f"[reserve] {node['id']} request={node['request_uri']} "
-        f"output={node['output_uri']}"
+        f"[reserve] {node['id']} request={node['request_uri']} output={node['output_uri']}"
     )
     result = adapter.reserve_ranges(
         environment=plan["environment"],
@@ -3300,9 +3201,7 @@ def execute_plan(
     nodes = plan["nodes"]
     serial_lanes = {"reservation-cas", "oracle-load"}
     load_node_ids = [
-        f"{product}.load"
-        for product in plan["products"]
-        if f"{product}.load" in nodes
+        f"{product}.load" for product in plan["products"] if f"{product}.load" in nodes
     ]
     load_positions = {node_id: index for index, node_id in enumerate(load_node_ids)}
     load_lease: Any | None = None
@@ -3356,11 +3255,11 @@ def execute_plan(
                             adapter.cancel_run(data_flow_run_id, auth)
                         except Exception as cancel_exc:
                             store.update(
-                                lambda payload,
-                                run_id=data_flow_run_id,
-                                error=str(cancel_exc): payload.setdefault(
-                                    "cancellation_errors", {}
-                                ).update({run_id: error})
+                                lambda payload, run_id=data_flow_run_id, error=str(cancel_exc): (
+                                    payload.setdefault("cancellation_errors", {}).update(
+                                        {run_id: error}
+                                    )
+                                )
                             )
             states = {node_id: store.payload["nodes"][node_id]["state"] for node_id in nodes}
             for node_id, node in nodes.items():
@@ -3384,7 +3283,7 @@ def execute_plan(
                     continue
                 if node["lane"] == "oracle-load" and any(
                     states[previous_id] not in NODE_TERMINAL
-                    for previous_id in load_node_ids[:load_positions[node_id]]
+                    for previous_id in load_node_ids[: load_positions[node_id]]
                 ):
                     continue
                 if node["lane"] in serial_lanes and any(
@@ -3454,8 +3353,7 @@ def execute_plan(
 
             if not futures:
                 if all(
-                    store.payload["nodes"][node_id]["state"] in NODE_TERMINAL
-                    for node_id in nodes
+                    store.payload["nodes"][node_id]["state"] in NODE_TERMINAL for node_id in nodes
                 ):
                     break
                 raise PipelineError("pipeline scheduler cannot make progress")
@@ -3465,9 +3363,7 @@ def execute_plan(
                 try:
                     result = future.result()
                 except Exception as exc:  # branch-local isolation
-                    progress.emit(
-                        f"[failed] {node_id} {type(exc).__name__}: {exc}"
-                    )
+                    progress.emit(f"[failed] {node_id} {type(exc).__name__}: {exc}")
                     set_node(
                         node_id,
                         state="FAILED",
@@ -3527,17 +3423,14 @@ def execute_plan(
         executor.shutdown(wait=True, cancel_futures=True)
         if load_lease is not None and not load_lease_quarantined:
             try:
-                adapter.release_load_lease(
-                    load_contract["lease_uri"], load_lease, auth=auth
-                )
+                adapter.release_load_lease(load_contract["lease_uri"], load_lease, auth=auth)
                 progress.emit("[load] environment lease released")
             except Exception as exc:
                 load_lease_error = f"{type(exc).__name__}: {exc}"
-                store.update(
-                    lambda payload: payload.update(load_lease_error=load_lease_error)
-                )
+                store.update(lambda payload: payload.update(load_lease_error=load_lease_error))
 
     if interrupted:
+
         def cancel_remaining(payload: dict[str, Any]) -> None:
             for node in payload["nodes"].values():
                 if node["state"] in {"PENDING", "RUNNING", "RETRYING"}:
@@ -3546,9 +3439,12 @@ def execute_plan(
 
         store.update(cancel_remaining)
         return 130
-    return 1 if load_lease_error or any(
-        node["state"] != "SUCCEEDED" for node in store.payload["nodes"].values()
-    ) else 0
+    return (
+        1
+        if load_lease_error
+        or any(node["state"] != "SUCCEEDED" for node in store.payload["nodes"].values())
+        else 0
+    )
 
 
 def _initial_manifest(plan: dict[str, Any], upstream_path: str) -> dict[str, Any]:
@@ -3638,7 +3534,7 @@ def _summary_error(node: Mapping[str, Any], maximum: int = 180) -> str:
         if isinstance(attempts, list) and attempts:
             error = f"Data Flow state {attempts[-1].get('state', 'UNKNOWN')}"
     text = " ".join(str(error or "unknown failure").split())
-    return text if len(text) <= maximum else f"{text[:maximum - 3]}..."
+    return text if len(text) <= maximum else f"{text[: maximum - 3]}..."
 
 
 def render_run_summary(
@@ -3654,16 +3550,15 @@ def render_run_summary(
     totals = {state: 0 for state in ("SUCCEEDED", "FAILED", "BLOCKED", "CANCELLED")}
     for product in products:
         product_nodes = [
-            node for node in nodes.values()
+            node
+            for node in nodes.values()
             if isinstance(node, dict) and node.get("product") == product
         ]
         state = _product_summary_state(product_nodes)
         totals[state] = totals.get(state, 0) + 1
         product_rows.append((product, state, product_nodes))
 
-    pipeline_elapsed = _summary_elapsed(
-        manifest.get("created_at"), manifest.get("finished_at")
-    )
+    pipeline_elapsed = _summary_elapsed(manifest.get("created_at"), manifest.get("finished_at"))
     lines = [
         "[summary] "
         f"pipeline={manifest.get('status', 'UNKNOWN')} products={len(products)} "
@@ -3673,22 +3568,19 @@ def render_run_summary(
     ]
     operation_index = {name: index for index, name in enumerate(_SUMMARY_OPERATIONS)}
     for product, state, product_nodes in product_rows:
-        by_operation = {
-            str(node.get("operation")): node for node in product_nodes
-        }
+        by_operation = {str(node.get("operation")): node for node in product_nodes}
         starts = [
-            parsed for parsed in (
-                _summary_datetime(node.get("started_at")) for node in product_nodes
-            ) if parsed is not None
+            parsed
+            for parsed in (_summary_datetime(node.get("started_at")) for node in product_nodes)
+            if parsed is not None
         ]
         finishes = [
-            parsed for parsed in (
-                _summary_datetime(node.get("finished_at")) for node in product_nodes
-            ) if parsed is not None
+            parsed
+            for parsed in (_summary_datetime(node.get("finished_at")) for node in product_nodes)
+            if parsed is not None
         ]
         elapsed = (
-            max(0.0, (max(finishes) - min(starts)).total_seconds())
-            if starts and finishes else None
+            max(0.0, (max(finishes) - min(starts)).total_seconds()) if starts and finishes else None
         )
         retries = sum(
             max(0, len(node.get("attempts", [])) - 1)
@@ -3711,8 +3603,7 @@ def render_run_summary(
         )
         if state in {"FAILED", "CANCELLED"}:
             problem_nodes = [
-                node for node in product_nodes
-                if node.get("state") in {"FAILED", "CANCELLED"}
+                node for node in product_nodes if node.get("state") in {"FAILED", "CANCELLED"}
             ]
             if problem_nodes:
                 problem = min(
@@ -3738,10 +3629,12 @@ def render_run_summary(
                     f"[summary] failure product={product} node={problem.get('id', '-')} "
                     f"run_id={run_id} error={_summary_error(problem)}"
                 )
-    lines.extend((
-        f"[summary] manifest_local={local_manifest}",
-        f"[summary] manifest_oci={manifest_uri} upload={upload_status}",
-    ))
+    lines.extend(
+        (
+            f"[summary] manifest_local={local_manifest}",
+            f"[summary] manifest_oci={manifest_uri} upload={upload_status}",
+        )
+    )
     return lines
 
 
@@ -3753,9 +3646,7 @@ def emit_run_summary(
     upload_status: str,
 ) -> None:
     try:
-        for line in render_run_summary(
-            manifest, str(local_manifest), manifest_uri, upload_status
-        ):
+        for line in render_run_summary(manifest, str(local_manifest), manifest_uri, upload_status):
             progress.emit(line)
     except Exception as exc:  # summary rendering must not change pipeline outcome
         progress.emit(f"[failed] final summary unavailable: {type(exc).__name__}: {exc}")
@@ -3825,11 +3716,7 @@ def run_command(
     )
     auth = _auth_from_args(args)
     auth_application = next(
-        (
-            node["application_id"]
-            for node in plan["nodes"].values()
-            if node.get("application_id")
-        ),
+        (node["application_id"] for node in plan["nodes"].values() if node.get("application_id")),
         None,
     )
     _ensure_adapter_auth(
@@ -3907,13 +3794,9 @@ def run_command(
         upload_status = "FAILED"
         upload_error = str(exc)
         store.update(
-            lambda payload: payload.update(
-                manifest_upload_error=upload_error, status="FAILED"
-            )
+            lambda payload: payload.update(manifest_upload_error=upload_error, status="FAILED")
         )
-        progress.emit(
-            f"[failed] pipeline run_id={args.run_id} manifest upload failed: {exc}"
-        )
+        progress.emit(f"[failed] pipeline run_id={args.run_id} manifest upload failed: {exc}")
         emit_run_summary(
             progress,
             store.payload,
@@ -3951,27 +3834,22 @@ def adopt_inputs_command(
     for raw in args.synthetic_uri:
         product, separator, uri = raw.partition("=")
         if not separator or not product or not uri:
-            raise PipelineError(
-                "--synthetic-uri must use product=oci://bucket@namespace/path"
-            )
+            raise PipelineError("--synthetic-uri must use product=oci://bucket@namespace/path")
         if product not in products:
-            raise PipelineError(
-                f"--synthetic-uri product {product!r} is not selected by --product"
-            )
+            raise PipelineError(f"--synthetic-uri product {product!r} is not selected by --product")
         if product in synthetic_uris:
             raise PipelineError(f"duplicate --synthetic-uri for product {product}")
         if not uri.startswith("oci://"):
             raise PipelineError(f"--synthetic-uri for {product} must start with oci://")
         synthetic_uris[product] = uri
     missing_validate_only = sorted(
-        product for product in products
-        if "engorda" not in PRODUCTS[product]["capabilities"]
-        and product not in synthetic_uris
+        product
+        for product in products
+        if "engorda" not in PRODUCTS[product]["capabilities"] and product not in synthetic_uris
     )
     if missing_validate_only:
         raise PipelineError(
-            "validate-only product(s) require --synthetic-uri: "
-            + ", ".join(missing_validate_only)
+            "validate-only product(s) require --synthetic-uri: " + ", ".join(missing_validate_only)
         )
     for label, uri in (("raw", args.raw_uri), ("faltantes", args.faltantes_uri)):
         if not uri.startswith("oci://"):
@@ -3990,9 +3868,7 @@ def adopt_inputs_command(
             "raw": {"uri": args.raw_uri, "producer": "external"},
             "faltantes": {"uri": args.faltantes_uri, "producer": "external"},
             "products": {
-                product: {
-                    "synthetic": {"uri": uri, "producer": "external"}
-                }
+                product: {"synthetic": {"uri": uri, "producer": "external"}}
                 for product, uri in sorted(synthetic_uris.items())
             },
         },
@@ -4033,12 +3909,10 @@ def adopt_inputs_command(
 def _auth_options(command: Callable[..., Any]) -> Callable[..., Any]:
     command = click.option("--profile", help="OCI CLI profile name.")(command)
     command = click.option("--config-file", help="OCI CLI config file path.")(command)
-    command = click.option(
-        "--region", help="OCI region; defaults to the selected profile region."
-    )(command)
-    command = click.option(
-        "--auth", help="OCI auth mode, for example security_token."
-    )(command)
+    command = click.option("--region", help="OCI region; defaults to the selected profile region.")(
+        command
+    )
+    command = click.option("--auth", help="OCI auth mode, for example security_token.")(command)
     command = click.option("--cert-bundle", help="CA certificate bundle path.")(command)
     command = click.option(
         "--oci-timeout-seconds",
@@ -4074,22 +3948,14 @@ def cli(context: click.Context) -> None:
 @cli.command("run")
 @click.option("--config", required=True, type=click.Path(dir_okay=False, path_type=str))
 @click.option("--product", multiple=True, required=True, help="Repeat or use commas.")
-@click.option(
-    "--from", "from_stage", required=True, type=click.Choice(PUBLIC_STAGES)
-)
+@click.option("--from", "from_stage", required=True, type=click.Choice(PUBLIC_STAGES))
 @click.option("--to", "to_stage", required=True, type=click.Choice(PUBLIC_STAGES))
-@click.option(
-    "--upstream-manifest", required=True, type=click.Path(dir_okay=False, path_type=str)
-)
+@click.option("--upstream-manifest", required=True, type=click.Path(dir_okay=False, path_type=str))
 @click.option("--run-id")
 @click.option("--local-run-root", default=".pipeline-runs", show_default=True)
-@click.option(
-    "--max-concurrency", type=click.IntRange(min=1), default=4, show_default=True
-)
+@click.option("--max-concurrency", type=click.IntRange(min=1), default=4, show_default=True)
 @click.option("--max-retries", type=click.IntRange(min=0), default=1, show_default=True)
-@click.option(
-    "--poll-seconds", type=click.FloatRange(min=0), default=30.0, show_default=True
-)
+@click.option("--poll-seconds", type=click.FloatRange(min=0), default=30.0, show_default=True)
 @click.option("--num-executors", type=click.IntRange(min=1))
 @click.option("--driver-shape")
 @click.option("--executor-shape")
@@ -4158,9 +4024,7 @@ def run_cli(context: click.Context, **options: Any) -> None:
     multiple=True,
     help="Existing product output as product=oci://...; required for validate-only products.",
 )
-@click.option(
-    "--output-manifest", required=True, type=click.Path(dir_okay=False, path_type=str)
-)
+@click.option("--output-manifest", required=True, type=click.Path(dir_okay=False, path_type=str))
 @click.option("--dry-run", is_flag=True, help="Resolve the adoption without remote calls.")
 @_auth_options
 @click.pass_context

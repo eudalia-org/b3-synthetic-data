@@ -25,8 +25,13 @@ def opts(**overrides):
 class TestCommandBuilders:
     def test_auth_flags_emit_only_configured_values(self):
         assert O.oci_auth_flags(opts(config_file="C:/oci/config", cert_bundle=None)) == [
-            "--profile", "DEV", "--config-file", "C:/oci/config", "--auth",
-            "security_token"]
+            "--profile",
+            "DEV",
+            "--config-file",
+            "C:/oci/config",
+            "--auth",
+            "security_token",
+        ]
 
     def test_create_serializes_arguments_and_runtime_overrides(self):
         command = O.build_run_create_command(
@@ -44,9 +49,25 @@ class TestCommandBuilders:
 
     def test_get_and_cancel_include_run_id_and_auth(self):
         assert O.build_run_get_command("run-1", opts(profile="P", auth=None)) == [
-            "oci", "data-flow", "run", "get", "--run-id", "run-1", "--profile", "P"]
+            "oci",
+            "data-flow",
+            "run",
+            "get",
+            "--run-id",
+            "run-1",
+            "--profile",
+            "P",
+        ]
         assert O.build_run_cancel_command("run-1", opts(profile="P", auth=None)) == [
-            "oci", "data-flow", "run", "cancel", "--run-id", "run-1", "--profile", "P"]
+            "oci",
+            "data-flow",
+            "run",
+            "cancel",
+            "--run-id",
+            "run-1",
+            "--profile",
+            "P",
+        ]
 
 
 class TestJsonTransport:
@@ -59,22 +80,26 @@ class TestJsonTransport:
 
         monkeypatch.setattr(O.subprocess, "run", fake_run)
 
-        assert O.run_json(["oci", "data-flow", "run", "get"]) == {
-            "data": {"id": "run-1"}}
+        assert O.run_json(["oci", "data-flow", "run", "get"]) == {"data": {"id": "run-1"}}
         assert calls == [
-            (["oci", "data-flow", "run", "get"], {
-                "capture_output": True, "text": True, "check": True})]
+            (
+                ["oci", "data-flow", "run", "get"],
+                {"capture_output": True, "text": True, "check": True},
+            )
+        ]
 
     def test_refreshes_security_token_once_then_retries(self, monkeypatch):
         command = O.build_run_get_command(
-            "run-1", opts(config_file="C:/Users/me/.oci/config", cert_bundle="C:/corp/ca.pem"))
+            "run-1", opts(config_file="C:/Users/me/.oci/config", cert_bundle="C:/corp/ca.pem")
+        )
         calls = []
 
         def fake_run(argv, **kwargs):
             calls.append(argv)
             if len(calls) == 1:
                 raise subprocess.CalledProcessError(
-                    1, argv, stderr="ServiceError: 401 NotAuthenticated")
+                    1, argv, stderr="ServiceError: 401 NotAuthenticated"
+                )
             if argv[1:3] == ["session", "refresh"]:
                 return subprocess.CompletedProcess(argv, 0, stdout="")
             return subprocess.CompletedProcess(argv, 0, stdout='{"data": {"id": "run-1"}}')
@@ -84,8 +109,17 @@ class TestJsonTransport:
         assert O.run_json(command)["data"]["id"] == "run-1"
         assert calls == [
             command,
-            ["oci", "session", "refresh", "--profile", "DEV", "--config-file",
-             "C:/Users/me/.oci/config", "--cert-bundle", "C:/corp/ca.pem"],
+            [
+                "oci",
+                "session",
+                "refresh",
+                "--profile",
+                "DEV",
+                "--config-file",
+                "C:/Users/me/.oci/config",
+                "--cert-bundle",
+                "C:/corp/ca.pem",
+            ],
             command,
         ]
 
@@ -119,11 +153,13 @@ class TestJsonTransport:
 
 class TestRunOperations:
     def test_create_get_and_cancel_decode_data(self, monkeypatch):
-        responses = iter([
-            {"data": {"id": "run-1"}},
-            {"data": {"lifecycle-state": "IN_PROGRESS"}},
-            {"data": {"lifecycle-state": "CANCELING"}},
-        ])
+        responses = iter(
+            [
+                {"data": {"id": "run-1"}},
+                {"data": {"lifecycle-state": "IN_PROGRESS"}},
+                {"data": {"lifecycle-state": "CANCELING"}},
+            ]
+        )
         monkeypatch.setattr(O, "run_json", lambda command: next(responses))
 
         assert O.create_run(["--product", "cdb"], "name", opts()) == "run-1"
@@ -131,13 +167,16 @@ class TestRunOperations:
         assert O.cancel_run("run-1", opts()) == "CANCELING"
 
 
-@pytest.mark.parametrize("state, kind", [
-    ("SUCCEEDED", "success"),
-    ("FAILED", "failure"),
-    ("CANCELED", "failure"),
-    ("STOPPED", "failure"),
-    ("IN_PROGRESS", "pending"),
-    ("unknown", "pending"),
-])
+@pytest.mark.parametrize(
+    "state, kind",
+    [
+        ("SUCCEEDED", "success"),
+        ("FAILED", "failure"),
+        ("CANCELED", "failure"),
+        ("STOPPED", "failure"),
+        ("IN_PROGRESS", "pending"),
+        ("unknown", "pending"),
+    ],
+)
 def test_classify_state(state, kind):
     assert O.classify_state(state) == kind

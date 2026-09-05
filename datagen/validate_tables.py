@@ -7,6 +7,7 @@ notebook (pass your own SparkSession); `main()` is the Data Flow CLI wrapper.
 
 Design: docs/plans/2026-06-18-validate-tables-design.md
 """
+
 from __future__ import annotations
 
 import argparse
@@ -32,9 +33,9 @@ SAMPLE_LIMIT = 10  # offending rows captured per finding
 @dataclass
 class Finding:
     table: str
-    check: str            # not_null | decimal_domain | varchar_domain | pk_not_null
-                          # | pk_unique | pk_collision | fk | unique
-    target: str           # column or constraint label
+    check: str  # not_null | decimal_domain | varchar_domain | pk_not_null
+    # | pk_unique | pk_collision | fk | unique
+    target: str  # column or constraint label
     violation_count: int
     sample: list
     ok: bool
@@ -60,8 +61,12 @@ def report_to_json(report: Report) -> dict:
         "summary": report.summary_counts,
         "findings": [
             {
-                "table": f.table, "check": f.check, "target": f.target,
-                "violation_count": f.violation_count, "sample": f.sample, "ok": f.ok,
+                "table": f.table,
+                "check": f.check,
+                "target": f.target,
+                "violation_count": f.violation_count,
+                "sample": f.sample,
+                "ok": f.ok,
             }
             for f in report.findings
         ],
@@ -70,12 +75,13 @@ def report_to_json(report: Report) -> dict:
 
 def render_summary(report: Report) -> str:
     rows = sorted(report.findings, key=lambda f: (f.ok, f.table, f.check))
-    lines = [f"Validation: {report.summary_counts['violations']} violation(s), "
-             f"{report.summary_counts['ok']} ok"]
+    lines = [
+        f"Validation: {report.summary_counts['violations']} violation(s), "
+        f"{report.summary_counts['ok']} ok"
+    ]
     for f in rows:
         mark = "ok" if f.ok else "!!"
-        lines.append(f"  [{mark}] {f.table}.{f.check}({f.target}) "
-                     f"-> {f.violation_count} bad")
+        lines.append(f"  [{mark}] {f.table}.{f.check}({f.target}) -> {f.violation_count} bad")
     return "\n".join(lines)
 
 
@@ -93,7 +99,7 @@ def decimal_overflow_threshold(precision: int, scale: int) -> int:
     and 999.99 is accepted.
     """
     int_digits = max(precision - scale, 0)
-    return 10 ** int_digits
+    return 10**int_digits
 
 
 def _fk_list(cfg: dict) -> list:
@@ -136,37 +142,44 @@ def _sample(df, cols, limit=SAMPLE_LIMIT) -> list:
 
 def check_not_null(df, table, not_null_cols) -> list:
     from pyspark.sql import functions as F
+
     findings = []
     for col in not_null_cols:
         if col not in df.columns:
             continue
         bad = df.filter(F.col(col).isNull())
         count = bad.count()
-        findings.append(Finding(table, "not_null", col, count,
-                                _sample(bad, [col]) if count else [], count == 0))
+        findings.append(
+            Finding(table, "not_null", col, count, _sample(bad, [col]) if count else [], count == 0)
+        )
     return findings
 
 
 def check_decimal_domain(df, table, col, precision, scale) -> Finding:
     from pyspark.sql import functions as F
+
     threshold = decimal_overflow_threshold(precision, scale)
     bad = df.filter(F.col(col).isNotNull() & (F.abs(F.col(col)) >= F.lit(threshold)))
     count = bad.count()
-    return Finding(table, "decimal_domain", col, count,
-                   _sample(bad, [col]) if count else [], count == 0)
+    return Finding(
+        table, "decimal_domain", col, count, _sample(bad, [col]) if count else [], count == 0
+    )
 
 
 def check_varchar_domain(df, table, col, length) -> Finding:
     from pyspark.sql import functions as F
+
     bad = df.filter(F.col(col).isNotNull() & (F.length(F.col(col)) > F.lit(length)))
     count = bad.count()
-    return Finding(table, "varchar_domain", col, count,
-                   _sample(bad, [col]) if count else [], count == 0)
+    return Finding(
+        table, "varchar_domain", col, count, _sample(bad, [col]) if count else [], count == 0
+    )
 
 
 def check_pk(synth_df, raw_df, table, pk_cols) -> list:
     """PK not-null + internal uniqueness + no collision with existing (raw) keys."""
     from pyspark.sql import functions as F
+
     findings = []
     # not-null: any pk column null
     null_cond = None
@@ -175,51 +188,85 @@ def check_pk(synth_df, raw_df, table, pk_cols) -> list:
         null_cond = c if null_cond is None else (null_cond | c)
     bad_null = synth_df.filter(null_cond)
     n_null = bad_null.count()
-    findings.append(Finding(table, "pk_not_null", ",".join(pk_cols), n_null,
-                            _sample(bad_null, pk_cols) if n_null else [], n_null == 0))
+    findings.append(
+        Finding(
+            table,
+            "pk_not_null",
+            ",".join(pk_cols),
+            n_null,
+            _sample(bad_null, pk_cols) if n_null else [],
+            n_null == 0,
+        )
+    )
     # internal uniqueness
-    dups = (synth_df.groupBy(*pk_cols).count().filter(F.col("count") > 1))
+    dups = synth_df.groupBy(*pk_cols).count().filter(F.col("count") > 1)
     n_dup = dups.count()
-    findings.append(Finding(table, "pk_unique", ",".join(pk_cols), n_dup,
-                            _sample(dups, pk_cols) if n_dup else [], n_dup == 0))
+    findings.append(
+        Finding(
+            table,
+            "pk_unique",
+            ",".join(pk_cols),
+            n_dup,
+            _sample(dups, pk_cols) if n_dup else [],
+            n_dup == 0,
+        )
+    )
     # collision with existing real keys (raw)
     if raw_df is not None:
         synth_keys = synth_df.select(*pk_cols).distinct()
         raw_keys = raw_df.select(*pk_cols).distinct()
         collide = synth_keys.join(raw_keys, on=list(pk_cols), how="inner")
         n_col = collide.count()
-        findings.append(Finding(table, "pk_collision", ",".join(pk_cols), n_col,
-                                _sample(collide, pk_cols) if n_col else [], n_col == 0))
+        findings.append(
+            Finding(
+                table,
+                "pk_collision",
+                ",".join(pk_cols),
+                n_col,
+                _sample(collide, pk_cols) if n_col else [],
+                n_col == 0,
+            )
+        )
     return findings
 
 
 def check_fk(child_df, parent_universe_df, table, child_cols, parent_cols, label) -> Finding:
     """Non-null child FK tuples must exist in (raw union synthetic) parent keys."""
     from pyspark.sql import functions as F
+
     cond = None
     for col in child_cols:  # only rows where every FK col is non-null are enforced
         c = F.col(col).isNotNull()
         cond = c if cond is None else (cond & c)
     child = child_df.filter(cond).select(*child_cols).distinct()
     parent = parent_universe_df.select(
-        *[F.col(p).alias(c) for p, c in zip(parent_cols, child_cols)]).distinct()
+        *[F.col(p).alias(c) for p, c in zip(parent_cols, child_cols)]
+    ).distinct()
     orphans = child.join(parent, on=list(child_cols), how="left_anti")
     count = orphans.count()
-    return Finding(table, "fk", label, count,
-                   _sample(orphans, list(child_cols)) if count else [], count == 0)
+    return Finding(
+        table, "fk", label, count, _sample(orphans, list(child_cols)) if count else [], count == 0
+    )
 
 
 def check_unique(df, table, cols) -> Finding:
     """Duplicate non-null unique tuples (Oracle ignores rows with any null)."""
     from pyspark.sql import functions as F
+
     cond = None
     for col in cols:
         c = F.col(col).isNotNull()
         cond = c if cond is None else (cond & c)
     dups = df.filter(cond).groupBy(*cols).count().filter(F.col("count") > 1)
     count = dups.count()
-    return Finding(table, "unique", ",".join(cols), count,
-                   _sample(dups, list(cols)) if count else [], count == 0)
+    return Finding(
+        table,
+        "unique",
+        ",".join(cols),
+        count,
+        _sample(dups, list(cols)) if count else [],
+        count == 0,
+    )
 
 
 def plan_checks(specs: dict, schema: dict, tables=None) -> list:
@@ -229,19 +276,22 @@ def plan_checks(specs: dict, schema: dict, tables=None) -> list:
     for table in sorted(t for t in schema if t in chosen):
         cols = schema[table].get("columns", {})
         not_null = [c for c, meta in cols.items() if not meta.get("nullable", True)]
-        decimals = [(c, m["precision"], m.get("scale", 0))
-                    for c, m in cols.items() if "precision" in m]
+        decimals = [
+            (c, m["precision"], m.get("scale", 0)) for c, m in cols.items() if "precision" in m
+        ]
         varchars = [(c, m["length"]) for c, m in cols.items() if "length" in m]
         spec = specs.get(table, {})
-        plan.append({
-            "table": table,
-            "pk_cols": spec.get("pk_cols") or [],
-            "not_null": sorted(not_null),
-            "decimals": decimals,
-            "varchars": varchars,
-            "unique": schema[table].get("unique", []),
-            "fks": [fk for fk in _fk_list(spec) if isinstance(fk, dict)],
-        })
+        plan.append(
+            {
+                "table": table,
+                "pk_cols": spec.get("pk_cols") or [],
+                "not_null": sorted(not_null),
+                "decimals": decimals,
+                "varchars": varchars,
+                "unique": schema[table].get("unique", []),
+                "fks": [fk for fk in _fk_list(spec) if isinstance(fk, dict)],
+            }
+        )
     return plan
 
 
@@ -276,8 +326,7 @@ def validate(spark, specs, schema, raw_base, synth_base, tables=None) -> Report:
         raw = _read_parquet_opt(spark, _raw_path(raw_base, table))
         # column/domain checks
         present = set(synth.columns)
-        findings += check_not_null(synth, table,
-                                   [c for c in item["not_null"] if c in present])
+        findings += check_not_null(synth, table, [c for c in item["not_null"] if c in present])
         for col, p, s in item["decimals"]:
             if col in present:
                 findings.append(check_decimal_domain(synth, table, col, p, s))
@@ -301,12 +350,12 @@ def validate(spark, specs, schema, raw_base, synth_base, tables=None) -> Report:
                 continue
             universe = _parent_universe(spark, raw_base, synth_base, parent, parent_cols)
             if universe is None:
-                logger.warning("No parent data for %s.%s -> %s; skipping FK",
-                               table, child_cols, parent)
+                logger.warning(
+                    "No parent data for %s.%s -> %s; skipping FK", table, child_cols, parent
+                )
                 continue
             label = f"{','.join(child_cols)}->{parent}"
-            findings.append(check_fk(synth, universe, table,
-                                     child_cols, parent_cols, label))
+            findings.append(check_fk(synth, universe, table, child_cols, parent_cols, label))
     return Report(findings=findings)
 
 
@@ -341,22 +390,22 @@ def get_validate_env() -> dict:
 
 
 def parse_arguments(argv=None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Validate synthetic Parquet vs DB constraints.")
+    parser = argparse.ArgumentParser(description="Validate synthetic Parquet vs DB constraints.")
     parser.add_argument("--specs", default=None, help="Override DATAGEN_SPECS_URI.")
     parser.add_argument("--schema", default=None, help="Override DATAGEN_SCHEMA_URI.")
-    parser.add_argument("--report-uri", default=None,
-                        help="Where to write the JSON report (object storage).")
-    parser.add_argument("--tables", default=None,
-                        help="Comma-separated subset of tables to validate.")
+    parser.add_argument(
+        "--report-uri", default=None, help="Where to write the JSON report (object storage)."
+    )
+    parser.add_argument(
+        "--tables", default=None, help="Comma-separated subset of tables to validate."
+    )
     return parser.parse_args(argv)
 
 
 def _read_json_object(spark, uri: str) -> dict:
     records = spark.sparkContext.wholeTextFiles(uri).collect()
     if len(records) != 1:
-        raise ValueError(
-            f"Expected exactly one JSON object at `{uri}`, found {len(records)}.")
+        raise ValueError(f"Expected exactly one JSON object at `{uri}`, found {len(records)}.")
     return json.loads(records[0][1])
 
 
@@ -382,6 +431,7 @@ def _write_report(spark, report: Report, uri: str) -> None:
 
 def create_spark_session(app_name: str):
     from pyspark.sql import SparkSession
+
     builder = SparkSession.builder.appName(app_name)
     builder = builder.config("spark.sql.parquet.aggregatePushdown", "true")
     return builder.getOrCreate()
@@ -397,9 +447,14 @@ def main() -> None:
 
     spark = create_spark_session("validate_tables")
     specs, schema = load_manifests(spark, specs_uri, schema_uri)
-    report = validate(spark, specs, schema,
-                      config["DATAGEN_RAW_BASE_URI"],
-                      config["DATAGEN_SYNTHETIC_BASE_URI"], tables=tables)
+    report = validate(
+        spark,
+        specs,
+        schema,
+        config["DATAGEN_RAW_BASE_URI"],
+        config["DATAGEN_SYNTHETIC_BASE_URI"],
+        tables=tables,
+    )
     summary = render_summary(report)
     print(summary)
     logger.info("%s", summary)

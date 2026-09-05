@@ -79,8 +79,7 @@ def gravame_tables(spark):
         ),
         "ARQUIVO_IF": spark.createDataFrame(
             [(61, 1, 51, None)],
-            "NUM_ID_ARQUIVO_IF long, NUM_IF long, NUM_ID_ARQUIVO_TRANSF long, "
-            "DAT_EXCLUSAO string",
+            "NUM_ID_ARQUIVO_IF long, NUM_IF long, NUM_ID_ARQUIVO_TRANSF long, DAT_EXCLUSAO string",
         ),
         "PROTOCOLO": spark.createDataFrame(
             [(71, 1, "26FREG00000010", None)],
@@ -161,18 +160,23 @@ def test_gravame_profile_is_isolated(capsys):
 
 
 def test_gravame_graph_accepts_contract_only_registration(spark):
-    findings = by_id(validator.check_gravame_graph(
-        gravame_tables(spark), 5, validator.VALIDATION_PROFILES["gravame"]
-    ))
+    findings = by_id(
+        validator.check_gravame_graph(
+            gravame_tables(spark), 5, validator.VALIDATION_PROFILES["gravame"]
+        )
+    )
 
     assert all(finding.passed for finding in findings.values()), findings
 
 
 def test_gravame_metadata_is_partial_without_oracle_and_requires_union_metadata():
     profile = validator.VALIDATION_PROFILES["gravame"]
-    assert validator.check_gravame_metadata(
-        validator.Metadata(set(), {}, {}, {}, {}), True, profile
-    )[0].severity == validator.SEV_WARN
+    assert (
+        validator.check_gravame_metadata(validator.Metadata(set(), {}, {}, {}, {}), True, profile)[
+            0
+        ].severity
+        == validator.SEV_WARN
+    )
 
     tables = set(validator.GRAVAME_OUTPUT_TABLES)
     pks = {table: ["ID"] for table in tables}
@@ -203,9 +207,9 @@ def test_gravame_graph_rejects_orphans(spark, table, column, check_id):
     else:
         tables[table] = tables[table].withColumn(column, validator.F.lit(999))
 
-    finding = by_id(validator.check_gravame_graph(
-        tables, 5, validator.VALIDATION_PROFILES["gravame"]
-    ))[check_id]
+    finding = by_id(
+        validator.check_gravame_graph(tables, 5, validator.VALIDATION_PROFILES["gravame"])
+    )[check_id]
     assert finding.severity == validator.SEV_ERROR
 
 
@@ -220,9 +224,9 @@ def test_gravame_graph_rejects_account_parameter_and_document_breaks(spark):
     tables["ARQUIVO_IF"] = tables["ARQUIVO_IF"].withColumn(
         "NUM_ID_ARQUIVO_TRANSF", validator.F.lit(999)
     )
-    findings = by_id(validator.check_gravame_graph(
-        tables, 5, validator.VALIDATION_PROFILES["gravame"]
-    ))
+    findings = by_id(
+        validator.check_gravame_graph(tables, 5, validator.VALIDATION_PROFILES["gravame"])
+    )
 
     assert findings["2i.endpoint_account"].severity == validator.SEV_ERROR
     assert findings["2i.operation_endpoint"].severity == validator.SEV_ERROR
@@ -237,9 +241,9 @@ def test_gravame_operation_chain_rejects_missing_original_and_duplicate_code(spa
             validator.F.col("COD_OPERACAO_ORIGINAL")
         ),
     )
-    finding = by_id(validator.check_gravame_graph(
-        tables, 5, validator.VALIDATION_PROFILES["gravame"]
-    ))["2i.operation_chain"]
+    finding = by_id(
+        validator.check_gravame_graph(tables, 5, validator.VALIDATION_PROFILES["gravame"])
+    )["2i.operation_chain"]
     assert finding.severity == validator.SEV_ERROR
 
     tables = gravame_tables(spark)
@@ -249,26 +253,24 @@ def test_gravame_operation_chain_rejects_missing_original_and_duplicate_code(spa
             validator.F.col("COD_OPERACAO_ORIGINAL")
         ),
     )
-    finding = by_id(validator.check_gravame_graph(
-        tables, 5, validator.VALIDATION_PROFILES["gravame"]
-    ))["2i.operation_chain"]
+    finding = by_id(
+        validator.check_gravame_graph(tables, 5, validator.VALIDATION_PROFILES["gravame"])
+    )["2i.operation_chain"]
     assert finding.severity == validator.SEV_ERROR
 
     tables = gravame_tables(spark)
-    tables["OPERACAO"] = tables["OPERACAO"].withColumn(
-        "COD_OPERACAO", validator.F.lit("duplicate")
-    )
-    finding = by_id(validator.check_gravame_graph(
-        tables, 5, validator.VALIDATION_PROFILES["gravame"]
-    ))["2i.operation_code"]
+    tables["OPERACAO"] = tables["OPERACAO"].withColumn("COD_OPERACAO", validator.F.lit("duplicate"))
+    finding = by_id(
+        validator.check_gravame_graph(tables, 5, validator.VALIDATION_PROFILES["gravame"])
+    )["2i.operation_code"]
     assert finding.severity == validator.SEV_ERROR
 
 
 def test_gravame_pledge_root_is_local_but_guarantee_may_be_external(spark):
     tables = instrument_backed_tables(spark)
-    findings = by_id(validator.check_gravame_graph(
-        tables, 5, validator.VALIDATION_PROFILES["gravame"]
-    ))
+    findings = by_id(
+        validator.check_gravame_graph(tables, 5, validator.VALIDATION_PROFILES["gravame"])
+    )
     assert findings["2i.pledge.edge"].passed
     assert findings["2i.external_operation_target"].passed
 
@@ -279,50 +281,64 @@ def test_gravame_pledge_root_is_local_but_guarantee_may_be_external(spark):
         ),
     )
     tables["OPERACAO"] = wrong_target
-    assert by_id(validator.check_gravame_graph(
-        tables, 5, validator.VALIDATION_PROFILES["gravame"]
-    ))["2i.external_operation_target"].severity == validator.SEV_ERROR
+    assert (
+        by_id(validator.check_gravame_graph(tables, 5, validator.VALIDATION_PROFILES["gravame"]))[
+            "2i.external_operation_target"
+        ].severity
+        == validator.SEV_ERROR
+    )
 
     tables = instrument_backed_tables(spark)
     tables["OPERACAO"] = tables["OPERACAO"].withColumn(
         "NUM_IF",
-        validator.F.when(validator.F.col("NUM_IF") == 900, 1).otherwise(
-            validator.F.col("NUM_IF")
-        ),
+        validator.F.when(validator.F.col("NUM_IF") == 900, 1).otherwise(validator.F.col("NUM_IF")),
     )
-    assert by_id(validator.check_gravame_graph(
-        tables, 5, validator.VALIDATION_PROFILES["gravame"]
-    ))["2i.external_operation_target"].severity == validator.SEV_ERROR
+    assert (
+        by_id(validator.check_gravame_graph(tables, 5, validator.VALIDATION_PROFILES["gravame"]))[
+            "2i.external_operation_target"
+        ].severity
+        == validator.SEV_ERROR
+    )
 
     tables = gravame_tables(spark)
     operations = tables["OPERACAO"]
-    tables["OPERACAO"] = operations.union(spark.createDataFrame(
-        [(35, 900, "orphan541", None, 15464, 6, 11, 12, None)], operations.schema
-    ))
-    assert by_id(validator.check_gravame_graph(
-        tables, 5, validator.VALIDATION_PROFILES["gravame"]
-    ))["2i.operation_route_membership"].severity == validator.SEV_ERROR
+    tables["OPERACAO"] = operations.union(
+        spark.createDataFrame(
+            [(35, 900, "orphan541", None, 15464, 6, 11, 12, None)], operations.schema
+        )
+    )
+    assert (
+        by_id(validator.check_gravame_graph(tables, 5, validator.VALIDATION_PROFILES["gravame"]))[
+            "2i.operation_route_membership"
+        ].severity
+        == validator.SEV_ERROR
+    )
 
     tables = instrument_backed_tables(spark)
     tables["GRAVAME_GRAU_PENHOR"] = tables["GRAVAME_GRAU_PENHOR"].withColumn(
         "NUM_IF_GRAVAME", validator.F.lit(999)
     )
-    assert by_id(validator.check_gravame_graph(
-        tables, 5, validator.VALIDATION_PROFILES["gravame"]
-    ))["2i.pledge.edge"].severity == validator.SEV_ERROR
+    assert (
+        by_id(validator.check_gravame_graph(tables, 5, validator.VALIDATION_PROFILES["gravame"]))[
+            "2i.pledge.edge"
+        ].severity
+        == validator.SEV_ERROR
+    )
 
 
 def test_gravame_dates_reject_malformed_and_reversed_values(spark):
     tables = gravame_tables(spark)
-    tables["INSTRUMENTO_FINANCEIRO"] = tables["INSTRUMENTO_FINANCEIRO"].withColumn(
-        "DAT_REGISTRO", validator.F.lit("not-a-date")
-    ).withColumn("DAT_EMISSAO", validator.F.lit("2031-01-01"))
+    tables["INSTRUMENTO_FINANCEIRO"] = (
+        tables["INSTRUMENTO_FINANCEIRO"]
+        .withColumn("DAT_REGISTRO", validator.F.lit("not-a-date"))
+        .withColumn("DAT_EMISSAO", validator.F.lit("2031-01-01"))
+    )
     tables["COMPLEMENTO_CONTRATO"] = tables["COMPLEMENTO_CONTRATO"].withColumn(
         "DAT_INCLUSAO", validator.F.lit("bad-contract-date")
     )
-    findings = by_id(validator.check_gravame_dates(
-        tables, 5, validator.VALIDATION_PROFILES["gravame"]
-    ))
+    findings = by_id(
+        validator.check_gravame_dates(tables, 5, validator.VALIDATION_PROFILES["gravame"])
+    )
 
     assert findings["5i.date_parse"].severity == validator.SEV_ERROR
     assert findings["5i.date_order"].severity == validator.SEV_ERROR
@@ -330,24 +346,22 @@ def test_gravame_dates_reject_malformed_and_reversed_values(spark):
 
 def test_gravame_registration_profile_is_advisory_and_opt_in(spark):
     profile = validator.VALIDATION_PROFILES["gravame"]
-    assert validator.check_gravame_registration_profile(
-        gravame_tables(spark), 5, False, profile
-    ) == []
+    assert (
+        validator.check_gravame_registration_profile(gravame_tables(spark), 5, False, profile) == []
+    )
 
     tables = gravame_tables(spark)
     tables["GRAVAME_GRAU_PENHOR"] = spark.createDataFrame(
         [(81, 1, 900, 1, None)], tables["GRAVAME_GRAU_PENHOR"].schema
     )
-    finding = by_id(validator.check_gravame_registration_profile(
-        tables, 5, True, profile
-    ))["8i.profile.variant_shape"]
+    finding = by_id(validator.check_gravame_registration_profile(tables, 5, True, profile))[
+        "8i.profile.variant_shape"
+    ]
     assert finding.severity == validator.SEV_WARN
 
     tables = gravame_tables(spark)
     tables["IF_GRVM"] = tables["IF_GRVM"].limit(0)
-    findings = by_id(validator.check_gravame_registration_profile(
-        tables, 5, True, profile
-    ))
+    findings = by_id(validator.check_gravame_registration_profile(tables, 5, True, profile))
     assert findings["8i.profile.common_shape"].severity == validator.SEV_WARN
     assert findings["8i.profile.variant_shape"].severity == validator.SEV_WARN
 
@@ -363,8 +377,7 @@ def test_gravame_registration_profile_is_advisory_and_opt_in(spark):
     [
         ("GRAVAME_TIPO_IF", "COD_TIPO_IF", "CCB", "6i.lookup.tipo_if"),
         ("GRAVAME_OBJECT_SERVICE", "IND_PLATAFORMA_BAIXA", "N", "6i.lookup.platform"),
-        ("GRAVAME_ROUTES", "NUM_ID_OBJETO_SERVICO", 47,
-         "6i.lookup.registration_route"),
+        ("GRAVAME_ROUTES", "NUM_ID_OBJETO_SERVICO", 47, "6i.lookup.registration_route"),
     ],
 )
 def test_gravame_target_rejects_wrong_type_platform_and_route(
@@ -372,9 +385,11 @@ def test_gravame_target_rejects_wrong_type_platform_and_route(
 ):
     frames = target_frames(spark)
     frames[frame] = frames[frame].withColumn(column, validator.F.lit(value))
-    findings = by_id(validator.check_gravame_target_frames(
-        gravame_tables(spark), frames, 5, validator.VALIDATION_PROFILES["gravame"]
-    ))
+    findings = by_id(
+        validator.check_gravame_target_frames(
+            gravame_tables(spark), frames, 5, validator.VALIDATION_PROFILES["gravame"]
+        )
+    )
 
     assert findings[check_id].severity == validator.SEV_ERROR
 
@@ -386,32 +401,40 @@ def test_gravame_target_ignores_nonregistration_routes(spark):
         spark.createDataFrame([(15464, 44, "520", "S")], frames["GRAVAME_ROUTES"].schema)
     )
 
-    finding = by_id(validator.check_gravame_target_frames(
-        tables, frames, 5, validator.VALIDATION_PROFILES["gravame"]
-    ))["6i.lookup.registration_route"]
+    finding = by_id(
+        validator.check_gravame_target_frames(
+            tables, frames, 5, validator.VALIDATION_PROFILES["gravame"]
+        )
+    )["6i.lookup.registration_route"]
     assert finding.passed
 
 
 def test_gravame_target_requires_active_non_matured_guarantee(spark):
     tables = instrument_backed_tables(spark)
     frames = target_frames(spark)
-    findings = by_id(validator.check_gravame_target_frames(
-        tables, frames, 5, validator.VALIDATION_PROFILES["gravame"]
-    ))
+    findings = by_id(
+        validator.check_gravame_target_frames(
+            tables, frames, 5, validator.VALIDATION_PROFILES["gravame"]
+        )
+    )
     assert findings["6i.lookup.guarantee"].passed
 
     frames["GRAVAME_GUARANTEES"] = frames["GRAVAME_GUARANTEES"].withColumn(
         "DAT_EXCLUSAO", validator.F.lit("2026-06-01")
     )
-    finding = by_id(validator.check_gravame_target_frames(
-        tables, frames, 5, validator.VALIDATION_PROFILES["gravame"]
-    ))["6i.lookup.guarantee"]
+    finding = by_id(
+        validator.check_gravame_target_frames(
+            tables, frames, 5, validator.VALIDATION_PROFILES["gravame"]
+        )
+    )["6i.lookup.guarantee"]
     assert finding.severity == validator.SEV_ERROR
 
 
 def test_gravame_shape_profiler_counts_operation_chain(spark):
     profile = profiler.build_profile(
-        instrument_backed_tables(spark), product="gravame", num_tipo_if=175,
+        instrument_backed_tables(spark),
+        product="gravame",
+        num_tipo_if=175,
         simplified=False,
     )
 
@@ -429,10 +452,18 @@ def test_gravame_shape_profiler_counts_operation_chain(spark):
 
 
 def test_gravame_shape_dispatch_needs_baseline_without_cdb_ratio(spark):
-    findings = by_id(validator.check_shapes(
-        spark, gravame_tables(spark), None, 5, 1.0, 0.15, 5.0,
-        validator.VALIDATION_PROFILES["gravame"],
-    ))
+    findings = by_id(
+        validator.check_shapes(
+            spark,
+            gravame_tables(spark),
+            None,
+            5,
+            1.0,
+            0.15,
+            5.0,
+            validator.VALIDATION_PROFILES["gravame"],
+        )
+    )
 
     assert findings["7.baseline"].severity == validator.SEV_WARN
     assert "7c.op_ratio" not in findings

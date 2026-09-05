@@ -208,6 +208,7 @@ def _perf_timer(phase: str, **fields: Any):
             f" {details}" if details else "",
         )
 
+
 # ---------------------------------------------------------------------------
 # Domínio: a seleção de NUM_IF vive no catálogo SQL único, em um bloco por
 # produto. A leitura das tabelas para montar o fecho é RAW; filtros posteriores
@@ -222,31 +223,33 @@ COL_NUM_TIPO_IF = "NUM_TIPO_IF"
 # Quantos tipos distintos o diagnóstico de lote heterogêneo lista no erro.
 MAX_TIPOS_DIAGNOSTICO = 10
 
-PRODUTOS_COM_PODA_SUBTIPO = frozenset({
-    'cdb_simplificado',
-    'cdb_resgate',
-    'cdb_escalonamento',
-    # LCI/LCA: o validador só reconhece 4 tipos de condição por produto
-    # (LCI_CONDITION_SUBTYPES / LCA_CONDITION_SUBTYPES) e o fecho clona TODA
-    # CONDICAO_IF ativa do instrumento, de qualquer tipo. Sem a poda, uma
-    # condição de tipo fora desses 4 vem sem a linha-subtipo (a tabela não está
-    # na lista do produto) e reprova 2e./2g..subtype_orphan. Conferido: os
-    # subtipos sintetizáveis de cada um coincidem exatamente com o mapa do
-    # validador — LCI {2,3,4,20}, LCA {1,3,5,20}.
-    'lci',
-    'lca',
-    # CCB: mesma situação. CCB_CONDICAO_SUBTYPES do validador é
-    # {1,2,4,5,14,20} e os subtipos sintetizáveis do produto coincidem
-    # EXATAMENTE com esse conjunto — condição de qualquer outro tipo (3, 6, 7,
-    # 15, 16, 17, 21, 22, 23, 24) sai sem linha-subtipo e reprova
-    # 2h.subtype_orphan / 2h.unknown_condition_type. As 5 variantes compartilham
-    # a mesma lista de tabelas, então todas precisam do gate.
-    'ccb_pppre',
-    'ccb_pfpre',
-    'ccb_pgrpre',
-    'ccb_favcp',
-    'ccb_fapre',
-})
+PRODUTOS_COM_PODA_SUBTIPO = frozenset(
+    {
+        "cdb_simplificado",
+        "cdb_resgate",
+        "cdb_escalonamento",
+        # LCI/LCA: o validador só reconhece 4 tipos de condição por produto
+        # (LCI_CONDITION_SUBTYPES / LCA_CONDITION_SUBTYPES) e o fecho clona TODA
+        # CONDICAO_IF ativa do instrumento, de qualquer tipo. Sem a poda, uma
+        # condição de tipo fora desses 4 vem sem a linha-subtipo (a tabela não está
+        # na lista do produto) e reprova 2e./2g..subtype_orphan. Conferido: os
+        # subtipos sintetizáveis de cada um coincidem exatamente com o mapa do
+        # validador — LCI {2,3,4,20}, LCA {1,3,5,20}.
+        "lci",
+        "lca",
+        # CCB: mesma situação. CCB_CONDICAO_SUBTYPES do validador é
+        # {1,2,4,5,14,20} e os subtipos sintetizáveis do produto coincidem
+        # EXATAMENTE com esse conjunto — condição de qualquer outro tipo (3, 6, 7,
+        # 15, 16, 17, 21, 22, 23, 24) sai sem linha-subtipo e reprova
+        # 2h.subtype_orphan / 2h.unknown_condition_type. As 5 variantes compartilham
+        # a mesma lista de tabelas, então todas precisam do gate.
+        "ccb_pppre",
+        "ccb_pfpre",
+        "ccb_pgrpre",
+        "ccb_favcp",
+        "ccb_fapre",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Lastro obrigatório por produto.
@@ -327,8 +330,8 @@ LASTRO_OBRIGATORIO_POR_PRODUTO: Dict[str, str] = {}
 # do destino.
 # ---------------------------------------------------------------------------
 SEMENTE_LATERAL_POR_PRODUTO: Dict[str, Tuple[str, ...]] = {
-    'lci': ('CREDITO_SCR',),
-    'lca': ('CREDITO_DC',),
+    "lci": ("CREDITO_SCR",),
+    "lca": ("CREDITO_DC",),
 }
 COL_NUM_ID_LOTE = "NUM_ID_LOTE"
 COD_CREDITO_POR_TABELA: Dict[str, str] = {
@@ -367,21 +370,25 @@ LASTROS_POR_LOTE_PADRAO = 10
 #     piso de PK do destino (ver o cabecalho de UNICIDADE ENTRE RUNS).
 # ---------------------------------------------------------------------------
 FK_COMPLEMENTAR_POR_PRODUTO: Dict[str, Tuple[Tuple[str, Dict[str, Any]], ...]] = {
-    'lci': ((
-        "HISTORICO_CREDITO_SCR",
-        {"columns": ["NUM_ID_CREDITO_SCR"],
-         "parent_table": "CREDITO_SCR",
-         "parent_columns": ["NUM_ID_CREDITO_SCR"]},
-    ),),
+    "lci": (
+        (
+            "HISTORICO_CREDITO_SCR",
+            {
+                "columns": ["NUM_ID_CREDITO_SCR"],
+                "parent_table": "CREDITO_SCR",
+                "parent_columns": ["NUM_ID_CREDITO_SCR"],
+            },
+        ),
+    ),
 }
 HISTORICO_LATERAL_POR_PRODUTO: Dict[str, Tuple[Tuple[str, str], ...]] = {
-    'lca': (("HISTORICO_CREDITO_DC", "CREDITO_DC"),),
+    "lca": (("HISTORICO_CREDITO_DC", "CREDITO_DC"),),
 }
 # Historicos que carregam o COD do credito e precisam receber o mesmo valor
 # sintetico (o 2d.inclusion_identity compara os dois).
 HISTORICOS_DO_CREDITO_POR_PRODUTO: Dict[str, Dict[str, Tuple[str, ...]]] = {
-    'lci': {"CREDITO_SCR": ("HISTORICO_CREDITO_SCR",)},
-    'lca': {"CREDITO_DC": ("HISTORICO_CREDITO_DC",)},
+    "lci": {"CREDITO_SCR": ("HISTORICO_CREDITO_SCR",)},
+    "lca": {"CREDITO_DC": ("HISTORICO_CREDITO_DC",)},
 }
 # Isentas da trava de vinculo principal em monta_plano: entram pela semente
 # lateral, nao pelo fecho. Sem isso o job aborta em HISTORICO_CREDITO_DC, cujas
@@ -416,13 +423,15 @@ TABELAS_SEMEADAS_LATERALMENTE = frozenset(
 # FIDELIDADE: usa _norm_code_validador e _canon_key_validador para normalizar
 # exatamente como o validador, e a nocao de ativo dele (nulo OU string vazia).
 # ---------------------------------------------------------------------------
-PRODUTOS_COM_PODA_FAMILIA_EVENTO = frozenset({
-    'cdb_simplificado',
-    'cdb_resgate',
-    'cdb_escalonamento',
-    'rdb_inclusao',
-    'rdb_resgate',
-})
+PRODUTOS_COM_PODA_FAMILIA_EVENTO = frozenset(
+    {
+        "cdb_simplificado",
+        "cdb_resgate",
+        "cdb_escalonamento",
+        "rdb_inclusao",
+        "rdb_resgate",
+    }
+)
 EVENTO_TABELA = "EVENTO"
 COL_NUM_TIPO_EVENTO_LEGADO = "NUM_TIPO_EVENTO_LEGADO"
 # (tipo do evento, tipo da condicao, tabela-subtipo exigida)
@@ -431,12 +440,14 @@ FAMILIA_EVENTO_CONDICAO: Tuple[Tuple[str, str, str], ...] = (
     ("85", "20", "RESGATE"),
 )
 
-PRODUTOS_COM_PODA_CRONOGRAMA_RESGATE = frozenset({
-    'cdb_resgate',
-    'rdb_resgate',
-})
+PRODUTOS_COM_PODA_CRONOGRAMA_RESGATE = frozenset(
+    {
+        "cdb_resgate",
+        "rdb_resgate",
+    }
+)
 MODO_RESGATE_EXIGIDO_POR_PRODUTO = {
-    'rdb_resgate': 'COM TABELA',
+    "rdb_resgate": "COM TABELA",
 }
 
 # ---------------------------------------------------------------------------
@@ -696,27 +707,33 @@ REFERENCIAS_CONTA: Tuple[Tuple[str, str], ...] = (
 # valer na prática, mas um instrumento com DUAS operações de registro válidas
 # daria 4 linhas e passaria. Este item torna a regra explícita.
 # ---------------------------------------------------------------------------
-PRODUTOS_COM_FILTRO_CARTEIRA_SALDO = frozenset({
-    'cdb_simplificado',
-    'cdb_resgate',
-    'cdb_escalonamento',
-    'rdb_inclusao',
-    'rdb_resgate',
-})
+PRODUTOS_COM_FILTRO_CARTEIRA_SALDO = frozenset(
+    {
+        "cdb_simplificado",
+        "cdb_resgate",
+        "cdb_escalonamento",
+        "rdb_inclusao",
+        "rdb_resgate",
+    }
+)
 CARTEIRA_SALDO_POR_TABELA: Dict[str, str] = {
     "CARTEIRA_COMITENTE": "QTD_CARTEIRA_COMITENTE",
     "CARTEIRA_PARTICIPANTE": "QTD_CARTEIRA_PARTICIPANTE",
 }
-PRODUTOS_COM_PAR_DADO_OPERACAO = frozenset({
-    'cdb_simplificado',
-})
+PRODUTOS_COM_PAR_DADO_OPERACAO = frozenset(
+    {
+        "cdb_simplificado",
+    }
+)
 DADO_OPERACAO_TABELA = "DADO_OPERACAO"
 COL_NUM_ID_OPERACAO = "NUM_ID_OPERACAO"
 DADO_OPERACAO_POR_INSTRUMENTO = 2
 
-PRODUTOS_COM_POLITICA_ESTRITA_OPERACAO = frozenset({
-    'cdb_simplificado',
-})
+PRODUTOS_COM_POLITICA_ESTRITA_OPERACAO = frozenset(
+    {
+        "cdb_simplificado",
+    }
+)
 OPERACAO_TABELA = "OPERACAO"
 TIPO_OPER_OBJETO_SERV_TABELA = "TIPO_OPER_OBJETO_SERV"
 TIPO_OPERACAO_TABELA = "TIPO_OPERACAO"
@@ -730,13 +747,15 @@ COL_IND_DISPONIVEL_IDENTIFICACAO = "IND_DISPONIVEL_IDENTIFICACAO"
 COL_COD_TIPO_OPERACAO = "COD_TIPO_OPERACAO"
 OPERACAO_CONTAS_PONTA = ("NUM_CONTA_PARTICIPANTE_P1", "NUM_CONTA_PARTICIPANTE_P2")
 
-PRODUTOS_COM_PODA_CONTA = frozenset({
-    "cdb_simplificado",
-    "cdb_resgate",
-    "cdb_escalonamento",
-    "lci",
-    "lca",
-})
+PRODUTOS_COM_PODA_CONTA = frozenset(
+    {
+        "cdb_simplificado",
+        "cdb_resgate",
+        "cdb_escalonamento",
+        "lci",
+        "lca",
+    }
+)
 
 CONTROLE_OPERACIONAL_DATE_SQL = (
     "SELECT DAT_CTL_OPER "
@@ -782,9 +801,7 @@ QUERY_SECTION_RE = re.compile(
     r"^[ \t]*--[ \t]*END QUERY:[ \t]*\1[ \t]*\r?$",
     re.MULTILINE | re.DOTALL,
 )
-RAW_SOURCE_PLACEHOLDER_RE = re.compile(
-    r"\{\{RAW_([A-Z][A-Z0-9_]*)\}\}", re.IGNORECASE
-)
+RAW_SOURCE_PLACEHOLDER_RE = re.compile(r"\{\{RAW_([A-Z][A-Z0-9_]*)\}\}", re.IGNORECASE)
 SQL_PLACEHOLDER_RE = re.compile(r"\{\{[^{}]+\}\}")
 
 # ---------------------------------------------------------------------------
@@ -846,7 +863,7 @@ def _default_genai_artifact_root(plan_uri: str) -> str:
     if not separator:
         return "genai"
     if parent.endswith("/engorda"):
-        parent = parent[:-len("/engorda")]
+        parent = parent[: -len("/engorda")]
     return f"{parent}/genai"
 
 
@@ -1009,9 +1026,7 @@ def resolve_genai_policy(document: Any, *, product: str) -> GenAiPolicy:
         )
     defaults = _genai_required_mapping(root.get("defaults"), "defaults")
     products = _genai_required_mapping(root.get("products"), "products")
-    product_config = _genai_required_mapping(
-        products.get(product), f"products.{product}"
-    )
+    product_config = _genai_required_mapping(products.get(product), f"products.{product}")
 
     targets_raw = product_config.get("targets")
     if not isinstance(targets_raw, list):
@@ -1024,26 +1039,20 @@ def resolve_genai_policy(document: Any, *, product: str) -> GenAiPolicy:
         max_chars = item.get("max_chars")
         if isinstance(max_chars, bool) or not isinstance(max_chars, int) or max_chars < 1:
             raise ValueError("GenAI policy targets.max_chars must be a positive integer")
-        targets.append(GenAiTargetPolicy(
-            table=table,
-            column=column,
-            max_chars=max_chars,
-            instruction=_genai_required_string(item, "instruction", "targets"),
-        ))
-
-    observed_targets = tuple(
-        (target.table, target.column, target.max_chars) for target in targets
-    )
-    if set(observed_targets) != set(GENAI_REVIEWED_TARGETS):
-        raise ValueError(
-            "GenAI policy targets do not match the reviewed version-1 pilot targets"
+        targets.append(
+            GenAiTargetPolicy(
+                table=table,
+                column=column,
+                max_chars=max_chars,
+                instruction=_genai_required_string(item, "instruction", "targets"),
+            )
         )
-    target_order = {
-        identity: index for index, identity in enumerate(GENAI_REVIEWED_TARGETS)
-    }
-    targets.sort(
-        key=lambda target: target_order[(target.table, target.column, target.max_chars)]
-    )
+
+    observed_targets = tuple((target.table, target.column, target.max_chars) for target in targets)
+    if set(observed_targets) != set(GENAI_REVIEWED_TARGETS):
+        raise ValueError("GenAI policy targets do not match the reviewed version-1 pilot targets")
+    target_order = {identity: index for index, identity in enumerate(GENAI_REVIEWED_TARGETS)}
+    targets.sort(key=lambda target: target_order[(target.table, target.column, target.max_chars)])
 
     exclusions_raw = _genai_required_mapping(
         product_config.get("excluded_context_columns"),
@@ -1051,8 +1060,10 @@ def resolve_genai_policy(document: Any, *, product: str) -> GenAiPolicy:
     )
     exclusions: Dict[str, Tuple[str, ...]] = {}
     for table, columns in exclusions_raw.items():
-        if not isinstance(table, str) or not isinstance(columns, list) or not all(
-            isinstance(column, str) and column.strip() for column in columns
+        if (
+            not isinstance(table, str)
+            or not isinstance(columns, list)
+            or not all(isinstance(column, str) and column.strip() for column in columns)
         ):
             raise ValueError("GenAI policy excluded_context_columns is invalid")
         exclusions[table.upper()] = tuple(column.upper() for column in columns)
@@ -1110,8 +1121,9 @@ def validate_genai_policy_runtime(
 ) -> None:
     normalized_specs = {str(table).upper(): cfg for table, cfg in specs.items()}
     normalized_types = {
-        str(table).upper(): {str(column).upper(): str(kind).lower()
-                             for column, kind in columns.items()}
+        str(table).upper(): {
+            str(column).upper(): str(kind).lower() for column, kind in columns.items()
+        }
         for table, columns in column_types.items()
     }
     normalized_static = {str(table).upper() for table in static_tables}
@@ -1125,13 +1137,9 @@ def validate_genai_policy_runtime(
         protected.setdefault(table, set()).update(
             str(column).upper() for column in (cfg.get("pk_cols") or [])
         )
-        protected[table].update(
-            str(column).upper() for column in (cfg.get("not_null_cols") or [])
-        )
+        protected[table].update(str(column).upper() for column in (cfg.get("not_null_cols") or []))
         for fk in _fk_list(dict(cfg)):
-            protected[table].update(
-                str(column).upper() for column in (fk.get("columns") or [])
-            )
+            protected[table].update(str(column).upper() for column in (fk.get("columns") or []))
             parent = str(fk.get("parent_table") or "").upper()
             protected.setdefault(parent, set()).update(
                 str(column).upper() for column in (fk.get("parent_columns") or [])
@@ -1285,13 +1293,10 @@ class OracleGenAiChatAdapter:
 
     def complete(self, attempt: GenAiGenerationAttempt) -> str:
         text_content = self.models.TextContent(type="TEXT", text=attempt.payload_json)
-        system_content = self.models.TextContent(
-            type="TEXT", text=attempt.system_instruction
-        )
+        system_content = self.models.TextContent(type="TEXT", text=attempt.system_instruction)
         payload = json.loads(attempt.payload_json)
         target_limits = {
-            target["target_id"]: int(target["max_chars"])
-            for target in payload["targets"]
+            target["target_id"]: int(target["max_chars"]) for target in payload["targets"]
         }
         response_schema = {
             "type": "object",
@@ -1464,9 +1469,7 @@ def build_genai_request(
                 continue
             source = values[target.column]
             source_value = None if source is None else str(source)
-            pending_cells.append(
-                (table, source_pk_json, target.column, source_value, target)
-            )
+            pending_cells.append((table, source_pk_json, target.column, source_value, target))
     pending_cells.sort(key=lambda item: (item[0], item[1], item[2]))
     cells = tuple(
         GenAiRequestCell(
@@ -1478,8 +1481,9 @@ def build_genai_request(
             max_chars=target.max_chars,
             instruction=target.instruction,
         )
-        for index, (table, source_pk_json, column, source_value, target)
-        in enumerate(pending_cells, start=1)
+        for index, (table, source_pk_json, column, source_value, target) in enumerate(
+            pending_cells, start=1
+        )
     )
     return GenAiInstrumentRequest(
         root_num_if=_genai_identity_value(instrument.root_num_if),
@@ -1519,13 +1523,8 @@ def _build_genai_attempt(
             }
             for target_id in target_ids
         ],
-        "expected": [
-            {"k": clone, "target_id": target_id}
-            for clone, target_id in expected_sorted
-        ],
-        "response_contract": {
-            "variants": [{"k": "integer", "values": {"target_id": "string"}}]
-        },
+        "expected": [{"k": clone, "target_id": target_id} for clone, target_id in expected_sorted],
+        "response_contract": {"variants": [{"k": "integer", "values": {"target_id": "string"}}]},
     }
     retry_token = hashlib.sha256(
         f"{request.root_num_if}:{request.run_seed}:{attempt_number}".encode("ascii")
@@ -1616,9 +1615,7 @@ def _generate_one_instrument(request: GenAiInstrumentRequest, adapter: Any):
         "variants": [
             {
                 "k": clone,
-                "values": {
-                    cell.target_id: "X" * cell.max_chars for cell in request.cells
-                },
+                "values": {cell.target_id: "X" * cell.max_chars for cell in request.cells},
             }
             for clone in range(1, request.clone_factor + 1)
         ]
@@ -1650,8 +1647,7 @@ def _generate_one_instrument(request: GenAiInstrumentRequest, adapter: Any):
             except Exception as exc:
                 request_errors += 1
                 logger.warning(
-                    "GenAI request root=%s logical_attempt=%d transport_attempt=%d "
-                    "failed: %s",
+                    "GenAI request root=%s logical_attempt=%d transport_attempt=%d failed: %s",
                     request.root_num_if,
                     attempt_number,
                     transport_attempt,
@@ -1671,35 +1667,38 @@ def _generate_one_instrument(request: GenAiInstrumentRequest, adapter: Any):
             identity = (clone, cell.target_id)
             accepted = generated.get(identity)
             if accepted is None:
-                rows.append(GenAiReplacementRow(
+                rows.append(
+                    GenAiReplacementRow(
+                        root_num_if=request.root_num_if,
+                        table_name=cell.table,
+                        source_pk_json=cell.source_pk_json,
+                        clone_index=clone,
+                        column_name=cell.column,
+                        target_id=cell.target_id,
+                        generated_value=None,
+                        action="KEEP_SOURCE",
+                        status=("FALLBACK_REQUEST" if api_successes == 0 else "FALLBACK_INVALID"),
+                        attempt_count=attempts_used,
+                        differs_from_source=False,
+                    )
+                )
+                continue
+            value, accepted_attempt = accepted
+            rows.append(
+                GenAiReplacementRow(
                     root_num_if=request.root_num_if,
                     table_name=cell.table,
                     source_pk_json=cell.source_pk_json,
                     clone_index=clone,
                     column_name=cell.column,
                     target_id=cell.target_id,
-                    generated_value=None,
-                    action="KEEP_SOURCE",
-                    status=("FALLBACK_REQUEST" if api_successes == 0
-                            else "FALLBACK_INVALID"),
-                    attempt_count=attempts_used,
-                    differs_from_source=False,
-                ))
-                continue
-            value, accepted_attempt = accepted
-            rows.append(GenAiReplacementRow(
-                root_num_if=request.root_num_if,
-                table_name=cell.table,
-                source_pk_json=cell.source_pk_json,
-                clone_index=clone,
-                column_name=cell.column,
-                target_id=cell.target_id,
-                generated_value=value,
-                action="REPLACE",
-                status="GENERATED",
-                attempt_count=accepted_attempt,
-                differs_from_source=value != cell.source_value,
-            ))
+                    generated_value=value,
+                    action="REPLACE",
+                    status="GENERATED",
+                    attempt_count=accepted_attempt,
+                    differs_from_source=value != cell.source_value,
+                )
+            )
     return rows, api_successes, request_errors
 
 
@@ -1726,13 +1725,15 @@ def generate_genai_replacements(
             request_errors += errors
     if requests and api_successes == 0:
         raise ValueError("no Oracle GenAI request succeeded")
-    rows.sort(key=lambda row: (
-        row.root_num_if,
-        row.table_name,
-        row.source_pk_json,
-        row.clone_index,
-        row.column_name,
-    ))
+    rows.sort(
+        key=lambda row: (
+            row.root_num_if,
+            row.table_name,
+            row.source_pk_json,
+            row.clone_index,
+            row.column_name,
+        )
+    )
     status_counts: Dict[str, int] = {}
     column_status_counts: Dict[str, Dict[str, int]] = {}
     for row in rows:
@@ -1769,12 +1770,9 @@ def generate_genai_replacements(
         counts["distinct"] += len(set(values))
     diversity = {
         label: {
-            "source_change_rate": (
-                counts["changed"] / counts["cells"] if counts["cells"] else 0.0
-            ),
+            "source_change_rate": (counts["changed"] / counts["cells"] if counts["cells"] else 0.0),
             "sibling_uniqueness_rate": (
-                counts["distinct"] / counts["sibling_cells"]
-                if counts["sibling_cells"] else 0.0
+                counts["distinct"] / counts["sibling_cells"] if counts["sibling_cells"] else 0.0
             ),
         }
         for label, counts in sorted(diversity_counts.items())
@@ -1787,8 +1785,10 @@ def generate_genai_replacements(
         request_errors=request_errors,
         endpoint_call_count=api_successes + request_errors,
         logical_attempts=sum(
-            max((row.attempt_count for row in rows if row.root_num_if == request.root_num_if),
-                default=0)
+            max(
+                (row.attempt_count for row in rows if row.root_num_if == request.root_num_if),
+                default=0,
+            )
             for request in requests
         ),
         duration_seconds=time.perf_counter() - started,
@@ -1802,9 +1802,7 @@ def generate_genai_replacements(
         diversity=diversity,
     )
     content = [row.record() for row in rows]
-    content_hash = hashlib.sha256(
-        _genai_canonical_json(content).encode("ascii")
-    ).hexdigest()
+    content_hash = hashlib.sha256(_genai_canonical_json(content).encode("ascii")).hexdigest()
     return GenAiGenerationResult(tuple(rows), metrics, content_hash)
 
 
@@ -1836,11 +1834,13 @@ def collect_genai_instruments(
             root = _genai_identity_value(values.pop(ROOT_PROVENANCE_COL))
             if root not in roots:
                 raise ValueError(f"GenAI provenance references unknown root {root}")
-            roots[root].append(GenAiSourceRow(
-                table=table,
-                source_pk={column: values[column] for column in pk_columns},
-                values=values,
-            ))
+            roots[root].append(
+                GenAiSourceRow(
+                    table=table,
+                    source_pk={column: values[column] for column in pk_columns},
+                    values=values,
+                )
+            )
     return tuple(
         GenAiInstrumentAggregate(root_num_if=root, rows=tuple(roots[root]))
         for root in sorted(roots, key=Decimal)
@@ -2252,20 +2252,29 @@ REGRAS_SCHEMA_CETIP: Dict[str, Any] = {
             "coluna_tipo": CONDICAO_IF_TIPO_COL,
             "coluna_ativa": "DAT_EXCLUSAO",
             "tabelas_por_tipo": {
-                "1": "AMORTIZACAO", "2": "JUROS_FIXO",
-                "3": "JUROS_FLUTUANTE", "4": "ATUALIZACAO_POS",
-                "5": "SPREAD", "6": "PARTICIPACAO_LUCROS",
-                "7": "PREMIO", "14": "ATUALIZACAO_PRE",
-                "15": "PREMIO_OPCAO", "16": "TERMO",
-                "17": "PARAMETRO_LIMITE", "20": "RESGATE",
-                "21": "PREMIO_CONTRATO", "22": "OPCAO",
-                "23": "RESET", "24": "DESDOBRAMENTO",
+                "1": "AMORTIZACAO",
+                "2": "JUROS_FIXO",
+                "3": "JUROS_FLUTUANTE",
+                "4": "ATUALIZACAO_POS",
+                "5": "SPREAD",
+                "6": "PARTICIPACAO_LUCROS",
+                "7": "PREMIO",
+                "14": "ATUALIZACAO_PRE",
+                "15": "PREMIO_OPCAO",
+                "16": "TERMO",
+                "17": "PARAMETRO_LIMITE",
+                "20": "RESGATE",
+                "21": "PREMIO_CONTRATO",
+                "22": "OPCAO",
+                "23": "RESET",
+                "24": "DESDOBRAMENTO",
             },
         },
         # {} desliga as nulificações integrais.
         "nulificar_colunas": {
             "OPERACAO": (
-                "NUM_ID_TRANSF_ARQ_P1", "NUM_ID_TRANSF_ARQ_P2",
+                "NUM_ID_TRANSF_ARQ_P1",
+                "NUM_ID_TRANSF_ARQ_P2",
             ),
         },
         # () desliga as nulificações seletivas de faltantes.
@@ -2313,8 +2322,7 @@ def _rule_mapping(value: Any, expected: Set[str], context: str) -> Mapping[str, 
 
 
 def _rule_sequence(value: Any, context: str) -> Tuple[Any, ...]:
-    if isinstance(value, (str, bytes)) or not isinstance(
-            value, (list, tuple, set, frozenset)):
+    if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple, set, frozenset)):
         raise ValueError(f"{context} precisa ser uma sequência")
     return tuple(value)
 
@@ -2322,8 +2330,7 @@ def _rule_sequence(value: Any, context: str) -> Tuple[Any, ...]:
 RULE_IDENTIFIER_RE = re.compile(r"^[A-Z][A-Z0-9_$#]*$")
 
 
-def _normalize_rule_identifier(value: Any, context: str, *,
-                               table: bool = False) -> str:
+def _normalize_rule_identifier(value: Any, context: str, *, table: bool = False) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{context} precisa ser um identificador não vazio")
     normalized = value.strip().upper()
@@ -2359,8 +2366,7 @@ def _normalize_produto(name: Any) -> str:
         raise ValueError("produto precisa ser texto não vazio")
     normalized = name.strip().lower()
     if not PRODUTO_NOME_RE.fullmatch(normalized):
-        raise ValueError(
-            f"nome de produto inválido: {name!r} (use [a-z][a-z0-9_]*)")
+        raise ValueError(f"nome de produto inválido: {name!r} (use [a-z][a-z0-9_]*)")
     if normalized not in TABELAS_ENGORDA_POR_PRODUTO:
         raise ValueError(
             f"produto desconhecido: {name!r}; escolha entre: "
@@ -2382,20 +2388,40 @@ def _build_product_profile(
     """Compila o perfil do schema para um rótulo de produto, aplicando os
     overrides de CLI. Sem overrides, tudo cai nos defaults derivados do nome."""
     produto = _normalize_produto(name)
-    rules = _rule_mapping(raw, {
-        "ajuste_datas", "tabelas_static", "integridade", "chaves_negocio",
-    }, "REGRAS_SCHEMA_CETIP")
-    integrity_raw = _rule_mapping(rules["integridade"], {
-        "subtipo", "nulificar_colunas", "faltantes_seletivos",
-    }, "integridade")
+    rules = _rule_mapping(
+        raw,
+        {
+            "ajuste_datas",
+            "tabelas_static",
+            "integridade",
+            "chaves_negocio",
+        },
+        "REGRAS_SCHEMA_CETIP",
+    )
+    integrity_raw = _rule_mapping(
+        rules["integridade"],
+        {
+            "subtipo",
+            "nulificar_colunas",
+            "faltantes_seletivos",
+        },
+        "integridade",
+    )
 
     subtype_raw = integrity_raw["subtipo"]
     subtype = None
     if subtype_raw is not None:
-        subtype_cfg = _rule_mapping(subtype_raw, {
-            "tabela_condicao", "pk_condicao", "coluna_tipo", "coluna_ativa",
-            "tabelas_por_tipo",
-        }, "integridade.subtipo")
+        subtype_cfg = _rule_mapping(
+            subtype_raw,
+            {
+                "tabela_condicao",
+                "pk_condicao",
+                "coluna_tipo",
+                "coluna_ativa",
+                "tabelas_por_tipo",
+            },
+            "integridade.subtipo",
+        )
         subtype_tables = subtype_cfg["tabelas_por_tipo"]
         if not isinstance(subtype_tables, Mapping):
             raise ValueError("integridade.subtipo.tabelas_por_tipo inválido")
@@ -2403,14 +2429,16 @@ def _build_product_profile(
         for raw_type, raw_table in subtype_tables.items():
             if not isinstance(raw_type, str) or not raw_type.strip():
                 raise ValueError("integridade.subtipo contém tipo inválido")
-            subtype_pairs.append((
-                raw_type.strip(),
-                _normalize_rule_identifier(
-                    raw_table,
-                    f"integridade.subtipo.tabelas_por_tipo[{raw_type!r}]",
-                    table=True,
-                ),
-            ))
+            subtype_pairs.append(
+                (
+                    raw_type.strip(),
+                    _normalize_rule_identifier(
+                        raw_table,
+                        f"integridade.subtipo.tabelas_por_tipo[{raw_type!r}]",
+                        table=True,
+                    ),
+                )
+            )
         subtype = SubtypePolicy(
             condition_table=_normalize_rule_identifier(
                 subtype_cfg["tabela_condicao"],
@@ -2437,53 +2465,61 @@ def _build_product_profile(
         raise ValueError("integridade.nulificar_colunas inválido")
     normalized_nullify: Dict[str, List[str]] = {}
     for raw_table, raw_columns in nullify_raw.items():
-        table = _normalize_rule_identifier(
-            raw_table, "integridade.nulificar_colunas", table=True
-        )
+        table = _normalize_rule_identifier(raw_table, "integridade.nulificar_colunas", table=True)
         target = normalized_nullify.setdefault(table, [])
-        for raw_column in _rule_sequence(
-                raw_columns, f"{table}.nulificar_colunas"):
-            column = _normalize_rule_identifier(
-                raw_column, f"{table}.nulificar_colunas"
-            )
+        for raw_column in _rule_sequence(raw_columns, f"{table}.nulificar_colunas"):
+            column = _normalize_rule_identifier(raw_column, f"{table}.nulificar_colunas")
             if column not in target:
                 target.append(column)
     nullify_columns = tuple(
-        (table, tuple(columns))
-        for table, columns in normalized_nullify.items()
+        (table, tuple(columns)) for table, columns in normalized_nullify.items()
     )
 
     normalized_selective: Set[Tuple[str, str]] = set()
     for item in _rule_sequence(
-            integrity_raw["faltantes_seletivos"],
-            "integridade.faltantes_seletivos"):
+        integrity_raw["faltantes_seletivos"], "integridade.faltantes_seletivos"
+    ):
         pair = _rule_sequence(item, "faltantes_seletivos")
         if len(pair) != 2:
-            raise ValueError(
-                "faltantes_seletivos precisa conter pares (TABELA, COLUNA)"
+            raise ValueError("faltantes_seletivos precisa conter pares (TABELA, COLUNA)")
+        normalized_selective.add(
+            (
+                _normalize_rule_identifier(pair[0], "faltantes_seletivos.tabela", table=True),
+                _normalize_rule_identifier(pair[1], "faltantes_seletivos.coluna"),
             )
-        normalized_selective.add((
-            _normalize_rule_identifier(
-                pair[0], "faltantes_seletivos.tabela", table=True
-            ),
-            _normalize_rule_identifier(
-                pair[1], "faltantes_seletivos.coluna"
-            ),
-        ))
+        )
     selective_missing = frozenset(normalized_selective)
 
-    business_raw = _rule_mapping(rules["chaves_negocio"], {
-        "cod_if", "operacao",
-    }, "chaves_negocio")
-    cod_if = _rule_mapping(business_raw["cod_if"], {
-        "alocador", "padrao", "prefixo_dry_run",
-    }, "chaves_negocio.cod_if")
+    business_raw = _rule_mapping(
+        rules["chaves_negocio"],
+        {
+            "cod_if",
+            "operacao",
+        },
+        "chaves_negocio",
+    )
+    cod_if = _rule_mapping(
+        business_raw["cod_if"],
+        {
+            "alocador",
+            "padrao",
+            "prefixo_dry_run",
+        },
+        "chaves_negocio.cod_if",
+    )
     operation_raw = business_raw["operacao"]
     operation = None
     if operation_raw is not None:
-        operation_cfg = _rule_mapping(operation_raw, {
-            "estrategia", "tabela", "padrao_codigo", "gerar_meu_numero",
-        }, "chaves_negocio.operacao")
+        operation_cfg = _rule_mapping(
+            operation_raw,
+            {
+                "estrategia",
+                "tabela",
+                "padrao_codigo",
+                "gerar_meu_numero",
+            },
+            "chaves_negocio.operacao",
+        )
         operation = OperationKeyPolicy(
             strategy=operation_cfg["estrategia"],
             table=_normalize_rule_identifier(
@@ -2496,18 +2532,21 @@ def _build_product_profile(
         )
 
     if cod_if_pattern is not None and (
-            not isinstance(cod_if_pattern, str) or not cod_if_pattern.strip()):
+        not isinstance(cod_if_pattern, str) or not cod_if_pattern.strip()
+    ):
         raise ValueError("cod_if_pattern precisa ser texto não vazio")
     if cod_if_dry_prefix is not None and (
-            not isinstance(cod_if_dry_prefix, str)
-            or not cod_if_dry_prefix.strip()):
+        not isinstance(cod_if_dry_prefix, str) or not cod_if_dry_prefix.strip()
+    ):
         raise ValueError("cod_if_dry_prefix precisa ser texto não vazio")
 
     return ProductProfile(
         name=produto,
-        query_filename=(query_filename.strip()
-                        if isinstance(query_filename, str) and query_filename.strip()
-                        else DEFAULT_QUERIES_FILENAME),
+        query_filename=(
+            query_filename.strip()
+            if isinstance(query_filename, str) and query_filename.strip()
+            else DEFAULT_QUERIES_FILENAME
+        ),
         default_clone_prefix=_normalize_clone_prefix(
             clone_prefix if clone_prefix else f"{DEFAULT_CLONE_PREFIX}/{produto}"
         ),
@@ -2518,20 +2557,16 @@ def _build_product_profile(
         ),
         business_keys=BusinessKeyPolicy(
             cod_if_allocator=cod_if["alocador"],
-            cod_if_pattern=(cod_if_pattern.strip() if cod_if_pattern
-                            else cod_if["padrao"]),
-            cod_if_dry_prefix=(cod_if_dry_prefix.strip() if cod_if_dry_prefix
-                               else cod_if["prefixo_dry_run"]),
+            cod_if_pattern=(cod_if_pattern.strip() if cod_if_pattern else cod_if["padrao"]),
+            cod_if_dry_prefix=(
+                cod_if_dry_prefix.strip() if cod_if_dry_prefix else cod_if["prefixo_dry_run"]
+            ),
             cod_if_oracle_type=tipo_oracle,
             operation=operation,
         ),
         static_tables=tuple(
-            _normalize_rule_identifier(
-                table, "tabelas_static", table=True
-            )
-            for table in _rule_sequence(
-                rules["tabelas_static"], "tabelas_static"
-            )
+            _normalize_rule_identifier(table, "tabelas_static", table=True)
+            for table in _rule_sequence(rules["tabelas_static"], "tabelas_static")
         ),
         date_strategy=rules["ajuste_datas"],
     )
@@ -2555,9 +2590,7 @@ def _build_product_profile(
 # ---------------------------------------------------------------------------
 FK_COMPLEMENTO_POR_TABELA: Dict[str, Tuple[Dict[str, Any], ...]] = {
     "PROTOCOLO": (
-        {"columns": ["NUM_IF"],
-         "parent_table": TABELA_RAIZ,
-         "parent_columns": [COL_NUM_IF]},
+        {"columns": ["NUM_IF"], "parent_table": TABELA_RAIZ, "parent_columns": [COL_NUM_IF]},
     ),
 }
 
@@ -2593,26 +2626,35 @@ def aplica_fk_complementar(spec: dict) -> List[str]:
 
 def _validate_product_profile(profile: ProductProfile) -> None:
     _normalize_produto(profile.name)
-    if (not isinstance(profile.query_filename, str)
-            or not profile.query_filename.strip().lower().endswith(".sql")):
+    if not isinstance(
+        profile.query_filename, str
+    ) or not profile.query_filename.strip().lower().endswith(".sql"):
         raise ValueError(f"{profile.name}: query_filename precisa apontar para .sql")
     _normalize_clone_prefix(profile.default_clone_prefix)
     if profile.date_strategy not in (None, "standard"):
-        raise ValueError(
-            f"{profile.name}: date_strategy desconhecida {profile.date_strategy!r}"
-        )
+        raise ValueError(f"{profile.name}: date_strategy desconhecida {profile.date_strategy!r}")
     if not isinstance(profile.integrity, IntegrityPolicy):
         raise ValueError(f"{profile.name}: integrity precisa ser IntegrityPolicy")
     if profile.integrity.subtype is not None:
         subtype = profile.integrity.subtype
-        if not all((subtype.condition_table, subtype.condition_pk,
-                    subtype.condition_type_column, subtype.active_column)):
+        if not all(
+            (
+                subtype.condition_table,
+                subtype.condition_pk,
+                subtype.condition_type_column,
+                subtype.active_column,
+            )
+        ):
             raise ValueError(f"{profile.name}: política de subtipo incompleta")
         if not subtype.subtype_by_type:
             raise ValueError(f"{profile.name}: política de subtipo sem tabelas")
-        if any(not isinstance(tipo, str) or not tipo.strip()
-               or not isinstance(table, str) or not table.strip()
-               for tipo, table in subtype.subtype_by_type):
+        if any(
+            not isinstance(tipo, str)
+            or not tipo.strip()
+            or not isinstance(table, str)
+            or not table.strip()
+            for tipo, table in subtype.subtype_by_type
+        ):
             raise ValueError(f"{profile.name}: mapa de subtipo contém entrada inválida")
         subtype_types = [str(tipo) for tipo, _ in subtype.subtype_by_type]
         if len(set(subtype_types)) != len(subtype_types):
@@ -2623,57 +2665,43 @@ def _validate_product_profile(profile: ProductProfile) -> None:
             table, f"{profile.name}.integrity.nullify_columns", table=True
         )
         if normalized_table != table or normalized_table in nullify_tables:
-            raise ValueError(
-                f"{profile.name}: tabela de nulificação inválida/duplicada {table!r}"
-            )
+            raise ValueError(f"{profile.name}: tabela de nulificação inválida/duplicada {table!r}")
         nullify_tables.add(normalized_table)
         if len(set(columns)) != len(columns):
-            raise ValueError(
-                f"{profile.name}.{table}: colunas de nulificação duplicadas"
-            )
+            raise ValueError(f"{profile.name}.{table}: colunas de nulificação duplicadas")
         for column in columns:
-            if _normalize_rule_identifier(
-                    column, f"{profile.name}.{table}.nullify_columns") != column:
-                raise ValueError(
-                    f"{profile.name}.{table}: coluna não normalizada {column!r}"
-                )
+            if (
+                _normalize_rule_identifier(column, f"{profile.name}.{table}.nullify_columns")
+                != column
+            ):
+                raise ValueError(f"{profile.name}.{table}: coluna não normalizada {column!r}")
     for table, column in profile.integrity.selective_missing_keys:
-        if (_normalize_rule_identifier(
-                table, f"{profile.name}.selective_missing.table", table=True
-        ) != table or _normalize_rule_identifier(
-                column, f"{profile.name}.selective_missing.column"
-        ) != column):
-            raise ValueError(
-                f"{profile.name}: faltante seletivo não normalizado "
-                f"{table}.{column}"
-            )
-    if any(not isinstance(table, str) or not table.strip()
-           for table in profile.static_tables):
+        if (
+            _normalize_rule_identifier(table, f"{profile.name}.selective_missing.table", table=True)
+            != table
+            or _normalize_rule_identifier(column, f"{profile.name}.selective_missing.column")
+            != column
+        ):
+            raise ValueError(f"{profile.name}: faltante seletivo não normalizado {table}.{column}")
+    if any(not isinstance(table, str) or not table.strip() for table in profile.static_tables):
         raise ValueError(f"{profile.name}: static_tables contém nome inválido")
-    static_tables = {
-        table_path_name(table.strip().upper()) for table in profile.static_tables
-    }
+    static_tables = {table_path_name(table.strip().upper()) for table in profile.static_tables}
     if TABELA_RAIZ in static_tables:
         raise ValueError(f"{profile.name}: {TABELA_RAIZ} não pode ser static")
 
     policy = profile.business_keys
     if not isinstance(policy, BusinessKeyPolicy):
-        raise ValueError(
-            f"{profile.name}: política de COD_IF é obrigatória para evitar colisões"
-        )
+        raise ValueError(f"{profile.name}: política de COD_IF é obrigatória para evitar colisões")
     if policy.cod_if_allocator != "oracle_if21":
         raise ValueError(
-            f"{profile.name}: alocador COD_IF desconhecido "
-            f"{policy.cod_if_allocator!r}"
+            f"{profile.name}: alocador COD_IF desconhecido {policy.cod_if_allocator!r}"
         )
     # None é legítimo ANTES da derivação; se vier preenchido (--tipo-oracle ou
     # policy já resolvida), tem que ser inteiro positivo.
     if policy.cod_if_oracle_type is not None and (
-            type(policy.cod_if_oracle_type) is not int
-            or policy.cod_if_oracle_type < 1):
-        raise ValueError(
-            f"{profile.name}: cod_if_oracle_type deve ser inteiro positivo"
-        )
+        type(policy.cod_if_oracle_type) is not int or policy.cod_if_oracle_type < 1
+    ):
+        raise ValueError(f"{profile.name}: cod_if_oracle_type deve ser inteiro positivo")
     if not policy.cod_if_pattern:
         raise ValueError(f"{profile.name}: padrão de COD_IF é obrigatório")
     re.compile(policy.cod_if_pattern)
@@ -2691,30 +2719,19 @@ def _validate_product_profile(profile: ProductProfile) -> None:
             raise ValueError(f"{profile.name}: política de operação inválida")
         if operation.strategy != "cetip_operacao_v1":
             raise ValueError(
-                f"{profile.name}: estratégia de operação desconhecida "
-                f"{operation.strategy!r}"
+                f"{profile.name}: estratégia de operação desconhecida {operation.strategy!r}"
             )
         if operation.table != "OPERACAO":
-            raise ValueError(
-                f"{profile.name}: cetip_operacao_v1 exige tabela OPERACAO"
-            )
+            raise ValueError(f"{profile.name}: cetip_operacao_v1 exige tabela OPERACAO")
         if not operation.code_pattern:
-            raise ValueError(
-                f"{profile.name}: padrão de COD_OPERACAO é obrigatório"
-            )
+            raise ValueError(f"{profile.name}: padrão de COD_OPERACAO é obrigatório")
         re.compile(operation.code_pattern)
         if not re.fullmatch(operation.code_pattern, "0000000000000001"):
-            raise ValueError(
-                f"{profile.name}: padrão de COD_OPERACAO não aceita o dry-run"
-            )
+            raise ValueError(f"{profile.name}: padrão de COD_OPERACAO não aceita o dry-run")
         if type(operation.generate_meu_numero) is not bool:
-            raise ValueError(
-                f"{profile.name}: gerar_meu_numero precisa ser booleano"
-            )
+            raise ValueError(f"{profile.name}: gerar_meu_numero precisa ser booleano")
         if operation.table in static_tables:
-            raise ValueError(
-                f"{profile.name}: {operation.table} não pode ser static"
-            )
+            raise ValueError(f"{profile.name}: {operation.table} não pode ser static")
 
 
 def get_product_profile(
@@ -2731,7 +2748,8 @@ def get_product_profile(
     O perfil técnico é único (REGRAS_SCHEMA_CETIP); as tabelas engordáveis são
     selecionadas por TABELAS_ENGORDA_POR_PRODUTO."""
     profile = _build_product_profile(
-        name, REGRAS_SCHEMA_CETIP,
+        name,
+        REGRAS_SCHEMA_CETIP,
         query_filename=query_filename,
         clone_prefix=clone_prefix,
         cod_if_pattern=cod_if_pattern,
@@ -2742,8 +2760,7 @@ def get_product_profile(
     return profile
 
 
-def _resolve_business_policy(policy: BusinessKeyPolicy,
-                             tipo_oracle: int) -> BusinessKeyPolicy:
+def _resolve_business_policy(policy: BusinessKeyPolicy, tipo_oracle: int) -> BusinessKeyPolicy:
     """Injeta o tipo DERIVADO do lote na política de chaves de negócio.
 
     Chamado uma única vez por run, depois da seleção dos instrumentos e antes de
@@ -2751,11 +2768,10 @@ def _resolve_business_policy(policy: BusinessKeyPolicy,
     inteiro concreto e _allocation_sql pode montar a chamada do Oracle."""
     if type(tipo_oracle) is not int or tipo_oracle < 1:
         raise ValueError("tipo derivado deve ser inteiro positivo")
-    if (policy.cod_if_oracle_type is not None
-            and int(policy.cod_if_oracle_type) != int(tipo_oracle)):
+    if policy.cod_if_oracle_type is not None and int(policy.cod_if_oracle_type) != int(tipo_oracle):
         raise ValueError(
-            f"tipo já fixado ({policy.cod_if_oracle_type}) diverge do derivado "
-            f"({tipo_oracle})")
+            f"tipo já fixado ({policy.cod_if_oracle_type}) diverge do derivado ({tipo_oracle})"
+        )
     return dataclasses.replace(policy, cod_if_oracle_type=int(tipo_oracle))
 
 
@@ -2814,13 +2830,12 @@ def get_engorda_env(
         logger.error("Env var(s) obrigatória(s) ausente(s): %s", ", ".join(missing))
         sys.exit(1)
     config["DATAGEN_RAW_PREFIX"] = (
-        "" if raw_uri_override
-        else os.environ.get("DATAGEN_RAW_PREFIX", "").strip("/")
+        "" if raw_uri_override else os.environ.get("DATAGEN_RAW_PREFIX", "").strip("/")
     )
-    config["DATAGEN_SYNTHETIC_PREFIX"] = os.environ.get(
-        "DATAGEN_SYNTHETIC_PREFIX", "").strip("/")
+    config["DATAGEN_SYNTHETIC_PREFIX"] = os.environ.get("DATAGEN_SYNTHETIC_PREFIX", "").strip("/")
     config["DATAGEN_CLONE_PREFIX"] = os.environ.get(
-        "DATAGEN_CLONE_PREFIX", DEFAULT_CLONE_PREFIX).strip("/")
+        "DATAGEN_CLONE_PREFIX", DEFAULT_CLONE_PREFIX
+    ).strip("/")
     if output_uri_override:
         config["DATAGEN_OUTPUT_URI"] = output_uri_override.rstrip("/")
     for name in ORACLE_ENV_VARS:
@@ -2881,10 +2896,7 @@ def _retry_transient_oci_action(label: str, action: Callable[[], Any]) -> Any:
         try:
             return action()
         except Exception as exc:
-            if (
-                attempt == attempts
-                or not _is_transient_oci_object_storage_error(exc)
-            ):
+            if attempt == attempts or not _is_transient_oci_object_storage_error(exc):
                 raise
             delay = TRANSIENT_OCI_RETRY_DELAYS_SECONDS[attempt - 1]
             summary = " ".join(str(exc).split())[:300]
@@ -2905,18 +2917,14 @@ def _default_num_if_query_path(filename: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
 
 
-def _extract_num_if_query_for_product(catalog_text: str, produto: str,
-                                      source: str) -> str:
+def _extract_num_if_query_for_product(catalog_text: str, produto: str, source: str) -> str:
     """Extrai do catálogo SQL único a query correspondente ao produto."""
     produto = _normalize_produto(produto)
     sections: Dict[str, str] = {}
     for match in QUERY_SECTION_RE.finditer(catalog_text):
         section_product = match.group(1)
         if section_product in sections:
-            raise ValueError(
-                f"catálogo de queries {source!r} repete o produto "
-                f"{section_product!r}"
-            )
+            raise ValueError(f"catálogo de queries {source!r} repete o produto {section_product!r}")
         sections[section_product] = match.group(2).strip()
 
     expected = set(TABELAS_ENGORDA_POR_PRODUTO)
@@ -2928,23 +2936,17 @@ def _extract_num_if_query_for_product(catalog_text: str, produto: str,
             details.append(f"produtos ausentes={missing}")
         if unknown:
             details.append(f"produtos desconhecidos={unknown}")
-        raise ValueError(
-            f"catálogo de queries inválido em {source!r}: " + "; ".join(details)
-        )
+        raise ValueError(f"catálogo de queries inválido em {source!r}: " + "; ".join(details))
 
     query = sections[produto]
     if not query:
-        raise ValueError(
-            f"produto {produto!r} ainda não possui query configurada em "
-            f"{source!r}"
-        )
+        raise ValueError(f"produto {produto!r} ainda não possui query configurada em {source!r}")
     return query
 
 
-def _read_num_if_query_text(spark: SparkSession,
-                            query_path: Optional[str],
-                            default_filename: Optional[str],
-                            produto: str) -> Tuple[str, str]:
+def _read_num_if_query_text(
+    spark: SparkSession, query_path: Optional[str], default_filename: Optional[str], produto: str
+) -> Tuple[str, str]:
     """Lê o catálogo SQL e devolve somente a query do produto selecionado."""
     selected_path = query_path or default_filename
     if selected_path is None:
@@ -3024,8 +3026,7 @@ def _fk_identidade_degenerada(table: str, fk: dict) -> bool:
         return False
     cols = list(fk.get("columns") or [])
     pcols = list(fk.get("parent_columns") or [])
-    return bool(cols) and len(cols) == len(pcols) and all(
-        c == p for c, p in zip(cols, pcols))
+    return bool(cols) and len(cols) == len(pcols) and all(c == p for c, p in zip(cols, pcols))
 
 
 def normalize_specs(specs: dict) -> dict:
@@ -3041,16 +3042,15 @@ def normalize_specs(specs: dict) -> dict:
         for fk in _fk_list(new_cfg):
             fk = dict(fk)
             fk["columns"] = [str(c).strip().upper() for c in (fk.get("columns") or [])]
-            fk["parent_columns"] = [str(c).strip().upper()
-                                    for c in (fk.get("parent_columns") or [])]
-            fk["parent_table"] = table_path_name(
-                str(fk.get("parent_table", "")).strip().upper())
+            fk["parent_columns"] = [
+                str(c).strip().upper() for c in (fk.get("parent_columns") or [])
+            ]
+            fk["parent_table"] = table_path_name(str(fk.get("parent_table", "")).strip().upper())
             if not _fk_identidade_degenerada(name, fk):
                 fks_norm.append(fk)
         new_cfg["foreign_keys"] = fks_norm
         new_cfg.pop("fks", None)
-        new_cfg["pk_cols"] = [str(c).strip().upper()
-                              for c in (new_cfg.get("pk_cols") or [])]
+        new_cfg["pk_cols"] = [str(c).strip().upper() for c in (new_cfg.get("pk_cols") or [])]
         out[name] = new_cfg
     return out
 
@@ -3064,7 +3064,8 @@ def load_specs(spark: SparkSession, specs_uri: str) -> dict:
     records = spark.sparkContext.wholeTextFiles(specs_uri).collect()
     if len(records) != 1:
         raise ValueError(
-            f"Esperado exatamente um specs.json em `{specs_uri}`, achei {len(records)}.")
+            f"Esperado exatamente um specs.json em `{specs_uri}`, achei {len(records)}."
+        )
     parsed = json.loads(records[0][1])
     if not isinstance(parsed, dict) or not parsed:
         raise ValueError(f"specs.json em `{specs_uri}` precisa ser objeto não-vazio.")
@@ -3081,8 +3082,7 @@ def _local_artifact_path(uri: str) -> Optional[str]:
     return None if "://" in uri else uri
 
 
-def _write_json_artifact(spark: SparkSession, uri: str,
-                         artifact: Mapping[str, Any]) -> None:
+def _write_json_artifact(spark: SparkSession, uri: str, artifact: Mapping[str, Any]) -> None:
     """Write one immutable deterministic JSON object locally or through Hadoop FS."""
     text = json.dumps(artifact, ensure_ascii=True, sort_keys=True, indent=2) + "\n"
     local_path = _local_artifact_path(uri)
@@ -3100,9 +3100,7 @@ def _write_json_artifact(spark: SparkSession, uri: str,
             try:
                 os.link(temporary, local_path)
             except FileExistsError as exc:
-                raise ValueError(
-                    f"artefato JSON imutável já existe em {uri!r}"
-                ) from exc
+                raise ValueError(f"artefato JSON imutável já existe em {uri!r}") from exc
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
@@ -3149,19 +3147,21 @@ def _read_json_artifact(spark: SparkSession, uri: str) -> dict[str, Any]:
 
 
 GENAI_ARTIFACT_SCHEMA_VERSION = 2
-GENAI_REPLACEMENT_SCHEMA = T.StructType([
-    T.StructField("ROOT_NUM_IF", T.StringType(), False),
-    T.StructField("TABLE_NAME", T.StringType(), False),
-    T.StructField("SOURCE_PK_JSON", T.StringType(), False),
-    T.StructField("CLONE_INDEX", T.IntegerType(), False),
-    T.StructField("COLUMN_NAME", T.StringType(), False),
-    T.StructField("TARGET_ID", T.StringType(), False),
-    T.StructField("GENERATED_VALUE", T.StringType(), True),
-    T.StructField("ACTION", T.StringType(), False),
-    T.StructField("STATUS", T.StringType(), False),
-    T.StructField("ATTEMPT_COUNT", T.IntegerType(), False),
-    T.StructField("DIFFERS_FROM_SOURCE", T.BooleanType(), False),
-])
+GENAI_REPLACEMENT_SCHEMA = T.StructType(
+    [
+        T.StructField("ROOT_NUM_IF", T.StringType(), False),
+        T.StructField("TABLE_NAME", T.StringType(), False),
+        T.StructField("SOURCE_PK_JSON", T.StringType(), False),
+        T.StructField("CLONE_INDEX", T.IntegerType(), False),
+        T.StructField("COLUMN_NAME", T.StringType(), False),
+        T.StructField("TARGET_ID", T.StringType(), False),
+        T.StructField("GENERATED_VALUE", T.StringType(), True),
+        T.StructField("ACTION", T.StringType(), False),
+        T.StructField("STATUS", T.StringType(), False),
+        T.StructField("ATTEMPT_COUNT", T.IntegerType(), False),
+        T.StructField("DIFFERS_FROM_SOURCE", T.BooleanType(), False),
+    ]
+)
 
 
 def _genai_replacement_record(row: GenAiReplacementRow) -> Tuple[Any, ...]:
@@ -3197,13 +3197,15 @@ def _genai_replacement_hash(frame: DataFrame) -> str:
         )
         for row in frame.collect()
     ]
-    rows.sort(key=lambda item: (
-        item.root_num_if,
-        item.table_name,
-        item.source_pk_json,
-        item.clone_index,
-        item.column_name,
-    ))
+    rows.sort(
+        key=lambda item: (
+            item.root_num_if,
+            item.table_name,
+            item.source_pk_json,
+            item.clone_index,
+            item.column_name,
+        )
+    )
     return hashlib.sha256(
         _genai_canonical_json([row.record() for row in rows]).encode("ascii")
     ).hexdigest()
@@ -3233,9 +3235,7 @@ def write_genai_artifacts(
     persisted = spark.read.parquet(replacements_uri)
     row_count = persisted.count()
     if row_count != len(result.rows):
-        raise ValueError(
-            f"GenAI replacement readback count {row_count} != {len(result.rows)}"
-        )
+        raise ValueError(f"GenAI replacement readback count {row_count} != {len(result.rows)}")
     content_hash = _genai_replacement_hash(persisted)
     if content_hash != result.content_sha256:
         raise ValueError("GenAI replacement logical content hash mismatch after write")
@@ -3262,9 +3262,7 @@ def write_genai_artifacts(
     manifest_sha256 = hashlib.sha256(
         _genai_canonical_json(manifest_body).encode("ascii")
     ).hexdigest()
-    _write_json_artifact(
-        spark, manifest_uri, {**manifest_body, "manifest_sha256": manifest_sha256}
-    )
+    _write_json_artifact(spark, manifest_uri, {**manifest_body, "manifest_sha256": manifest_sha256})
     return {
         "enabled": True,
         "schema_version": GENAI_ARTIFACT_SCHEMA_VERSION,
@@ -3287,9 +3285,7 @@ def write_genai_artifacts(
     }
 
 
-def load_genai_replacements(
-    spark: SparkSession, descriptor: Mapping[str, Any]
-) -> DataFrame:
+def load_genai_replacements(spark: SparkSession, descriptor: Mapping[str, Any]) -> DataFrame:
     if descriptor.get("enabled") is not True:
         raise ValueError("GenAI descriptor is not enabled")
     if descriptor.get("schema_version") != GENAI_ARTIFACT_SCHEMA_VERSION:
@@ -3313,24 +3309,22 @@ def load_genai_replacements(
     if policy_hash != policy_descriptor.get("resolved_sha256"):
         raise ValueError("GenAI policy snapshot hash marker differs from plan")
     policy_snapshot.pop("source_sha256", None)
-    if hashlib.sha256(
-        _genai_canonical_json(policy_snapshot).encode("ascii")
-    ).hexdigest() != policy_hash:
+    if (
+        hashlib.sha256(_genai_canonical_json(policy_snapshot).encode("ascii")).hexdigest()
+        != policy_hash
+    ):
         raise ValueError("GenAI policy snapshot content hash differs from plan")
     manifest = _read_json_artifact(spark, manifest_uri)
     manifest_hash = manifest.pop("manifest_sha256", None)
     if manifest_hash != manifest_descriptor.get("content_sha256"):
         raise ValueError("GenAI manifest hash marker differs from plan")
-    if hashlib.sha256(
-        _genai_canonical_json(manifest).encode("ascii")
-    ).hexdigest() != manifest_hash:
+    if hashlib.sha256(_genai_canonical_json(manifest).encode("ascii")).hexdigest() != manifest_hash:
         raise ValueError("GenAI manifest content hash differs from plan")
     replacements = descriptor.get("replacements")
     if not isinstance(replacements, Mapping):
         raise ValueError("GenAI descriptor has no replacements")
     uri = replacements.get("uri")
-    if (not isinstance(uri, str)
-            or not _mesmo_ou_ancestral(artifact_root, uri)):
+    if not isinstance(uri, str) or not _mesmo_ou_ancestral(artifact_root, uri):
         raise ValueError("GenAI replacement URI is invalid")
     frame = spark.read.parquet(uri)
     if frame.schema.jsonValue() != replacements.get("schema"):
@@ -3365,8 +3359,13 @@ def _validate_selected_lote_descriptor(
     if not isinstance(descriptor, Mapping):
         raise ValueError("selected_lote precisa ser um descriptor")
     expected_keys = {
-        "artifact_type", "schema_version", "snapshot_id", "snapshot_uri",
-        "table_set", "tables", "selective_missing",
+        "artifact_type",
+        "schema_version",
+        "snapshot_id",
+        "snapshot_uri",
+        "table_set",
+        "tables",
+        "selective_missing",
     }
     if set(descriptor) != expected_keys:
         raise ValueError(
@@ -3390,14 +3389,14 @@ def _validate_selected_lote_descriptor(
     if plan_uri is not None:
         expected_uri = _selected_lote_snapshot_uri(plan_uri, snapshot_id)
         if snapshot_uri != expected_uri:
-            raise ValueError(
-                "selected_lote snapshot_uri não deriva do plan_uri e snapshot_id"
-            )
+            raise ValueError("selected_lote snapshot_uri não deriva do plan_uri e snapshot_id")
 
     table_set = descriptor.get("table_set")
-    if (not isinstance(table_set, list)
-            or any(not isinstance(table, str) or not table for table in table_set)
-            or table_set != sorted(set(table_set))):
+    if (
+        not isinstance(table_set, list)
+        or any(not isinstance(table, str) or not table for table in table_set)
+        or table_set != sorted(set(table_set))
+    ):
         raise ValueError("selected_lote table_set precisa ser lista exata e ordenada")
     if set(table_set) != expected_tables:
         raise ValueError(
@@ -3427,9 +3426,11 @@ def _validate_selected_lote_descriptor(
             raise ValueError(f"selected_lote tables.{table}.schema não é canônico")
 
     selective = descriptor.get("selective_missing")
-    if (not isinstance(selective, Mapping)
-            or set(selective) != {"present", "path", "row_count", "schema"}
-            or type(selective.get("present")) is not bool):
+    if (
+        not isinstance(selective, Mapping)
+        or set(selective) != {"present", "path", "row_count", "schema"}
+        or type(selective.get("present")) is not bool
+    ):
         raise ValueError("selected_lote selective_missing inválido")
     if selective["present"]:
         if selective.get("path") != f"{snapshot_uri}/selective_missing":
@@ -3448,7 +3449,10 @@ def _validate_selected_lote_descriptor(
         if parsed_schema.jsonValue() != schema:
             raise ValueError("selected_lote selective_missing.schema não é canônico")
     elif dict(selective) != {
-        "present": False, "path": None, "row_count": 0, "schema": None,
+        "present": False,
+        "path": None,
+        "row_count": 0,
+        "schema": None,
     }:
         raise ValueError("selected_lote selective_missing ausente possui contrato inválido")
     return dict(descriptor)
@@ -3461,8 +3465,7 @@ def _snapshot_partition_count(row_count: int) -> int:
         1,
         min(
             SNAPSHOT_MAX_PARTITIONS,
-            (row_count + SNAPSHOT_ROWS_PER_PARTITION - 1)
-            // SNAPSHOT_ROWS_PER_PARTITION,
+            (row_count + SNAPSHOT_ROWS_PER_PARTITION - 1) // SNAPSHOT_ROWS_PER_PARTITION,
         ),
     )
 
@@ -3526,8 +3529,7 @@ def _load_selected_lote_snapshot(
         expected_count = validated["tables"][table]["row_count"]
         if counts[table] != expected_count:
             raise ValueError(
-                f"selected_lote tables.{table}.row_count={counts[table]}, "
-                f"esperado {expected_count}"
+                f"selected_lote tables.{table}.row_count={counts[table]}, esperado {expected_count}"
             )
 
     root = lotes[TABELA_RAIZ]
@@ -3536,9 +3538,7 @@ def _load_selected_lote_snapshot(
     root_ids = sorted(int(row[COL_NUM_IF]) for row in root.select(COL_NUM_IF).collect())
     expected_root_ids = sorted(int(value) for value in selected_num_ifs)
     if root_ids != expected_root_ids:
-        raise ValueError(
-            f"selected_lote root NUM_IF diverge: {root_ids} != {expected_root_ids}"
-        )
+        raise ValueError(f"selected_lote root NUM_IF diverge: {root_ids} != {expected_root_ids}")
 
     selective = validated["selective_missing"]
     missing: Optional[DataFrame] = None
@@ -3559,17 +3559,13 @@ def _load_selected_lote_snapshot(
                 f"{len(rows)}, esperado {selective['row_count']}"
             )
         if any(value is None for _, _, value in rows):
-            raise ValueError(
-                "selected_lote selective_missing possui VALOR nulo"
-            )
+            raise ValueError("selected_lote selective_missing possui VALOR nulo")
         if len(set(rows)) != len(rows):
             raise ValueError("selected_lote selective_missing possui duplicatas")
-        invalid_pairs = sorted({(table, column) for table, column, _ in rows}
-                               - set(selective_keys))
+        invalid_pairs = sorted({(table, column) for table, column, _ in rows} - set(selective_keys))
         if invalid_pairs:
             raise ValueError(
-                "selected_lote selective_missing diverge da allowlist: "
-                f"{invalid_pairs}"
+                f"selected_lote selective_missing diverge da allowlist: {invalid_pairs}"
             )
     return lotes, missing, counts
 
@@ -3588,7 +3584,8 @@ def _create_selected_lote_snapshot(
     snapshot_uri = _selected_lote_snapshot_uri(plan_uri, snapshot_id)
     counts = (
         {table: int(count) for table, count in lote_counts.items()}
-        if lote_counts is not None else _count_final_lotes(lotes)
+        if lote_counts is not None
+        else _count_final_lotes(lotes)
     )
     descriptor: dict[str, Any] = {
         "artifact_type": ENGORDA_SELECTED_LOTE_ARTIFACT,
@@ -3611,32 +3608,26 @@ def _create_selected_lote_snapshot(
                 "row_count": selective_missing.count(),
                 "schema": selective_missing.schema.jsonValue(),
             }
-            if selective_missing is not None else {
-                "present": False, "path": None, "row_count": 0, "schema": None,
+            if selective_missing is not None
+            else {
+                "present": False,
+                "path": None,
+                "row_count": 0,
+                "schema": None,
             }
         ),
     }
-    _validate_selected_lote_descriptor(
-        descriptor, expected_tables=set(lotes), plan_uri=plan_uri
-    )
+    _validate_selected_lote_descriptor(descriptor, expected_tables=set(lotes), plan_uri=plan_uri)
     _write_selected_lote_datasets(descriptor, lotes, selective_missing)
     for table in descriptor["table_set"]:
-        persisted_schema = spark.read.parquet(
-            descriptor["tables"][table]["path"]
-        ).schema
+        persisted_schema = spark.read.parquet(descriptor["tables"][table]["path"]).schema
         if persisted_schema.simpleString() != lotes[table].schema.simpleString():
-            raise ValueError(
-                f"selected_lote tables.{table}.schema mudou na persistência"
-            )
+            raise ValueError(f"selected_lote tables.{table}.schema mudou na persistência")
         descriptor["tables"][table]["schema"] = persisted_schema.jsonValue()
     if selective_missing is not None:
-        persisted_schema = spark.read.parquet(
-            descriptor["selective_missing"]["path"]
-        ).schema
+        persisted_schema = spark.read.parquet(descriptor["selective_missing"]["path"]).schema
         if persisted_schema.simpleString() != selective_missing.schema.simpleString():
-            raise ValueError(
-                "selected_lote selective_missing.schema mudou na persistência"
-            )
+            raise ValueError("selected_lote selective_missing.schema mudou na persistência")
         descriptor["selective_missing"]["schema"] = persisted_schema.jsonValue()
     _load_selected_lote_snapshot(
         spark,
@@ -3655,14 +3646,25 @@ def _not_null_cols(cfg: dict) -> set[str]:
 
 
 def _is_numeric_type(dt: T.DataType) -> bool:
-    return isinstance(dt, (T.ByteType, T.ShortType, T.IntegerType, T.LongType,
-                           T.FloatType, T.DoubleType, T.DecimalType))
+    return isinstance(
+        dt,
+        (
+            T.ByteType,
+            T.ShortType,
+            T.IntegerType,
+            T.LongType,
+            T.FloatType,
+            T.DoubleType,
+            T.DecimalType,
+        ),
+    )
 
 
 def _read_pk_max(spark, path: str, pk_col: str):
     """max(pk_col) do Parquet COMPLETO (footer-fast com aggregatePushdown) —
     cópia de engorda_tables._read_pk_max. Sem filtros de produto de propósito:
     a PK nova precisa ficar acima de TODAS as linhas de produção."""
+
     def read_max():
         row = read_parquet(spark, path).agg(F.max(F.col(pk_col))).first()
         return row[0] if row is not None else None
@@ -3674,7 +3676,7 @@ def _pk_capacity_of(dt: T.DataType) -> Optional[int]:
     """Maior inteiro que o tipo físico da PK comporta (None = desconhecido)."""
     if isinstance(dt, T.DecimalType):
         int_digits = dt.precision - dt.scale
-        return (10 ** int_digits) - 1 if int_digits > 0 else 0
+        return (10**int_digits) - 1 if int_digits > 0 else 0
     if isinstance(dt, T.ByteType):
         return 127
     if isinstance(dt, T.ShortType):
@@ -3695,27 +3697,35 @@ def _with_contiguous_row_id(df: DataFrame, id_col: str) -> DataFrame:
     Window.orderBy global (single-task sort). row_number só DENTRO de cada
     partição + prefix-sum dos tamanhos no driver."""
     part_col, prow_col, off_col, mid_col = (
-        f"__{id_col}_part", f"__{id_col}_prow", f"__{id_col}_poff", f"__{id_col}_mid")
+        f"__{id_col}_part",
+        f"__{id_col}_prow",
+        f"__{id_col}_poff",
+        f"__{id_col}_mid",
+    )
     colisao = [c for c in (part_col, prow_col, off_col, mid_col) if c in df.columns]
     if colisao:
         raise ValueError(f"colisão de coluna temporária: {colisao}")
 
-    df = (df.withColumn(mid_col, F.monotonically_increasing_id())
-            .withColumn(part_col, F.spark_partition_id()))
+    df = df.withColumn(mid_col, F.monotonically_increasing_id()).withColumn(
+        part_col, F.spark_partition_id()
+    )
     w_part = Window.partitionBy(part_col).orderBy(F.col(mid_col))
     df = df.withColumn(prow_col, F.row_number().over(w_part))
 
     sizes = df.groupBy(part_col).agg(F.count(F.lit(1)).cast("long").alias("__sz"))
     spark = df.sparkSession
-    ordered = sorted(((r[part_col], r["__sz"]) for r in sizes.collect()),
-                     key=lambda p: p[0])
+    ordered = sorted(((r[part_col], r["__sz"]) for r in sizes.collect()), key=lambda p: p[0])
     running = 0
     offsets: List[Tuple[int, int]] = []
     for pid, size in ordered:
         offsets.append((pid, running))
         running += size
-    schema = T.StructType([T.StructField(part_col, T.IntegerType(), False),
-                           T.StructField(off_col, T.LongType(), False)])
+    schema = T.StructType(
+        [
+            T.StructField(part_col, T.IntegerType(), False),
+            T.StructField(off_col, T.LongType(), False),
+        ]
+    )
     off_df = spark.createDataFrame(offsets, schema=schema)
     df = df.join(F.broadcast(off_df), on=part_col, how="left")
     df = df.withColumn(id_col, (F.col(off_col) + F.col(prow_col) - F.lit(1)).cast("long"))
@@ -3734,8 +3744,11 @@ def _toposort_break_cycles(deps: Mapping[str, set]) -> List[str]:
         if not ready:
             if not warned:
                 pend = {t: sorted(deps[t] - done) for t in sorted(remaining)}
-                logger.warning("Ciclo de FK entre tabelas sintetizáveis; quebrando "
-                               "deterministicamente. Pendências: %s", pend)
+                logger.warning(
+                    "Ciclo de FK entre tabelas sintetizáveis; quebrando "
+                    "deterministicamente. Pendências: %s",
+                    pend,
+                )
                 warned = True
             ready = [min(remaining, key=lambda n: (len(deps[n] - done), n))]
         for name in ready:
@@ -3798,10 +3811,14 @@ def _date_expression_for_type(expr, dt: T.DataType):
     return expr.cast(dt)
 
 
-def aplica_regras_engorda(df: DataFrame, tabela: str, *, engorda_ts: datetime,
-                          controle_operacional_date: date,
-                          prazo_vencimento_dias: Optional[int] = None,
-                          ) -> Tuple[DataFrame, List[str]]:
+def aplica_regras_engorda(
+    df: DataFrame,
+    tabela: str,
+    *,
+    engorda_ts: datetime,
+    controle_operacional_date: date,
+    prazo_vencimento_dias: Optional[int] = None,
+) -> Tuple[DataFrame, List[str]]:
     """Aplica as regras de DATA do engorda aos sintéticos de UMA tabela.
 
     Devolve (df, colunas efetivamente reescritas). Tolerante por construção: a
@@ -3819,24 +3836,29 @@ def aplica_regras_engorda(df: DataFrame, tabela: str, *, engorda_ts: datetime,
     def _tipo_ok(col: str) -> bool:
         if _tipo_data_engordavel(tipos[col]):
             return True
-        logger.warning("%s.%s: tipo %s não é data/hora/string; regra de engorda "
-                       "IGNORADA (a coluna mantém o valor sintetizado).",
-                       tabela, col, tipos[col].simpleString())
+        logger.warning(
+            "%s.%s: tipo %s não é data/hora/string; regra de engorda "
+            "IGNORADA (a coluna mantém o valor sintetizado).",
+            tabela,
+            col,
+            tipos[col].simpleString(),
+        )
         return False
 
     is_instrumento = tabela == TABELA_RAIZ
-    tem_venc = (is_instrumento
-                and ENGORDA_COL_DAT_VENCIMENTO in tipos
-                and _tipo_ok(ENGORDA_COL_DAT_VENCIMENTO))
-    tem_emissao = (is_instrumento
-                   and ENGORDA_COL_DAT_EMISSAO in tipos
-                   and _tipo_ok(ENGORDA_COL_DAT_EMISSAO))
+    tem_venc = (
+        is_instrumento
+        and ENGORDA_COL_DAT_VENCIMENTO in tipos
+        and _tipo_ok(ENGORDA_COL_DAT_VENCIMENTO)
+    )
+    tem_emissao = (
+        is_instrumento and ENGORDA_COL_DAT_EMISSAO in tipos and _tipo_ok(ENGORDA_COL_DAT_EMISSAO)
+    )
 
     # 1) Prazo de vencimento (dias), ainda com os valores ORIGINAIS na mão.
     if tem_venc:
         if ENGORDA_PRAZO_TMP_COL in df.columns:
-            raise ValueError(
-                f"{tabela}: colisão de coluna temporária {ENGORDA_PRAZO_TMP_COL}.")
+            raise ValueError(f"{tabela}: colisão de coluna temporária {ENGORDA_PRAZO_TMP_COL}.")
         padrao = F.lit(int(DEFAULT_DT_VENCIMENTO_PRAZO_DIAS)).cast("int")
         prazo_fixo = ENGORDA_PRAZO_DIAS_POR_TABELA.get(tabela, prazo_vencimento_dias)
         if prazo_fixo is not None:
@@ -3851,14 +3873,13 @@ def aplica_regras_engorda(df: DataFrame, tabela: str, *, engorda_ts: datetime,
         # Prazo nulo (data ilegível/ausente) ou não-positivo cai no default: um
         # vencimento anterior à emissão quebraria a regra de negócio na NoMe.
         prazo_expr = F.coalesce(prazo_expr, padrao)
-        prazo_expr = F.when(
-            prazo_expr < F.lit(MIN_DT_VENCIMENTO_PRAZO_DIAS), padrao
-        ).otherwise(prazo_expr)
+        prazo_expr = F.when(prazo_expr < F.lit(MIN_DT_VENCIMENTO_PRAZO_DIAS), padrao).otherwise(
+            prazo_expr
+        )
         df = df.withColumn(ENGORDA_PRAZO_TMP_COL, prazo_expr)
 
     # 2) Colunas de timestamp: TODAS com o mesmo instante do run.
-    timestamp_cols = (*ENGORDA_COLS_TIMESTAMP,
-                      *ENGORDA_TIMESTAMP_COLS_BY_TABLE.get(tabela, ()))
+    timestamp_cols = (*ENGORDA_COLS_TIMESTAMP, *ENGORDA_TIMESTAMP_COLS_BY_TABLE.get(tabela, ()))
     for col in timestamp_cols:
         if col not in tipos or not _tipo_ok(col):
             continue
@@ -3866,8 +3887,7 @@ def aplica_regras_engorda(df: DataFrame, tabela: str, *, engorda_ts: datetime,
         aplicadas.append(col)
 
     # Timestamp legado textual de OPERACAO: yyyyMMddHHmmssSS (centésimos).
-    formatted_ts = (engorda_ts.strftime("%Y%m%d%H%M%S")
-                    + f"{engorda_ts.microsecond // 10_000:02d}")
+    formatted_ts = engorda_ts.strftime("%Y%m%d%H%M%S") + f"{engorda_ts.microsecond // 10_000:02d}"
     for col in ENGORDA_FORMATTED_TIMESTAMP_COLS_BY_TABLE.get(tabela, ()):
         if col not in tipos or not _tipo_ok(col):
             continue
@@ -3878,15 +3898,15 @@ def aplica_regras_engorda(df: DataFrame, tabela: str, *, engorda_ts: datetime,
     for col in ENGORDA_OPERATIONAL_DATE_COLS_BY_TABLE.get(tabela, ()):
         if col not in tipos or not _tipo_ok(col):
             continue
-        df = df.withColumn(
-            col, _date_literal_for_type(controle_operacional_date, tipos[col]))
+        df = df.withColumn(col, _date_literal_for_type(controle_operacional_date, tipos[col]))
         aplicadas.append(col)
 
     # 4) DAT_VENCIMENTO = data operacional + prazo original/fixo, sem hora.
     if tem_venc:
         venc_expr = F.expr(
             f"date_add(DATE '{controle_operacional_date.isoformat()}', "
-            f"CAST({ENGORDA_PRAZO_TMP_COL} AS INT))")
+            f"CAST({ENGORDA_PRAZO_TMP_COL} AS INT))"
+        )
         df = df.withColumn(
             ENGORDA_COL_DAT_VENCIMENTO,
             _date_expression_for_type(venc_expr, tipos[ENGORDA_COL_DAT_VENCIMENTO]),
@@ -3965,8 +3985,7 @@ def ajusta_datas_resgate(
     )
 
     selected = {
-        table_path_name(table).upper()
-        for table in (tabelas or ("RESGATE", "CONDICAO_RESGATE"))
+        table_path_name(table).upper() for table in (tabelas or ("RESGATE", "CONDICAO_RESGATE"))
     }
     changed: List[str] = []
     for table in ("CONDICAO_RESGATE", "RESGATE"):
@@ -3976,23 +3995,27 @@ def ajusta_datas_resgate(
         if CONDICAO_IF_PK not in frame.columns or "DAT_RESGATE" not in frame.columns:
             continue
         date_type = frame.schema["DAT_RESGATE"].dataType
-        source = frame.withColumn(
-            "__condition_key", _norm_key_col(F.col(CONDICAO_IF_PK))
-        ).alias("source")
+        source = frame.withColumn("__condition_key", _norm_key_col(F.col(CONDICAO_IF_PK))).alias(
+            "source"
+        )
         context = condition_shifts.alias("context")
         joined = source.join(F.broadcast(context), "__condition_key", "left")
         parsed = F.to_date(F.col("source.DAT_RESGATE"))
         shifted = F.date_add(parsed, F.col("context.__shift_days"))
         shifted_for_type = _date_expression_for_type(shifted, date_type)
-        adjusted = joined.select(*[
-            F.when(
-                parsed.isNotNull() & F.col("context.__shift_days").isNotNull(),
-                shifted_for_type,
-            ).otherwise(F.col(f"source.{column}")).alias(column)
-            if column == "DAT_RESGATE"
-            else F.col(f"source.{column}").alias(column)
-            for column in frame.columns
-        ])
+        adjusted = joined.select(
+            *[
+                F.when(
+                    parsed.isNotNull() & F.col("context.__shift_days").isNotNull(),
+                    shifted_for_type,
+                )
+                .otherwise(F.col(f"source.{column}"))
+                .alias(column)
+                if column == "DAT_RESGATE"
+                else F.col(f"source.{column}").alias(column)
+                for column in frame.columns
+            ]
+        )
         updated[table] = (adjusted, source_rows)
         changed.append(table)
 
@@ -4021,17 +4044,20 @@ def ajusta_datas_condicao_if(
         return clones, []
     if {COL_NUM_IF, ENGORDA_COL_DAT_EMISSAO} - set(raiz_sintetica.columns):
         return clones, []
-    colisao = [c for c in (CONDICAO_IF_SHIFT_KEY_COL, CONDICAO_IF_SHIFT_DAYS_COL)
-               if c in clones.columns]
+    colisao = [
+        c for c in (CONDICAO_IF_SHIFT_KEY_COL, CONDICAO_IF_SHIFT_DAYS_COL) if c in clones.columns
+    ]
     if colisao:
-        raise ValueError(
-            f"{CONDICAO_IF_TABLE}: colisão de coluna temporária {colisao}.")
+        raise ValueError(f"{CONDICAO_IF_TABLE}: colisão de coluna temporária {colisao}.")
 
     tipos = {c: clones.schema[c].dataType for c in cols_alvo}
     nao_datavel = [c for c in cols_alvo if not _tipo_data_engordavel(tipos[c])]
     if nao_datavel:
-        logger.warning("%s: coluna(s) %s não são data/hora/string; deslocamento "
-                       "IGNORADO nelas.", CONDICAO_IF_TABLE, nao_datavel)
+        logger.warning(
+            "%s: coluna(s) %s não são data/hora/string; deslocamento IGNORADO nelas.",
+            CONDICAO_IF_TABLE,
+            nao_datavel,
+        )
         cols_alvo = [c for c in cols_alvo if c not in nao_datavel]
         if not cols_alvo:
             return clones, []
@@ -4051,19 +4077,17 @@ def ajusta_datas_condicao_if(
     shifts = (
         root_map.join(original_roots, "__old_num_if", "inner")
         .join(shifted_roots, CONDICAO_IF_SHIFT_KEY_COL, "inner")
-        .where(F.col("__old_emission").isNotNull()
-               & F.col("__new_emission").isNotNull())
+        .where(F.col("__old_emission").isNotNull() & F.col("__new_emission").isNotNull())
         .select(
             CONDICAO_IF_SHIFT_KEY_COL,
-            F.datediff("__new_emission", "__old_emission").alias(
-                CONDICAO_IF_SHIFT_DAYS_COL),
+            F.datediff("__new_emission", "__old_emission").alias(CONDICAO_IF_SHIFT_DAYS_COL),
         )
         .dropDuplicates([CONDICAO_IF_SHIFT_KEY_COL])
     )
 
-    source = clones.withColumn(
-        CONDICAO_IF_SHIFT_KEY_COL, _norm_key_col(F.col(COL_NUM_IF))
-    ).alias("source")
+    source = clones.withColumn(CONDICAO_IF_SHIFT_KEY_COL, _norm_key_col(F.col(COL_NUM_IF))).alias(
+        "source"
+    )
     context = shifts.alias("context")
     joined = source.join(F.broadcast(context), CONDICAO_IF_SHIFT_KEY_COL, "left")
 
@@ -4077,15 +4101,15 @@ def ajusta_datas_condicao_if(
             )
             projecao.append(
                 F.when(
-                    parsed.isNotNull()
-                    & F.col(f"context.{CONDICAO_IF_SHIFT_DAYS_COL}").isNotNull(),
+                    parsed.isNotNull() & F.col(f"context.{CONDICAO_IF_SHIFT_DAYS_COL}").isNotNull(),
                     deslocada,
-                ).otherwise(F.col(f"source.{column}")).alias(column)
+                )
+                .otherwise(F.col(f"source.{column}"))
+                .alias(column)
             )
         else:
             projecao.append(F.col(f"source.{column}").alias(column))
-    logger.info("%s: deslocamento Δ-emissão aplicado em %s.",
-                CONDICAO_IF_TABLE, cols_alvo)
+    logger.info("%s: deslocamento Δ-emissão aplicado em %s.", CONDICAO_IF_TABLE, cols_alvo)
     return joined.select(*projecao), cols_alvo
 
 
@@ -4097,6 +4121,7 @@ def ajusta_datas_condicao_if(
 class FkRemap:
     """FK desta tabela para a PK de um pai sintetizado (grupo de constraint do
     spec, colunas alinhadas por posição com a PK do pai)."""
+
     columns: Tuple[str, ...]
     parent_table: str
     parent_columns: Tuple[str, ...]
@@ -4108,9 +4133,9 @@ class PlanoTabela:
     name: str
     pk_cols: Tuple[str, ...]
     fks_remap: List[FkRemap] = field(default_factory=list)
-    pk_regra: str = ""              # OFFSET_PROPRIO | VIA_PAI
+    pk_regra: str = ""  # OFFSET_PROPRIO | VIA_PAI
     pk_start: Optional[int] = None  # início da PK nova (só OFFSET_PROPRIO)
-    pk_passo: int = 1               # folga ENTRE PKs novas consecutivas
+    pk_passo: int = 1  # folga ENTRE PKs novas consecutivas
 
 
 ROOT_PROVENANCE_COL = "__root_num_if"
@@ -4125,8 +4150,7 @@ class TargetInstrumentSelection:
     lote_counts: Optional[Dict[str, int]] = None
 
 
-def _fks_para_pais_clonados(spec: dict, tabela: str,
-                            clonaveis: Set[str]) -> List[FkRemap]:
+def _fks_para_pais_clonados(spec: dict, tabela: str, clonaveis: Set[str]) -> List[FkRemap]:
     out: List[FkRemap] = []
     for fk in _fk_list(spec[tabela]):
         pai = fk.get("parent_table")
@@ -4139,21 +4163,32 @@ def _fks_para_pais_clonados(spec: dict, tabela: str,
             logger.warning(
                 "FK %s.%s -> %s.%s não aponta para a PK do pai; sem remap "
                 "definido — colunas mantêm o valor original.",
-                tabela, list(cols), pai, list(pcols))
+                tabela,
+                list(cols),
+                pai,
+                list(pcols),
+            )
             continue
         principal = (cols == pcols) and (pai != tabela)
-        out.append(FkRemap(columns=cols, parent_table=pai,
-                           parent_columns=pcols, principal=principal))
+        out.append(
+            FkRemap(columns=cols, parent_table=pai, parent_columns=pcols, principal=principal)
+        )
     return out
 
 
-def monta_plano(spark, config, spec: dict, estaticas_extra: Set[str],
-                pk_floor: int, pk_band: int, offset_num_if: Optional[int],
-                n_clones_estimado: int,
-                pk_passo: int = 1,
-                source_frames: Optional[Mapping[str, DataFrame]] = None,
-                frozen_table_plans: Optional[Mapping[str, Any]] = None,
-                ) -> Dict[str, PlanoTabela]:
+def monta_plano(
+    spark,
+    config,
+    spec: dict,
+    estaticas_extra: Set[str],
+    pk_floor: int,
+    pk_band: int,
+    offset_num_if: Optional[int],
+    n_clones_estimado: int,
+    pk_passo: int = 1,
+    source_frames: Optional[Mapping[str, DataFrame]] = None,
+    frozen_table_plans: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, PlanoTabela]:
     """Classifica cada tabela sintetizável e define a regra de PK. Aborta (com
     lista completa) se alguma tabela ficar sem regra — nada de chute.
 
@@ -4175,14 +4210,9 @@ def monta_plano(spark, config, spec: dict, estaticas_extra: Set[str],
         raise ValueError(f"{TABELA_RAIZ} precisa ser sintetizável (não-static) no spec.")
     frozen = source_frames is not None or frozen_table_plans is not None
     if frozen and (source_frames is None or frozen_table_plans is None):
-        raise ValueError(
-            "reconstrução congelada exige source_frames e frozen_table_plans"
-        )
-    if frozen and (set(source_frames) != clonaveis
-                   or set(frozen_table_plans) != clonaveis):
-        raise ValueError(
-            "snapshot/frozen table_set diverge do conjunto sintetizável"
-        )
+        raise ValueError("reconstrução congelada exige source_frames e frozen_table_plans")
+    if frozen and (set(source_frames) != clonaveis or set(frozen_table_plans) != clonaveis):
+        raise ValueError("snapshot/frozen table_set diverge do conjunto sintetizável")
 
     source_schemas: Dict[str, T.StructType] = {}
 
@@ -4208,8 +4238,7 @@ def monta_plano(spark, config, spec: dict, estaticas_extra: Set[str],
 
         # Regra da PK: componente coberto por FK de pai sintetizado -> segue o pai;
         # senão, surrogate única/numérica fora de FK -> offset próprio.
-        cols_fk_qualquer = {c for fk in _fk_list(spec[t])
-                            for c in (fk.get("columns") or [])}
+        cols_fk_qualquer = {c for fk in _fk_list(spec[t]) for c in (fk.get("columns") or [])}
         cols_fk_remap = {c for fk in fks for c in fk.columns}
         if any(c in cols_fk_remap for c in pk):
             plano.pk_regra = "VIA_PAI"
@@ -4222,33 +4251,38 @@ def monta_plano(spark, config, spec: dict, estaticas_extra: Set[str],
             if not _is_numeric_type(dt):
                 problemas.append(
                     f"{t}: PK {pk[0]} não numérica ({dt.simpleString()}) e sem "
-                    "FK de pai sintetizado — sem regra de remap")
+                    "FK de pai sintetizado — sem regra de remap"
+                )
                 continue
             plano.pk_regra = "OFFSET_PROPRIO"
         else:
             problemas.append(
                 f"{t}: PK {list(pk)} sem componente de FK de pai sintetizado e não "
                 "elegível a offset (composta e/ou participa de FK para pai não "
-                "sintetizado) — sem regra de remap")
+                "sintetizado) — sem regra de remap"
+            )
             continue
 
         # Vínculo principal para o pertencimento: exigido de toda tabela
         # sintetizável exceto a raiz.
-        if (t != TABELA_RAIZ
-                and t not in TABELAS_SEMEADAS_LATERALMENTE
-                and not any(fk.principal for fk in fks)):
+        if (
+            t != TABELA_RAIZ
+            and t not in TABELAS_SEMEADAS_LATERALMENTE
+            and not any(fk.principal for fk in fks)
+        ):
             problemas.append(
                 f"{t}: nenhuma FK de VÍNCULO PRINCIPAL (colunas com mesmo nome "
                 "da PK de um pai sintetizado) — não sei ligar as linhas ao "
-                "instrumento. Marque static (--tratar-como-static) ou corrija o spec.")
+                "instrumento. Marque static (--tratar-como-static) ou corrija o spec."
+            )
             continue
         planos[t] = plano
 
     if problemas:
         raise ValueError(
             "Tabela(s) sintetizável(is) sem regra segura — resolva antes de rodar "
-            "(--tratar-como-static as exclui da sintetização):\n  - "
-            + "\n  - ".join(problemas))
+            "(--tratar-como-static as exclui da sintetização):\n  - " + "\n  - ".join(problemas)
+        )
 
     if frozen_table_plans is not None:
         for table, plano in sorted(planos.items()):
@@ -4257,23 +4291,17 @@ def monta_plano(spark, config, spec: dict, estaticas_extra: Set[str],
             if not isinstance(frozen_pk, Mapping):
                 raise ValueError(f"plano congelado {table}.pk inválido")
             if frozen_pk.get("rule") != plano.pk_regra:
-                raise ValueError(
-                    f"plano congelado {table}.pk.rule diverge da classificação atual"
-                )
+                raise ValueError(f"plano congelado {table}.pk.rule diverge da classificação atual")
             step = frozen_pk.get("step")
             if isinstance(step, bool) or not isinstance(step, int) or step < 1:
                 raise ValueError(f"plano congelado {table}.pk.step inválido")
             minimum_start = frozen_pk.get("minimum_start")
             if plano.pk_regra == "OFFSET_PROPRIO":
                 if isinstance(minimum_start, bool) or not isinstance(minimum_start, int):
-                    raise ValueError(
-                        f"plano congelado {table}.pk.minimum_start inválido"
-                    )
+                    raise ValueError(f"plano congelado {table}.pk.minimum_start inválido")
                 plano.pk_start = minimum_start
             elif minimum_start is not None:
-                raise ValueError(
-                    f"plano congelado {table}.pk.minimum_start precisa ser nulo"
-                )
+                raise ValueError(f"plano congelado {table}.pk.minimum_start precisa ser nulo")
             plano.pk_passo = step
 
     # Início da PK nova para as tabelas OFFSET_PROPRIO (max real do Parquet
@@ -4292,7 +4320,8 @@ def monta_plano(spark, config, spec: dict, estaticas_extra: Set[str],
                 if offset_num_if <= true_max:
                     raise ValueError(
                         f"--offset-num-if {offset_num_if} <= max real de "
-                        f"{COL_NUM_IF} ({true_max}); colidiria com produção.")
+                        f"{COL_NUM_IF} ({true_max}); colidiria com produção."
+                    )
                 # Início EXPLÍCITO é inclusivo: o primeiro NUM_IF novo É o valor
                 # informado (semântica documentada no --help).
                 plano.pk_start = offset_num_if
@@ -4309,41 +4338,68 @@ def monta_plano(spark, config, spec: dict, estaticas_extra: Set[str],
                 "%s: início %d + ~%d sintético(s) × passo %d pode estourar o "
                 "domínio da PK (cap %d). Reduza o lote/K/passo ou trate a "
                 "tabela como static.",
-                t, plano.pk_start, n_clones_estimado, pk_passo, cap)
+                t,
+                plano.pk_start,
+                n_clones_estimado,
+                pk_passo,
+                cap,
+            )
         if frozen_table_plans is None:
-            logger.info("Plano %s: PK %s OFFSET_PROPRIO a partir de %d "
-                        "(max real %d, band %d, passo %d)", t, pk_col,
-                        plano.pk_start, true_max, pk_band, pk_passo)
+            logger.info(
+                "Plano %s: PK %s OFFSET_PROPRIO a partir de %d (max real %d, band %d, passo %d)",
+                t,
+                pk_col,
+                plano.pk_start,
+                true_max,
+                pk_band,
+                pk_passo,
+            )
         else:
             logger.info(
-                "Plano %s: PK %s OFFSET_PROPRIO congelado a partir de %d "
-                "(passo %d)", t, pk_col, plano.pk_start, plano.pk_passo,
+                "Plano %s: PK %s OFFSET_PROPRIO congelado a partir de %d (passo %d)",
+                t,
+                pk_col,
+                plano.pk_start,
+                plano.pk_passo,
             )
     for t, plano in sorted(planos.items()):
         if plano.pk_regra == "VIA_PAI":
-            logger.info("Plano %s: PK %s VIA_PAI (segue o mapeamento do pai)",
-                        t, list(plano.pk_cols))
-        principais = [f"{list(fk.columns)}->{fk.parent_table}"
-                      for fk in plano.fks_remap if fk.principal]
-        laterais = [f"{list(fk.columns)}->{fk.parent_table}"
-                    for fk in plano.fks_remap if not fk.principal]
-        logger.info("Plano %s: vínculo principal %s | laterais (remap-se-no-lote) %s",
-                    t, principais or "-", laterais or "-")
+            logger.info(
+                "Plano %s: PK %s VIA_PAI (segue o mapeamento do pai)", t, list(plano.pk_cols)
+            )
+        principais = [
+            f"{list(fk.columns)}->{fk.parent_table}" for fk in plano.fks_remap if fk.principal
+        ]
+        laterais = [
+            f"{list(fk.columns)}->{fk.parent_table}" for fk in plano.fks_remap if not fk.principal
+        ]
+        logger.info(
+            "Plano %s: vínculo principal %s | laterais (remap-se-no-lote) %s",
+            t,
+            principais or "-",
+            laterais or "-",
+        )
     return planos
 
 
 def ordem_topologica(planos: Dict[str, PlanoTabela]) -> List[str]:
-    deps = {t: {fk.parent_table for fk in p.fks_remap
-                if fk.parent_table != t and fk.parent_table in planos}
-            for t, p in planos.items()}
+    deps = {
+        t: {
+            fk.parent_table
+            for fk in p.fks_remap
+            if fk.parent_table != t and fk.parent_table in planos
+        }
+        for t, p in planos.items()
+    }
     return _toposort_break_cycles(deps)
 
 
 # ---------------------------------------------------------------------------
 # Seleção do lote de instrumentos.
 # ---------------------------------------------------------------------------
-def _dominio_num_if_produto(spark, config, profile: ProductProfile,
-                             query_path: Optional[str] = None) -> DataFrame:
+def _dominio_num_if_produto(
+    spark, config, profile: ProductProfile, query_path: Optional[str] = None
+) -> DataFrame:
     """Executa a query do produto extraída do catálogo SQL único.
 
     O SQL deve ser um único SELECT e expor exatamente uma coluna chamada NUM_IF.
@@ -4357,8 +4413,9 @@ def _dominio_num_if_produto(spark, config, profile: ProductProfile,
         spark, query_path, profile.query_filename, profile.name
     )
     sql = _render_num_if_query(sql_text, config)
-    logger.info("Produto %s: executando query de domínio de NUM_IF: %s",
-                profile.name, resolved_path)
+    logger.info(
+        "Produto %s: executando query de domínio de NUM_IF: %s", profile.name, resolved_path
+    )
     queried = spark.sql(sql)
 
     num_if_columns = [c for c in queried.columns if c.upper() == COL_NUM_IF]
@@ -4413,9 +4470,7 @@ def _norm_code_validador(col):
 def _canon_key_validador(col):
     """Match validate_products._canon_key_col for account references."""
     value = F.trim(col.cast("string"))
-    stripped = F.regexp_replace(
-        F.regexp_replace(value, r"(\.\d*?)0+$", "$1"), r"\.$", ""
-    )
+    stripped = F.regexp_replace(F.regexp_replace(value, r"(\.\d*?)0+$", "$1"), r"\.$", "")
     return F.when(value.rlike(r"^-?\d+\.\d*0*$"), stripped).otherwise(value)
 
 
@@ -4423,9 +4478,7 @@ def _fk_key_col(col, data_type: T.DataType):
     text = col.cast("string")
     if isinstance(data_type, T.NumericType):
         text = F.trim(text)
-        return F.regexp_replace(
-            F.regexp_replace(text, r"(\.\d*?)0+$", "$1"), r"\.$", ""
-        )
+        return F.regexp_replace(F.regexp_replace(text, r"(\.\d*?)0+$", "$1"), r"\.$", "")
     return text
 
 
@@ -4440,19 +4493,16 @@ def _valida_contrato_nulificacao_seletiva(
             problemas.append(f"{tabela}.{coluna}: tabela ausente no spec")
             continue
         fk_filha = any(
-            fk.get("parent_table") and coluna in (fk.get("columns") or [])
-            for fk in _fk_list(cfg)
+            fk.get("parent_table") and coluna in (fk.get("columns") or []) for fk in _fk_list(cfg)
         )
         if not fk_filha:
-            problemas.append(
-                f"{tabela}.{coluna}: coluna ausente ou não é FK filha no spec"
-            )
+            problemas.append(f"{tabela}.{coluna}: coluna ausente ou não é FK filha no spec")
         if coluna in _not_null_cols(cfg):
             problemas.append(f"{tabela}.{coluna}: consta em not_null_cols")
         composite = [
-            fk for fk in _fk_list(cfg)
-            if coluna in (fk.get("columns") or [])
-            and len(fk.get("columns") or []) != 1
+            fk
+            for fk in _fk_list(cfg)
+            if coluna in (fk.get("columns") or []) and len(fk.get("columns") or []) != 1
         ]
         if composite:
             problemas.append(
@@ -4474,10 +4524,7 @@ def _valida_contrato_nulificacao_seletiva(
 def _pred_faltante_seletivo(selective_keys: frozenset[Tuple[str, str]]):
     pred = F.lit(False)
     for tabela, coluna in sorted(selective_keys):
-        pred = pred | (
-            (F.col("TABELA") == F.lit(tabela))
-            & (F.col("COLUNA") == F.lit(coluna))
-        )
+        pred = pred | ((F.col("TABELA") == F.lit(tabela)) & (F.col("COLUNA") == F.lit(coluna)))
     return pred
 
 
@@ -4493,8 +4540,7 @@ def _faltantes_seletivos_para_snapshot(
     )
 
 
-def _subtipos_clonaveis(spec: dict,
-                        policy: SubtypePolicy) -> List[Tuple[str, str]]:
+def _subtipos_clonaveis(spec: dict, policy: SubtypePolicy) -> List[Tuple[str, str]]:
     """Pares (tipo, tabela-subtipo) que a sintetização realmente produz.
 
     Loga os tipos SEM tabela-subtipo no spec: num produto novo, um subtipo fora
@@ -4517,12 +4563,15 @@ def _subtipos_clonaveis(spec: dict,
             "Toda %s desses tipos será tratada como dangling e os NUM_IF "
             "correspondentes saem do domínio. Se o produto usa esses tipos, "
             "inclua as tabelas no --specs.",
-            ausentes, policy.condition_table)
+            ausentes,
+            policy.condition_table,
+        )
     return disponiveis
 
 
-def _num_if_inconsistentes_subtipo(spark, config, spec, dominio: DataFrame,
-                                    policy: SubtypePolicy) -> DataFrame:
+def _num_if_inconsistentes_subtipo(
+    spark, config, spec, dominio: DataFrame, policy: SubtypePolicy
+) -> DataFrame:
     """NUM_IF do domínio cujo sintético teria ao menos UMA CONDICAO_IF ativa sem a
     respectiva linha-subtipo sintetizável — os dangling da Cat 1 (item 1). Base da
     poda: excluídos do sorteio, o lote nasce sem ClassCastException.
@@ -4531,7 +4580,9 @@ def _num_if_inconsistentes_subtipo(spark, config, spec, dominio: DataFrame,
     portanto uma PK existente na tabela do tipo errado continua dangling."""
     cond_source = _read_source(spark, config, policy.condition_table)
     required = {
-        COL_NUM_IF, policy.condition_pk, policy.condition_type_column,
+        COL_NUM_IF,
+        policy.condition_pk,
+        policy.condition_type_column,
         policy.active_column,
     }
     missing = sorted(required - set(cond_source.columns))
@@ -4540,23 +4591,29 @@ def _num_if_inconsistentes_subtipo(spark, config, spec, dominio: DataFrame,
             f"{policy.condition_table}: coluna(s) obrigatória(s) ausente(s) "
             f"para poda de subtipo: {missing}"
         )
-    cond = (cond_source.where(F.col(policy.active_column).isNull())
-            .select(F.col(COL_NUM_IF).alias(COL_NUM_IF),
-                    _norm_key_col(F.col(policy.condition_pk)).alias("__nci"),
-                    _norm_key_col(F.col(policy.condition_type_column)).alias(
-                        "__tipo"))
-            .join(dominio.select(COL_NUM_IF), on=COL_NUM_IF, how="left_semi"))
+    cond = (
+        cond_source.where(F.col(policy.active_column).isNull())
+        .select(
+            F.col(COL_NUM_IF).alias(COL_NUM_IF),
+            _norm_key_col(F.col(policy.condition_pk)).alias("__nci"),
+            _norm_key_col(F.col(policy.condition_type_column)).alias("__tipo"),
+        )
+        .join(dominio.select(COL_NUM_IF), on=COL_NUM_IF, how="left_semi")
+    )
     presente = None
     for tipo, s in _subtipos_clonaveis(spec, policy):
         try:
             sdf = _read_source(spark, config, s)
         except Exception as exc:  # fonte ausente: trata como sem chaves (conservador)
-            logger.warning("poda subtipo: não li a fonte de %s (%s); condições "
-                           "desse tipo entram como dangling.", s, exc)
+            logger.warning(
+                "poda subtipo: não li a fonte de %s (%s); condições "
+                "desse tipo entram como dangling.",
+                s,
+                exc,
+            )
             continue
         if policy.condition_pk not in sdf.columns:
-            logger.warning("poda subtipo: %s sem coluna %s; ignorada.",
-                           s, policy.condition_pk)
+            logger.warning("poda subtipo: %s sem coluna %s; ignorada.", s, policy.condition_pk)
             continue
         piece = sdf.select(
             _norm_key_col(F.col(policy.condition_pk)).alias("__nci"),
@@ -4566,9 +4623,7 @@ def _num_if_inconsistentes_subtipo(spark, config, spec, dominio: DataFrame,
     if presente is None:
         # Nenhuma tabela-subtipo sintetizável: toda condição concreta seria dangling.
         return cond.select(COL_NUM_IF).dropDuplicates()
-    dangling = cond.join(
-        presente.dropDuplicates(), on=["__nci", "__tipo"], how="left_anti"
-    )
+    dangling = cond.join(presente.dropDuplicates(), on=["__nci", "__tipo"], how="left_anti")
     return dangling.select(COL_NUM_IF).dropDuplicates()
 
 
@@ -4592,9 +4647,7 @@ def _num_if_cronograma_resgate_invalido(
         try:
             sources[table] = _read_source(spark, config, table)
         except Exception as exc:
-            raise ValueError(
-                f"poda cronograma de resgate exige a fonte {table}"
-            ) from exc
+            raise ValueError(f"poda cronograma de resgate exige a fonte {table}") from exc
 
     required = {
         CONDICAO_IF_TABLE: {
@@ -4615,10 +4668,7 @@ def _num_if_cronograma_resgate_invalido(
         for column in sorted(columns - set(sources[table].columns))
     ]
     if missing:
-        raise ValueError(
-            "poda cronograma de resgate sem coluna(s) obrigatória(s): "
-            f"{missing}"
-        )
+        raise ValueError(f"poda cronograma de resgate sem coluna(s) obrigatória(s): {missing}")
 
     conditions, _ = _filtra_ativos(sources[CONDICAO_IF_TABLE], CONDICAO_IF_TABLE)
     redemptions, _ = _filtra_ativos(sources[RESGATE_TABELA], RESGATE_TABELA)
@@ -4645,9 +4695,8 @@ def _num_if_cronograma_resgate_invalido(
         .select("__num_if", "__nci", "__modo")
         .dropDuplicates()
     )
-    com_tabela = (
-        parents.where(F.col("__modo") == F.lit(COD_COND_RESGATE_COM_TABELA))
-        .select("__num_if", "__nci")
+    com_tabela = parents.where(F.col("__modo") == F.lit(COD_COND_RESGATE_COM_TABELA)).select(
+        "__num_if", "__nci"
     )
 
     schedule_values = schedules.select(
@@ -4669,14 +4718,11 @@ def _num_if_cronograma_resgate_invalido(
         "__nci",
         "left_anti",
     ).select("__num_if")
-    invalid_values = (
-        com_tabela.join(
-            schedule_values.where(~F.col("__valid")).select("__nci").dropDuplicates(),
-            "__nci",
-            "left_semi",
-        )
-        .select("__num_if")
-    )
+    invalid_values = com_tabela.join(
+        schedule_values.where(~F.col("__valid")).select("__nci").dropDuplicates(),
+        "__nci",
+        "left_semi",
+    ).select("__num_if")
     invalid_roots = missing_schedule.unionByName(invalid_values)
     if required_mode is not None:
         redemption_modes = redemptions.select(
@@ -4684,28 +4730,20 @@ def _num_if_cronograma_resgate_invalido(
             _norm_code_validador(F.col(COL_COD_COND_RESGATE)).alias("__modo"),
         )
         variant_counts = (
-            target_roots.join(
-                conditions.select("__num_if", "__nci"), "__num_if", "left"
-            )
+            target_roots.join(conditions.select("__num_if", "__nci"), "__num_if", "left")
             .join(redemption_modes, "__nci", "left")
             .groupBy("__num_if")
             .agg(
                 F.count("__nci").alias("__parent_count"),
-                F.sum(
-                    F.when(F.col("__modo") == F.lit(required_mode), 1).otherwise(0)
-                ).alias("__required_mode_count"),
+                F.sum(F.when(F.col("__modo") == F.lit(required_mode), 1).otherwise(0)).alias(
+                    "__required_mode_count"
+                ),
             )
         )
-        invalid_variant = (
-            variant_counts.where(
-                (F.coalesce(F.col("__parent_count"), F.lit(0)) != F.lit(1))
-                | (
-                    F.coalesce(F.col("__required_mode_count"), F.lit(0))
-                    != F.lit(1)
-                )
-            )
-            .select("__num_if")
-        )
+        invalid_variant = variant_counts.where(
+            (F.coalesce(F.col("__parent_count"), F.lit(0)) != F.lit(1))
+            | (F.coalesce(F.col("__required_mode_count"), F.lit(0)) != F.lit(1))
+        ).select("__num_if")
         invalid_roots = invalid_roots.unionByName(invalid_variant)
     invalid_roots = invalid_roots.dropDuplicates()
     return (
@@ -4777,9 +4815,7 @@ def _contas_elegiveis(spark, config) -> Optional[DataFrame]:
             familia_ok = (
                 familia.select(
                     F.trim(F.col(COL_COD_CONTA_MEMBRO).cast("string")).alias("__cod"),
-                    _canon_key_validador(F.col(COL_NUM_ID_AREA_ATUACAO)).alias(
-                        "__area"
-                    ),
+                    _canon_key_validador(F.col(COL_NUM_ID_AREA_ATUACAO)).alias("__area"),
                     F.col(COL_COD_TIPO_ACESSO).cast("string").alias("__acesso"),
                 )
                 .where(
@@ -4793,8 +4829,7 @@ def _contas_elegiveis(spark, config) -> Optional[DataFrame]:
     return elegiveis.select("__conta").dropDuplicates()
 
 
-def _num_if_operacao_nao_registro(spark, config,
-                                  dominio: DataFrame) -> DataFrame:
+def _num_if_operacao_nao_registro(spark, config, dominio: DataFrame) -> DataFrame:
     """NUM_IF que tem ALGUMA operação fora do registro válido (item 7).
 
     Réplica de _strict_lookup_eligible_domain do código antigo de
@@ -4811,81 +4846,120 @@ def _num_if_operacao_nao_registro(spark, config,
     """
     vazio = dominio.select(COL_NUM_IF).limit(0)
     fontes: Dict[str, DataFrame] = {}
-    for tabela in (OPERACAO_TABELA, TIPO_OPER_OBJETO_SERV_TABELA,
-                   TIPO_OPERACAO_TABELA, CONTA_PARTICIPANTE_TABELA):
+    for tabela in (
+        OPERACAO_TABELA,
+        TIPO_OPER_OBJETO_SERV_TABELA,
+        TIPO_OPERACAO_TABELA,
+        CONTA_PARTICIPANTE_TABELA,
+    ):
         try:
             fontes[tabela] = _read_source(spark, config, tabela)
         except Exception as exc:
             logger.warning(
                 "política estrita de operação: não li a fonte de %s (%s); poda "
                 "IGNORADA — o lote pode trazer operação fora do registro.",
-                tabela, exc)
+                tabela,
+                exc,
+            )
             return vazio
 
     obrigatorias = (
-        (OPERACAO_TABELA, (COL_NUM_IF, COL_NUM_ID_TIPO_OPER_OBJETO_SERV,
-                           *OPERACAO_CONTAS_PONTA)),
-        (TIPO_OPER_OBJETO_SERV_TABELA, (COL_NUM_ID_TIPO_OPER_OBJETO_SERV,
-                                        COL_NUM_ID_OBJETO_SERVICO,
-                                        COL_NUM_ID_TIPO_OPERACAO,
-                                        COL_IND_DISPONIVEL_IDENTIFICACAO)),
+        (OPERACAO_TABELA, (COL_NUM_IF, COL_NUM_ID_TIPO_OPER_OBJETO_SERV, *OPERACAO_CONTAS_PONTA)),
+        (
+            TIPO_OPER_OBJETO_SERV_TABELA,
+            (
+                COL_NUM_ID_TIPO_OPER_OBJETO_SERV,
+                COL_NUM_ID_OBJETO_SERVICO,
+                COL_NUM_ID_TIPO_OPERACAO,
+                COL_IND_DISPONIVEL_IDENTIFICACAO,
+            ),
+        ),
         (TIPO_OPERACAO_TABELA, (COL_NUM_ID_TIPO_OPERACAO, COL_COD_TIPO_OPERACAO)),
-        (CONTA_PARTICIPANTE_TABELA, (COL_NUM_CONTA_PARTICIPANTE,
-                                     COL_NUM_ID_SITUACAO_CONTA,
-                                     COL_COD_CONTA_PARTICIPANTE)),
+        (
+            CONTA_PARTICIPANTE_TABELA,
+            (COL_NUM_CONTA_PARTICIPANTE, COL_NUM_ID_SITUACAO_CONTA, COL_COD_CONTA_PARTICIPANTE),
+        ),
     )
-    faltando = [f"{tab}.{col}" for tab, cols in obrigatorias
-                for col in cols if col not in fontes[tab].columns]
+    faltando = [
+        f"{tab}.{col}"
+        for tab, cols in obrigatorias
+        for col in cols
+        if col not in fontes[tab].columns
+    ]
     if faltando:
-        logger.warning("política estrita de operação: coluna(s) ausente(s) %s; "
-                       "poda IGNORADA.", faltando)
+        logger.warning(
+            "política estrita de operação: coluna(s) ausente(s) %s; poda IGNORADA.", faltando
+        )
         return vazio
 
-    alvo = dominio.select(
-        _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")
-    ).dropDuplicates()
-    ops = fontes[OPERACAO_TABELA].select(
-        _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if"),
-        _norm_key_col(F.col(COL_NUM_ID_TIPO_OPER_OBJETO_SERV)).alias("__rota"),
-        *[F.col(coluna).alias(f"__conta_{i}")
-          for i, coluna in enumerate(OPERACAO_CONTAS_PONTA)],
-    ).join(alvo, on="__num_if", how="left_semi")
+    alvo = dominio.select(_norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")).dropDuplicates()
+    ops = (
+        fontes[OPERACAO_TABELA]
+        .select(
+            _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if"),
+            _norm_key_col(F.col(COL_NUM_ID_TIPO_OPER_OBJETO_SERV)).alias("__rota"),
+            *[
+                F.col(coluna).alias(f"__conta_{i}")
+                for i, coluna in enumerate(OPERACAO_CONTAS_PONTA)
+            ],
+        )
+        .join(alvo, on="__num_if", how="left_semi")
+    )
 
-    rotas = fontes[TIPO_OPER_OBJETO_SERV_TABELA].select(
-        _norm_key_col(F.col(COL_NUM_ID_TIPO_OPER_OBJETO_SERV)).alias("__rota"),
-        _norm_key_col(F.col(COL_NUM_ID_OBJETO_SERVICO)).alias("__objeto"),
-        _norm_key_col(F.col(COL_NUM_ID_TIPO_OPERACAO)).alias("__tipo_oper"),
-        F.trim(F.col(COL_IND_DISPONIVEL_IDENTIFICACAO).cast("string")).alias("__ident"),
-    ).dropDuplicates(["__rota"])
-    tipos = fontes[TIPO_OPERACAO_TABELA].select(
-        _norm_key_col(F.col(COL_NUM_ID_TIPO_OPERACAO)).alias("__tipo_oper"),
-        F.trim(F.col(COL_COD_TIPO_OPERACAO).cast("string")).alias("__cod_oper"),
-    ).dropDuplicates(["__tipo_oper"])
-    contas_ok = fontes[CONTA_PARTICIPANTE_TABELA].select(
-        _norm_key_col(F.col(COL_NUM_CONTA_PARTICIPANTE)).alias("__conta_key"),
-        _norm_key_col(F.col(COL_NUM_ID_SITUACAO_CONTA)).alias("__situacao"),
-        F.trim(F.col(COL_COD_CONTA_PARTICIPANTE).cast("string")).alias("__cod_conta"),
-    ).where(
-        (F.col("__situacao") == F.lit(CONTA_SITUACAO_ELEGIVEL))
-        & F.col("__cod_conta").rlike(CONTA_COD_PATTERN)
-    ).select("__conta_key").dropDuplicates()
+    rotas = (
+        fontes[TIPO_OPER_OBJETO_SERV_TABELA]
+        .select(
+            _norm_key_col(F.col(COL_NUM_ID_TIPO_OPER_OBJETO_SERV)).alias("__rota"),
+            _norm_key_col(F.col(COL_NUM_ID_OBJETO_SERVICO)).alias("__objeto"),
+            _norm_key_col(F.col(COL_NUM_ID_TIPO_OPERACAO)).alias("__tipo_oper"),
+            F.trim(F.col(COL_IND_DISPONIVEL_IDENTIFICACAO).cast("string")).alias("__ident"),
+        )
+        .dropDuplicates(["__rota"])
+    )
+    tipos = (
+        fontes[TIPO_OPERACAO_TABELA]
+        .select(
+            _norm_key_col(F.col(COL_NUM_ID_TIPO_OPERACAO)).alias("__tipo_oper"),
+            F.trim(F.col(COL_COD_TIPO_OPERACAO).cast("string")).alias("__cod_oper"),
+        )
+        .dropDuplicates(["__tipo_oper"])
+    )
+    contas_ok = (
+        fontes[CONTA_PARTICIPANTE_TABELA]
+        .select(
+            _norm_key_col(F.col(COL_NUM_CONTA_PARTICIPANTE)).alias("__conta_key"),
+            _norm_key_col(F.col(COL_NUM_ID_SITUACAO_CONTA)).alias("__situacao"),
+            F.trim(F.col(COL_COD_CONTA_PARTICIPANTE).cast("string")).alias("__cod_conta"),
+        )
+        .where(
+            (F.col("__situacao") == F.lit(CONTA_SITUACAO_ELEGIVEL))
+            & F.col("__cod_conta").rlike(CONTA_COD_PATTERN)
+        )
+        .select("__conta_key")
+        .dropDuplicates()
+    )
 
-    joined = ops.join(rotas, on="__rota", how="left").join(
-        tipos, on="__tipo_oper", how="left")
+    joined = ops.join(rotas, on="__rota", how="left").join(tipos, on="__tipo_oper", how="left")
     for i in range(len(OPERACAO_CONTAS_PONTA)):
         bruto = F.col(f"__conta_{i}")
-        joined = joined.withColumn(f"__key_{i}", _norm_key_col(bruto)).join(
-            contas_ok.select(F.col("__conta_key").alias(f"__key_{i}"),
-                             F.lit(True).alias(f"__ok_{i}")),
-            on=f"__key_{i}", how="left",
-        ).withColumn(
-            f"__ponta_ok_{i}",
-            F.coalesce(
-                bruto.isNotNull()
-                & (F.trim(bruto.cast("string")) != F.lit(""))
-                & F.col(f"__ok_{i}"),
-                F.lit(False),
-            ),
+        joined = (
+            joined.withColumn(f"__key_{i}", _norm_key_col(bruto))
+            .join(
+                contas_ok.select(
+                    F.col("__conta_key").alias(f"__key_{i}"), F.lit(True).alias(f"__ok_{i}")
+                ),
+                on=f"__key_{i}",
+                how="left",
+            )
+            .withColumn(
+                f"__ponta_ok_{i}",
+                F.coalesce(
+                    bruto.isNotNull()
+                    & (F.trim(bruto.cast("string")) != F.lit(""))
+                    & F.col(f"__ok_{i}"),
+                    F.lit(False),
+                ),
+            )
         )
 
     valida = (
@@ -4900,9 +4974,7 @@ def _num_if_operacao_nao_registro(spark, config,
     for i in range(len(OPERACAO_CONTAS_PONTA)):
         valida = valida & F.col(f"__ponta_ok_{i}")
 
-    ruins = joined.where(
-        ~F.coalesce(valida, F.lit(False))
-    ).select("__num_if").dropDuplicates()
+    ruins = joined.where(~F.coalesce(valida, F.lit(False))).select("__num_if").dropDuplicates()
 
     return (
         _copia_independente(dominio.select(COL_NUM_IF))
@@ -4913,34 +4985,37 @@ def _num_if_operacao_nao_registro(spark, config,
     )
 
 
-def _num_if_carteira_sem_saldo(spark, config,
-                               dominio: DataFrame) -> DataFrame:
+def _num_if_carteira_sem_saldo(spark, config, dominio: DataFrame) -> DataFrame:
     """NUM_IF com ALGUMA carteira de saldo <= 0 (item 8, nível instrumento).
 
     Tolerante: fonte ilegível ou coluna ausente vira no-op com WARNING.
     """
     vazio = dominio.select(COL_NUM_IF).limit(0)
-    alvo = dominio.select(
-        _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")
-    ).dropDuplicates()
+    alvo = dominio.select(_norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")).dropDuplicates()
     ruins: Optional[DataFrame] = None
     for tabela, coluna in CARTEIRA_SALDO_POR_TABELA.items():
         try:
             src = _read_source(spark, config, tabela)
         except Exception as exc:
-            logger.warning("carteira sem saldo: não li a fonte de %s (%s); "
-                           "tabela ignorada.", tabela, exc)
+            logger.warning(
+                "carteira sem saldo: não li a fonte de %s (%s); tabela ignorada.", tabela, exc
+            )
             continue
         if COL_NUM_IF not in src.columns or coluna not in src.columns:
-            logger.warning("carteira sem saldo: %s sem %s/%s; ignorada.",
-                           tabela, COL_NUM_IF, coluna)
+            logger.warning(
+                "carteira sem saldo: %s sem %s/%s; ignorada.", tabela, COL_NUM_IF, coluna
+            )
             continue
-        parcial = src.select(
-            _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if"),
-            F.col(coluna).cast("double").alias("__qtd"),
-        ).join(alvo, on="__num_if", how="left_semi").where(
-            F.coalesce(F.col("__qtd"), F.lit(0.0)) <= F.lit(0.0)
-        ).select("__num_if").dropDuplicates()
+        parcial = (
+            src.select(
+                _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if"),
+                F.col(coluna).cast("double").alias("__qtd"),
+            )
+            .join(alvo, on="__num_if", how="left_semi")
+            .where(F.coalesce(F.col("__qtd"), F.lit(0.0)) <= F.lit(0.0))
+            .select("__num_if")
+            .dropDuplicates()
+        )
         ruins = parcial if ruins is None else ruins.unionByName(parcial)
     if ruins is None:
         logger.warning("carteira sem saldo: nenhuma fonte legível; poda IGNORADA.")
@@ -4955,8 +5030,7 @@ def _num_if_carteira_sem_saldo(spark, config,
     )
 
 
-def _num_if_dado_operacao_fora_do_par(spark, config,
-                                      dominio: DataFrame) -> DataFrame:
+def _num_if_dado_operacao_fora_do_par(spark, config, dominio: DataFrame) -> DataFrame:
     """NUM_IF que não tem EXATAMENTE 2 linhas de DADO_OPERACAO (item 9).
 
     Conta as linhas de DADO_OPERACAO alcançáveis pelo instrumento via OPERACAO.
@@ -4969,18 +5043,21 @@ def _num_if_dado_operacao_fora_do_par(spark, config,
         ops = _read_source(spark, config, OPERACAO_TABELA)
         dados = _read_source(spark, config, DADO_OPERACAO_TABELA)
     except Exception as exc:
-        logger.warning("par de DADO_OPERACAO: não li as fontes (%s); poda "
-                       "IGNORADA.", exc)
+        logger.warning("par de DADO_OPERACAO: não li as fontes (%s); poda IGNORADA.", exc)
         return vazio
-    if (COL_NUM_IF not in ops.columns or COL_NUM_ID_OPERACAO not in ops.columns
-            or COL_NUM_ID_OPERACAO not in dados.columns):
-        logger.warning("par de DADO_OPERACAO: coluna(s) ausente(s) em %s/%s; "
-                       "poda IGNORADA.", OPERACAO_TABELA, DADO_OPERACAO_TABELA)
+    if (
+        COL_NUM_IF not in ops.columns
+        or COL_NUM_ID_OPERACAO not in ops.columns
+        or COL_NUM_ID_OPERACAO not in dados.columns
+    ):
+        logger.warning(
+            "par de DADO_OPERACAO: coluna(s) ausente(s) em %s/%s; poda IGNORADA.",
+            OPERACAO_TABELA,
+            DADO_OPERACAO_TABELA,
+        )
         return vazio
 
-    alvo = dominio.select(
-        _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")
-    ).dropDuplicates()
+    alvo = dominio.select(_norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")).dropDuplicates()
     op_keys = ops.select(
         _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if"),
         _norm_key_col(F.col(COL_NUM_ID_OPERACAO)).alias("__op"),
@@ -4988,14 +5065,10 @@ def _num_if_dado_operacao_fora_do_par(spark, config,
     dado_keys = dados.select(
         _norm_key_col(F.col(COL_NUM_ID_OPERACAO)).alias("__op"),
     )
-    contagem = op_keys.join(dado_keys, on="__op", how="inner").groupBy(
-        "__num_if"
-    ).count()
+    contagem = op_keys.join(dado_keys, on="__op", how="inner").groupBy("__num_if").count()
     # Instrumento fora do par: contagem <> 2, OU sem nenhuma linha (não aparece
     # na contagem) — este último é pego pelo left_anti contra as contagens boas.
-    boas = contagem.where(
-        F.col("count") == F.lit(DADO_OPERACAO_POR_INSTRUMENTO)
-    ).select("__num_if")
+    boas = contagem.where(F.col("count") == F.lit(DADO_OPERACAO_POR_INSTRUMENTO)).select("__num_if")
     return (
         _copia_independente(dominio.select(COL_NUM_IF))
         .withColumn("__num_if", _norm_key_col(F.col(COL_NUM_IF)))
@@ -5032,42 +5105,35 @@ def _num_if_evento_sem_familia(spark, config, dominio: DataFrame) -> DataFrame:
         try:
             fonte = _read_source(spark, config, tabela)
         except Exception as exc:
-            raise ValueError(
-                f"poda de familia de evento exige a fonte {tabela}"
-            ) from exc
+            raise ValueError(f"poda de familia de evento exige a fonte {tabela}") from exc
         ausentes = [f"{tabela}.{c}" for c in colunas if c not in fonte.columns]
         if ausentes:
-            raise ValueError(
-                f"poda de familia de evento sem coluna(s) obrigatoria(s): {ausentes}"
-            )
+            raise ValueError(f"poda de familia de evento sem coluna(s) obrigatoria(s): {ausentes}")
         return fonte
 
-    alvo = dominio.select(
-        _canon_key_validador(F.col(COL_NUM_IF)).alias("root_id")).dropDuplicates()
+    alvo = dominio.select(_canon_key_validador(F.col(COL_NUM_IF)).alias("root_id")).dropDuplicates()
     tipos_evento = [t for t, _c, _tab in FAMILIA_EVENTO_CONDICAO]
     eventos = (
-        _ativo_validador(ler_fonte_obrigatoria(
-            EVENTO_TABELA, (COL_NUM_IF, COL_NUM_TIPO_EVENTO_LEGADO)
-        ))
+        _ativo_validador(
+            ler_fonte_obrigatoria(EVENTO_TABELA, (COL_NUM_IF, COL_NUM_TIPO_EVENTO_LEGADO))
+        )
         .select(
             _canon_key_validador(F.col(COL_NUM_IF)).alias("root_id"),
-            _norm_code_validador(
-                F.col(COL_NUM_TIPO_EVENTO_LEGADO)).alias("event_type"),
+            _norm_code_validador(F.col(COL_NUM_TIPO_EVENTO_LEGADO)).alias("event_type"),
         )
         .where(F.col("event_type").isin(*tipos_evento))
         .join(alvo, on="root_id", how="left_semi")
         .dropDuplicates()
     )
     tipos_presentes = {
-        row.event_type
-        for row in eventos.select("event_type").dropDuplicates().collect()
+        row.event_type for row in eventos.select("event_type").dropDuplicates().collect()
     }
     if not tipos_presentes:
         return vazio
 
-    condicoes = _ativo_validador(ler_fonte_obrigatoria(
-        CONDICAO_IF_TABLE, (COL_NUM_IF, CONDICAO_IF_PK, CONDICAO_IF_TIPO_COL)
-    )).select(
+    condicoes = _ativo_validador(
+        ler_fonte_obrigatoria(CONDICAO_IF_TABLE, (COL_NUM_IF, CONDICAO_IF_PK, CONDICAO_IF_TIPO_COL))
+    ).select(
         _canon_key_validador(F.col(CONDICAO_IF_PK)).alias("condition_id"),
         _canon_key_validador(F.col(COL_NUM_IF)).alias("root_id"),
         _norm_code_validador(F.col(CONDICAO_IF_TIPO_COL)).alias("condition_type"),
@@ -5079,11 +5145,12 @@ def _num_if_evento_sem_familia(spark, config, dominio: DataFrame) -> DataFrame:
             continue
         parcial = (
             _ativo_validador(ler_fonte_obrigatoria(tabela, (CONDICAO_IF_PK,)))
-            .select(_canon_key_validador(
-                F.col(CONDICAO_IF_PK)).alias("condition_id"))
+            .select(_canon_key_validador(F.col(CONDICAO_IF_PK)).alias("condition_id"))
             .join(
                 condicoes.where(F.col("condition_type") == F.lit(tipo_cond)),
-                on="condition_id", how="inner")
+                on="condition_id",
+                how="inner",
+            )
             .select("root_id", F.lit(tipo_evento).alias("event_type"))
             .dropDuplicates()
         )
@@ -5091,9 +5158,11 @@ def _num_if_evento_sem_familia(spark, config, dominio: DataFrame) -> DataFrame:
     if familias is None:
         return vazio
 
-    ruins = eventos.join(
-        familias, on=["root_id", "event_type"], how="left_anti"
-    ).select("root_id").dropDuplicates()
+    ruins = (
+        eventos.join(familias, on=["root_id", "event_type"], how="left_anti")
+        .select("root_id")
+        .dropDuplicates()
+    )
 
     return (
         _copia_independente(dominio.select(COL_NUM_IF))
@@ -5104,8 +5173,7 @@ def _num_if_evento_sem_familia(spark, config, dominio: DataFrame) -> DataFrame:
     )
 
 
-def _num_if_lote_sem_lastro(spark, config, produto: Optional[str],
-                            dominio: DataFrame) -> DataFrame:
+def _num_if_lote_sem_lastro(spark, config, produto: Optional[str], dominio: DataFrame) -> DataFrame:
     """NUM_IF cujo NUM_ID_LOTE nao tem lastro ativo (poda de lastro).
 
     Mesma mecanica das demais podas de dominio: devolve os NUM_IF a REMOVER
@@ -5126,16 +5194,13 @@ def _num_if_lote_sem_lastro(spark, config, produto: Optional[str],
     try:
         raiz = _read_source(spark, config, TABELA_RAIZ)
     except Exception as exc:
-        logger.warning("poda de lastro: nao li %s (%s); poda IGNORADA.",
-                       TABELA_RAIZ, exc)
+        logger.warning("poda de lastro: nao li %s (%s); poda IGNORADA.", TABELA_RAIZ, exc)
         return vazio
     if COL_NUM_ID_LOTE not in raiz.columns:
-        logger.warning("poda de lastro: %s sem %s; poda IGNORADA.",
-                       TABELA_RAIZ, COL_NUM_ID_LOTE)
+        logger.warning("poda de lastro: %s sem %s; poda IGNORADA.", TABELA_RAIZ, COL_NUM_ID_LOTE)
         return vazio
 
-    alvo = dominio.select(
-        _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")).dropDuplicates()
+    alvo = dominio.select(_norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")).dropDuplicates()
     por_instrumento = raiz.select(
         _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if"),
         _norm_key_col(F.col(COL_NUM_ID_LOTE)).alias("__lote"),
@@ -5146,31 +5211,34 @@ def _num_if_lote_sem_lastro(spark, config, produto: Optional[str],
         try:
             src = _read_source(spark, config, tabela)
         except Exception as exc:
-            logger.warning("poda de lastro: nao li %s (%s); poda IGNORADA.",
-                           tabela, exc)
+            logger.warning("poda de lastro: nao li %s (%s); poda IGNORADA.", tabela, exc)
             return vazio
         if COL_NUM_ID_LOTE not in src.columns:
-            logger.warning("poda de lastro: %s sem %s; poda IGNORADA.",
-                           tabela, COL_NUM_ID_LOTE)
+            logger.warning("poda de lastro: %s sem %s; poda IGNORADA.", tabela, COL_NUM_ID_LOTE)
             return vazio
         ativos = src
         if COL_DAT_EXCLUSAO in src.columns:
             ativos = ativos.where(F.col(COL_DAT_EXCLUSAO).isNull())
-        parcial = ativos.select(
-            _norm_key_col(F.col(COL_NUM_ID_LOTE)).alias("__lote")
-        ).where(F.col("__lote").isNotNull()).dropDuplicates()
-        lotes_com_lastro = (parcial if lotes_com_lastro is None
-                            else lotes_com_lastro.intersect(parcial))
+        parcial = (
+            ativos.select(_norm_key_col(F.col(COL_NUM_ID_LOTE)).alias("__lote"))
+            .where(F.col("__lote").isNotNull())
+            .dropDuplicates()
+        )
+        lotes_com_lastro = (
+            parcial if lotes_com_lastro is None else lotes_com_lastro.intersect(parcial)
+        )
     if lotes_com_lastro is None:
         return vazio
 
     # Sai do dominio quem tem lote nulo OU lote sem lastro.
-    sem = por_instrumento.where(
-        F.col("__lote").isNull() | (F.col("__lote") == F.lit(""))
-    ).select("__num_if")
-    fora = por_instrumento.where(
-        F.col("__lote").isNotNull() & (F.col("__lote") != F.lit(""))
-    ).join(lotes_com_lastro, on="__lote", how="left_anti").select("__num_if")
+    sem = por_instrumento.where(F.col("__lote").isNull() | (F.col("__lote") == F.lit(""))).select(
+        "__num_if"
+    )
+    fora = (
+        por_instrumento.where(F.col("__lote").isNotNull() & (F.col("__lote") != F.lit("")))
+        .join(lotes_com_lastro, on="__lote", how="left_anti")
+        .select("__num_if")
+    )
     ruins = sem.unionByName(fora).dropDuplicates()
 
     return (
@@ -5189,9 +5257,7 @@ def _num_if_conta_nao_elegivel(spark, config, dominio: DataFrame) -> DataFrame:
     if elegiveis is None:
         return vazio
 
-    alvo = dominio.select(
-        _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")
-    ).dropDuplicates()
+    alvo = dominio.select(_norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")).dropDuplicates()
     ruins: Optional[DataFrame] = None
     for tabela, coluna in REFERENCIAS_CONTA:
         try:
@@ -5226,9 +5292,9 @@ def _num_if_conta_nao_elegivel(spark, config, dominio: DataFrame) -> DataFrame:
         inelegivel = refs.where(F.trim(F.col("__bruto")) != F.lit("")).join(
             elegiveis, "__conta", "left_anti"
         )
-        parcial = em_branco.select("__num_if").unionByName(
-            inelegivel.select("__num_if")
-        ).dropDuplicates()
+        parcial = (
+            em_branco.select("__num_if").unionByName(inelegivel.select("__num_if")).dropDuplicates()
+        )
         ruins = parcial if ruins is None else ruins.unionByName(parcial)
 
     if ruins is None:
@@ -5253,18 +5319,19 @@ def _parse_faltantes_arg(txt: str) -> List[Tuple[str, str, List[str]]]:
             continue
         chave, sep, vals = grupo.partition("=")
         if not sep or "." not in chave:
-            raise ValueError(f"--faltantes-arg: entrada inválida {grupo!r} "
-                             "(use TABELA.COLUNA=v1,v2;...).")
+            raise ValueError(
+                f"--faltantes-arg: entrada inválida {grupo!r} (use TABELA.COLUNA=v1,v2;...)."
+            )
         tab, _, col = chave.partition(".")
         valores = [v.strip() for v in vals.split(",") if v.strip()]
         if valores:
-            out.append((table_path_name(tab.strip().upper()),
-                        col.strip().upper(), valores))
+            out.append((table_path_name(tab.strip().upper()), col.strip().upper(), valores))
     return out
 
 
-def _carrega_faltantes(spark, config, faltantes_arg: Optional[str],
-                       faltantes_parquet: Optional[str]) -> Optional[DataFrame]:
+def _carrega_faltantes(
+    spark, config, faltantes_arg: Optional[str], faltantes_parquet: Optional[str]
+) -> Optional[DataFrame]:
     """DataFrame [TABELA, COLUNA, VALOR] das chaves de referência que NÃO existem
     no destino (QAB) — itens 3/4, sem conexão Oracle. Vem de --faltantes-arg
     (inline) e/ou --faltantes-parquet (colunas TABELA/COLUNA/VALOR). VALOR é
@@ -5282,23 +5349,31 @@ def _carrega_faltantes(spark, config, faltantes_arg: Optional[str],
         need = ["TABELA", "COLUNA", "VALOR"]
         faltam = [n for n in need if n not in cm]
         if faltam:
-            raise ValueError(f"--faltantes-parquet precisa das colunas {need}; "
-                             f"faltam {faltam} (achei {pq.columns}).")
+            raise ValueError(
+                f"--faltantes-parquet precisa das colunas {need}; "
+                f"faltam {faltam} (achei {pq.columns})."
+            )
         pqn = pq.select(
-            F.element_at(F.split(F.upper(F.trim(F.col(cm["TABELA"]))), r"\."), -1)
-             .alias("TABELA"),
+            F.element_at(F.split(F.upper(F.trim(F.col(cm["TABELA"]))), r"\."), -1).alias("TABELA"),
             F.upper(F.trim(F.col(cm["COLUNA"]))).alias("COLUNA"),
-            F.col(cm["VALOR"]).cast("string").alias("VALOR"))
+            F.col(cm["VALOR"]).cast("string").alias("VALOR"),
+        )
         df = pqn if df is None else df.unionByName(pqn)
     if df is None:
         return None
-    return df.select(F.col("TABELA"), F.col("COLUNA"),
-                     F.col("VALOR").cast("string").alias("VALOR")).dropDuplicates()
+    return df.select(
+        F.col("TABELA"), F.col("COLUNA"), F.col("VALOR").cast("string").alias("VALOR")
+    ).dropDuplicates()
 
 
-def _num_if_excluidos_por_faltantes(spark, config, spec, faltantes: DataFrame,
-                                    dominio: DataFrame,
-                                    selective_keys: frozenset[Tuple[str, str]]) -> DataFrame:
+def _num_if_excluidos_por_faltantes(
+    spark,
+    config,
+    spec,
+    faltantes: DataFrame,
+    dominio: DataFrame,
+    selective_keys: frozenset[Tuple[str, str]],
+) -> DataFrame:
     """NUM_IF do domínio a podar (itens 3/4): instrumentos cujo cluster referencia
     uma chave inexistente no destino. Só tabelas COM coluna NUM_IF (o instrumento
     é alcançável direto) — ex.: CARTEIRA_COMITENTE carrega NUM_ID_ENTIDADE
@@ -5308,8 +5383,10 @@ def _num_if_excluidos_por_faltantes(spark, config, spec, faltantes: DataFrame,
     # A allowlist nullable tem outra política: preserva o instrumento e anula
     # apenas sintéticos cujo valor aparece em faltantes.
     faltantes_poda = faltantes.where(~_pred_faltante_seletivo(selective_keys))
-    pares = [(r["TABELA"], r["COLUNA"]) for r in
-             faltantes_poda.select("TABELA", "COLUNA").dropDuplicates().collect()]
+    pares = [
+        (r["TABELA"], r["COLUNA"])
+        for r in faltantes_poda.select("TABELA", "COLUNA").dropDuplicates().collect()
+    ]
     excl: Optional[DataFrame] = None
     for tab, col in pares:
         if tab not in spec:
@@ -5321,36 +5398,45 @@ def _num_if_excluidos_por_faltantes(spark, config, spec, faltantes: DataFrame,
             logger.warning("faltantes: não li a fonte de %s (%s); ignorada.", tab, exc)
             continue
         if COL_NUM_IF not in src.columns:
-            logger.warning("faltantes: %s não tem %s — não dá p/ alcançar o "
-                           "instrumento; use uma tabela com NUM_IF (ex.: "
-                           "CARTEIRA_COMITENTE). Ignorada.", tab, COL_NUM_IF)
+            logger.warning(
+                "faltantes: %s não tem %s — não dá p/ alcançar o "
+                "instrumento; use uma tabela com NUM_IF (ex.: "
+                "CARTEIRA_COMITENTE). Ignorada.",
+                tab,
+                COL_NUM_IF,
+            )
             continue
         if col not in src.columns:
             logger.warning("faltantes: %s sem coluna %s; ignorada.", tab, col)
             continue
         data_type = src.schema[col].dataType
-        miss = (faltantes_poda.where((F.col("TABELA") == F.lit(tab))
-                                      & (F.col("COLUNA") == F.lit(col)))
-                .select(_fk_key_col(F.col("VALOR"), data_type).alias("__v"))
-                .dropDuplicates())
-        hit = (src.select(F.col(COL_NUM_IF).alias(COL_NUM_IF),
-                          _fk_key_col(F.col(col), data_type).alias("__v"))
-               .join(F.broadcast(miss), on="__v", how="left_semi")
-               .select(COL_NUM_IF).dropDuplicates())
+        miss = (
+            faltantes_poda.where((F.col("TABELA") == F.lit(tab)) & (F.col("COLUNA") == F.lit(col)))
+            .select(_fk_key_col(F.col("VALOR"), data_type).alias("__v"))
+            .dropDuplicates()
+        )
+        hit = (
+            src.select(
+                F.col(COL_NUM_IF).alias(COL_NUM_IF), _fk_key_col(F.col(col), data_type).alias("__v")
+            )
+            .join(F.broadcast(miss), on="__v", how="left_semi")
+            .select(COL_NUM_IF)
+            .dropDuplicates()
+        )
         n = hit.count()
-        logger.info("faltantes: %s.%s -> %d instrumento(s) do domínio a podar.",
-                    tab, col, n)
+        logger.info("faltantes: %s.%s -> %d instrumento(s) do domínio a podar.", tab, col, n)
         excl = hit if excl is None else excl.unionByName(hit)
     if excl is None:
         return dominio.select(COL_NUM_IF).limit(0)
-    return (excl.join(dominio.select(COL_NUM_IF), on=COL_NUM_IF, how="left_semi")
-            .dropDuplicates())
+    return excl.join(dominio.select(COL_NUM_IF), on=COL_NUM_IF, how="left_semi").dropDuplicates()
 
 
-def aplica_nulificacao(df: DataFrame, tabela: str,
-                       cols_por_tabela: Mapping[str, Sequence[str]],
-                       not_null_cols: Optional[Set[str]] = None,
-                       ) -> Tuple[DataFrame, List[str]]:
+def aplica_nulificacao(
+    df: DataFrame,
+    tabela: str,
+    cols_por_tabela: Mapping[str, Sequence[str]],
+    not_null_cols: Optional[Set[str]] = None,
+) -> Tuple[DataFrame, List[str]]:
     """Anula (seta NULL) colunas nullable marcadas como drift de destino (item 2:
     NUM_ID_TRANSF_ARQ_P1/P2 de OPERACAO -> TRANSFERENCIA_ARQUIVO inexistente no
     QAB). Só atua em coluna existente e NÃO NOT NULL: anular uma NOT NULL apenas
@@ -5358,12 +5444,16 @@ def aplica_nulificacao(df: DataFrame, tabela: str,
     validação pré-escrita pegaria de qualquer forma). Devolve (df, anuladas)."""
     nn = not_null_cols or set()
     anuladas: List[str] = []
-    for c in (cols_por_tabela.get(tabela) or []):
+    for c in cols_por_tabela.get(tabela) or []:
         if c not in df.columns:
             continue
         if c in nn:
-            logger.warning("%s.%s é NOT NULL no spec; anulação IGNORADA (anular "
-                           "trocaria fk_orphan por ORA-01400).", tabela, c)
+            logger.warning(
+                "%s.%s é NOT NULL no spec; anulação IGNORADA (anular "
+                "trocaria fk_orphan por ORA-01400).",
+                tabela,
+                c,
+            )
             continue
         df = df.withColumn(c, F.lit(None).cast(df.schema[c].dataType))
         anuladas.append(c)
@@ -5397,10 +5487,7 @@ def aplica_nulificacao_faltantes(
             )
         tipo = out.schema[coluna].dataType
         chaves = (
-            faltantes.where(
-                (F.col("TABELA") == F.lit(tab))
-                & (F.col("COLUNA") == F.lit(coluna))
-            )
+            faltantes.where((F.col("TABELA") == F.lit(tab)) & (F.col("COLUNA") == F.lit(coluna)))
             .select(_fk_key_col(F.col("VALOR"), tipo).alias(FALTANTES_SELECTIVE_KEY_COL))
             .where(F.col(FALTANTES_SELECTIVE_KEY_COL).isNotNull())
             .dropDuplicates()
@@ -5409,37 +5496,40 @@ def aplica_nulificacao_faltantes(
         if n_chaves == 0:
             logger.info(
                 "faltantes seletivos: %s.%s -> 0 chave(s) distinta(s), 0 sintético(s) casado(s).",
-                tab, coluna,
+                tab,
+                coluna,
             )
             continue
         colisao = [
-            c for c in (FALTANTES_SELECTIVE_KEY_COL, FALTANTES_SELECTIVE_MARKER_COL)
+            c
+            for c in (FALTANTES_SELECTIVE_KEY_COL, FALTANTES_SELECTIVE_MARKER_COL)
             if c in out.columns
         ]
         if colisao:
             raise ValueError(f"{tab}: colisão de coluna temporária {colisao}.")
 
         marcadores = chaves.withColumn(FALTANTES_SELECTIVE_MARKER_COL, F.lit(True))
-        joined = (
-            out.withColumn(
-                FALTANTES_SELECTIVE_KEY_COL, _fk_key_col(F.col(coluna), tipo)
-            )
-            .join(F.broadcast(marcadores), on=FALTANTES_SELECTIVE_KEY_COL, how="left")
+        joined = out.withColumn(FALTANTES_SELECTIVE_KEY_COL, _fk_key_col(F.col(coluna), tipo)).join(
+            F.broadcast(marcadores), on=FALTANTES_SELECTIVE_KEY_COL, how="left"
         )
         n_casados = joined.where(F.col(FALTANTES_SELECTIVE_MARKER_COL)).count()
         out = joined.select(
             *[
-                F.when(
-                    F.col(FALTANTES_SELECTIVE_MARKER_COL), F.lit(None).cast(tipo)
-                ).otherwise(F.col(c)).alias(c)
-                if c == coluna else F.col(c)
+                F.when(F.col(FALTANTES_SELECTIVE_MARKER_COL), F.lit(None).cast(tipo))
+                .otherwise(F.col(c))
+                .alias(c)
+                if c == coluna
+                else F.col(c)
                 for c in out.columns
             ]
         )
         logger.info(
             "faltantes seletivos: %s.%s -> %d chave(s) distinta(s) listada(s), "
             "%d linha(s) sintética(s) casada(s).",
-            tab, coluna, n_chaves, n_casados,
+            tab,
+            coluna,
+            n_chaves,
+            n_casados,
         )
         contagens[coluna] = {
             "chaves_distintas_listadas": n_chaves,
@@ -5468,9 +5558,7 @@ def _merge_nullification_mappings(
             if not isinstance(raw_table, str) or not raw_table.strip():
                 raise ValueError("anular_cols contém tabela inválida")
             if isinstance(raw_columns, (str, bytes)):
-                raise TypeError(
-                    f"anular_cols[{raw_table!r}] precisa ser uma sequência de colunas"
-                )
+                raise TypeError(f"anular_cols[{raw_table!r}] precisa ser uma sequência de colunas")
             table = table_path_name(raw_table.strip().upper())
             target = merged.setdefault(table, [])
             for raw_column in raw_columns:
@@ -5494,9 +5582,7 @@ def _dominio_instrumentos_elegiveis(
     poda_conta: bool = True,
     politica_estrita_operacao: bool = True,
 ) -> Tuple[DataFrame, DataFrame]:
-    fonte = _materializa_dominio_num_if(
-        spark, config, profile, query_num_if_path
-    )
+    fonte = _materializa_dominio_num_if(spark, config, profile, query_num_if_path)
     # O helper faz checkpoint ANTES de qualquer poda. Sem esse corte,
     # "0 instrumento(s) válido(s)" é ambíguo entre "a query não devolveu nada" e
     # "as podas levaram tudo" — que pedem correções opostas. Também corta a
@@ -5504,84 +5590,104 @@ def _dominio_instrumentos_elegiveis(
     # left_semi contra `fonte`).
     domain_stats = fonte.agg(
         F.count(F.lit(1)).alias("row_count"),
-        F.max(F.when(F.col(COL_NUM_IF).isNull(), F.lit(1)).otherwise(F.lit(0)))
-        .alias("has_null"),
+        F.max(F.when(F.col(COL_NUM_IF).isNull(), F.lit(1)).otherwise(F.lit(0))).alias("has_null"),
     ).first()
     if domain_stats["has_null"]:
         raise ValueError("query de NUM_IF retornou NUM_IF nulo")
     n_dominio = int(domain_stats["row_count"])
-    logger.info("Produto %s: domínio de NUM_IF vindo integralmente da query — "
-                "%d instrumento(s) ANTES da poda.", profile.name, n_dominio)
+    logger.info(
+        "Produto %s: domínio de NUM_IF vindo integralmente da query — "
+        "%d instrumento(s) ANTES da poda.",
+        profile.name,
+        n_dominio,
+    )
     if n_dominio == 0:
         logger.error(
             "Produto %s: a QUERY devolveu domínio VAZIO — nenhuma poda foi "
             "aplicada ainda. O problema está nos filtros do bloco %s de %s, não "
             "nas podas nem na admissão FK.",
-            profile.name, profile.name, DEFAULT_QUERIES_FILENAME)
+            profile.name,
+            profile.name,
+            DEFAULT_QUERIES_FILENAME,
+        )
 
     # Poda de domínio: junta as exclusões dos itens 1/3/4 e tira do domínio.
     exclusoes: List[Tuple[str, DataFrame]] = []
     subtype_policy = profile.integrity.subtype
-    if (poda_subtipo
-            and profile.name in PRODUTOS_COM_PODA_SUBTIPO
-            and subtype_policy is not None):
-        exclusoes.append(("subtipo dangling (Cat 1)",
-                          _num_if_inconsistentes_subtipo(
-                              spark, config, spec, fonte, subtype_policy)))
-    if (poda_cronograma_resgate
-            and profile.name in PRODUTOS_COM_PODA_CRONOGRAMA_RESGATE):
-        exclusoes.append((
-            "cronograma de resgate COM TABELA",
-            _num_if_cronograma_resgate_invalido(
-                spark,
-                config,
-                fonte,
-                required_mode=MODO_RESGATE_EXIGIDO_POR_PRODUTO.get(profile.name),
-            ),
-        ))
+    if poda_subtipo and profile.name in PRODUTOS_COM_PODA_SUBTIPO and subtype_policy is not None:
+        exclusoes.append(
+            (
+                "subtipo dangling (Cat 1)",
+                _num_if_inconsistentes_subtipo(spark, config, spec, fonte, subtype_policy),
+            )
+        )
+    if poda_cronograma_resgate and profile.name in PRODUTOS_COM_PODA_CRONOGRAMA_RESGATE:
+        exclusoes.append(
+            (
+                "cronograma de resgate COM TABELA",
+                _num_if_cronograma_resgate_invalido(
+                    spark,
+                    config,
+                    fonte,
+                    required_mode=MODO_RESGATE_EXIGIDO_POR_PRODUTO.get(profile.name),
+                ),
+            )
+        )
     if poda_conta and profile.name in PRODUTOS_COM_PODA_CONTA:
-        exclusoes.append((
-            "conta participante inelegível (item 6)",
-            _num_if_conta_nao_elegivel(spark, config, fonte),
-        ))
+        exclusoes.append(
+            (
+                "conta participante inelegível (item 6)",
+                _num_if_conta_nao_elegivel(spark, config, fonte),
+            )
+        )
     if profile.name in PRODUTOS_COM_PODA_FAMILIA_EVENTO:
-        exclusoes.append((
-            "evento 83/85 sem família de condição (8a)",
-            _num_if_evento_sem_familia(spark, config, fonte),
-        ))
+        exclusoes.append(
+            (
+                "evento 83/85 sem família de condição (8a)",
+                _num_if_evento_sem_familia(spark, config, fonte),
+            )
+        )
     if profile.name in SEMENTE_LATERAL_POR_PRODUTO:
-        exclusoes.append((
-            "lote sem lastro",
-            _num_if_lote_sem_lastro(spark, config, profile.name, fonte),
-        ))
-    if (politica_estrita_operacao
-            and profile.name in PRODUTOS_COM_POLITICA_ESTRITA_OPERACAO):
-        exclusoes.append((
-            "operação fora do registro válido (item 7)",
-            _num_if_operacao_nao_registro(spark, config, fonte),
-        ))
-    if (politica_estrita_operacao
-            and profile.name in PRODUTOS_COM_FILTRO_CARTEIRA_SALDO):
-        exclusoes.append((
-            "carteira com saldo <= 0 (item 8)",
-            _num_if_carteira_sem_saldo(spark, config, fonte),
-        ))
-    if (politica_estrita_operacao
-            and profile.name in PRODUTOS_COM_PAR_DADO_OPERACAO):
-        exclusoes.append((
-            "DADO_OPERACAO fora do par (item 9)",
-            _num_if_dado_operacao_fora_do_par(spark, config, fonte),
-        ))
+        exclusoes.append(
+            (
+                "lote sem lastro",
+                _num_if_lote_sem_lastro(spark, config, profile.name, fonte),
+            )
+        )
+    if politica_estrita_operacao and profile.name in PRODUTOS_COM_POLITICA_ESTRITA_OPERACAO:
+        exclusoes.append(
+            (
+                "operação fora do registro válido (item 7)",
+                _num_if_operacao_nao_registro(spark, config, fonte),
+            )
+        )
+    if politica_estrita_operacao and profile.name in PRODUTOS_COM_FILTRO_CARTEIRA_SALDO:
+        exclusoes.append(
+            (
+                "carteira com saldo <= 0 (item 8)",
+                _num_if_carteira_sem_saldo(spark, config, fonte),
+            )
+        )
+    if politica_estrita_operacao and profile.name in PRODUTOS_COM_PAR_DADO_OPERACAO:
+        exclusoes.append(
+            (
+                "DADO_OPERACAO fora do par (item 9)",
+                _num_if_dado_operacao_fora_do_par(spark, config, fonte),
+            )
+        )
     if faltantes is not None:
-        exclusoes.append(("chave inexistente no destino (Cat 3/4)",
-                          _num_if_excluidos_por_faltantes(spark, config, spec,
-                                                          faltantes, fonte,
-                                                          profile.integrity.selective_missing_keys)))
+        exclusoes.append(
+            (
+                "chave inexistente no destino (Cat 3/4)",
+                _num_if_excluidos_por_faltantes(
+                    spark, config, spec, faltantes, fonte, profile.integrity.selective_missing_keys
+                ),
+            )
+        )
     excluir: Optional[DataFrame] = None
     for rotulo, df in exclusoes:
         df = df.select(COL_NUM_IF).dropDuplicates().localCheckpoint(eager=True)
-        logger.info("Poda de domínio [%s]: %d instrumento(s) removido(s).",
-                    rotulo, df.count())
+        logger.info("Poda de domínio [%s]: %d instrumento(s) removido(s).", rotulo, df.count())
         excluir = df if excluir is None else excluir.unionByName(df)
     if excluir is not None:
         excluir = excluir.dropDuplicates().localCheckpoint(eager=True)
@@ -5590,36 +5696,45 @@ def _dominio_instrumentos_elegiveis(
         valido = fonte
     valido = valido.localCheckpoint(eager=True)
     n_valido = valido.count()
-    logger.info("Domínio VÁLIDO após a poda: %d de %d instrumento(s) "
-                "(%d podado(s)).", n_valido, n_dominio, n_dominio - n_valido)
+    logger.info(
+        "Domínio VÁLIDO após a poda: %d de %d instrumento(s) (%d podado(s)).",
+        n_valido,
+        n_dominio,
+        n_dominio - n_valido,
+    )
     if n_dominio and not n_valido:
         logger.error(
             "Produto %s: a QUERY devolveu %d instrumento(s), mas as PODAS "
             "levaram todos. Veja qual poda acima removeu mais e afrouxe a "
             "correspondente (--sem-poda-subtipo / --sem-poda-conta / "
             "--sem-poda-cronograma-resgate / menos faltantes).",
-            profile.name, n_dominio)
+            profile.name,
+            n_dominio,
+        )
     return fonte, valido
 
 
-def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
-                           n_instrumentos: Optional[int], seed: int,
-                           profile: ProductProfile,
-                           query_num_if_path: Optional[str] = None,
-                           faltantes: Optional[DataFrame] = None,
-                           poda_subtipo: bool = True,
-                           poda_cronograma_resgate: bool = True,
-                           poda_conta: bool = True,
-                           politica_estrita_operacao: bool = True,
-                           permitir_lote_menor: bool = False) -> List:
+def seleciona_instrumentos(
+    spark,
+    config,
+    spec,
+    num_ifs: Optional[List[int]],
+    n_instrumentos: Optional[int],
+    seed: int,
+    profile: ProductProfile,
+    query_num_if_path: Optional[str] = None,
+    faltantes: Optional[DataFrame] = None,
+    poda_subtipo: bool = True,
+    poda_cronograma_resgate: bool = True,
+    poda_conta: bool = True,
+    politica_estrita_operacao: bool = True,
+    permitir_lote_menor: bool = False,
+) -> List:
     """Select valid roots; only sampled nonempty deficits may return fewer."""
     if (num_ifs is None) == (n_instrumentos is None):
-        raise ValueError(
-            "informe exatamente uma seleção: num_ifs ou n_instrumentos"
-        )
+        raise ValueError("informe exatamente uma seleção: num_ifs ou n_instrumentos")
     if num_ifs is not None and not num_ifs:
-        raise ValueError("Lista de NUM_IF vazia; informe valores ou use "
-                         "--n-instrumentos.")
+        raise ValueError("Lista de NUM_IF vazia; informe valores ou use --n-instrumentos.")
     fonte, valido = _dominio_instrumentos_elegiveis(
         spark,
         config,
@@ -5635,12 +5750,16 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
 
     if num_ifs:
         pedidos = F.broadcast(
-            spark.createDataFrame([(v,) for v in num_ifs], [COL_NUM_IF])
-            .select(F.col(COL_NUM_IF).cast(fonte.schema[COL_NUM_IF].dataType)))
-        no_dominio = {int(r[0]) for r in
-                      fonte.join(pedidos, on=COL_NUM_IF, how="left_semi").collect()}
-        validos = {int(r[0]) for r in
-                   valido.join(pedidos, on=COL_NUM_IF, how="left_semi").collect()}
+            spark.createDataFrame([(v,) for v in num_ifs], [COL_NUM_IF]).select(
+                F.col(COL_NUM_IF).cast(fonte.schema[COL_NUM_IF].dataType)
+            )
+        )
+        no_dominio = {
+            int(r[0]) for r in fonte.join(pedidos, on=COL_NUM_IF, how="left_semi").collect()
+        }
+        validos = {
+            int(r[0]) for r in valido.join(pedidos, on=COL_NUM_IF, how="left_semi").collect()
+        }
         fora = [v for v in num_ifs if v not in no_dominio]
         podados = [v for v in num_ifs if v in no_dominio and v not in validos]
         if fora or podados:
@@ -5648,8 +5767,10 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
             if fora:
                 partes.append(f"fora do domínio do produto: {fora}")
             if podados:
-                partes.append("no domínio mas PODADOS (subtipo dangling e/ou "
-                              f"chave inexistente no destino): {podados}")
+                partes.append(
+                    "no domínio mas PODADOS (subtipo dangling e/ou "
+                    f"chave inexistente no destino): {podados}"
+                )
             raise ValueError("NUM_IF(s) não sintetizáveis — " + "; ".join(partes))
         valores = sorted(validos)
     else:
@@ -5668,15 +5789,18 @@ def seleciona_instrumentos(spark, config, spec, num_ifs: Optional[List[int]],
                 f"Domínio VÁLIDO após a poda tem só "
                 f"{len(valores)} instrumento(s); pedi {n}. Afrouxe os filtros "
                 "ou reduza --n-instrumentos. Para compensar um domínio não vazio "
-                "no fator K, não use --sem-ajuste-k.")
+                "no fator K, não use --sem-ajuste-k."
+            )
         valores = sorted(valores)
-    logger.info("Lote: %d instrumento(s) NUM_IF=%s", len(valores),
-                valores if len(valores) <= 20 else f"{valores[:20]}... (+{len(valores)-20})")
+    logger.info(
+        "Lote: %d instrumento(s) NUM_IF=%s",
+        len(valores),
+        valores if len(valores) <= 20 else f"{valores[:20]}... (+{len(valores) - 20})",
+    )
     return valores
 
 
-def _ajusta_fator_k_por_dominio(fator_k: int, n_pedido: Optional[int],
-                                n_obtido: int) -> int:
+def _ajusta_fator_k_por_dominio(fator_k: int, n_pedido: Optional[int], n_obtido: int) -> int:
     """Preserve requested sampled volume with ceil(requested * K / obtained)."""
     if n_pedido is None or n_obtido <= 0 or n_obtido >= n_pedido:
         return fator_k
@@ -5706,9 +5830,7 @@ def _target_fk_rejections(
     selective_value_nullable = False
     order_index = {table: index for index, table in enumerate(materialization_order)}
     edges_by_child: Dict[str, List[dict[str, Any]]] = {}
-    parent_requirements: Dict[
-        str, Dict[Tuple[str, ...], Tuple[T.DataType, ...]]
-    ] = {}
+    parent_requirements: Dict[str, Dict[Tuple[str, ...], Tuple[T.DataType, ...]]] = {}
     parent_requirement_uses: Dict[Tuple[str, Tuple[str, ...]], int] = {}
 
     # Validate the complete edge plan before starting any Spark iterator or
@@ -5719,8 +5841,12 @@ def _target_fk_rejections(
             child_cols = tuple(fk.get("columns") or ())
             parent_table = fk.get("parent_table")
             parent_cols = tuple(fk.get("parent_columns") or ())
-            if (not parent_table or not child_cols or not parent_cols
-                    or len(child_cols) != len(parent_cols)):
+            if (
+                not parent_table
+                or not child_cols
+                or not parent_cols
+                or len(child_cols) != len(parent_cols)
+            ):
                 raise ValueError(
                     f"FK inválida no spec: {table}.{list(child_cols)} -> "
                     f"{parent_table}.{list(parent_cols)}"
@@ -5728,14 +5854,11 @@ def _target_fk_rejections(
             missing_child_cols = sorted(set(child_cols) - set(child.columns))
             if missing_child_cols:
                 raise ValueError(
-                    f"FK do spec usa coluna(s) ausente(s) em {table}: "
-                    f"{missing_child_cols}"
+                    f"FK do spec usa coluna(s) ausente(s) em {table}: {missing_child_cols}"
                 )
-            nullable_nullifications = (
-                set(child_cols)
-                & set(nullify_columns.get(table, ()))
-                - _not_null_cols(spec[table])
-            )
+            nullable_nullifications = set(child_cols) & set(
+                nullify_columns.get(table, ())
+            ) - _not_null_cols(spec[table])
             if nullable_nullifications:
                 logger.info(
                     "Admissão FK: %s.%s será anulada integralmente; probe pulado.",
@@ -5745,9 +5868,7 @@ def _target_fk_rejections(
                 continue
 
             child_types = tuple(child.schema[column].dataType for column in child_cols)
-            numeric_flags = tuple(
-                isinstance(data_type, T.NumericType) for data_type in child_types
-            )
+            numeric_flags = tuple(isinstance(data_type, T.NumericType) for data_type in child_types)
             remappable = any(
                 edge.columns == child_cols
                 and edge.parent_table == parent_table
@@ -5759,8 +5880,12 @@ def _target_fk_rejections(
                 or order_index.get(parent_table, len(order_index)) < order_index[table]
             )
             internal_requirement = None
-            if (remappable and parent_map_available
-                    and parent_table in lotes and parent_table in proveniencias):
+            if (
+                remappable
+                and parent_map_available
+                and parent_table in lotes
+                and parent_table in proveniencias
+            ):
                 parent = lotes[parent_table]
                 missing_parent_cols = sorted(set(parent_cols) - set(parent.columns))
                 if missing_parent_cols:
@@ -5768,43 +5893,37 @@ def _target_fk_rejections(
                         f"FK do spec usa coluna(s) pai ausente(s) em {parent_table}: "
                         f"{missing_parent_cols}"
                     )
-                parent_types = tuple(
-                    parent.schema[column].dataType for column in parent_cols
-                )
-                parent_requirements.setdefault(parent_table, {})[
-                    parent_cols
-                ] = parent_types
+                parent_types = tuple(parent.schema[column].dataType for column in parent_cols)
+                parent_requirements.setdefault(parent_table, {})[parent_cols] = parent_types
                 internal_requirement = (parent_table, parent_cols)
                 parent_requirement_uses[internal_requirement] = (
                     parent_requirement_uses.get(internal_requirement, 0) + 1
                 )
 
             selective_indexes = [
-                index for index, column in enumerate(child_cols)
+                index
+                for index, column in enumerate(child_cols)
                 if (table, column) in selective_keys
             ]
-            label = (
-                f"FK {table}.{list(child_cols)} -> "
-                f"{parent_table}.{list(parent_cols)}"
+            label = f"FK {table}.{list(child_cols)} -> {parent_table}.{list(parent_cols)}"
+            edges_by_child.setdefault(table, []).append(
+                {
+                    "child_cols": child_cols,
+                    "child_types": child_types,
+                    "parent_table": parent_table,
+                    "parent_cols": parent_cols,
+                    "numeric_flags": numeric_flags,
+                    "selective_indexes": selective_indexes,
+                    "label": label,
+                    "internal_requirement": internal_requirement,
+                    "residual_roots": {},
+                }
             )
-            edges_by_child.setdefault(table, []).append({
-                "child_cols": child_cols,
-                "child_types": child_types,
-                "parent_table": parent_table,
-                "parent_cols": parent_cols,
-                "numeric_flags": numeric_flags,
-                "selective_indexes": selective_indexes,
-                "label": label,
-                "internal_requirement": internal_requirement,
-                "residual_roots": {},
-            })
 
     # Load each parent lazily on first use and release it after its last child.
     # This keeps one iterator per parent table without retaining the complete
     # multiproduct parent graph for the duration of admission.
-    internal_sets: Dict[
-        str, Dict[Tuple[str, ...], Set[Tuple[Any, Tuple[str, ...]]]]
-    ] = {}
+    internal_sets: Dict[str, Dict[Tuple[str, ...], Set[Tuple[Any, Tuple[str, ...]]]]] = {}
 
     def ensure_parent_sets(parent_table: str) -> None:
         if parent_table in internal_sets:
@@ -5812,23 +5931,16 @@ def _target_fk_rejections(
         requirements = parent_requirements[parent_table]
         parent = lotes[parent_table]
         parent_pk = list(planos[parent_table].pk_cols)
-        wide_columns = list(dict.fromkeys(
-            column for columns in requirements for column in columns
-        ))
+        wide_columns = list(dict.fromkeys(column for columns in requirements for column in columns))
         projected = (
             parent.join(proveniencias[parent_table], parent_pk, "inner")
             .select(
                 ROOT_PROVENANCE_COL,
-                *[
-                    F.col(column).cast("string").alias(column)
-                    for column in wide_columns
-                ],
+                *[F.col(column).cast("string").alias(column) for column in wide_columns],
             )
             .coalesce(FK_ADMISSION_ITERATOR_PARTITIONS)
         )
-        table_sets = {
-            columns: set() for columns in requirements
-        }
+        table_sets = {columns: set() for columns in requirements}
         internal_sets[parent_table] = table_sets
         if lote_counts is not None and lote_counts.get(parent_table) == 0:
             logger.info(
@@ -5849,9 +5961,7 @@ def _target_fk_rejections(
                 if any(value is None for value in values):
                     continue
                 key = tuple(
-                    _canon_oracle_key(
-                        value, isinstance(data_type, T.NumericType)
-                    )
+                    _canon_oracle_key(value, isinstance(data_type, T.NumericType))
                     for value, data_type in zip(values, data_types)
                 )
                 table_sets[columns].add((root, key))
@@ -5879,11 +5989,9 @@ def _target_fk_rejections(
         child = lotes[table]
         provenance = proveniencias[table]
         child_pk = list(planos[table].pk_cols)
-        wide_columns = list(dict.fromkeys(
-            column
-            for state in edge_states
-            for column in state["child_cols"]
-        ))
+        wide_columns = list(
+            dict.fromkeys(column for state in edge_states for column in state["child_cols"])
+        )
         row_count = 0
         started = time.perf_counter()
         if lote_counts is not None and lote_counts.get(table) == 0:
@@ -5894,10 +6002,7 @@ def _target_fk_rejections(
                 child.join(provenance, child_pk, "inner")
                 .select(
                     ROOT_PROVENANCE_COL,
-                    *[
-                        F.col(column).cast("string").alias(column)
-                        for column in wide_columns
-                    ],
+                    *[F.col(column).cast("string").alias(column) for column in wide_columns],
                 )
                 .coalesce(FK_ADMISSION_ITERATOR_PARTITIONS)
             )
@@ -5908,8 +6013,7 @@ def _target_fk_rejections(
                 for state in edge_states:
                     values = tuple(row[column] for column in state["child_cols"])
                     if any(
-                        value is None
-                        or (isinstance(data_type, T.StringType) and value == "")
+                        value is None or (isinstance(data_type, T.StringType) and value == "")
                         for value, data_type in zip(values, state["child_types"])
                     ):
                         continue
@@ -5943,7 +6047,7 @@ def _target_fk_rejections(
             oracle_seconds = 0.0
             lookup_batches = 0
             for offset in range(0, len(keys), 900):
-                batch = keys[offset:offset + 900]
+                batch = keys[offset : offset + 900]
                 lookup_started = time.perf_counter()
                 lookup_batches += 1
                 try:
@@ -5979,12 +6083,14 @@ def _target_fk_rejections(
                     )
                 for key in sorted(missing_keys):
                     for root in sorted(residual_roots[key]):
-                        selective_rows.append((
-                            root,
-                            table,
-                            state["child_cols"][index],
-                            key[index],
-                        ))
+                        selective_rows.append(
+                            (
+                                root,
+                                table,
+                                state["child_cols"][index],
+                                key[index],
+                            )
+                        )
                 if missing_count:
                     logger.info(
                         "Admissão FK seletiva: %s, %d chave(s) ausente(s); "
@@ -5994,16 +6100,13 @@ def _target_fk_rejections(
                     )
             else:
                 for key in missing_keys:
-                    edge_bad_roots.update(
-                        int(root) for root in residual_roots[key]
-                    )
+                    edge_bad_roots.update(int(root) for root in residual_roots[key])
                 rejected.update(edge_bad_roots)
                 for root in edge_bad_roots:
                     reasons.setdefault(root, set()).add(state["label"])
                 if missing_count:
                     logger.info(
-                        "Admissão FK: %s, %d chave(s) ausente(s), "
-                        "%d NUM_IF rejeitado(s).",
+                        "Admissão FK: %s, %d chave(s) ausente(s), %d NUM_IF rejeitado(s).",
                         state["label"],
                         missing_count,
                         len(edge_bad_roots),
@@ -6038,17 +6141,19 @@ def _target_fk_rejections(
         assert selective_root_field is not None
         selective_missing = spark.createDataFrame(
             selective_rows,
-            T.StructType([
-                T.StructField(
-                    ROOT_PROVENANCE_COL,
-                    selective_root_field.dataType,
-                    selective_root_field.nullable,
-                    selective_root_field.metadata,
-                ),
-                T.StructField("TABELA", T.StringType(), False),
-                T.StructField("COLUNA", T.StringType(), False),
-                T.StructField("VALOR", T.StringType(), selective_value_nullable),
-            ]),
+            T.StructType(
+                [
+                    T.StructField(
+                        ROOT_PROVENANCE_COL,
+                        selective_root_field.dataType,
+                        selective_root_field.nullable,
+                        selective_root_field.metadata,
+                    ),
+                    T.StructField("TABELA", T.StringType(), False),
+                    T.StructField("COLUNA", T.StringType(), False),
+                    T.StructField("VALOR", T.StringType(), selective_value_nullable),
+                ]
+            ),
         )
     return rejected, reasons, selective_missing
 
@@ -6065,9 +6170,7 @@ def _hash_band_plan(domain_count: int, requested: int) -> Tuple[int, int, float]
     return target_size, band_count, domain_count / band_count
 
 
-def _small_plan_shuffle_partition_target(
-    configured: int, default_parallelism: int
-) -> int:
+def _small_plan_shuffle_partition_target(configured: int, default_parallelism: int) -> int:
     if configured < 1 or default_parallelism < 1:
         raise ValueError("shuffle partitions e defaultParallelism devem ser >= 1")
     return min(configured, max(8, default_parallelism))
@@ -6101,9 +6204,7 @@ def _ranked_hash_band_domain(
         F.col(COL_NUM_IF),
         F.xxhash64(F.lit(seed), F.col(COL_NUM_IF).cast("string")).alias("__rank"),
     )
-    return ranked.withColumn(
-        "__band", F.pmod(F.col("__rank"), F.lit(band_count))
-    )
+    return ranked.withColumn("__band", F.pmod(F.col("__rank"), F.lit(band_count)))
 
 
 def seleciona_instrumentos_destino(
@@ -6136,9 +6237,7 @@ def seleciona_instrumentos_destino(
 ) -> TargetInstrumentSelection:
     """Admite exactly N roots whose complete FK closure is loadable in Oracle."""
     if (num_ifs is None) == (n_instrumentos is None):
-        raise ValueError(
-            "informe exatamente uma seleção: num_ifs ou n_instrumentos"
-        )
+        raise ValueError("informe exatamente uma seleção: num_ifs ou n_instrumentos")
     if num_ifs is not None and not num_ifs:
         raise ValueError("Lista de NUM_IF vazia")
 
@@ -6163,16 +6262,16 @@ def seleciona_instrumentos_destino(
 
     if num_ifs is not None:
         requested_df = F.broadcast(
-            spark.createDataFrame([(value,) for value in num_ifs], [COL_NUM_IF])
-            .select(F.col(COL_NUM_IF).cast(fonte.schema[COL_NUM_IF].dataType))
+            spark.createDataFrame([(value,) for value in num_ifs], [COL_NUM_IF]).select(
+                F.col(COL_NUM_IF).cast(fonte.schema[COL_NUM_IF].dataType)
+            )
         )
         in_domain = {
-            int(row[0]) for row in
-            fonte.join(requested_df, COL_NUM_IF, "left_semi").collect()
+            int(row[0]) for row in fonte.join(requested_df, COL_NUM_IF, "left_semi").collect()
         }
         eligible = {
-            int(row[0]) for row in
-            valid_domain.join(requested_df, COL_NUM_IF, "left_semi").collect()
+            int(row[0])
+            for row in valid_domain.join(requested_df, COL_NUM_IF, "left_semi").collect()
         }
         outside = [value for value in num_ifs if value not in in_domain]
         pruned = [value for value in num_ifs if value in in_domain and value not in eligible]
@@ -6185,9 +6284,7 @@ def seleciona_instrumentos_destino(
         band_count = 0
     else:
         valid_count = valid_domain.count()
-        target_size, band_count, expected_size = _hash_band_plan(
-            valid_count, requested
-        )
+        target_size, band_count, expected_size = _hash_band_plan(valid_count, requested)
         logger.info(
             "PERF hash_band_sampling count=%d bands=%d expected_size=%.1f "
             "target_size=%d requested=%d",
@@ -6267,9 +6364,7 @@ def seleciona_instrumentos_destino(
                 produto=produto,
                 lastros_por_lote=lastros_por_lote,
             )
-        with _perf_timer(
-            "live_fk_admission", product=profile.name, roots=len(candidates)
-        ):
+        with _perf_timer("live_fk_admission", product=profile.name, roots=len(candidates)):
             rejected, reasons, page_selective = _retry_transient_oci_action(
                 f"admissão FK de {profile.name}",
                 lambda: _target_fk_rejections(
@@ -6288,43 +6383,35 @@ def seleciona_instrumentos_destino(
         all_reasons.update(reasons)
         if num_ifs is not None and rejected:
             details = "; ".join(
-                f"NUM_IF {root}: {', '.join(sorted(reasons[root]))}"
-                for root in sorted(rejected)
+                f"NUM_IF {root}: {', '.join(sorted(reasons[root]))}" for root in sorted(rejected)
             )
             for frame in lotes.values():
                 frame.unpersist(blocking=False)
             for frame in proveniencias.values():
                 frame.unpersist(blocking=False)
             raise ValueError(
-                "Admissão FK rejeitou lista explícita; nenhum NUM_IF foi "
-                f"substituído: {details}"
+                f"Admissão FK rejeitou lista explícita; nenhum NUM_IF foi substituído: {details}"
             )
-        page_accepted = [
-            candidate for candidate in candidates
-            if candidate not in rejected
-        ][:requested - len(accepted)]
+        page_accepted = [candidate for candidate in candidates if candidate not in rejected][
+            : requested - len(accepted)
+        ]
         accepted.extend(page_accepted)
         if page_accepted:
             accepted_materialization_started = time.perf_counter()
             accepted_roots = spark.createDataFrame(
                 [(value,) for value in page_accepted], [ROOT_PROVENANCE_COL]
             ).select(
-                F.col(ROOT_PROVENANCE_COL).cast(
-                    lotes[TABELA_RAIZ].schema[COL_NUM_IF].dataType
-                )
+                F.col(ROOT_PROVENANCE_COL).cast(lotes[TABELA_RAIZ].schema[COL_NUM_IF].dataType)
             )
             if page_selective is not None:
-                selected_missing = (
-                    page_selective
-                    .join(
-                        F.broadcast(accepted_roots),
-                        ROOT_PROVENANCE_COL,
-                        "left_semi",
-                    )
-                    .select("TABELA", "COLUNA", "VALOR")
-                )
+                selected_missing = page_selective.join(
+                    F.broadcast(accepted_roots),
+                    ROOT_PROVENANCE_COL,
+                    "left_semi",
+                ).select("TABELA", "COLUNA", "VALOR")
                 selective_missing = (
-                    selected_missing if selective_missing is None
+                    selected_missing
+                    if selective_missing is None
                     else selective_missing.unionByName(selected_missing)
                 )
             for table in ordem:
@@ -6337,16 +6424,14 @@ def seleciona_instrumentos_destino(
                 )
                 accepted_keys = accepted_provenance.select(*table_pk).dropDuplicates()
                 accepted_page_lote = _durable_materialize(
-                    lotes[table]
-                    .join(accepted_keys, table_pk, "left_semi")
+                    lotes[table].join(accepted_keys, table_pk, "left_semi")
                 )
                 accepted_page_count = _retry_transient_oci_action(
                     f"materialização do lote aceito {table}",
                     accepted_page_lote.count,
                 )
                 accepted_page_provenance = (
-                    _durable_materialize(accepted_provenance)
-                    if retain_provenance else None
+                    _durable_materialize(accepted_provenance) if retain_provenance else None
                 )
                 if accepted_page_provenance is not None:
                     _retry_transient_oci_action(
@@ -6356,9 +6441,7 @@ def seleciona_instrumentos_destino(
                 if table in accepted_lotes:
                     previous_lote = accepted_lotes[table]
                     accepted_lotes[table] = _durable_materialize(
-                        previous_lote
-                        .unionByName(accepted_page_lote)
-                        .dropDuplicates(table_pk)
+                        previous_lote.unionByName(accepted_page_lote).dropDuplicates(table_pk)
                     )
                     accepted_lote_counts[table] = _retry_transient_oci_action(
                         f"materialização do lote aceito acumulado {table}",
@@ -6369,9 +6452,9 @@ def seleciona_instrumentos_destino(
                     if retain_provenance:
                         previous_provenance = accepted_provenances[table]
                         accepted_provenances[table] = _durable_materialize(
-                            previous_provenance
-                            .unionByName(accepted_page_provenance)
-                            .dropDuplicates(table_pk + [ROOT_PROVENANCE_COL])
+                            previous_provenance.unionByName(
+                                accepted_page_provenance
+                            ).dropDuplicates(table_pk + [ROOT_PROVENANCE_COL])
                         )
                         _retry_transient_oci_action(
                             f"materialização da proveniência aceita acumulada {table}",
@@ -6414,7 +6497,8 @@ def seleciona_instrumentos_destino(
     accepted = sorted(accepted[:requested])
     missing_df = (
         _durable_materialize(selective_missing.dropDuplicates())
-        if selective_missing is not None else None
+        if selective_missing is not None
+        else None
     )
     logger.info(
         "Admissão FK concluída: %d instrumento(s) aceito(s), %d rejeitado(s).",
@@ -6423,9 +6507,7 @@ def seleciona_instrumentos_destino(
     )
     if int(spark.conf.get("spark.sql.shuffle.partitions")) != configured_plan_shuffles:
         spark.conf.set("spark.sql.shuffle.partitions", str(configured_plan_shuffles))
-        logger.info(
-            "PERF small_plan_shuffle restored=%d", configured_plan_shuffles
-        )
+        logger.info("PERF small_plan_shuffle restored=%d", configured_plan_shuffles)
     return TargetInstrumentSelection(
         values=accepted,
         missing_keys=missing_df,
@@ -6435,8 +6517,9 @@ def seleciona_instrumentos_destino(
     )
 
 
-def _deriva_tipo_oracle(spark, config, num_if_valores: List,
-                         tipo_oracle_cli: Optional[int] = None) -> int:
+def _deriva_tipo_oracle(
+    spark, config, num_if_valores: List, tipo_oracle_cli: Optional[int] = None
+) -> int:
     """Deriva o TIPO do instrumento (NUM_TIPO_IF) das próprias linhas do lote.
 
     Por que derivar em vez de configurar: o valor alimenta
@@ -6458,10 +6541,14 @@ def _deriva_tipo_oracle(spark, config, num_if_valores: List,
         if tipo_oracle_cli is None:
             raise ValueError(
                 f"{TABELA_RAIZ} não expõe a coluna {COL_NUM_TIPO_IF}: não há como "
-                "derivar o tipo do lote. Informe --tipo-oracle explicitamente.")
+                "derivar o tipo do lote. Informe --tipo-oracle explicitamente."
+            )
         logger.warning(
-            "%s sem coluna %s; usando --tipo-oracle=%d SEM conferência contra o "
-            "dado.", TABELA_RAIZ, COL_NUM_TIPO_IF, int(tipo_oracle_cli))
+            "%s sem coluna %s; usando --tipo-oracle=%d SEM conferência contra o dado.",
+            TABELA_RAIZ,
+            COL_NUM_TIPO_IF,
+            int(tipo_oracle_cli),
+        )
         return int(tipo_oracle_cli)
 
     sel = spark.createDataFrame([(v,) for v in num_if_valores], [COL_NUM_IF])
@@ -6477,24 +6564,25 @@ def _deriva_tipo_oracle_do_lote(
     """Deriva NUM_TIPO_IF do lote já admitido, sem consultar RAW."""
     if COL_NUM_TIPO_IF not in lote_raiz.columns:
         raise ValueError(
-            f"snapshot de {TABELA_RAIZ} não expõe {COL_NUM_TIPO_IF}; "
-            "gere novamente o plano"
+            f"snapshot de {TABELA_RAIZ} não expõe {COL_NUM_TIPO_IF}; gere novamente o plano"
         )
     brutos = [
-        row["__tipo"] for row in
-        (lote_raiz.select(F.col(COL_NUM_TIPO_IF).alias("__tipo"))
-         .dropDuplicates()
-         .orderBy("__tipo")
-         .limit(MAX_TIPOS_DIAGNOSTICO + 1)
-         .collect())
+        row["__tipo"]
+        for row in (
+            lote_raiz.select(F.col(COL_NUM_TIPO_IF).alias("__tipo"))
+            .dropDuplicates()
+            .orderBy("__tipo")
+            .limit(MAX_TIPOS_DIAGNOSTICO + 1)
+            .collect()
+        )
     ]
     if not brutos:
-        raise ValueError(
-            f"lote sem linhas em {TABELA_RAIZ}: não há {COL_NUM_TIPO_IF} a derivar.")
+        raise ValueError(f"lote sem linhas em {TABELA_RAIZ}: não há {COL_NUM_TIPO_IF} a derivar.")
     if any(valor is None for valor in brutos):
         raise ValueError(
             f"{TABELA_RAIZ}.{COL_NUM_TIPO_IF} nulo em linha(s) do lote; corrija o "
-            "domínio da query do produto.")
+            "domínio da query do produto."
+        )
 
     tipos: List[int] = []
     for valor in brutos:
@@ -6505,25 +6593,31 @@ def _deriva_tipo_oracle_do_lote(
                 f"{TABELA_RAIZ}.{COL_NUM_TIPO_IF} não é inteiro no lote: {valor!r}"
             ) from exc
         if tipo < 1:
-            raise ValueError(
-                f"{TABELA_RAIZ}.{COL_NUM_TIPO_IF} inválido no lote: {tipo}")
+            raise ValueError(f"{TABELA_RAIZ}.{COL_NUM_TIPO_IF} inválido no lote: {tipo}")
         tipos.append(tipo)
     tipos = sorted(set(tipos))
 
     if len(tipos) > 1:
-        listados = (tipos if len(tipos) <= MAX_TIPOS_DIAGNOSTICO
-                    else f"{tipos[:MAX_TIPOS_DIAGNOSTICO]}... (+)")
+        listados = (
+            tipos
+            if len(tipos) <= MAX_TIPOS_DIAGNOSTICO
+            else f"{tipos[:MAX_TIPOS_DIAGNOSTICO]}... (+)"
+        )
         if tipo_oracle_esperado is None:
             raise ValueError(
                 f"Lote heterogêneo: {COL_NUM_TIPO_IF} distinto(s) {listados} nas "
                 f"linhas selecionadas de {TABELA_RAIZ}. O tipo define qual COD_IF "
                 "o Oracle aloca, então o SQL do produto precisa restringir o "
                 "domínio a UM tipo. Se o lote for legitimamente multi-tipo, "
-                "informe --tipo-oracle para escolher o tipo da alocação.")
+                "informe --tipo-oracle para escolher o tipo da alocação."
+            )
         logger.warning(
             "Lote heterogêneo (%s=%s); alocando COD_IF com tipo congelado=%d por "
             "decisão explícita do plano.",
-            COL_NUM_TIPO_IF, listados, int(tipo_oracle_esperado))
+            COL_NUM_TIPO_IF,
+            listados,
+            int(tipo_oracle_esperado),
+        )
         return int(tipo_oracle_esperado)
 
     derivado = tipos[0]
@@ -6532,12 +6626,16 @@ def _deriva_tipo_oracle_do_lote(
             f"tipo Oracle esperado={int(tipo_oracle_esperado)} diverge do "
             f"{COL_NUM_TIPO_IF} "
             f"do lote ({derivado}). Isso indica query/produto trocados; corrija "
-            "antes de alocar COD_IF no Oracle.")
+            "antes de alocar COD_IF no Oracle."
+        )
     logger.info(
         "Tipo do instrumento DERIVADO do lote: %s=%d (%s).",
-        COL_NUM_TIPO_IF, derivado,
-        "confirmado pelo valor esperado" if tipo_oracle_esperado is not None
-        else "sem override na CLI")
+        COL_NUM_TIPO_IF,
+        derivado,
+        "confirmado pelo valor esperado"
+        if tipo_oracle_esperado is not None
+        else "sem override na CLI",
+    )
     return derivado
 
 
@@ -6555,8 +6653,12 @@ def _filtra_ativos(df: DataFrame, tabela: str) -> Tuple[DataFrame, Optional[str]
     if coluna is None:
         return df, None
     if coluna not in df.columns:
-        logger.warning("fecho ativos: %s não expõe a coluna declarada %s; filtro "
-                       "NÃO aplicado (sem fallback proposital).", tabela, coluna)
+        logger.warning(
+            "fecho ativos: %s não expõe a coluna declarada %s; filtro "
+            "NÃO aplicado (sem fallback proposital).",
+            tabela,
+            coluna,
+        )
         return df, None
     if coluna == COL_DAT_EXCLUSAO:
         col = F.col(COL_DAT_EXCLUSAO)
@@ -6565,8 +6667,7 @@ def _filtra_ativos(df: DataFrame, tabela: str) -> Tuple[DataFrame, Optional[str]
             pred = pred | (F.trim(col) == F.lit(""))
         return df.where(pred), COL_DAT_EXCLUSAO
     norm = F.upper(F.trim(F.col(COL_IND_EXCLUIDO).cast("string")))
-    return df.where(F.coalesce(~norm.isin("S", "Y", "1"), F.lit(True))), \
-        COL_IND_EXCLUIDO
+    return df.where(F.coalesce(~norm.isin("S", "Y", "1"), F.lit(True))), COL_IND_EXCLUIDO
 
 
 def _poda_cronograma_sem_tabela(lotes: Dict[str, DataFrame]) -> Optional[int]:
@@ -6584,8 +6685,12 @@ def _poda_cronograma_sem_tabela(lotes: Dict[str, DataFrame]) -> Optional[int]:
     if CONDICAO_IF_PK not in cronograma.columns:
         return None
     if {CONDICAO_IF_PK, COL_COD_COND_RESGATE} - set(resgate.columns):
-        logger.warning("poda cronograma: %s sem %s/%s; poda NÃO aplicada.",
-                       RESGATE_TABELA, CONDICAO_IF_PK, COL_COD_COND_RESGATE)
+        logger.warning(
+            "poda cronograma: %s sem %s/%s; poda NÃO aplicada.",
+            RESGATE_TABELA,
+            CONDICAO_IF_PK,
+            COL_COD_COND_RESGATE,
+        )
         return None
     if {CONDICAO_IF_PK, CONDICAO_IF_TIPO_COL} - set(condicao.columns):
         logger.warning(
@@ -6597,26 +6702,20 @@ def _poda_cronograma_sem_tabela(lotes: Dict[str, DataFrame]) -> Optional[int]:
         return None
     pais_com_tabela = (
         resgate.where(
-            _norm_code_validador(F.col(COL_COD_COND_RESGATE))
-            == F.lit(COD_COND_RESGATE_COM_TABELA)
+            _norm_code_validador(F.col(COL_COD_COND_RESGATE)) == F.lit(COD_COND_RESGATE_COM_TABELA)
         )
         .select(_norm_key_col(F.col(CONDICAO_IF_PK)).alias("__cron_key"))
         .dropDuplicates()
     )
     condicoes_tipo_20 = (
         condicao.where(
-            _norm_code_validador(F.col(CONDICAO_IF_TIPO_COL))
-            == F.lit(CONDICAO_IF_TIPO_RESGATE)
+            _norm_code_validador(F.col(CONDICAO_IF_TIPO_COL)) == F.lit(CONDICAO_IF_TIPO_RESGATE)
         )
         .select(_norm_key_col(F.col(CONDICAO_IF_PK)).alias("__cron_key"))
         .dropDuplicates()
     )
-    pais_com_tabela = pais_com_tabela.join(
-        condicoes_tipo_20, "__cron_key", "left_semi"
-    )
-    marcado = cronograma.withColumn(
-        "__cron_key", _norm_key_col(F.col(CONDICAO_IF_PK))
-    )
+    pais_com_tabela = pais_com_tabela.join(condicoes_tipo_20, "__cron_key", "left_semi")
+    marcado = cronograma.withColumn("__cron_key", _norm_key_col(F.col(CONDICAO_IF_PK)))
     mantido = marcado.join(F.broadcast(pais_com_tabela), "__cron_key", "left_semi")
     mantido = mantido.select(*cronograma.columns).localCheckpoint(eager=True)
     antes = cronograma.count()
@@ -6630,12 +6729,16 @@ def _durable_materialize(frame: DataFrame) -> DataFrame:
     return frame.persist(StorageLevel.MEMORY_AND_DISK_2)
 
 
-def _semente_lateral_por_lote(spark, config, produto: Optional[str],
-                              planos: Dict[str, PlanoTabela],
-                              lotes: Dict[str, DataFrame],
-                              proveniencias: Dict[str, DataFrame],
-                              contagens: Dict[str, int],
-                              lastros_por_lote: int) -> frozenset:
+def _semente_lateral_por_lote(
+    spark,
+    config,
+    produto: Optional[str],
+    planos: Dict[str, PlanoTabela],
+    lotes: Dict[str, DataFrame],
+    proveniencias: Dict[str, DataFrame],
+    contagens: Dict[str, int],
+    lastros_por_lote: int,
+) -> frozenset:
     """Semeia as tabelas de lastro pelo NUM_ID_LOTE dos instrumentos da raiz.
 
     Ver o cabecalho de SEMENTE_LATERAL_POR_PRODUTO para o porque. Muta `lotes`,
@@ -6651,19 +6754,19 @@ def _semente_lateral_por_lote(spark, config, produto: Optional[str],
     if not tabelas:
         return frozenset()
     if lastros_por_lote < 1:
-        raise ValueError(
-            "LASTROS_POR_LOTE_PADRAO deve ser >= 1 (recebi %r)."
-            % (lastros_por_lote,))
+        raise ValueError("LASTROS_POR_LOTE_PADRAO deve ser >= 1 (recebi %r)." % (lastros_por_lote,))
 
     raiz = lotes.get(TABELA_RAIZ)
     if raiz is None:
         raise ValueError(
             "Produto %s: semente lateral exige o lote da raiz %s ja calculado."
-            % (produto, TABELA_RAIZ))
+            % (produto, TABELA_RAIZ)
+        )
     if COL_NUM_ID_LOTE not in raiz.columns:
         raise ValueError(
             "Produto %s: %s nao expoe %s; sem isso nao ha vinculo com o lastro."
-            % (produto, TABELA_RAIZ, COL_NUM_ID_LOTE))
+            % (produto, TABELA_RAIZ, COL_NUM_ID_LOTE)
+        )
 
     chaves = (
         raiz.select(
@@ -6679,10 +6782,14 @@ def _semente_lateral_por_lote(spark, config, produto: Optional[str],
     if n_lotes == 0:
         raise ValueError(
             "Produto %s: nenhum instrumento do lote tem %s preenchido — nao ha "
-            "como semear o lastro. Confira o CTE de lastro na query."
-            % (produto, COL_NUM_ID_LOTE))
-    logger.info("Semente lateral [%s]: %d lote(s) distinto(s) na raiz; teto de "
-                "%d linha(s) por lote.", produto, n_lotes, lastros_por_lote)
+            "como semear o lastro. Confira o CTE de lastro na query." % (produto, COL_NUM_ID_LOTE)
+        )
+    logger.info(
+        "Semente lateral [%s]: %d lote(s) distinto(s) na raiz; teto de %d linha(s) por lote.",
+        produto,
+        n_lotes,
+        lastros_por_lote,
+    )
 
     semeadas = set()
     for tabela in tabelas:
@@ -6690,14 +6797,13 @@ def _semente_lateral_por_lote(spark, config, produto: Optional[str],
         if plano is None:
             raise ValueError(
                 "Produto %s: %s esta em SEMENTE_LATERAL_POR_PRODUTO mas nao no "
-                "plano — inclua em TABELAS_ENGORDA_POR_PRODUTO."
-                % (produto, tabela))
+                "plano — inclua em TABELAS_ENGORDA_POR_PRODUTO." % (produto, tabela)
+            )
         src = _read_source(spark, config, tabela)
         obrigatorias = (COL_NUM_ID_LOTE,) + tuple(plano.pk_cols)
         faltando = [c for c in obrigatorias if c not in src.columns]
         if faltando:
-            raise ValueError(
-                "Produto %s: %s nao expoe %s." % (produto, tabela, faltando))
+            raise ValueError("Produto %s: %s nao expoe %s." % (produto, tabela, faltando))
 
         cand = src.withColumn("__lote", _norm_key_col(F.col(COL_NUM_ID_LOTE)))
         if COL_DAT_EXCLUSAO in src.columns:
@@ -6713,44 +6819,42 @@ def _semente_lateral_por_lote(spark, config, produto: Optional[str],
             if plano_h is None:
                 raise ValueError(
                     "Produto %s: %s nao esta no plano — inclua em "
-                    "TABELAS_ENGORDA_POR_PRODUTO." % (produto, hist))
+                    "TABELAS_ENGORDA_POR_PRODUTO." % (produto, hist)
+                )
             fks_h = [
-                fk for fk in plano_h.fks_remap
-                if fk.parent_table == tabela
-                and tuple(fk.parent_columns) == tuple(plano.pk_cols)
+                fk
+                for fk in plano_h.fks_remap
+                if fk.parent_table == tabela and tuple(fk.parent_columns) == tuple(plano.pk_cols)
             ]
             if not fks_h:
                 raise ValueError(
                     "Produto %s: %s nao declara FK para %s.%s."
-                    % (produto, hist, tabela, list(plano.pk_cols)))
+                    % (produto, hist, tabela, list(plano.pk_cols))
+                )
             fk_h = fks_h[0]
             src_h = _read_source(spark, config, hist)
             faltando_h = [c for c in fk_h.columns if c not in src_h.columns]
             if faltando_h:
-                raise ValueError(
-                    "Produto %s: %s nao expoe %s."
-                    % (produto, hist, faltando_h))
+                raise ValueError("Produto %s: %s nao expoe %s." % (produto, hist, faltando_h))
             aliases_mestre = [f"__master_key_{i}" for i in range(len(plano.pk_cols))]
-            mestres_do_lote = cand.select(*(
-                F.col(parent_col).alias(alias)
-                for parent_col, alias in zip(plano.pk_cols, aliases_mestre)
-            )).dropDuplicates()
+            mestres_do_lote = cand.select(
+                *(
+                    F.col(parent_col).alias(alias)
+                    for parent_col, alias in zip(plano.pk_cols, aliases_mestre)
+                )
+            ).dropDuplicates()
             condicao_alvo = [
                 src_h[child_col] == mestres_do_lote[alias]
                 for child_col, alias in zip(fk_h.columns, aliases_mestre)
             ]
             mestres_com_historico = (
-                src_h.join(
-                    F.broadcast(mestres_do_lote), condicao_alvo, "left_semi"
-                )
+                src_h.join(F.broadcast(mestres_do_lote), condicao_alvo, "left_semi")
                 .select(*fk_h.columns)
                 .dropDuplicates()
             )
             condicao = [
                 cand[parent_col] == mestres_com_historico[child_col]
-                for parent_col, child_col in zip(
-                    fk_h.parent_columns, fk_h.columns
-                )
+                for parent_col, child_col in zip(fk_h.parent_columns, fk_h.columns)
             ]
             cand = cand.join(mestres_com_historico, condicao, "left_semi")
 
@@ -6758,9 +6862,8 @@ def _semente_lateral_por_lote(spark, config, produto: Optional[str],
         ordem_pk = [F.col(c).asc() for c in plano.pk_cols]
         cand = (
             cand.withColumn(
-                "__rn",
-                F.row_number().over(
-                    Window.partitionBy("__lote").orderBy(*ordem_pk)))
+                "__rn", F.row_number().over(Window.partitionBy("__lote").orderBy(*ordem_pk))
+            )
             .where(F.col("__rn") <= F.lit(lastros_por_lote))
             .drop("__rn")
         )
@@ -6773,8 +6876,8 @@ def _semente_lateral_por_lote(spark, config, produto: Optional[str],
         if col_cod and col_cod not in src.columns:
             raise ValueError(
                 "Produto %s: %s nao expoe %s; sem isso o credito sintetico "
-                "colide com o real (o codigo e UNICO no destino)."
-                % (produto, tabela, col_cod))
+                "colide com o real (o codigo e UNICO no destino)." % (produto, tabela, col_cod)
+            )
 
         lote_t = _durable_materialize(cand.select(*src.columns))
         n = lote_t.count()
@@ -6782,7 +6885,8 @@ def _semente_lateral_por_lote(spark, config, produto: Optional[str],
             raise ValueError(
                 "Produto %s: semente lateral de %s vazia — nenhum dos %d lote(s) "
                 "da raiz tem linha ativa. O CTE de lastro da query deveria ter "
-                "impedido isso." % (produto, tabela, n_lotes))
+                "impedido isso." % (produto, tabela, n_lotes)
+            )
         prov = (
             cand.select(*plano.pk_cols, "__lote")
             .join(F.broadcast(chaves), on="__lote", how="inner")
@@ -6805,18 +6909,20 @@ def _semente_lateral_por_lote(spark, config, produto: Optional[str],
             if not col_cod:
                 raise ValueError(
                     "Produto %s: %s se liga a %s pelo codigo, mas a coluna de "
-                    "codigo nao esta declarada." % (produto, hist, tabela))
+                    "codigo nao esta declarada." % (produto, hist, tabela)
+                )
             plano_h = planos.get(hist)
             if plano_h is None:
                 raise ValueError(
                     "Produto %s: %s nao esta no plano — inclua em "
-                    "TABELAS_ENGORDA_POR_PRODUTO." % (produto, hist))
+                    "TABELAS_ENGORDA_POR_PRODUTO." % (produto, hist)
+                )
             src_h = _read_source(spark, config, hist)
-            faltando_h = [c for c in (col_cod, COL_NUM_ID_LOTE, *plano_h.pk_cols)
-                          if c not in src_h.columns]
+            faltando_h = [
+                c for c in (col_cod, COL_NUM_ID_LOTE, *plano_h.pk_cols) if c not in src_h.columns
+            ]
             if faltando_h:
-                raise ValueError(
-                    "Produto %s: %s nao expoe %s." % (produto, hist, faltando_h))
+                raise ValueError("Produto %s: %s nao expoe %s." % (produto, hist, faltando_h))
             # Casa pelo codigo ORIGINAL do credito — ainda intacto nesta
             # fase. A troca pelo sintetico acontece depois, nos dois lados de
             # uma vez, em _aplica_cod_credito_sintetico.
@@ -6824,8 +6930,7 @@ def _semente_lateral_por_lote(spark, config, produto: Optional[str],
                 F.trim(F.col(col_cod).cast("string")).alias("__cod_ant")
             ).dropDuplicates()
             hcand = (
-                src_h
-                .withColumn("__cod_ant", F.trim(F.col(col_cod).cast("string")))
+                src_h.withColumn("__cod_ant", F.trim(F.col(col_cod).cast("string")))
                 .withColumn("__lote", _norm_key_col(F.col(COL_NUM_ID_LOTE)))
                 .join(F.broadcast(codigos), on="__cod_ant", how="left_semi")
                 .withColumn("__lote", _norm_key_col(F.col(COL_NUM_ID_LOTE)))
@@ -6845,14 +6950,20 @@ def _semente_lateral_por_lote(spark, config, produto: Optional[str],
             semeadas.add(hist)
             logger.info(
                 "Semente lateral [%s]: %d linha(s) de historico, casadas por %s "
-                "com os %d credito(s) de %s.", hist, nh, col_cod, n, tabela)
+                "com os %d credito(s) de %s.",
+                hist,
+                nh,
+                col_cod,
+                n,
+                tabela,
+            )
     chaves.unpersist(blocking=False)
     return frozenset(semeadas)
 
 
-def _aplica_cod_credito_sintetico(produto: Optional[str],
-                                  planos: Dict[str, PlanoTabela],
-                                  lotes: Dict[str, DataFrame]) -> None:
+def _aplica_cod_credito_sintetico(
+    produto: Optional[str], planos: Dict[str, PlanoTabela], lotes: Dict[str, DataFrame]
+) -> None:
     """Gera o COD_CREDITO_* sintetico e aplica no credito E nos seus historicos.
 
     Roda DEPOIS de _apply_oracle_pk_floors, quando plano.pk_start ja e o valor
@@ -6868,7 +6979,7 @@ def _aplica_cod_credito_sintetico(produto: Optional[str],
     if not tabelas:
         return
     historicos = HISTORICOS_DO_CREDITO_POR_PRODUTO.get(produto or "", {})
-    teto = COD_CREDITO_BASE ** COD_CREDITO_DIGITOS - 1
+    teto = COD_CREDITO_BASE**COD_CREDITO_DIGITOS - 1
     for tabela in tabelas:
         col_cod = COD_CREDITO_POR_TABELA.get(tabela)
         lote_c = lotes.get(tabela)
@@ -6878,31 +6989,35 @@ def _aplica_cod_credito_sintetico(produto: Optional[str],
         if plano is None or plano.pk_start is None:
             raise ValueError(
                 "Produto %s: %s sem pk_start — nao da para derivar %s de forma "
-                "coordenada com o destino." % (produto, tabela, col_cod))
+                "coordenada com o destino." % (produto, tabela, col_cod)
+            )
         base = int(plano.pk_start)
         mapa = (
-            lote_c.select(
-                F.trim(F.col(col_cod).cast("string")).alias("__cod_ant"))
+            lote_c.select(F.trim(F.col(col_cod).cast("string")).alias("__cod_ant"))
             .dropDuplicates()
             .withColumn(
                 "__ord",
-                F.lit(base) + F.row_number().over(
-                    Window.orderBy(F.col("__cod_ant").asc())) - F.lit(1))
+                F.lit(base)
+                + F.row_number().over(Window.orderBy(F.col("__cod_ant").asc()))
+                - F.lit(1),
+            )
         )
         if mapa.where(F.col("__ord") > F.lit(teto)).limit(1).count():
             raise ValueError(
                 "Produto %s: ordinal de %s passou de %d — nao cabe em %d "
                 "caracteres base %d. pk_start=%d."
-                % (produto, col_cod, teto, COD_CREDITO_DIGITOS,
-                   COD_CREDITO_BASE, base))
+                % (produto, col_cod, teto, COD_CREDITO_DIGITOS, COD_CREDITO_BASE, base)
+            )
         mapa = (
             mapa.withColumn(
                 "__cod_novo",
                 F.concat(
                     F.lit(COD_CREDITO_PREFIXO_SINTETICO),
-                    F.lpad(F.conv(F.col("__ord").cast("string"), 10,
-                                  COD_CREDITO_BASE),
-                           COD_CREDITO_DIGITOS, "0"),
+                    F.lpad(
+                        F.conv(F.col("__ord").cast("string"), 10, COD_CREDITO_BASE),
+                        COD_CREDITO_DIGITOS,
+                        "0",
+                    ),
                 ),
             )
             .select("__cod_ant", "__cod_novo")
@@ -6914,16 +7029,14 @@ def _aplica_cod_credito_sintetico(produto: Optional[str],
         for alvo in alvos:
             lote = lotes[alvo]
             if col_cod not in lote.columns:
-                raise ValueError(
-                    "Produto %s: %s nao expoe %s." % (produto, alvo, col_cod))
-            marcado = lote.withColumn(
-                "__cod_ant", F.trim(F.col(col_cod).cast("string")))
+                raise ValueError("Produto %s: %s nao expoe %s." % (produto, alvo, col_cod))
+            marcado = lote.withColumn("__cod_ant", F.trim(F.col(col_cod).cast("string")))
             juntado = marcado.join(F.broadcast(mapa), on="__cod_ant", how="left")
             if juntado.where(F.col("__cod_novo").isNull()).limit(1).count():
                 raise ValueError(
                     "Produto %s: ha linha(s) em %s cujo %s nao casa com nenhum "
-                    "credito do lote — orfao por construcao."
-                    % (produto, alvo, col_cod))
+                    "credito do lote — orfao por construcao." % (produto, alvo, col_cod)
+                )
             novo = (
                 juntado.withColumn(col_cod, F.col("__cod_novo"))
                 .select(*lote.columns)
@@ -6932,15 +7045,18 @@ def _aplica_cod_credito_sintetico(produto: Optional[str],
             n = novo.count()
             lotes[alvo] = novo
             lote.unpersist(blocking=False)
-            logger.info("Codigo sintetico [%s]: %s aplicado em %d linha(s).",
-                        alvo, col_cod, n)
+            logger.info("Codigo sintetico [%s]: %s aplicado em %d linha(s).", alvo, col_cod, n)
         primeiro = COD_CREDITO_PREFIXO_SINTETICO + _base36(base, COD_CREDITO_DIGITOS)
-        ultimo = COD_CREDITO_PREFIXO_SINTETICO + _base36(
-            base + n_cod - 1, COD_CREDITO_DIGITOS)
+        ultimo = COD_CREDITO_PREFIXO_SINTETICO + _base36(base + n_cod - 1, COD_CREDITO_DIGITOS)
         logger.info(
             "Codigo sintetico [%s]: %d codigo(s) distintos, de %s a %s "
             "(base pk_start=%d, ja coordenado com o destino).",
-            tabela, n_cod, primeiro, ultimo, base)
+            tabela,
+            n_cod,
+            primeiro,
+            ultimo,
+            base,
+        )
         mapa.unpersist(blocking=False)
 
 
@@ -6958,8 +7074,7 @@ def _base36(valor: int, largura: int) -> str:
     return texto.rjust(largura, "0")
 
 
-def _diagnostico_lastro(produto: Optional[str],
-                        lotes: Dict[str, DataFrame]) -> None:
+def _diagnostico_lastro(produto: Optional[str], lotes: Dict[str, DataFrame]) -> None:
     """Bloco de log que PROVA o vinculo LCI/LCA <-> lastro no lote gerado.
 
     Puramente observacional: nao altera nada. So roda para os produtos com
@@ -6970,8 +7085,7 @@ def _diagnostico_lastro(produto: Optional[str],
     raiz = lotes.get(TABELA_RAIZ)
     if raiz is None or COL_NUM_ID_LOTE not in raiz.columns:
         return
-    lotes_raiz = raiz.select(
-        _norm_key_col(F.col(COL_NUM_ID_LOTE)).alias("__lote")).dropDuplicates()
+    lotes_raiz = raiz.select(_norm_key_col(F.col(COL_NUM_ID_LOTE)).alias("__lote")).dropDuplicates()
     n_raiz = raiz.count()
     n_lotes_raiz = lotes_raiz.count()
     logger.info("=" * 70)
@@ -6992,8 +7106,7 @@ def _diagnostico_lastro(produto: Optional[str],
         sem_lastro = lotes_raiz.join(lotes_cred, on="__lote", how="left_anti").count()
         logger.info("  %-38s %d", tabela + " (linhas):", n_c)
         logger.info("  %-38s %d", tabela + " (lotes cobertos):", n_lc)
-        logger.info("  %-38s %d   <<< TEM QUE SER 0",
-                    "lotes da raiz SEM lastro:", sem_lastro)
+        logger.info("  %-38s %d   <<< TEM QUE SER 0", "lotes da raiz SEM lastro:", sem_lastro)
         if sem_lastro:
             # Nao aborta de proposito: a poda de dominio "lote sem lastro"
             # ja deveria ter tirado esses instrumentos ANTES da amostragem.
@@ -7003,18 +7116,20 @@ def _diagnostico_lastro(produto: Optional[str],
             logger.warning(
                 "  ATENCAO: %d lote(s) de instrumento sem linha em %s. A poda "
                 "de dominio deveria ter evitado isso; verifique se ela foi "
-                "ignorada por fonte ilegivel.", sem_lastro, tabela)
+                "ignorada por fonte ilegivel.",
+                sem_lastro,
+                tabela,
+            )
         col_cod = COD_CREDITO_POR_TABELA.get(tabela)
         if col_cod and col_cod in lote_c.columns:
-            fora = lote_c.where(
-                ~F.col(col_cod).startswith(COD_CREDITO_PREFIXO_SINTETICO)
-            ).count()
-            logger.info("  %-38s %d   <<< TEM QUE SER 0",
-                        col_cod + " sem prefixo " + COD_CREDITO_PREFIXO_SINTETICO + ":",
-                        fora)
+            fora = lote_c.where(~F.col(col_cod).startswith(COD_CREDITO_PREFIXO_SINTETICO)).count()
+            logger.info(
+                "  %-38s %d   <<< TEM QUE SER 0",
+                col_cod + " sem prefixo " + COD_CREDITO_PREFIXO_SINTETICO + ":",
+                fora,
+            )
     nomes_hist = []
-    for _cred, hists in HISTORICOS_DO_CREDITO_POR_PRODUTO.get(
-            produto or "", {}).items():
+    for _cred, hists in HISTORICOS_DO_CREDITO_POR_PRODUTO.get(produto or "", {}).items():
         nomes_hist.extend(hists)
     for hist in dict.fromkeys(nomes_hist):
         lote_h = lotes.get(hist)
@@ -7056,10 +7171,7 @@ def _calcula_lotes_com_proveniencia(
 
     laterais_planejadas = set(planos).intersection(TABELAS_SEMEADAS_LATERALMENTE)
     if laterais_planejadas and not produto:
-        raise ValueError(
-            "Tabelas laterais planejadas sem produto: "
-            f"{sorted(laterais_planejadas)}"
-        )
+        raise ValueError(f"Tabelas laterais planejadas sem produto: {sorted(laterais_planejadas)}")
 
     def _fonte(tabela: str) -> DataFrame:
         if tabela in fontes:
@@ -7085,7 +7197,8 @@ def _calcula_lotes_com_proveniencia(
     if contagens[TABELA_RAIZ] != len(num_if_valores):
         raise ValueError(
             f"{TABELA_RAIZ}: lote com {contagens[TABELA_RAIZ]} linha(s) para "
-            f"{len(num_if_valores)} NUM_IF — PK duplicada ou seleção inconsistente.")
+            f"{len(num_if_valores)} NUM_IF — PK duplicada ou seleção inconsistente."
+        )
     proveniencias[TABELA_RAIZ] = (
         lotes[TABELA_RAIZ]
         .select(
@@ -7100,7 +7213,13 @@ def _calcula_lotes_com_proveniencia(
     # Semente lateral do lastro (lci/lca). Devolve conjunto VAZIO para todo
     # o resto, e ai o laco abaixo se comporta exatamente como antes.
     semeadas_lateralmente = _semente_lateral_por_lote(
-        spark, config, produto, planos, lotes, proveniencias, contagens,
+        spark,
+        config,
+        produto,
+        planos,
+        lotes,
+        proveniencias,
+        contagens,
         lastros_por_lote,
     )
     for _tab in semeadas_lateralmente:
@@ -7112,8 +7231,7 @@ def _calcula_lotes_com_proveniencia(
             if t == TABELA_RAIZ or t in semeadas_lateralmente:
                 continue
             plano = planos[t]
-            fks_uteis = [fk for fk in plano.fks_remap
-                         if fk.principal and fk.parent_table in lotes]
+            fks_uteis = [fk for fk in plano.fks_remap if fk.principal and fk.parent_table in lotes]
             if not fks_uteis:
                 continue  # pai ainda sem lote nesta passada (ciclo); tenta na próxima
             src = _fonte(t)
@@ -7124,21 +7242,14 @@ def _calcula_lotes_com_proveniencia(
                 parent = proveniencias[fk.parent_table].alias("__parent")
                 join_condition = [
                     F.col(f"__child.{child_col}") == F.col(f"__parent.{parent_col}")
-                    for child_col, parent_col in zip(
-                        fk.columns, fk.parent_columns
-                    )
+                    for child_col, parent_col in zip(fk.columns, fk.parent_columns)
                 ]
                 linked = child.join(F.broadcast(parent), join_condition, "inner")
                 partes.append(linked.select("__child.*"))
                 partes_proveniencia.append(
                     linked.select(
-                        *[
-                            F.col(f"__child.{pk_col}").alias(pk_col)
-                            for pk_col in plano.pk_cols
-                        ],
-                        F.col(f"__parent.{ROOT_PROVENANCE_COL}").alias(
-                            ROOT_PROVENANCE_COL
-                        ),
+                        *[F.col(f"__child.{pk_col}").alias(pk_col) for pk_col in plano.pk_cols],
+                        F.col(f"__parent.{ROOT_PROVENANCE_COL}").alias(ROOT_PROVENANCE_COL),
                     ).dropDuplicates()
                 )
             lote_t = partes[0]
@@ -7149,17 +7260,12 @@ def _calcula_lotes_com_proveniencia(
             proveniencia_t = partes_proveniencia[0]
             for extra in partes_proveniencia[1:]:
                 proveniencia_t = proveniencia_t.unionByName(extra)
-            proveniencia_t = (
-                proveniencia_t.dropDuplicates(
-                    [*plano.pk_cols, ROOT_PROVENANCE_COL]
-                ).transform(_durable_materialize)
-            )
+            proveniencia_t = proveniencia_t.dropDuplicates(
+                [*plano.pk_cols, ROOT_PROVENANCE_COL]
+            ).transform(_durable_materialize)
             n = lote_t.count()
             n_proveniencia = proveniencia_t.count()
-            changed = (
-                contagens.get(t) != n
-                or contagens_proveniencia.get(t) != n_proveniencia
-            )
+            changed = contagens.get(t) != n or contagens_proveniencia.get(t) != n_proveniencia
             if changed:
                 # PRIMEIRA atribuição também conta como mudança: num ciclo de
                 # FKs principais o lote da passada 1 pode estar incompleto
@@ -7189,7 +7295,8 @@ def _calcula_lotes_com_proveniencia(
             raise ValueError(
                 f"Pertencimento não estabilizou em {max_passadas} passada(s)"
                 + (f"; tabela(s) sem lote: {faltando}" if faltando else "")
-                + ". Aumente --max-passadas (ciclos de FK profundos no fecho).")
+                + ". Aumente --max-passadas (ciclos de FK profundos no fecho)."
+            )
     for t in ordem:
         if t not in lotes:
             # Sem caminho principal até a raiz nesta execução: nada a sintetizar.
@@ -7212,25 +7319,22 @@ def _calcula_lotes_com_proveniencia(
             contagens[CRONOGRAMA_TABELA] = lotes[CRONOGRAMA_TABELA].count()
             cronograma_pk = list(planos[CRONOGRAMA_TABELA].pk_cols)
             previous_provenance = proveniencias[CRONOGRAMA_TABELA]
-            proveniencias[CRONOGRAMA_TABELA] = (
-                previous_provenance
-                .join(
-                    F.broadcast(
-                        lotes[CRONOGRAMA_TABELA]
-                        .select(*cronograma_pk)
-                        .dropDuplicates()
-                    ),
-                    cronograma_pk,
-                    "left_semi",
-                )
-                .localCheckpoint(eager=True)
-            )
+            proveniencias[CRONOGRAMA_TABELA] = previous_provenance.join(
+                F.broadcast(lotes[CRONOGRAMA_TABELA].select(*cronograma_pk).dropDuplicates()),
+                cronograma_pk,
+                "left_semi",
+            ).localCheckpoint(eager=True)
             previous_provenance.unpersist(blocking=False)
-            logger.info("poda cronograma [%s]: %d linha(s) removida(s) por pai "
-                        "que não é tipo %s ativo com %s='%s'; restam %d.",
-                        CRONOGRAMA_TABELA, podadas, CONDICAO_IF_TIPO_RESGATE,
-                        COL_COD_COND_RESGATE, COD_COND_RESGATE_COM_TABELA,
-                        contagens[CRONOGRAMA_TABELA])
+            logger.info(
+                "poda cronograma [%s]: %d linha(s) removida(s) por pai "
+                "que não é tipo %s ativo com %s='%s'; restam %d.",
+                CRONOGRAMA_TABELA,
+                podadas,
+                CONDICAO_IF_TIPO_RESGATE,
+                COL_COD_COND_RESGATE,
+                COD_COND_RESGATE_COM_TABELA,
+                contagens[CRONOGRAMA_TABELA],
+            )
     for t in ordem:
         logger.info("Lote %s: %d linha(s).", t, contagens[t])
     if counts_out is not None:
@@ -7239,15 +7343,20 @@ def _calcula_lotes_com_proveniencia(
     return lotes, proveniencias
 
 
-def calcula_lotes(spark, config, spec: dict, planos: Dict[str, PlanoTabela],
-                  ordem: List[str], num_if_valores: List,
-                  max_passadas: int,
-                  somente_ativos: bool = True,
-                  counts_out: Optional[Dict[str, int]] = None,
-                   produto: Optional[str] = None,
-                   lastros_por_lote: int = LASTROS_POR_LOTE_PADRAO,
-                   provenance_out: Optional[Dict[str, DataFrame]] = None,
-                   ) -> Dict[str, DataFrame]:
+def calcula_lotes(
+    spark,
+    config,
+    spec: dict,
+    planos: Dict[str, PlanoTabela],
+    ordem: List[str],
+    num_if_valores: List,
+    max_passadas: int,
+    somente_ativos: bool = True,
+    counts_out: Optional[Dict[str, int]] = None,
+    produto: Optional[str] = None,
+    lastros_por_lote: int = LASTROS_POR_LOTE_PADRAO,
+    provenance_out: Optional[Dict[str, DataFrame]] = None,
+) -> Dict[str, DataFrame]:
     lotes, proveniencias = _calcula_lotes_com_proveniencia(
         spark,
         config,
@@ -7297,12 +7406,8 @@ def _valida_lastro_obrigatorio(produto: str, lotes: Dict[str, DataFrame]) -> Non
             f"Produto {produto}: {tabela} não expõe {COL_NUM_IF}; sem isso não "
             "há como provar o vínculo de lastro por instrumento."
         )
-    raizes = raiz.select(
-        _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")
-    ).dropDuplicates()
-    com_lastro = lastro.select(
-        _norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")
-    ).dropDuplicates()
+    raizes = raiz.select(_norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")).dropDuplicates()
+    com_lastro = lastro.select(_norm_key_col(F.col(COL_NUM_IF)).alias("__num_if")).dropDuplicates()
     sem_lastro = raizes.join(com_lastro, "__num_if", "left_anti")
     n_sem = sem_lastro.count()
     if n_sem:
@@ -7313,16 +7418,19 @@ def _valida_lastro_obrigatorio(produto: str, lotes: Dict[str, DataFrame]) -> Non
             f"query precisa exigir {tabela} — ver o CTE no bloco {produto} de "
             f"{DEFAULT_QUERIES_FILENAME}."
         )
-    logger.info("Lastro obrigatório [%s]: os %d instrumento(s) do lote têm "
-                "linha em %s.", produto, raizes.count(), tabela)
+    logger.info(
+        "Lastro obrigatório [%s]: os %d instrumento(s) do lote têm linha em %s.",
+        produto,
+        raizes.count(),
+        tabela,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Sintetização: lote × K, mapeamento de PK e reescrita de FKs.
 # ---------------------------------------------------------------------------
 def _k_df(spark, fator_k: int) -> DataFrame:
-    return (spark.range(1, fator_k + 1)
-            .select(F.col("id").cast("int").alias(K_COL)))
+    return spark.range(1, fator_k + 1).select(F.col("id").cast("int").alias(K_COL))
 
 
 def _copia_independente(df: DataFrame) -> DataFrame:
@@ -7335,8 +7443,9 @@ def _copia_independente(df: DataFrame) -> DataFrame:
     return df.select(*[F.col(c).alias(c) for c in df.columns])
 
 
-def _monta_mapeamento_pk(clones: DataFrame, plano: PlanoTabela,
-                         mapeamentos: Dict[str, DataFrame]) -> DataFrame:
+def _monta_mapeamento_pk(
+    clones: DataFrame, plano: PlanoTabela, mapeamentos: Dict[str, DataFrame]
+) -> DataFrame:
     """DataFrame de mapeamento da PK desta tabela: colunas old_<pk_i>, K_COL,
     new_<pk_i>. OFFSET_PROPRIO gera valores acima do max real, espaçados de
     plano.pk_passo (1 = contíguo); VIA_PAI deriva do mapeamento do(s) pai(s) —
@@ -7351,17 +7460,21 @@ def _monta_mapeamento_pk(clones: DataFrame, plano: PlanoTabela,
         base = clones.select(*pk, K_COL).dropDuplicates(pk + [K_COL])
         pk_col = pk[0]
         dt = clones.schema[pk_col].dataType
-        com_id = _with_contiguous_row_id(base, "__pk_rid")
+        # Stable source-key order keeps reserved IDs unchanged after repartitioning.
+        com_id = _with_contiguous_row_id(base.orderBy(*pk, K_COL), "__pk_rid")
         passo = max(1, int(plano.pk_passo))
-        mapa = (com_id
-                .withColumn(f"new_{pk_col}",
-                            (F.lit(int(plano.pk_start))
-                             + F.col("__pk_rid") * F.lit(passo))
-                            .cast(dt))
-                .drop("__pk_rid")
-                .select(*[F.col(c).alias(f"old_{c}") for c in pk],
-                        F.col(K_COL).alias(K_COL),
-                        F.col(f"new_{pk_col}").alias(f"new_{pk_col}")))
+        mapa = (
+            com_id.withColumn(
+                f"new_{pk_col}",
+                (F.lit(int(plano.pk_start)) + F.col("__pk_rid") * F.lit(passo)).cast(dt),
+            )
+            .drop("__pk_rid")
+            .select(
+                *[F.col(c).alias(f"old_{c}") for c in pk],
+                F.col(K_COL).alias(K_COL),
+                F.col(f"new_{pk_col}").alias(f"new_{pk_col}"),
+            )
+        )
         return _copia_independente(mapa)
 
     # VIA_PAI: aplica cada FK remapeável que cobre componentes da PK. A base
@@ -7369,41 +7482,48 @@ def _monta_mapeamento_pk(clones: DataFrame, plano: PlanoTabela,
     # composta (A, B) -> PK do pai onde a PK local é só (A) precisa de old_B
     # para o join com o mapeamento do pai. Como a PK é única por linha,
     # dropDuplicates por (pk, K) mantém uma linha por chave.
-    fks_cobrem_pk = [fk for fk in plano.fks_remap
-                     if any(c in plano.pk_cols for c in fk.columns)]
-    cols_base = list(dict.fromkeys(
-        pk + [c for fk in fks_cobrem_pk for c in fk.columns]))
+    fks_cobrem_pk = [fk for fk in plano.fks_remap if any(c in plano.pk_cols for c in fk.columns)]
+    cols_base = list(dict.fromkeys(pk + [c for fk in fks_cobrem_pk for c in fk.columns]))
     base = clones.select(*cols_base, K_COL).dropDuplicates(pk + [K_COL])
-    out = base.select(*[F.col(c).alias(f"old_{c}") for c in cols_base], K_COL,
-                      *[F.col(c).alias(f"new_{c}") for c in pk])
+    out = base.select(
+        *[F.col(c).alias(f"old_{c}") for c in cols_base],
+        K_COL,
+        *[F.col(c).alias(f"new_{c}") for c in pk],
+    )
     for fk in fks_cobrem_pk:
         mapa_pai = mapeamentos.get(fk.parent_table)
         if mapa_pai is None:
             continue  # ciclo sem raiz — já teria abortado no plano
         mapa_pai = _copia_independente(mapa_pai)
-        cond = [out[f"old_{cc}"] == mapa_pai[f"old_{pc}"]
-                for cc, pc in zip(fk.columns, fk.parent_columns)]
+        cond = [
+            out[f"old_{cc}"] == mapa_pai[f"old_{pc}"]
+            for cc, pc in zip(fk.columns, fk.parent_columns)
+        ]
         cond.append(out[K_COL] == mapa_pai[K_COL])
         joined = out.join(F.broadcast(mapa_pai), on=cond, how="left")
         proj = []
         for c in pk:
             if c in fk.columns:
                 pc = fk.parent_columns[list(fk.columns).index(c)]
-                proj.append(F.coalesce(mapa_pai[f"new_{pc}"],
-                                       out[f"new_{c}"]).alias(f"new_{c}"))
+                proj.append(F.coalesce(mapa_pai[f"new_{pc}"], out[f"new_{c}"]).alias(f"new_{c}"))
             else:
                 proj.append(out[f"new_{c}"].alias(f"new_{c}"))
         out = joined.select(
             *[out[f"old_{cb}"].alias(f"old_{cb}") for cb in cols_base],
-            out[K_COL].alias(K_COL), *proj)
-    mapa = out.select(*[F.col(f"old_{c}").alias(f"old_{c}") for c in pk],
-                      F.col(K_COL).alias(K_COL),
-                      *[F.col(f"new_{c}").alias(f"new_{c}") for c in pk])
+            out[K_COL].alias(K_COL),
+            *proj,
+        )
+    mapa = out.select(
+        *[F.col(f"old_{c}").alias(f"old_{c}") for c in pk],
+        F.col(K_COL).alias(K_COL),
+        *[F.col(f"new_{c}").alias(f"new_{c}") for c in pk],
+    )
     return _copia_independente(mapa)
 
 
-def _aplica_remap_fk(clones: DataFrame, fk: FkRemap, mapa_pai: DataFrame,
-                     orig: Dict[str, str]) -> DataFrame:
+def _aplica_remap_fk(
+    clones: DataFrame, fk: FkRemap, mapa_pai: DataFrame, orig: Dict[str, str]
+) -> DataFrame:
     """Reescreve as colunas do grupo de FK via mapeamento do pai, juntando
     pelos valores ORIGINAIS congelados (__orig_*). LEFT join + coalesce(new,
     atual): alvo fora do lote (ou FK NULL) mantém o valor — a política padrão
@@ -7411,16 +7531,20 @@ def _aplica_remap_fk(clones: DataFrame, fk: FkRemap, mapa_pai: DataFrame,
     # Cópia independente: numa self-FK o mapa já está na linhagem de `clones`
     # (passo 1); reutilizar as MESMAS referências seria self-join ambíguo.
     mapa_pai = _copia_independente(mapa_pai)
-    cond = [clones[orig[cc]] == mapa_pai[f"old_{pc}"]
-            for cc, pc in zip(fk.columns, fk.parent_columns)]
+    cond = [
+        clones[orig[cc]] == mapa_pai[f"old_{pc}"] for cc, pc in zip(fk.columns, fk.parent_columns)
+    ]
     cond.append(clones[K_COL] == mapa_pai[K_COL])
     joined = clones.join(F.broadcast(mapa_pai), on=cond, how="left")
     proj = []
     for c in clones.columns:
         if c in fk.columns:
             pc = fk.parent_columns[list(fk.columns).index(c)]
-            proj.append(F.coalesce(mapa_pai[f"new_{pc}"], clones[c])
-                        .cast(clones.schema[c].dataType).alias(c))
+            proj.append(
+                F.coalesce(mapa_pai[f"new_{pc}"], clones[c])
+                .cast(clones.schema[c].dataType)
+                .alias(c)
+            )
         else:
             proj.append(clones[c].alias(c))
     return joined.select(*proj)
@@ -7433,15 +7557,18 @@ def _aplica_genai_replacements(
     replacements: DataFrame,
 ) -> DataFrame:
     required = {
-        "TABLE_NAME", "SOURCE_PK_JSON", "CLONE_INDEX", "COLUMN_NAME",
-        "GENERATED_VALUE", "ACTION",
+        "TABLE_NAME",
+        "SOURCE_PK_JSON",
+        "CLONE_INDEX",
+        "COLUMN_NAME",
+        "GENERATED_VALUE",
+        "ACTION",
     }
     missing = sorted(required - set(replacements.columns))
     if missing:
         raise ValueError(f"GenAI replacements missing columns: {missing}")
     table_replacements = replacements.where(
-        (F.col("TABLE_NAME") == F.lit(plano.name))
-        & (F.col("ACTION") == F.lit("REPLACE"))
+        (F.col("TABLE_NAME") == F.lit(plano.name)) & (F.col("ACTION") == F.lit("REPLACE"))
     )
     columns = [
         str(row["COLUMN_NAME"])
@@ -7455,10 +7582,12 @@ def _aplica_genai_replacements(
     clones = clones.withColumn(
         source_json_col,
         F.to_json(
-            F.struct(*[
-                F.col(orig[column]).cast("string").alias(column)
-                for column in sorted(plano.pk_cols)
-            ]),
+            F.struct(
+                *[
+                    F.col(orig[column]).cast("string").alias(column)
+                    for column in sorted(plano.pk_cols)
+                ]
+            ),
             options={"ignoreNullFields": "false"},
         ),
     )
@@ -7469,14 +7598,11 @@ def _aplica_genai_replacements(
         clone_alias = f"__genai_clone_{index}"
         value_alias = f"__genai_value_{index}"
         present_alias = f"__genai_present_{index}"
-        mapping = (
-            table_replacements.where(F.col("COLUMN_NAME") == F.lit(column))
-            .select(
-                F.col("SOURCE_PK_JSON").alias(source_alias),
-                F.col("CLONE_INDEX").cast("int").alias(clone_alias),
-                F.col("GENERATED_VALUE").alias(value_alias),
-                F.lit(True).alias(present_alias),
-            )
+        mapping = table_replacements.where(F.col("COLUMN_NAME") == F.lit(column)).select(
+            F.col("SOURCE_PK_JSON").alias(source_alias),
+            F.col("CLONE_INDEX").cast("int").alias(clone_alias),
+            F.col("GENERATED_VALUE").alias(value_alias),
+            F.lit(True).alias(present_alias),
         )
         joined = clones.join(
             F.broadcast(mapping),
@@ -7484,15 +7610,12 @@ def _aplica_genai_replacements(
             & (clones[K_COL] == mapping[clone_alias]),
             "left",
         )
-        clones = (
-            joined.withColumn(
-                column,
-                F.when(F.col(present_alias), F.col(value_alias))
-                .otherwise(F.col(column))
-                .cast(clones.schema[column].dataType),
-            )
-            .drop(source_alias, clone_alias, value_alias, present_alias)
-        )
+        clones = joined.withColumn(
+            column,
+            F.when(F.col(present_alias), F.col(value_alias))
+            .otherwise(F.col(column))
+            .cast(clones.schema[column].dataType),
+        ).drop(source_alias, clone_alias, value_alias, present_alias)
     return clones.drop(source_json_col)
 
 
@@ -7516,8 +7639,7 @@ def clona_tabela(
         raise ValueError(f"{plano.name}: coluna {K_COL} já existe na fonte.")
     clones = lote.crossJoin(F.broadcast(_k_df(spark, fator_k)))
 
-    cols_de_join = sorted({*plano.pk_cols,
-                           *(c for fk in plano.fks_remap for c in fk.columns)})
+    cols_de_join = sorted({*plano.pk_cols, *(c for fk in plano.fks_remap for c in fk.columns)})
     orig = {c: f"__orig_{c}" for c in cols_de_join}
     colisao = [oc for oc in orig.values() if oc in clones.columns]
     if colisao:
@@ -7541,8 +7663,9 @@ def clona_tabela(
     proj = []
     for c in clones.columns:
         if c in plano.pk_cols:
-            proj.append(F.coalesce(mapa_p1[f"new_{c}"], clones[c])
-                        .cast(clones.schema[c].dataType).alias(c))
+            proj.append(
+                F.coalesce(mapa_p1[f"new_{c}"], clones[c]).cast(clones.schema[c].dataType).alias(c)
+            )
         else:
             proj.append(clones[c].alias(c))
     clones = joined.select(*proj)
@@ -7553,19 +7676,19 @@ def clona_tabela(
     for fk in plano.fks_remap:
         if all(c in plano.pk_cols for c in fk.columns):
             continue
-        mapa_pai = mapa_pk if fk.parent_table == plano.name \
-            else mapeamentos.get(fk.parent_table)
+        mapa_pai = mapa_pk if fk.parent_table == plano.name else mapeamentos.get(fk.parent_table)
         if mapa_pai is None:
-            logger.warning("%s: mapeamento do pai %s indisponível (ciclo); "
-                           "FK %s mantém valores originais.",
-                           plano.name, fk.parent_table, list(fk.columns))
+            logger.warning(
+                "%s: mapeamento do pai %s indisponível (ciclo); FK %s mantém valores originais.",
+                plano.name,
+                fk.parent_table,
+                list(fk.columns),
+            )
             continue
         clones = _aplica_remap_fk(clones, fk, mapa_pai, orig)
 
     if genai_replacements is not None:
-        clones = _aplica_genai_replacements(
-            clones, plano, orig, genai_replacements
-        )
+        clones = _aplica_genai_replacements(clones, plano, orig, genai_replacements)
 
     return clones.drop(K_COL, *orig.values()), mapa_pk
 
@@ -7573,11 +7696,15 @@ def clona_tabela(
 # ---------------------------------------------------------------------------
 # Relatório de conferência no log: chaves original -> nova de 1 instrumento.
 # ---------------------------------------------------------------------------
-def loga_chaves_amostra(ordem: List[str], planos: Dict[str, PlanoTabela],
-                        lotes: Dict[str, DataFrame],
-                        mapeamentos: Dict[str, DataFrame],
-                        num_if_amostra, fator_k: int,
-                        limite_por_tabela: int = 30) -> None:
+def loga_chaves_amostra(
+    ordem: List[str],
+    planos: Dict[str, PlanoTabela],
+    lotes: Dict[str, DataFrame],
+    mapeamentos: Dict[str, DataFrame],
+    num_if_amostra,
+    fator_k: int,
+    limite_por_tabela: int = 30,
+) -> None:
     """Loga, por tabela, as chaves ORIGINAIS -> NOVAS (todas as cópias k) das
     linhas de UM instrumento do lote, para conferência manual contra o banco
     de origem: use os valores originais no DBeaver
@@ -7586,8 +7713,12 @@ def loga_chaves_amostra(ordem: List[str], planos: Dict[str, PlanoTabela],
     (ex.: subtipos de CONDICAO_IF) mostra as chaves do lote inteiro, até o
     limite — num lote de 1 instrumento é a mesma coisa."""
     logger.info("=" * 78)
-    logger.info("CHAVES DE CONFERÊNCIA — instrumento de amostra NUM_IF=%s × K=%d "
-                "(mapa completo em %s)", num_if_amostra, fator_k, MAPA_NUM_IF_TABLE)
+    logger.info(
+        "CHAVES DE CONFERÊNCIA — instrumento de amostra NUM_IF=%s × K=%d (mapa completo em %s)",
+        num_if_amostra,
+        fator_k,
+        MAPA_NUM_IF_TABLE,
+    )
     logger.info("=" * 78)
     for t in ordem:
         plano = planos.get(t)
@@ -7597,32 +7728,41 @@ def loga_chaves_amostra(ordem: List[str], planos: Dict[str, PlanoTabela],
         lote = lotes[t]
         pk = list(plano.pk_cols)
         tem_num_if = COL_NUM_IF in lote.columns
-        restrito = (lote.where(F.col(COL_NUM_IF) == F.lit(num_if_amostra))
-                    if tem_num_if else lote)
-        chaves = (restrito
-                  .select(*[F.col(c).alias(f"old_{c}") for c in pk])
-                  .dropDuplicates())
+        restrito = lote.where(F.col(COL_NUM_IF) == F.lit(num_if_amostra)) if tem_num_if else lote
+        chaves = restrito.select(*[F.col(c).alias(f"old_{c}") for c in pk]).dropDuplicates()
         cols_old = [f"old_{c}" for c in pk]
-        amostra = (chaves.join(F.broadcast(_copia_independente(mapa)),
-                               on=cols_old, how="inner")
-                   .orderBy(*cols_old, K_COL)
-                   .limit(limite_por_tabela + 1)
-                   .collect())
-        origem = ("linhas do instrumento de amostra" if tem_num_if
-                  else "lote inteiro (tabela sem coluna NUM_IF)")
+        amostra = (
+            chaves.join(F.broadcast(_copia_independente(mapa)), on=cols_old, how="inner")
+            .orderBy(*cols_old, K_COL)
+            .limit(limite_por_tabela + 1)
+            .collect()
+        )
+        origem = (
+            "linhas do instrumento de amostra"
+            if tem_num_if
+            else "lote inteiro (tabela sem coluna NUM_IF)"
+        )
         logger.info("[%s] PK=(%s) — %s:", t, "+".join(pk), origem)
         for r in amostra[:limite_por_tabela]:
             olds = tuple(r[f"old_{c}"] for c in pk)
             news = tuple(r[f"new_{c}"] for c in pk)
-            logger.info("    k=%s  %s -> %s", r[K_COL],
-                        olds[0] if len(olds) == 1 else olds,
-                        news[0] if len(news) == 1 else news)
+            logger.info(
+                "    k=%s  %s -> %s",
+                r[K_COL],
+                olds[0] if len(olds) == 1 else olds,
+                news[0] if len(news) == 1 else news,
+            )
         if len(amostra) > limite_por_tabela:
-            logger.info("    ... truncado em %d chave(s); mapa completo desta "
-                        "tabela sai só no log acima do lote.", limite_por_tabela)
-    logger.info("Conferência no banco original: SELECT * FROM <owner>.<TABELA> "
-                "WHERE <PK> IN (valores ORIGINAIS acima); após a carga, as "
-                "mesmas linhas devem existir com as chaves NOVAS.")
+            logger.info(
+                "    ... truncado em %d chave(s); mapa completo desta "
+                "tabela sai só no log acima do lote.",
+                limite_por_tabela,
+            )
+    logger.info(
+        "Conferência no banco original: SELECT * FROM <owner>.<TABELA> "
+        "WHERE <PK> IN (valores ORIGINAIS acima); após a carga, as "
+        "mesmas linhas devem existir com as chaves NOVAS."
+    )
     logger.info("=" * 78)
 
 
@@ -7632,14 +7772,14 @@ def loga_chaves_amostra(ordem: List[str], planos: Dict[str, PlanoTabela],
 def _validate_meu_numero_prefix(value: Optional[str]) -> str:
     if not isinstance(value, str) or not MEU_PREFIX_PATTERN.fullmatch(value):
         raise argparse.ArgumentTypeError(
-            "--meu-numero-prefix deve ter exatamente 3 dígitos e começar em 1-9")
+            "--meu-numero-prefix deve ter exatamente 3 dígitos e começar em 1-9"
+        )
     return value
 
 
 def _validate_meu_capacity(allocated: int) -> None:
     if allocated > MAX_MEU_NUMERO_ORDINAL:
-        raise ValueError(
-            f"meu-número excede capacidade: {allocated} > {MAX_MEU_NUMERO_ORDINAL}")
+        raise ValueError(f"meu-número excede capacidade: {allocated} > {MAX_MEU_NUMERO_ORDINAL}")
 
 
 def _oracle_credentials(config: Mapping[str, str]) -> Tuple[str, str, str]:
@@ -7692,10 +7832,7 @@ def _oracle_existing_parent_keys(
     if batch_size < 1 or batch_size > 900:
         raise ValueError("batch_size da admissão FK deve estar entre 1 e 900")
     table = _normalize_rule_identifier(table, "FK parent_table", table=True)
-    columns = tuple(
-        _normalize_rule_identifier(column, "FK parent_column")
-        for column in columns
-    )
+    columns = tuple(_normalize_rule_identifier(column, "FK parent_column") for column in columns)
     if not columns:
         raise ValueError("admissão FK exige ao menos uma coluna pai")
     numeric_flags = numeric_flags or tuple(False for _ in columns)
@@ -7714,7 +7851,7 @@ def _oracle_existing_parent_keys(
     try:
         selected = ", ".join(columns)
         for offset in range(0, len(keys), batch_size):
-            batch = keys[offset:offset + batch_size]
+            batch = keys[offset : offset + batch_size]
             if len(columns) == 1:
                 placeholders = ", ".join("?" for _ in batch)
                 predicate = f"{columns[0]} IN ({placeholders})"
@@ -7722,10 +7859,7 @@ def _oracle_existing_parent_keys(
                 tuple_placeholder = "(" + ", ".join("?" for _ in columns) + ")"
                 placeholders = ", ".join(tuple_placeholder for _ in batch)
                 predicate = f"({selected}) IN ({placeholders})"
-            sql = (
-                f"SELECT DISTINCT {selected} FROM CETIP.{table} "
-                f"WHERE {predicate}"
-            )
+            sql = f"SELECT DISTINCT {selected} FROM CETIP.{table} WHERE {predicate}"
             statement = None
             result_set = None
             try:
@@ -7738,11 +7872,12 @@ def _oracle_existing_parent_keys(
                         bind_index += 1
                 result_set = statement.executeQuery()
                 while result_set.next():
-                    existing.add(tuple(
-                        _canon_oracle_key(
-                            result_set.getString(index + 1), numeric_flags[index]
-                        ) for index in range(len(columns))
-                    ))
+                    existing.add(
+                        tuple(
+                            _canon_oracle_key(result_set.getString(index + 1), numeric_flags[index])
+                            for index in range(len(columns))
+                        )
+                    )
             finally:
                 if result_set is not None:
                     result_set.close()
@@ -7768,15 +7903,11 @@ def _apply_oracle_pk_floors(
                 continue
             if len(plano.pk_cols) != 1 or plano.pk_start is None:
                 raise ValueError(f"{table}: OFFSET_PROPRIO exige PK simples e início")
-            pk_col = _normalize_rule_identifier(
-                plano.pk_cols[0], f"{table}.pk"
-            )
+            pk_col = _normalize_rule_identifier(plano.pk_cols[0], f"{table}.pk")
             statement = None
             result_set = None
             try:
-                statement = connection.prepareStatement(
-                    f"SELECT MAX({pk_col}) FROM CETIP.{table}"
-                )
+                statement = connection.prepareStatement(f"SELECT MAX({pk_col}) FROM CETIP.{table}")
                 result_set = statement.executeQuery()
                 raw_max = result_set.getString(1) if result_set.next() else None
             finally:
@@ -7791,8 +7922,7 @@ def _apply_oracle_pk_floors(
         connection.close()
 
 
-def _read_controle_operacional_date(jvm, jdbc_url: str, user: str,
-                                    password: str) -> date:
+def _read_controle_operacional_date(jvm, jdbc_url: str, user: str, password: str) -> date:
     """Lê a data operacional única usada por todo o run."""
     connection = _open_oracle_connection(jvm, jdbc_url, user, password)
     statement = None
@@ -7801,8 +7931,7 @@ def _read_controle_operacional_date(jvm, jdbc_url: str, user: str,
         statement = connection.prepareStatement(CONTROLE_OPERACIONAL_DATE_SQL)
         result_set = statement.executeQuery()
         if not result_set.next():
-            raise ValueError(
-                "CONTROLE_OPERACIONAL não retornou NUM_ORDEM=0/NUM_SISTEMA NULL")
+            raise ValueError("CONTROLE_OPERACIONAL não retornou NUM_ORDEM=0/NUM_SISTEMA NULL")
         raw = result_set.getDate(1)
         if raw is None:
             raise ValueError("CONTROLE_OPERACIONAL.DAT_CTL_OPER está NULL")
@@ -7815,15 +7944,12 @@ def _read_controle_operacional_date(jvm, jdbc_url: str, user: str,
         connection.close()
 
 
-def _allocation_sql(code_kind: str, batch_count: int,
-                    policy: BusinessKeyPolicy) -> str:
+def _allocation_sql(code_kind: str, batch_count: int, policy: BusinessKeyPolicy) -> str:
     if batch_count < 1:
         raise ValueError("batch_count deve ser >= 1")
     if code_kind == "COD_IF":
         if policy.cod_if_allocator != "oracle_if21":
-            raise ValueError(
-                f"alocador COD_IF não implementado: {policy.cod_if_allocator!r}"
-            )
+            raise ValueError(f"alocador COD_IF não implementado: {policy.cod_if_allocator!r}")
         # Defensivo: a policy só chega aqui depois de _resolve_business_policy.
         if policy.cod_if_oracle_type is None:
             raise ValueError(
@@ -7838,19 +7964,27 @@ def _allocation_sql(code_kind: str, batch_count: int,
         if policy.operation is None:
             raise ValueError("perfil não habilita geração de COD_OPERACAO")
         if policy.operation.strategy != "cetip_operacao_v1":
-            raise ValueError(
-                f"estratégia não implementada: {policy.operation.strategy!r}"
-            )
+            raise ValueError(f"estratégia não implementada: {policy.operation.strategy!r}")
         expression = "CETIP.GET_COD_OPERACAO"
     else:
         raise ValueError(f"tipo de código desconhecido: {code_kind}")
-    return (f"SELECT LEVEL ordinal, {expression} code FROM dual "
-            f"CONNECT BY LEVEL <= {int(batch_count)}")
+    return (
+        f"SELECT LEVEL ordinal, {expression} code FROM dual CONNECT BY LEVEL <= {int(batch_count)}"
+    )
 
 
-def _iter_oracle_code_batches(jvm, jdbc_url: str, user: str, password: str, *,
-                              code_kind: str, total: int, batch_size: int,
-                              engorda_date: date, policy: BusinessKeyPolicy):
+def _iter_oracle_code_batches(
+    jvm,
+    jdbc_url: str,
+    user: str,
+    password: str,
+    *,
+    code_kind: str,
+    total: int,
+    batch_size: int,
+    engorda_date: date,
+    policy: BusinessKeyPolicy,
+):
     """Entrega um lote por round-trip; não retém códigos de lotes anteriores."""
     if total < 0 or batch_size < 1:
         raise ValueError("total deve ser >= 0 e batch_size deve ser >= 1")
@@ -7865,7 +7999,8 @@ def _iter_oracle_code_batches(jvm, jdbc_url: str, user: str, password: str, *,
             batch: List[Tuple[int, str]] = []
             try:
                 statement = connection.prepareStatement(
-                    _allocation_sql(code_kind, expected, policy))
+                    _allocation_sql(code_kind, expected, policy)
+                )
                 if code_kind == "COD_IF":
                     statement.setString(1, engorda_date.isoformat())
                 result_set = statement.executeQuery()
@@ -7881,14 +8016,17 @@ def _iter_oracle_code_batches(jvm, jdbc_url: str, user: str, password: str, *,
                     statement.close()
             if len(batch) != expected:
                 raise ValueError(
-                    f"{code_kind}: Oracle retornou {len(batch)} código(s), esperado {expected}")
+                    f"{code_kind}: Oracle retornou {len(batch)} código(s), esperado {expected}"
+                )
             local_ordinals = [ordinal - offset for ordinal, _ in batch]
             if local_ordinals != list(range(1, expected + 1)):
                 raise ValueError(f"{code_kind}: ordinais Oracle incompletos/fora de ordem")
             codes = [code for _, code in batch]
-            pattern = (policy.cod_if_pattern if code_kind == "COD_IF"
-                       else (policy.operation.code_pattern
-                             if policy.operation is not None else None))
+            pattern = (
+                policy.cod_if_pattern
+                if code_kind == "COD_IF"
+                else (policy.operation.code_pattern if policy.operation is not None else None)
+            )
             if not pattern:
                 raise ValueError(f"{code_kind}: pattern não configurado no perfil")
             invalid = [code for code in codes if not re.fullmatch(pattern, code)]
@@ -7903,8 +8041,9 @@ def _iter_oracle_code_batches(jvm, jdbc_url: str, user: str, password: str, *,
             connection.close()
 
 
-def _with_distributed_ordinal(df: DataFrame, order_cols: Sequence[str],
-                              ordinal_col: str = "ORDINAL") -> DataFrame:
+def _with_distributed_ordinal(
+    df: DataFrame, order_cols: Sequence[str], ordinal_col: str = "ORDINAL"
+) -> DataFrame:
     """Ordenação distribuída estável + índice contíguo, sem Window global."""
     if ordinal_col in df.columns:
         raise ValueError(f"colisão de coluna ordinal: {ordinal_col}")
@@ -7915,54 +8054,63 @@ def _with_distributed_ordinal(df: DataFrame, order_cols: Sequence[str],
         ascending=True,
         numPartitions=partitions,
     )
-    indexed = ordered.zipWithIndex().map(
-        lambda pair: tuple(pair[0]) + (int(pair[1]) + 1,))
-    schema = T.StructType(list(df.schema.fields) + [
-        T.StructField(ordinal_col, T.LongType(), False)])
+    indexed = ordered.zipWithIndex().map(lambda pair: tuple(pair[0]) + (int(pair[1]) + 1,))
+    schema = T.StructType(
+        list(df.schema.fields) + [T.StructField(ordinal_col, T.LongType(), False)]
+    )
     return df.sparkSession.createDataFrame(indexed, schema)
 
 
-def _code_slots(df: DataFrame, pk_col: str, old_code_col: str,
-                new_pk_alias: str, old_code_alias: str) -> DataFrame:
+def _code_slots(
+    df: DataFrame, pk_col: str, old_code_col: str, new_pk_alias: str, old_code_alias: str
+) -> DataFrame:
     if pk_col not in df.columns or old_code_col not in df.columns:
         raise ValueError(f"colunas obrigatórias ausentes: {pk_col}, {old_code_col}")
     indexed = _with_distributed_ordinal(df.select(pk_col, old_code_col), [pk_col])
     return indexed.select(
-        "ORDINAL", F.col(pk_col).alias(new_pk_alias),
-        F.col(old_code_col).alias(old_code_alias))
+        "ORDINAL", F.col(pk_col).alias(new_pk_alias), F.col(old_code_col).alias(old_code_alias)
+    )
 
 
 def _dry_placeholder(kind: str, policy: BusinessKeyPolicy):
     if kind == "COD_IF":
-        return F.concat(F.lit(policy.cod_if_dry_prefix),
-                        F.upper(F.lpad(F.conv(F.col("ORDINAL"), 10, 36), 5, "0")))
+        return F.concat(
+            F.lit(policy.cod_if_dry_prefix),
+            F.upper(F.lpad(F.conv(F.col("ORDINAL"), 10, 36), 5, "0")),
+        )
     if kind == "COD_OPERACAO" and policy.operation is not None:
         return F.lpad(F.col("ORDINAL").cast("string"), 16, "0")
     raise ValueError(f"tipo de código não habilitado no perfil: {kind}")
 
 
-def _join_code_chunks(slots: DataFrame, code_chunks: DataFrame,
-                      generated_alias: str) -> DataFrame:
+def _join_code_chunks(slots: DataFrame, code_chunks: DataFrame, generated_alias: str) -> DataFrame:
     return slots.join(code_chunks.select("ORDINAL", generated_alias), on="ORDINAL", how="inner")
 
 
-def _materialize_code_map(spark: SparkSession, slots: DataFrame, *, code_kind: str,
-                           generated_alias: str, out_path: Optional[str], dry_run: bool,
-                           credentials: Optional[Tuple[str, str, str]], batch_size: int,
-                           engorda_date: date, policy: BusinessKeyPolicy,
-                           offline: bool = False) -> DataFrame:
+def _materialize_code_map(
+    spark: SparkSession,
+    slots: DataFrame,
+    *,
+    code_kind: str,
+    generated_alias: str,
+    out_path: Optional[str],
+    dry_run: bool,
+    credentials: Optional[Tuple[str, str, str]],
+    batch_size: int,
+    engorda_date: date,
+    policy: BusinessKeyPolicy,
+    offline: bool = False,
+) -> DataFrame:
     """Anexa códigos por ordinal, mantendo no driver somente o lote corrente."""
     total = slots.count()
     if dry_run or offline:
-        mapping = slots.withColumn(
-            generated_alias, _dry_placeholder(code_kind, policy)
-        )
+        mapping = slots.withColumn(generated_alias, _dry_placeholder(code_kind, policy))
         if offline:
             if out_path is None:
                 raise ValueError("destino é obrigatório para mapa de código offline")
-            mapping.coalesce(_snapshot_partition_count(total)).write.mode(
-                "overwrite"
-            ).parquet(out_path)
+            mapping.coalesce(_snapshot_partition_count(total)).write.mode("overwrite").parquet(
+                out_path
+            )
             return spark.read.parquet(out_path)
         return mapping
     if out_path is None or credentials is None:
@@ -7975,12 +8123,22 @@ def _materialize_code_map(spark: SparkSession, slots: DataFrame, *, code_kind: s
 
     chunk_path = f"{out_path}.__code_chunks"
     for batch in _iter_oracle_code_batches(
-            spark.sparkContext._jvm, jdbc_url, user, password,
-            code_kind=code_kind, total=total, batch_size=batch_size,
-            engorda_date=engorda_date, policy=policy):
-        schema = T.StructType([
-            T.StructField("ORDINAL", T.LongType(), False),
-            T.StructField(generated_alias, T.StringType(), False)])
+        spark.sparkContext._jvm,
+        jdbc_url,
+        user,
+        password,
+        code_kind=code_kind,
+        total=total,
+        batch_size=batch_size,
+        engorda_date=engorda_date,
+        policy=policy,
+    ):
+        schema = T.StructType(
+            [
+                T.StructField("ORDINAL", T.LongType(), False),
+                T.StructField(generated_alias, T.StringType(), False),
+            ]
+        )
         spark.createDataFrame(batch, schema).write.mode("append").parquet(chunk_path)
     code_chunks = spark.read.parquet(chunk_path)
     mapping = _join_code_chunks(slots, code_chunks, generated_alias)
@@ -7988,9 +8146,11 @@ def _materialize_code_map(spark: SparkSession, slots: DataFrame, *, code_kind: s
     _delete_path(spark, chunk_path)
     mapping = spark.read.parquet(out_path)
     pk_column = slots.columns[1]
-    pattern = (policy.cod_if_pattern if code_kind == "COD_IF"
-               else (policy.operation.code_pattern
-                     if policy.operation is not None else None))
+    pattern = (
+        policy.cod_if_pattern
+        if code_kind == "COD_IF"
+        else (policy.operation.code_pattern if policy.operation is not None else None)
+    )
     if not pattern:
         raise ValueError(f"{code_kind}: pattern não configurado no perfil")
     summary = mapping.agg(
@@ -8000,23 +8160,33 @@ def _materialize_code_map(spark: SparkSession, slots: DataFrame, *, code_kind: s
         F.countDistinct(generated_alias).alias("codes"),
         F.count(F.when(~F.col(generated_alias).rlike(pattern), 1)).alias("invalid"),
     ).first()
-    if any(int(summary[name]) != total
-           for name in ("total", "ordinals", "pks", "codes")) or int(summary["invalid"]):
+    if any(int(summary[name]) != total for name in ("total", "ordinals", "pks", "codes")) or int(
+        summary["invalid"]
+    ):
         raise ValueError(f"{code_kind}: mapa Parquet incompleto, duplicado ou malformado")
     return mapping
 
 
-def _attach_generated_code(df: DataFrame, mapping: DataFrame, *, pk_col: str,
-                           new_pk_alias: str, code_col: str,
-                           generated_alias: str) -> DataFrame:
+def _attach_generated_code(
+    df: DataFrame,
+    mapping: DataFrame,
+    *,
+    pk_col: str,
+    new_pk_alias: str,
+    code_col: str,
+    generated_alias: str,
+) -> DataFrame:
     right = mapping.select(new_pk_alias, generated_alias).alias("m")
     left = df.alias("d")
     joined = left.join(right, F.col(f"d.{pk_col}") == F.col(f"m.{new_pk_alias}"), "left")
-    return joined.select(*[
-        F.col(f"m.{generated_alias}").cast(df.schema[c].dataType).alias(c)
-        if c == code_col else F.col(f"d.{c}").alias(c)
-        for c in df.columns
-    ])
+    return joined.select(
+        *[
+            F.col(f"m.{generated_alias}").cast(df.schema[c].dataType).alias(c)
+            if c == code_col
+            else F.col(f"d.{c}").alias(c)
+            for c in df.columns
+        ]
+    )
 
 
 def _write_offline_artifact_marker(
@@ -8049,9 +8219,13 @@ def _generate_meu_numeros(
 ) -> DataFrame:
     _validate_meu_numero_prefix(prefix)
     required = {
-        "NUM_ID_OPERACAO", "DAT_OPERACAO", "NUM_CONTA_PARTICIPANTE_P1",
-        "NUM_CONTA_PARTICIPANTE_P2", "NUM_CONTROLE_LANCAMENTO_P1",
-        "NUM_CONTROLE_LANCAMENTO_P2", "NUM_ID_TIPO_OPER_OBJETO_SERV",
+        "NUM_ID_OPERACAO",
+        "DAT_OPERACAO",
+        "NUM_CONTA_PARTICIPANTE_P1",
+        "NUM_CONTA_PARTICIPANTE_P2",
+        "NUM_CONTROLE_LANCAMENTO_P1",
+        "NUM_CONTROLE_LANCAMENTO_P2",
+        "NUM_ID_TIPO_OPER_OBJETO_SERV",
     }
     missing = sorted(required - set(operacoes.columns))
     if missing:
@@ -8059,10 +8233,13 @@ def _generate_meu_numeros(
     norm_p1 = _norm_key_col(F.col("NUM_CONTA_PARTICIPANTE_P1"))
     norm_p2 = _norm_key_col(F.col("NUM_CONTA_PARTICIPANTE_P2"))
     staged = operacoes.withColumn("__meu_same_account", norm_p1.eqNullSafe(norm_p2))
-    allocations = (staged.select(
-        "NUM_ID_OPERACAO", F.lit(1).cast("int").alias("__meu_side"))
-        .unionByName(staged.where("__meu_same_account").select(
-            "NUM_ID_OPERACAO", F.lit(2).cast("int").alias("__meu_side"))))
+    allocations = staged.select(
+        "NUM_ID_OPERACAO", F.lit(1).cast("int").alias("__meu_side")
+    ).unionByName(
+        staged.where("__meu_same_account").select(
+            "NUM_ID_OPERACAO", F.lit(2).cast("int").alias("__meu_side")
+        )
+    )
     allocated = allocations.count()
     if ordinal_start < 1:
         raise ValueError("meu-número: ordinal_start deve ser >= 1")
@@ -8073,33 +8250,41 @@ def _generate_meu_numeros(
             f"{allocated} alocação(ões)"
         )
     _validate_meu_capacity(expected_end)
-    allocation_map = _with_distributed_ordinal(
-        allocations, ["NUM_ID_OPERACAO", "__meu_side"], "__meu_ord"
-    ).withColumn(
-        "__meu_ord", F.col("__meu_ord") + F.lit(ordinal_start - 1)
-    ).localCheckpoint(eager=True)
+    allocation_map = (
+        _with_distributed_ordinal(allocations, ["NUM_ID_OPERACAO", "__meu_side"], "__meu_ord")
+        .withColumn("__meu_ord", F.col("__meu_ord") + F.lit(ordinal_start - 1))
+        .localCheckpoint(eager=True)
+    )
     p1_map = allocation_map.where(F.col("__meu_side") == 1).select(
-        "NUM_ID_OPERACAO", F.col("__meu_ord").alias("__meu_p1_ord"))
+        "NUM_ID_OPERACAO", F.col("__meu_ord").alias("__meu_p1_ord")
+    )
     p2_map = allocation_map.where(F.col("__meu_side") == 2).select(
-        "NUM_ID_OPERACAO", F.col("__meu_ord").alias("__meu_p2_allocated_ord"))
-    staged = (staged.join(p1_map, on="NUM_ID_OPERACAO", how="inner")
-              .join(p2_map, on="NUM_ID_OPERACAO", how="left")
-              .withColumn(
-                  "__meu_p2_ord",
-                  F.coalesce(F.col("__meu_p2_allocated_ord"), F.col("__meu_p1_ord"))))
+        "NUM_ID_OPERACAO", F.col("__meu_ord").alias("__meu_p2_allocated_ord")
+    )
+    staged = (
+        staged.join(p1_map, on="NUM_ID_OPERACAO", how="inner")
+        .join(p2_map, on="NUM_ID_OPERACAO", how="left")
+        .withColumn(
+            "__meu_p2_ord", F.coalesce(F.col("__meu_p2_allocated_ord"), F.col("__meu_p1_ord"))
+        )
+    )
 
     def _control(ordinal_col: str):
         return F.concat(F.lit(prefix), F.lpad(F.col(ordinal_col).cast("string"), 7, "0"))
 
     dat_type = operacoes.schema["DAT_OPERACAO"].dataType
-    return (staged
-            .withColumn("DAT_OPERACAO", _date_literal_for_type(engorda_date, dat_type))
-            .withColumn("NUM_CONTROLE_LANCAMENTO_P1", _control("__meu_p1_ord").cast(
-                operacoes.schema["NUM_CONTROLE_LANCAMENTO_P1"].dataType))
-            .withColumn("NUM_CONTROLE_LANCAMENTO_P2", _control("__meu_p2_ord").cast(
-                operacoes.schema["NUM_CONTROLE_LANCAMENTO_P2"].dataType))
-            .drop("__meu_p1_ord", "__meu_p2_ord", "__meu_p2_allocated_ord",
-                  "__meu_same_account"))
+    return (
+        staged.withColumn("DAT_OPERACAO", _date_literal_for_type(engorda_date, dat_type))
+        .withColumn(
+            "NUM_CONTROLE_LANCAMENTO_P1",
+            _control("__meu_p1_ord").cast(operacoes.schema["NUM_CONTROLE_LANCAMENTO_P1"].dataType),
+        )
+        .withColumn(
+            "NUM_CONTROLE_LANCAMENTO_P2",
+            _control("__meu_p2_ord").cast(operacoes.schema["NUM_CONTROLE_LANCAMENTO_P2"].dataType),
+        )
+        .drop("__meu_p1_ord", "__meu_p2_ord", "__meu_p2_allocated_ord", "__meu_same_account")
+    )
 
 
 def _normalized_meu_sides(operacoes: DataFrame) -> DataFrame:
@@ -8117,9 +8302,7 @@ def _normalized_meu_sides(operacoes: DataFrame) -> DataFrame:
         operacoes.select(
             "NUM_ID_OPERACAO",
             F.lit(side_number).cast("int").alias("__meu_side"),
-            _norm_key_col(F.col(f"NUM_CONTA_PARTICIPANTE_{side_name}")).alias(
-                "__meu_account"
-            ),
+            _norm_key_col(F.col(f"NUM_CONTA_PARTICIPANTE_{side_name}")).alias("__meu_account"),
             tos.alias("__meu_tos"),
         )
         for side_number, side_name in ((1, "P1"), (2, "P2"))
@@ -8128,9 +8311,7 @@ def _normalized_meu_sides(operacoes: DataFrame) -> DataFrame:
 
 
 def _meu_group_id(account: str, tos: str) -> str:
-    canonical_tuple = json.dumps(
-        [account, tos], ensure_ascii=True, separators=(",", ":")
-    )
+    canonical_tuple = json.dumps([account, tos], ensure_ascii=True, separators=(",", ":"))
     return hashlib.sha256(canonical_tuple.encode("ascii")).hexdigest()
 
 
@@ -8152,16 +8333,13 @@ def _grouped_meu_numero_descriptor(
     else:
         grouped_rows = sides.groupBy("__meu_account", "__meu_tos").count().collect()
     if any(
-        row["__meu_account"] in {None, ""} or row["__meu_tos"] in {None, ""}
-        for row in grouped_rows
+        row["__meu_account"] in {None, ""} or row["__meu_tos"] in {None, ""} for row in grouped_rows
     ):
         raise ValueError("meu-número: conta/TOS nulo ou vazio")
     groups = sorted(
         (
             {
-                "group_id": _meu_group_id(
-                    str(row["__meu_account"]), str(row["__meu_tos"])
-                ),
+                "group_id": _meu_group_id(str(row["__meu_account"]), str(row["__meu_tos"])),
                 "count_demand": int(row["count"]) * fator_k,
             }
             for row in grouped_rows
@@ -8175,9 +8353,7 @@ def _grouped_meu_numero_descriptor(
         "operational_date": operational_date.isoformat(),
         "normalization": MEU_NUMERO_NORMALIZATION,
         "tuple_count_demand": sum(group["count_demand"] for group in groups),
-        "ordinal_count_demand": max(
-            (group["count_demand"] for group in groups), default=0
-        ),
+        "ordinal_count_demand": max((group["count_demand"] for group in groups), default=0),
         "groups": groups,
     }
     if requested_prefix is not None:
@@ -8218,16 +8394,13 @@ def _generate_grouped_meu_numeros(
     sides = _normalized_meu_sides(operacoes)
     grouped_rows = sides.groupBy("__meu_account", "__meu_tos").count().collect()
     if any(
-        row["__meu_account"] in {None, ""} or row["__meu_tos"] in {None, ""}
-        for row in grouped_rows
+        row["__meu_account"] in {None, ""} or row["__meu_tos"] in {None, ""} for row in grouped_rows
     ):
         raise ValueError("meu-número: conta/TOS nulo ou vazio")
     actual_groups = sorted(
         (
             {
-                "group_id": _meu_group_id(
-                    str(row["__meu_account"]), str(row["__meu_tos"])
-                ),
+                "group_id": _meu_group_id(str(row["__meu_account"]), str(row["__meu_tos"])),
                 "count_demand": int(row["count"]),
             }
             for row in grouped_rows
@@ -8235,9 +8408,7 @@ def _generate_grouped_meu_numeros(
         key=lambda group: group["group_id"],
     )
     actual_tuple_count = sum(group["count_demand"] for group in actual_groups)
-    actual_ordinal_count = max(
-        (group["count_demand"] for group in actual_groups), default=0
-    )
+    actual_ordinal_count = max((group["count_demand"] for group in actual_groups), default=0)
     if (
         descriptor.get("groups") != actual_groups
         or descriptor.get("tuple_count_demand") != actual_tuple_count
@@ -8277,15 +8448,11 @@ def _generate_grouped_meu_numeros(
         .withColumn("DAT_OPERACAO", _date_literal_for_type(engorda_date, dat_type))
         .withColumn(
             "NUM_CONTROLE_LANCAMENTO_P1",
-            F.col("__meu_p1_control").cast(
-                operacoes.schema["NUM_CONTROLE_LANCAMENTO_P1"].dataType
-            ),
+            F.col("__meu_p1_control").cast(operacoes.schema["NUM_CONTROLE_LANCAMENTO_P1"].dataType),
         )
         .withColumn(
             "NUM_CONTROLE_LANCAMENTO_P2",
-            F.col("__meu_p2_control").cast(
-                operacoes.schema["NUM_CONTROLE_LANCAMENTO_P2"].dataType
-            ),
+            F.col("__meu_p2_control").cast(operacoes.schema["NUM_CONTROLE_LANCAMENTO_P2"].dataType),
         )
     )
     return generated.select(*operacoes.columns)
@@ -8294,16 +8461,22 @@ def _generate_grouped_meu_numeros(
 def _flatten_meu_tuples(operacoes: DataFrame) -> DataFrame:
     pieces = []
     for side in ("P1", "P2"):
-        pieces.append(operacoes.select(
-            F.date_trunc("second", F.col("DAT_OPERACAO").cast("timestamp")).alias(
-                "DAT_OPERACAO"),
-            _norm_key_col(F.col(f"NUM_CONTA_PARTICIPANTE_{side}")).alias(
-                "NUM_CONTA_PARTICIPANTE"),
-            F.col(f"NUM_CONTROLE_LANCAMENTO_{side}").cast("string").alias(
-                "NUM_CONTROLE_LANCAMENTO"),
-            _norm_key_col(F.col("NUM_ID_TIPO_OPER_OBJETO_SERV")).alias(
-                "NUM_ID_TIPO_OPER_OBJETO_SERV"),
-        ))
+        pieces.append(
+            operacoes.select(
+                F.date_trunc("second", F.col("DAT_OPERACAO").cast("timestamp")).alias(
+                    "DAT_OPERACAO"
+                ),
+                _norm_key_col(F.col(f"NUM_CONTA_PARTICIPANTE_{side}")).alias(
+                    "NUM_CONTA_PARTICIPANTE"
+                ),
+                F.col(f"NUM_CONTROLE_LANCAMENTO_{side}")
+                .cast("string")
+                .alias("NUM_CONTROLE_LANCAMENTO"),
+                _norm_key_col(F.col("NUM_ID_TIPO_OPER_OBJETO_SERV")).alias(
+                    "NUM_ID_TIPO_OPER_OBJETO_SERV"
+                ),
+            )
+        )
     return pieces[0].unionByName(pieces[1])
 
 
@@ -8324,11 +8497,8 @@ def _validated_root_cod_if_map(instrumentos: DataFrame) -> DataFrame:
         | (F.trim(F.col("__root_cod_if").cast("string")) == "")
     ).count()
     if invalid:
-        raise ValueError(
-            "INSTRUMENTO_FINANCEIRO: mapeamento NUM_IF -> COD_IF ausente/vazio"
-        )
-    duplicates = (roots.groupBy("__num_if").count()
-                  .where(F.col("count") != 1).limit(1).count())
+        raise ValueError("INSTRUMENTO_FINANCEIRO: mapeamento NUM_IF -> COD_IF ausente/vazio")
+    duplicates = roots.groupBy("__num_if").count().where(F.col("count") != 1).limit(1).count()
     if duplicates:
         raise ValueError("INSTRUMENTO_FINANCEIRO: mapeamento NUM_IF -> COD_IF duplicado")
     return roots
@@ -8342,41 +8512,48 @@ def _propagate_root_cod_if(instrumentos: DataFrame, operacoes: DataFrame) -> Dat
     if not isinstance(operacoes.schema["COD_IF"].dataType, T.StringType):
         raise ValueError("OPERACAO.COD_IF precisa ter tipo textual StringType")
 
-    roots = _validated_root_cod_if_map(instrumentos).withColumn(
-        "__root_found", F.lit(True)
+    roots = _validated_root_cod_if_map(instrumentos).withColumn("__root_found", F.lit(True))
+    joined = operacoes.withColumn("__num_if", _norm_key_col(F.col(COL_NUM_IF))).join(
+        roots, "__num_if", "left"
     )
-    joined = operacoes.withColumn(
-        "__num_if", _norm_key_col(F.col(COL_NUM_IF))
-    ).join(roots, "__num_if", "left")
-    unmatched = joined.where(
-        F.col("__num_if").isNull()
-        | (F.col("__num_if") == "")
-        | F.col("__root_found").isNull()
-    ).limit(1).count()
+    unmatched = (
+        joined.where(
+            F.col("__num_if").isNull() | (F.col("__num_if") == "") | F.col("__root_found").isNull()
+        )
+        .limit(1)
+        .count()
+    )
     if unmatched:
         raise ValueError("OPERACAO: NUM_IF sem mapeamento ativo de COD_IF na raiz")
 
-    propagated = joined.select(*[
-        F.col("__root_cod_if").cast("string").alias(column)
-        if column == "COD_IF" else F.col(column)
-        for column in operacoes.columns
-    ])
-    compared = propagated.withColumn(
-        "__num_if", _norm_key_col(F.col(COL_NUM_IF))
-    ).join(roots.select("__num_if", "__root_cod_if"), "__num_if", "left")
-    invalid = compared.where(
-        F.col("COD_IF").isNull()
-        | F.col("__root_cod_if").isNull()
-        | (F.trim(F.col("COD_IF")) != F.trim(F.col("__root_cod_if").cast("string")))
-    ).limit(1).count()
+    propagated = joined.select(
+        *[
+            F.col("__root_cod_if").cast("string").alias(column)
+            if column == "COD_IF"
+            else F.col(column)
+            for column in operacoes.columns
+        ]
+    )
+    compared = propagated.withColumn("__num_if", _norm_key_col(F.col(COL_NUM_IF))).join(
+        roots.select("__num_if", "__root_cod_if"), "__num_if", "left"
+    )
+    invalid = (
+        compared.where(
+            F.col("COD_IF").isNull()
+            | F.col("__root_cod_if").isNull()
+            | (F.trim(F.col("COD_IF")) != F.trim(F.col("__root_cod_if").cast("string")))
+        )
+        .limit(1)
+        .count()
+    )
     if invalid:
         raise ValueError("OPERACAO.COD_IF não preservou exatamente o código textual da raiz")
     return propagated
 
 
-def _validate_business_keys(instrumentos: DataFrame,
-                            operacoes: Optional[DataFrame],
-                            policy: BusinessKeyPolicy) -> None:
+def _validate_business_keys(
+    instrumentos: DataFrame, operacoes: Optional[DataFrame], policy: BusinessKeyPolicy
+) -> None:
     try:
         roots = _validated_root_cod_if_map(instrumentos)
     except ValueError as exc:
@@ -8386,15 +8563,12 @@ def _validate_business_keys(instrumentos: DataFrame,
     checks = [(instrumentos, "COD_IF", policy.cod_if_pattern)]
     if operation is not None:
         if operacoes is None:
-            raise ValueError(
-                "Validação final de chaves de negócio FALHOU: OPERACAO ausente"
-            )
+            raise ValueError("Validação final de chaves de negócio FALHOU: OPERACAO ausente")
         required = {COL_NUM_IF, "COD_IF", "COD_OPERACAO"}
         missing = sorted(required - set(operacoes.columns))
         if missing:
             raise ValueError(
-                "Validação final de chaves de negócio FALHOU: "
-                f"OPERACAO sem coluna(s): {missing}"
+                f"Validação final de chaves de negócio FALHOU: OPERACAO sem coluna(s): {missing}"
             )
         if not isinstance(operacoes.schema["COD_IF"].dataType, T.StringType):
             raise ValueError(
@@ -8409,15 +8583,13 @@ def _validate_business_keys(instrumentos: DataFrame,
             errors.append(f"{column}: pattern ausente no perfil")
             continue
         total = df.count()
-        invalid = df.where(
-            F.col(column).isNull() | ~F.trim(F.col(column)).rlike(pattern)).count()
+        invalid = df.where(F.col(column).isNull() | ~F.trim(F.col(column)).rlike(pattern)).count()
         distinct = df.select(F.trim(F.col(column))).dropDuplicates().count()
         if invalid:
             errors.append(f"{column}: {invalid} valor(es) vazio(s)/malformado(s)")
         if distinct != total:
             errors.append(f"{column}: {total - distinct} duplicata(s)")
-    if (operation is not None and operation.generate_meu_numero
-            and operacoes is not None):
+    if operation is not None and operation.generate_meu_numero and operacoes is not None:
         tuples = _flatten_meu_tuples(operacoes)
         total_tuples = tuples.count()
         incomplete = tuples.where(
@@ -8431,27 +8603,21 @@ def _validate_business_keys(instrumentos: DataFrame,
         ).count()
         distinct_tuples = tuples.dropDuplicates().count()
         if incomplete:
-            errors.append(
-                f"meu-número: {incomplete} tupla(s) incompleta(s)/malformada(s)"
-            )
+            errors.append(f"meu-número: {incomplete} tupla(s) incompleta(s)/malformada(s)")
         if distinct_tuples != total_tuples:
-            errors.append(
-                f"meu-número: {total_tuples - distinct_tuples} colisão(ões) interna(s)"
-            )
+            errors.append(f"meu-número: {total_tuples - distinct_tuples} colisão(ões) interna(s)")
     if operation is not None and operacoes is not None:
-        compared = operacoes.withColumn(
-            "__num_if", _norm_key_col(F.col(COL_NUM_IF))
-        ).join(roots, "__num_if", "left")
+        compared = operacoes.withColumn("__num_if", _norm_key_col(F.col(COL_NUM_IF))).join(
+            roots, "__num_if", "left"
+        )
         mismatches = compared.where(
             F.col("__root_cod_if").isNull()
             | F.col("COD_IF").isNull()
-            | (F.trim(F.col("COD_IF")) !=
-               F.trim(F.col("__root_cod_if").cast("string")))
+            | (F.trim(F.col("COD_IF")) != F.trim(F.col("__root_cod_if").cast("string")))
         ).count()
         if mismatches:
             errors.append(
-                "OPERACAO.COD_IF: "
-                f"{mismatches} valor(es) divergente(s) da raiz por NUM_IF"
+                f"OPERACAO.COD_IF: {mismatches} valor(es) divergente(s) da raiz por NUM_IF"
             )
     if errors:
         raise ValueError("Validação final de chaves de negócio FALHOU: " + "; ".join(errors))
@@ -8480,22 +8646,24 @@ def _validate_disabled_operation_output(
 def _assert_no_meu_collisions(operacoes: DataFrame, existing: DataFrame) -> None:
     generated = _flatten_meu_tuples(operacoes).dropDuplicates()
     normalized_existing = existing.select(
-        F.date_trunc("second", F.col("DAT_OPERACAO").cast("timestamp")).alias(
-            "DAT_OPERACAO"),
-        _norm_key_col(F.col("NUM_CONTA_PARTICIPANTE")).alias(
-            "NUM_CONTA_PARTICIPANTE"),
-        F.col("NUM_CONTROLE_LANCAMENTO").cast("string").alias(
-            "NUM_CONTROLE_LANCAMENTO"),
-        _norm_key_col(F.col("NUM_ID_TIPO_OPER_OBJETO_SERV")).alias(
-            "NUM_ID_TIPO_OPER_OBJETO_SERV"),
+        F.date_trunc("second", F.col("DAT_OPERACAO").cast("timestamp")).alias("DAT_OPERACAO"),
+        _norm_key_col(F.col("NUM_CONTA_PARTICIPANTE")).alias("NUM_CONTA_PARTICIPANTE"),
+        F.col("NUM_CONTROLE_LANCAMENTO").cast("string").alias("NUM_CONTROLE_LANCAMENTO"),
+        _norm_key_col(F.col("NUM_ID_TIPO_OPER_OBJETO_SERV")).alias("NUM_ID_TIPO_OPER_OBJETO_SERV"),
     ).dropDuplicates()
     if generated.join(normalized_existing, generated.columns, "left_semi").limit(1).count():
         raise ValueError("preflight Oracle: colisão de tupla meu-número no destino")
 
 
-def _read_existing_meu_tuples(spark: SparkSession, credentials: Tuple[str, str, str], *,
-                              engorda_date: date, prefix: str, temp_path: str,
-                              chunk_size: int = 50_000) -> DataFrame:
+def _read_existing_meu_tuples(
+    spark: SparkSession,
+    credentials: Tuple[str, str, str],
+    *,
+    engorda_date: date,
+    prefix: str,
+    temp_path: str,
+    chunk_size: int = 50_000,
+) -> DataFrame:
     jdbc_url, user, password = credentials
     sql = """
         SELECT DAT_OPERACAO, NUM_CONTA_PARTICIPANTE, NUM_CONTROLE_LANCAMENTO,
@@ -8520,12 +8688,14 @@ def _read_existing_meu_tuples(spark: SparkSession, credentials: Tuple[str, str, 
               AND NUM_CONTROLE_LANCAMENTO_P2 LIKE ?
         )
     """
-    schema = T.StructType([
-        T.StructField("DAT_OPERACAO", T.StringType(), False),
-        T.StructField("NUM_CONTA_PARTICIPANTE", T.StringType(), False),
-        T.StructField("NUM_CONTROLE_LANCAMENTO", T.StringType(), False),
-        T.StructField("NUM_ID_TIPO_OPER_OBJETO_SERV", T.StringType(), False),
-    ])
+    schema = T.StructType(
+        [
+            T.StructField("DAT_OPERACAO", T.StringType(), False),
+            T.StructField("NUM_CONTA_PARTICIPANTE", T.StringType(), False),
+            T.StructField("NUM_CONTROLE_LANCAMENTO", T.StringType(), False),
+            T.StructField("NUM_ID_TIPO_OPER_OBJETO_SERV", T.StringType(), False),
+        ]
+    )
     connection = statement = result_set = None
     wrote = False
     try:
@@ -8539,8 +8709,9 @@ def _read_existing_meu_tuples(spark: SparkSession, credentials: Tuple[str, str, 
         chunk: List[Tuple[str, str, str, str]] = []
         while result_set.next():
             timestamp = result_set.getTimestamp(1)
-            timestamp_text = str(timestamp.toString()) if hasattr(timestamp, "toString") \
-                else str(timestamp)
+            timestamp_text = (
+                str(timestamp.toString()) if hasattr(timestamp, "toString") else str(timestamp)
+            )
             values = (timestamp_text,) + tuple(result_set.getString(i) for i in range(2, 5))
             chunk.append(tuple(str(value) for value in values))
             if len(chunk) >= chunk_size:
@@ -8563,39 +8734,43 @@ def _read_existing_meu_tuples(spark: SparkSession, credentials: Tuple[str, str, 
 # ---------------------------------------------------------------------------
 # Validações pré-escrita.
 # ---------------------------------------------------------------------------
-def valida_tabela(spec_cfg: dict, plano: PlanoTabela, clones: DataFrame,
-                  n_lote: int, fator_k: int) -> List[str]:
+def valida_tabela(
+    spec_cfg: dict, plano: PlanoTabela, clones: DataFrame, n_lote: int, fator_k: int
+) -> List[str]:
     """Devolve a lista de ERROS da tabela (vazia = ok). Uma única passada de
     agregação por checagem; os sintéticos são pequenos (lote × K)."""
     erros: List[str] = []
     esperado = n_lote * fator_k
     total = clones.count()
     if total != esperado:
-        erros.append(f"contagem: {total} sintético(s), esperado {esperado} "
-                     f"(lote {n_lote} × K {fator_k})")
+        erros.append(
+            f"contagem: {total} sintético(s), esperado {esperado} (lote {n_lote} × K {fator_k})"
+        )
 
     if total:
         pk = list(plano.pk_cols)
         distintos = clones.select(*pk).dropDuplicates().count()
         if distintos != total:
-            erros.append(f"PK nova duplicada: {total - distintos} colisão(ões) "
-                         f"interna(s) em {pk}")
+            erros.append(f"PK nova duplicada: {total - distintos} colisão(ões) interna(s) em {pk}")
         if plano.pk_regra == "OFFSET_PROPRIO":
             pk_col = pk[0]
             minimo = clones.agg(F.min(F.col(pk_col))).first()[0]
             if minimo is not None and int(minimo) < int(plano.pk_start):
-                erros.append(f"PK nova abaixo do início seguro: min({pk_col})="
-                             f"{minimo} < {plano.pk_start}")
+                erros.append(
+                    f"PK nova abaixo do início seguro: min({pk_col})={minimo} < {plano.pk_start}"
+                )
 
         nn = sorted(c for c in _not_null_cols(spec_cfg) if c in clones.columns)
         if nn:
-            row = clones.agg(*[
-                F.count(F.when(_null_efetivo_pred(clones, c), F.lit(1))).alias(c)
-                for c in nn]).first()
+            row = clones.agg(
+                *[F.count(F.when(_null_efetivo_pred(clones, c), F.lit(1))).alias(c) for c in nn]
+            ).first()
             for c in nn:
                 if int(row[c]) > 0:
-                    erros.append(f"NOT NULL violado: {c} com {int(row[c])} "
-                                 "nulo(s) efetivo(s) (ORA-01400 na carga)")
+                    erros.append(
+                        f"NOT NULL violado: {c} com {int(row[c])} "
+                        "nulo(s) efetivo(s) (ORA-01400 na carga)"
+                    )
     return erros
 
 
@@ -8612,9 +8787,7 @@ def _delete_path(spark: SparkSession, path: str) -> None:
         raise ValueError(f"não foi possível apagar caminho de trabalho: {path}")
 
 
-def _promote_staging_paths(
-    fs, staging, final, backup, *, require_absent: bool = False
-) -> None:
+def _promote_staging_paths(fs, staging, final, backup, *, require_absent: bool = False) -> None:
     """Promove staging com rollback explícito, sem alegar atomicidade.
 
     Object stores podem implementar rename como copy+delete. Existe uma janela
@@ -8633,7 +8806,10 @@ def _promote_staging_paths(
     if had_previous:
         logger.warning(
             "Publicação object-store não atômica: se o processo cair entre renames, "
-            "restaure manualmente %s para %s.", backup_text, final_text)
+            "restaure manualmente %s para %s.",
+            backup_text,
+            final_text,
+        )
         try:
             preserved = bool(fs.rename(final, backup))
             backup_exists = bool(fs.exists(backup))
@@ -8642,7 +8818,8 @@ def _promote_staging_paths(
         if not preserved or not backup_exists:
             raise RuntimeError(
                 "CRÍTICO: não foi possível verificar a preservação do destino anterior; "
-                f"caminho de backup esperado: {backup_text}")
+                f"caminho de backup esperado: {backup_text}"
+            )
 
     try:
         promoted = bool(fs.rename(staging, final))
@@ -8657,7 +8834,8 @@ def _promote_staging_paths(
         except Exception:
             raise RuntimeError(
                 "CRÍTICO: promoção falhou e o destino parcial não pôde ser verificado; "
-                f"backup para recuperação manual: {backup_text}") from None
+                f"backup para recuperação manual: {backup_text}"
+            ) from None
         if partial_exists:
             try:
                 partial_deleted = bool(fs.delete(final, True))
@@ -8666,7 +8844,8 @@ def _promote_staging_paths(
             if not partial_deleted:
                 raise RuntimeError(
                     "CRÍTICO: promoção falhou e o destino parcial não pôde ser removido; "
-                    f"backup para recuperação manual: {backup_text}")
+                    f"backup para recuperação manual: {backup_text}"
+                )
         try:
             restored = bool(fs.rename(backup, final))
             restored_exists = bool(fs.exists(final))
@@ -8675,9 +8854,9 @@ def _promote_staging_paths(
         if not restored or not restored_exists:
             raise RuntimeError(
                 "CRÍTICO: promoção e restauração do destino anterior falharam; "
-                f"recupere manualmente o backup {backup_text} para {final_text}")
-        raise ValueError(
-            "falha ao promover staging; destino anterior restaurado e verificado")
+                f"recupere manualmente o backup {backup_text} para {final_text}"
+            )
+        raise ValueError("falha ao promover staging; destino anterior restaurado e verificado")
 
     if had_previous:
         try:
@@ -8688,7 +8867,9 @@ def _promote_staging_paths(
         if not deleted or backup_remains:
             logger.warning(
                 "Destino novo publicado e verificado, mas a limpeza do backup falhou; "
-                "remova manualmente %s. O destino final não foi alterado.", backup_text)
+                "remova manualmente %s. O destino final não foi alterado.",
+                backup_text,
+            )
 
 
 def _publish_staging(
@@ -8704,14 +8885,16 @@ def _publish_staging(
     final = jvm.org.apache.hadoop.fs.Path(final_path)
     backup = jvm.org.apache.hadoop.fs.Path(f"{final_path}.__previous_{uuid.uuid4().hex}")
     fs = final.getFileSystem(jsc.hadoopConfiguration())
-    _promote_staging_paths(
-        fs, staging, final, backup, require_absent=require_absent
-    )
+    _promote_staging_paths(fs, staging, final, backup, require_absent=require_absent)
 
 
-def _stage_and_publish(spark: SparkSession, final_path: str,
-                       prepare: Callable[[str], None], *,
-                       require_absent: bool = False) -> None:
+def _stage_and_publish(
+    spark: SparkSession,
+    final_path: str,
+    prepare: Callable[[str], None],
+    *,
+    require_absent: bool = False,
+) -> None:
     staging_path = f"{final_path}.__staging_{uuid.uuid4().hex}"
     _delete_path(spark, staging_path)
     try:
@@ -8727,7 +8910,8 @@ def _stage_and_publish(spark: SparkSession, final_path: str,
     except Exception:
         logger.error(
             "Publicação abortada; verifique o erro e qualquer backup .__previous_* "
-            "antes de consumir o destino fixo.")
+            "antes de consumir o destino fixo."
+        )
         raise
 
 
@@ -8738,8 +8922,7 @@ def _assert_exact_output_absent(spark: SparkSession, path: str) -> None:
     fs = hpath.getFileSystem(jsc.hadoopConfiguration())
     if fs.exists(hpath):
         raise ValueError(
-            f"artefato sintético imutável já existe em {path!r}; "
-            "não será sobrescrito por retry"
+            f"artefato sintético imutável já existe em {path!r}; não será sobrescrito por retry"
         )
 
 
@@ -8755,14 +8938,18 @@ def escreve_tabela(
     output = df.coalesce(partitions) if current_partitions > partitions else df
     logger.info(
         "Gravando %s: %d linha(s), %d -> %d partição(ões).",
-        out_path, expected, current_partitions, output.rdd.getNumPartitions(),
+        out_path,
+        expected,
+        current_partitions,
+        output.rdd.getNumPartitions(),
     )
     _delete_path(spark, out_path)
     output.write.mode("append").parquet(out_path)
     actual = spark.read.parquet(out_path).count()
     if actual != expected:
         raise ValueError(
-            f"readback Parquet falhou em {out_path}: {actual} linha(s), esperado {expected}")
+            f"readback Parquet falhou em {out_path}: {actual} linha(s), esperado {expected}"
+        )
 
 
 def _area(base: str, prefix: Optional[str]) -> str:
@@ -8799,13 +8986,14 @@ def _valida_destino(config: dict) -> str:
         raise ValueError(
             "DATAGEN_CLONE_PREFIX vazio: o destino seria a RAIZ de "
             "DATAGEN_SYNTHETIC_BASE_URI, que seria substituída por inteiro. "
-            f"Defina um prefixo dedicado (default: {DEFAULT_CLONE_PREFIX}).")
+            f"Defina um prefixo dedicado (default: {DEFAULT_CLONE_PREFIX})."
+        )
 
     save_base = clone_base_path(config)
-    raw_area = _area(config["DATAGEN_RAW_BASE_URI"],
-                     config.get("DATAGEN_RAW_PREFIX"))
-    engorda_area = _area(config["DATAGEN_SYNTHETIC_BASE_URI"],
-                         config.get("DATAGEN_SYNTHETIC_PREFIX"))
+    raw_area = _area(config["DATAGEN_RAW_BASE_URI"], config.get("DATAGEN_RAW_PREFIX"))
+    engorda_area = _area(
+        config["DATAGEN_SYNTHETIC_BASE_URI"], config.get("DATAGEN_SYNTHETIC_PREFIX")
+    )
 
     # Área raw: nem publicar por cima (save_base ancestral) nem escrever dentro
     # (misturar sintéticos com snapshots que o engorda lê por nome de tabela).
@@ -8813,7 +9001,8 @@ def _valida_destino(config: dict) -> str:
         raise ValueError(
             f"Destino dos sintéticos ({save_base}) sobrepõe a área raw "
             f"({raw_area}). Ajuste DATAGEN_CLONE_PREFIX/DATAGEN_RAW_PREFIX "
-            "para áreas disjuntas.")
+            "para áreas disjuntas."
+        )
     # Área do engorda: só é problema se substituir save_base LEVAR JUNTO a área
     # do engorda (igual ou descendente). O contrário — sintéticos DENTRO da base
     # sintética, em prefixo próprio — é o layout esperado.
@@ -8821,7 +9010,8 @@ def _valida_destino(config: dict) -> str:
         raise ValueError(
             f"Destino dos sintéticos ({save_base}) é igual/ancestral da área de "
             f"saída do engorda ({engorda_area}); apagá-lo destruiria a saída "
-            "do engorda_tables. Use um prefixo dedicado aos sintéticos.")
+            "do engorda_tables. Use um prefixo dedicado aos sintéticos."
+        )
     return save_base
 
 
@@ -8836,11 +9026,29 @@ def _valida_destino(config: dict) -> str:
 # ---------------------------------------------------------------------------
 # Colunas do SELECT final da query de contagens, na ordem em que são logadas.
 _CONTAGENS_DOMINIO_COLS = (
-    "QIFE", "QTIT", "QCRE", "QC20",
-    "QC01", "QC02", "QC03", "QC04", "QC05", "QC14",
-    "QRES", "QJFL", "QJFI", "QE83", "QE85",
-    "QDEP", "QCOM", "QCPA", "QOPE",
-    "QDOP", "QESP", "QECO", "QLAN",
+    "QIFE",
+    "QTIT",
+    "QCRE",
+    "QC20",
+    "QC01",
+    "QC02",
+    "QC03",
+    "QC04",
+    "QC05",
+    "QC14",
+    "QRES",
+    "QJFL",
+    "QJFI",
+    "QE83",
+    "QE85",
+    "QDEP",
+    "QCOM",
+    "QCPA",
+    "QOPE",
+    "QDOP",
+    "QESP",
+    "QECO",
+    "QLAN",
 )
 
 
@@ -9005,22 +9213,25 @@ CROSS JOIN LAN_IF LAN
 """
 
 
-def _loga_contagens_dominio(spark, config: dict,
-                            dry_run: bool = False) -> None:
+def _loga_contagens_dominio(spark, config: dict, dry_run: bool = False) -> None:
     """Roda a query de contagens do domínio nos Parquets ENGORDADOS (saída
     sintética) e escreve o resultado no log. É puramente diagnóstico: qualquer
     falha é logada como aviso e NÃO interrompe nem altera a sintetização. No
     --dry-run nada foi gravado, então as contagens são puladas."""
     if dry_run:
-        logger.info("--dry-run: contagens do domínio (dados engordados) puladas "
-                    "— nada foi gravado.")
+        logger.info(
+            "--dry-run: contagens do domínio (dados engordados) puladas — nada foi gravado."
+        )
         return
     try:
         sql = _monta_query_contagens_dominio(config)
         row = spark.sql(sql).first()
         logger.info("=" * 78)
-        logger.info("CONTAGENS DO DOMÍNIO (dados engordados — diagnóstico; "
-                    "domínio do SQL de entrada via %s):", MAPA_NUM_IF_TABLE)
+        logger.info(
+            "CONTAGENS DO DOMÍNIO (dados engordados — diagnóstico; "
+            "domínio do SQL de entrada via %s):",
+            MAPA_NUM_IF_TABLE,
+        )
         if row is None:
             logger.info("  (query não retornou linhas)")
         else:
@@ -9103,9 +9314,7 @@ def _build_engorda_plan(
         synthetic_count = source_count * fator_k
         pk_plan = {
             "rule": plano.pk_regra,
-            "count_demand": (
-                synthetic_count if plano.pk_regra == "OFFSET_PROPRIO" else 0
-            ),
+            "count_demand": (synthetic_count if plano.pk_regra == "OFFSET_PROPRIO" else 0),
             "step": plano.pk_passo,
             "minimum_start": plano.pk_start,
         }
@@ -9114,13 +9323,13 @@ def _build_engorda_plan(
             frozen_pk = frozen_table.get("pk") if isinstance(frozen_table, Mapping) else None
             if not isinstance(frozen_pk, Mapping):
                 raise ValueError(f"plano congelado {table}.pk inválido")
-            if (frozen_table.get("source_count") != source_count
-                    or frozen_table.get("synthetic_count") != synthetic_count
-                    or frozen_pk.get("rule") != pk_plan["rule"]
-                    or frozen_pk.get("count_demand") != pk_plan["count_demand"]):
-                raise ValueError(
-                    f"plano congelado {table} diverge das contagens/classificação"
-                )
+            if (
+                frozen_table.get("source_count") != source_count
+                or frozen_table.get("synthetic_count") != synthetic_count
+                or frozen_pk.get("rule") != pk_plan["rule"]
+                or frozen_pk.get("count_demand") != pk_plan["count_demand"]
+            ):
+                raise ValueError(f"plano congelado {table} diverge das contagens/classificação")
             pk_plan = dict(frozen_pk)
         tables[table] = {
             "source_count": source_count,
@@ -9140,18 +9349,12 @@ def _build_engorda_plan(
             "tuple_count_demand": 0,
             "ordinal_count_demand": 0,
             "groups": [],
-            **(
-                {"requested_prefix": meu_numero_prefix}
-                if meu_numero_prefix is not None else {}
-            ),
+            **({"requested_prefix": meu_numero_prefix} if meu_numero_prefix is not None else {}),
         }
     else:
         meu_descriptor = {
             "ordinal_count_demand": 0,
-            **(
-                {"requested_prefix": meu_numero_prefix}
-                if meu_numero_prefix is not None else {}
-            ),
+            **({"requested_prefix": meu_numero_prefix} if meu_numero_prefix is not None else {}),
         }
     if operation is not None and operation.table in lotes:
         operation_source_count = source_counts[operation.table]
@@ -9181,12 +9384,9 @@ def _build_engorda_plan(
         "seed": seed,
         "engorda_timestamp": engorda_ts.isoformat(),
         "controle_operacional_date": (
-            controle_operacional_date.isoformat()
-            if controle_operacional_date is not None else None
+            controle_operacional_date.isoformat() if controle_operacional_date is not None else None
         ),
-        "raw_uri": _area(
-            config["DATAGEN_RAW_BASE_URI"], config.get("DATAGEN_RAW_PREFIX")
-        ),
+        "raw_uri": _area(config["DATAGEN_RAW_BASE_URI"], config.get("DATAGEN_RAW_PREFIX")),
         "output_uri": clone_base_path(dict(config)),
         "specs_uri": specs_uri,
         "spec_sha256": spec_sha256,
@@ -9195,8 +9395,7 @@ def _build_engorda_plan(
         "selected_lote": dict(selected_lote),
         "prazo_vencimento_dias": prazo_vencimento_dias,
         "anular_cols": {
-            table: list(columns)
-            for table, columns in sorted((anular_cols or {}).items())
+            table: list(columns) for table, columns in sorted((anular_cols or {}).items())
         },
         "tables": tables,
         "cod_if": {
@@ -9310,16 +9509,30 @@ def _validate_plan_artifact(plan: Mapping[str, Any]) -> dict[str, Any]:
     if plan_id != _plan_id(body):
         raise ValueError("plan_id não corresponde ao conteúdo do plano")
     required = {
-        "product", "selected_num_ifs", "fator_k", "seed",
-        "engorda_timestamp", "controle_operacional_date", "raw_uri",
-        "output_uri", "specs_uri", "spec_sha256", "faltantes_uri", "tables", "cod_if",
-        "cod_operacao", "meu_numero", "query_num_if_uri", "selected_lote",
+        "product",
+        "selected_num_ifs",
+        "fator_k",
+        "seed",
+        "engorda_timestamp",
+        "controle_operacional_date",
+        "raw_uri",
+        "output_uri",
+        "specs_uri",
+        "spec_sha256",
+        "faltantes_uri",
+        "tables",
+        "cod_if",
+        "cod_operacao",
+        "meu_numero",
+        "query_num_if_uri",
+        "selected_lote",
     }
     missing = sorted(required - set(plan))
     if missing:
         raise ValueError(f"artefato de plano incompleto: {missing}")
-    if (not isinstance(plan["spec_sha256"], str)
-            or not re.fullmatch(r"[0-9a-f]{64}", plan["spec_sha256"])):
+    if not isinstance(plan["spec_sha256"], str) or not re.fullmatch(
+        r"[0-9a-f]{64}", plan["spec_sha256"]
+    ):
         raise ValueError("artefato de plano possui spec_sha256 inválido")
     if not isinstance(plan["tables"], dict) or not plan["tables"]:
         raise ValueError("artefato de plano precisa conter tables")
@@ -9339,18 +9552,16 @@ def _validate_plan_artifact(plan: Mapping[str, Any]) -> dict[str, Any]:
     for table, table_plan in plan["tables"].items():
         snapshot_count = selected_lote["tables"][table]["row_count"]
         if table_plan.get("source_count") != snapshot_count:
-            raise ValueError(
-                f"plano tables.{table}.source_count diverge do selected_lote"
-            )
+            raise ValueError(f"plano tables.{table}.source_count diverge do selected_lote")
     return dict(plan)
 
 
-def _reservation_range(section: Mapping[str, Any], context: str,
-                       expected_count: int, *, step: int = 1) -> Tuple[int, int]:
+def _reservation_range(
+    section: Mapping[str, Any], context: str, expected_count: int, *, step: int = 1
+) -> Tuple[int, int]:
     if section.get("count") != expected_count:
         raise ValueError(
-            f"reserva {context}: count={section.get('count')!r}, "
-            f"esperado {expected_count}"
+            f"reserva {context}: count={section.get('count')!r}, esperado {expected_count}"
         )
     start, end = section.get("start"), section.get("end")
     if any(type(value) is not int for value in (start, end)):
@@ -9377,12 +9588,8 @@ def _validate_reservation_artifact(
         },
         ENGORDA_PLAN_SCHEMA_VERSION: {ENGORDA_RESERVATION_SCHEMA_VERSION},
     }.get(plan_version, set())
-    if (
-        reservation.get("schema_version") not in allowed_reservation_versions
-    ):
-        raise ValueError(
-            "artefato de reserva possui schema_version incompatível com o plano"
-        )
+    if reservation.get("schema_version") not in allowed_reservation_versions:
+        raise ValueError("artefato de reserva possui schema_version incompatível com o plano")
     if reservation.get("plan_id") != plan["plan_id"]:
         raise ValueError("reserva não está vinculada ao plan_id consumido")
     if reservation.get("product") != plan["product"]:
@@ -9392,9 +9599,9 @@ def _validate_reservation_artifact(
     if not isinstance(table_pks, dict):
         raise ValueError("reserva precisa conter table_pks")
     expected_tables = {
-        table for table, table_plan in plan["tables"].items()
-        if table_plan["pk"]["rule"] == "OFFSET_PROPRIO"
-        and table_plan["pk"]["count_demand"] > 0
+        table
+        for table, table_plan in plan["tables"].items()
+        if table_plan["pk"]["rule"] == "OFFSET_PROPRIO" and table_plan["pk"]["count_demand"] > 0
     }
     if set(table_pks) != expected_tables:
         raise ValueError(
@@ -9457,11 +9664,8 @@ def _validate_reservation_artifact(
         except argparse.ArgumentTypeError as exc:
             raise ValueError(str(exc)) from exc
         requested_prefix = meu_plan.get("requested_prefix")
-        if (requested_prefix is not None
-                and meu_reservation.get("prefix") != requested_prefix):
-            raise ValueError(
-                "reserva meu_numero diverge do requested_prefix do plano"
-            )
+        if requested_prefix is not None and meu_reservation.get("prefix") != requested_prefix:
+            raise ValueError("reserva meu_numero diverge do requested_prefix do plano")
         start, end = _reservation_range(meu_reservation, "meu_numero", meu_count)
         if start < 1 or end > MAX_MEU_NUMERO_ORDINAL:
             raise ValueError("reserva meu_numero excede os ordinais de 1 a 9999999")
@@ -9499,49 +9703,53 @@ def _validate_reservation_live_pk_floors(
             )
 
 
-def executa_clonagem(spark, config, spec: dict, *,
-                     product_profile: ProductProfile,
-                     meu_numero_prefix: Optional[str] = None,
-                     num_ifs: Optional[List[int]] = None,
-                     n_instrumentos: Optional[int] = None,
-                     fator_k: int = 1,
-                     seed: int = DEFAULT_SEED,
-                     query_num_if_path: Optional[str] = None,
-                     pk_offset: int = 0,
-                     pk_safety_band: int = 0,
-                     pk_passo: int = 1,
-                     offset_num_if: Optional[int] = None,
-                     tratar_como_static: Optional[Set[str]] = None,
-                     max_passadas: int = 6,
-                     engorda_ts: Optional[datetime] = None,
-                     controle_operacional_date: Optional[date] = None,
-                     prazo_vencimento_dias: Optional[int] = None,
-                     faltantes_arg: Optional[str] = None,
-                      faltantes_parquet: Optional[str] = None,
-                      poda_subtipo: bool = True,
-                      poda_cronograma_resgate: bool = True,
-                      poda_conta: bool = True,
-                      politica_estrita_operacao: bool = True,
-                      lastros_por_lote: int = LASTROS_POR_LOTE_PADRAO,
-                      ajusta_fator_k: bool = True,
-                      anular_cols: Optional[Mapping[str, Sequence[str]]] = None,
-                      oracle_code_batch_size: int = DEFAULT_ORACLE_CODE_BATCH_SIZE,
-                      tipo_oracle: Optional[int] = None,
-                       somente_ativos: bool = True,
-                       dry_run: bool = False,
-                       no_oracle: bool = False,
-                      phase: str = "all",
-                      plan_uri: Optional[str] = None,
-                       planned_artifact: Optional[Mapping[str, Any]] = None,
-                       reservation: Optional[Mapping[str, Any]] = None,
-                       snapshot_lotes: Optional[Mapping[str, DataFrame]] = None,
-                       snapshot_faltantes: Optional[DataFrame] = None,
-                        snapshot_lote_counts: Optional[Mapping[str, int]] = None,
-                        specs_uri: Optional[str] = None,
-                        enable_genai: bool = False,
-                        genai_execution: Optional[GenAiExecutionConfig] = None,
-                        genai_frozen: Optional[GenAiFrozenArtifacts] = None,
-                        ) -> Dict[str, dict]:
+def executa_clonagem(
+    spark,
+    config,
+    spec: dict,
+    *,
+    product_profile: ProductProfile,
+    meu_numero_prefix: Optional[str] = None,
+    num_ifs: Optional[List[int]] = None,
+    n_instrumentos: Optional[int] = None,
+    fator_k: int = 1,
+    seed: int = DEFAULT_SEED,
+    query_num_if_path: Optional[str] = None,
+    pk_offset: int = 0,
+    pk_safety_band: int = 0,
+    pk_passo: int = 1,
+    offset_num_if: Optional[int] = None,
+    tratar_como_static: Optional[Set[str]] = None,
+    max_passadas: int = 6,
+    engorda_ts: Optional[datetime] = None,
+    controle_operacional_date: Optional[date] = None,
+    prazo_vencimento_dias: Optional[int] = None,
+    faltantes_arg: Optional[str] = None,
+    faltantes_parquet: Optional[str] = None,
+    poda_subtipo: bool = True,
+    poda_cronograma_resgate: bool = True,
+    poda_conta: bool = True,
+    politica_estrita_operacao: bool = True,
+    lastros_por_lote: int = LASTROS_POR_LOTE_PADRAO,
+    ajusta_fator_k: bool = True,
+    anular_cols: Optional[Mapping[str, Sequence[str]]] = None,
+    oracle_code_batch_size: int = DEFAULT_ORACLE_CODE_BATCH_SIZE,
+    tipo_oracle: Optional[int] = None,
+    somente_ativos: bool = True,
+    dry_run: bool = False,
+    no_oracle: bool = False,
+    phase: str = "all",
+    plan_uri: Optional[str] = None,
+    planned_artifact: Optional[Mapping[str, Any]] = None,
+    reservation: Optional[Mapping[str, Any]] = None,
+    snapshot_lotes: Optional[Mapping[str, DataFrame]] = None,
+    snapshot_faltantes: Optional[DataFrame] = None,
+    snapshot_lote_counts: Optional[Mapping[str, int]] = None,
+    specs_uri: Optional[str] = None,
+    enable_genai: bool = False,
+    genai_execution: Optional[GenAiExecutionConfig] = None,
+    genai_frozen: Optional[GenAiFrozenArtifacts] = None,
+) -> Dict[str, dict]:
     """Roda a sintetização fim a fim; devolve {tabela: estatísticas} (para uso em
     notebook). Aborta sem gravar NADA se qualquer validação falhar.
 
@@ -9562,15 +9770,9 @@ def executa_clonagem(spark, config, spec: dict, *,
     if phase == "plan" and dry_run:
         raise ValueError("phase plan não aceita dry_run: a admissão Oracle é obrigatória")
     if phase != "materialize" and (num_ifs is None) == (n_instrumentos is None):
-        raise ValueError(
-            "informe exatamente uma seleção: num_ifs ou n_instrumentos"
-        )
-    if phase == "materialize" and (
-        snapshot_lotes is None or snapshot_lote_counts is None
-    ):
-        raise ValueError(
-            "materialize exige lotes e contagens carregados do snapshot validado"
-        )
+        raise ValueError("informe exatamente uma seleção: num_ifs ou n_instrumentos")
+    if phase == "materialize" and (snapshot_lotes is None or snapshot_lote_counts is None):
+        raise ValueError("materialize exige lotes e contagens carregados do snapshot validado")
     if fator_k < 1:
         raise ValueError("--fator-k deve ser >= 1.")
     if oracle_code_batch_size < 1:
@@ -9583,51 +9785,45 @@ def executa_clonagem(spark, config, spec: dict, *,
         and operation_policy.generate_meu_numero
         and not (dry_run or no_oracle)
     ):
-        raise ValueError(
-            "meu-número live exige phase plan -> reserve -> materialize"
-        )
+        raise ValueError("meu-número live exige phase plan -> reserve -> materialize")
     meu_numero_ordinal_start = 1
     meu_numero_ordinal_end: Optional[int] = None
     requested_meu_numero_prefix = meu_numero_prefix if phase == "plan" else None
     if requested_meu_numero_prefix is not None:
-        requested_meu_numero_prefix = _validate_meu_numero_prefix(
-            requested_meu_numero_prefix
-        )
+        requested_meu_numero_prefix = _validate_meu_numero_prefix(requested_meu_numero_prefix)
     if phase == "materialize":
         if planned_artifact is None or reservation is None:
             raise ValueError("materialize exige plano e reserva validados")
         planned_no_oracle = planned_artifact.get("oracle_access", "live") == "disabled"
         if no_oracle != planned_no_oracle:
-            raise ValueError(
-                "materialize --no-oracle diverge do oracle_access congelado no plano"
-            )
+            raise ValueError("materialize --no-oracle diverge do oracle_access congelado no plano")
         planned_genai = bool(
             isinstance(planned_artifact.get("genai"), Mapping)
             and planned_artifact["genai"].get("enabled") is True
         )
         if enable_genai != planned_genai:
-            raise ValueError(
-                "materialize --enable-genai diverge do descriptor congelado no plano"
-            )
-        if enable_genai and (
-            genai_frozen is None
-        ):
+            raise ValueError("materialize --enable-genai diverge do descriptor congelado no plano")
+        if enable_genai and (genai_frozen is None):
             raise ValueError("materialize GenAI exige descriptor e replacements validados")
         meu_reservation = reservation.get("meu_numero") or {}
-        requested_meu_numero_prefix = (
-            planned_artifact.get("meu_numero") or {}
-        ).get("requested_prefix")
+        requested_meu_numero_prefix = (planned_artifact.get("meu_numero") or {}).get(
+            "requested_prefix"
+        )
         if meu_reservation.get("count"):
             meu_numero_prefix = str(meu_reservation["prefix"])
             meu_numero_ordinal_start = int(meu_reservation["start"])
             meu_numero_ordinal_end = int(meu_reservation["end"])
     planned_meu_count = (
         int((planned_artifact.get("meu_numero") or {}).get("ordinal_count_demand", 0))
-        if planned_artifact is not None else None
+        if planned_artifact is not None
+        else None
     )
-    if (phase != "plan" and operation_policy is not None
-            and operation_policy.generate_meu_numero
-            and (phase != "materialize" or planned_meu_count != 0)):
+    if (
+        phase != "plan"
+        and operation_policy is not None
+        and operation_policy.generate_meu_numero
+        and (phase != "materialize" or planned_meu_count != 0)
+    ):
         meu_numero_prefix = _validate_meu_numero_prefix(meu_numero_prefix)
     elif phase != "plan" and meu_numero_prefix is not None:
         logger.info(
@@ -9644,34 +9840,38 @@ def executa_clonagem(spark, config, spec: dict, *,
     if product_profile.date_strategy == "standard":
         if credentials is not None:
             if controle_operacional_date is not None and phase != "materialize":
-                raise ValueError(
-                    "controle_operacional_date só pode ser informado no dry-run")
+                raise ValueError("controle_operacional_date só pode ser informado no dry-run")
             if controle_operacional_date is None:
                 controle_operacional_date = _read_controle_operacional_date(
-                    spark._sc._jvm, *credentials)
+                    spark._sc._jvm, *credentials
+                )
         elif controle_operacional_date is None:
             controle_operacional_date = engorda_ts.date()
             logger.warning(
                 "Execução sem Oracle e sem --data-controle-operacional: usando "
-                "a data da engorda (%s).", controle_operacional_date)
-        logger.info("Timestamp de engorda: %s; data operacional: %s "
-                    "(prazo de %s: %s)",
-                    engorda_ts.isoformat(sep=" "), controle_operacional_date,
-                    ENGORDA_COL_DAT_VENCIMENTO,
-                    f"{prazo_vencimento_dias} dia(s) fixos"
-                    if prazo_vencimento_dias is not None
-                    else "preserva o prazo original da linha sintetizada")
+                "a data da engorda (%s).",
+                controle_operacional_date,
+            )
+        logger.info(
+            "Timestamp de engorda: %s; data operacional: %s (prazo de %s: %s)",
+            engorda_ts.isoformat(sep=" "),
+            controle_operacional_date,
+            ENGORDA_COL_DAT_VENCIMENTO,
+            f"{prazo_vencimento_dias} dia(s) fixos"
+            if prazo_vencimento_dias is not None
+            else "preserva o prazo original da linha sintetizada",
+        )
     else:
         logger.info("Produto %s não altera colunas de data.", product_profile.name)
     spec = normalize_specs(spec)
     aplica_fk_complementar(spec)
     spec_sha256 = hashlib.sha256(_canonical_json(spec).encode("ascii")).hexdigest()
-    logger.info("Spec carregado: %d tabela(s); engordáveis (não-static) antes dos "
-                "parâmetros: %d.", len(spec),
-                sum(1 for cfg in spec.values() if not cfg.get("static")))
-    _valida_contrato_nulificacao_seletiva(
-        spec, product_profile.integrity.selective_missing_keys
+    logger.info(
+        "Spec carregado: %d tabela(s); engordáveis (não-static) antes dos parâmetros: %d.",
+        len(spec),
+        sum(1 for cfg in spec.values() if not cfg.get("static")),
     )
+    _valida_contrato_nulificacao_seletiva(spec, product_profile.integrity.selective_missing_keys)
     produto = _normalize_produto(product_profile.name)
     tabelas_produto = {
         table_path_name(table.strip().upper())
@@ -9681,8 +9881,7 @@ def executa_clonagem(spark, config, spec: dict, *,
     tabelas_ausentes = sorted(tabelas_produto - set(spec))
     if tabelas_ausentes:
         raise ValueError(
-            f"Produto {produto}: tabela(s) não encontrada(s) no "
-            f"spec: {tabelas_ausentes}"
+            f"Produto {produto}: tabela(s) não encontrada(s) no spec: {tabelas_ausentes}"
         )
     for table in tabelas_produto:
         spec[table]["static"] = False
@@ -9706,20 +9905,22 @@ def executa_clonagem(spark, config, spec: dict, *,
         existentes.append(copy.deepcopy(fk_nova))
         logger.info(
             "FK complementar injetada EM MEMORIA para %s: %s.%s -> %s.%s "
-            "(compatibilidade com spec antigo).", produto, tabela_fk,
-            fk_nova["columns"], fk_nova["parent_table"],
-            fk_nova["parent_columns"])
+            "(compatibilidade com spec antigo).",
+            produto,
+            tabela_fk,
+            fk_nova["columns"],
+            fk_nova["parent_table"],
+            fk_nova["parent_columns"],
+        )
     if tabelas_produto:
-        logger.info("Tabelas engordáveis do produto %s: %s",
-                    produto, sorted(tabelas_produto))
+        logger.info("Tabelas engordáveis do produto %s: %s", produto, sorted(tabelas_produto))
     estaticas_extra = {
         table_path_name(t.strip().upper())
         for t in (*product_profile.static_tables, *(tratar_como_static or set()))
         if t.strip()
     }
     if estaticas_extra:
-        logger.info("Tratando como static por perfil/parâmetro: %s",
-                    sorted(estaticas_extra))
+        logger.info("Tratando como static por perfil/parâmetro: %s", sorted(estaticas_extra))
         for table in estaticas_extra:
             if table in spec:
                 spec[table]["static"] = True
@@ -9727,34 +9928,33 @@ def executa_clonagem(spark, config, spec: dict, *,
     if phase == "materialize":
         faltantes = snapshot_faltantes
     else:
-        faltantes = _carrega_faltantes(
-            spark, config, faltantes_arg, faltantes_parquet
-        )
+        faltantes = _carrega_faltantes(spark, config, faltantes_arg, faltantes_parquet)
         if faltantes is not None:
             logger.info(
                 "Faltantes offline carregados: %d chave(s). Em run real o arquivo "
                 "não decide a admissão; o Oracle live é autoritativo.",
                 faltantes.count(),
             )
-    if (not poda_subtipo
-            and produto in PRODUTOS_COM_PODA_SUBTIPO
-            and product_profile.integrity.subtype is not None):
-        logger.warning("Poda de subtipo (item 1) DESLIGADA (--sem-poda-subtipo): "
-                       "sintéticos podem ter CONDICAO_IF dangling (Cat 1).")
-    if (not poda_cronograma_resgate
-            and produto in PRODUTOS_COM_PODA_CRONOGRAMA_RESGATE):
+    if (
+        not poda_subtipo
+        and produto in PRODUTOS_COM_PODA_SUBTIPO
+        and product_profile.integrity.subtype is not None
+    ):
         logger.warning(
-            "Poda de cronograma de resgate DESLIGADA "
-            "(--sem-poda-cronograma-resgate)."
+            "Poda de subtipo (item 1) DESLIGADA (--sem-poda-subtipo): "
+            "sintéticos podem ter CONDICAO_IF dangling (Cat 1)."
         )
+    if not poda_cronograma_resgate and produto in PRODUTOS_COM_PODA_CRONOGRAMA_RESGATE:
+        logger.warning("Poda de cronograma de resgate DESLIGADA (--sem-poda-cronograma-resgate).")
     if not poda_conta and produto in PRODUTOS_COM_PODA_CONTA:
         logger.warning("Poda de conta DESLIGADA (--sem-poda-conta).")
-    if (not politica_estrita_operacao
-            and produto in PRODUTOS_COM_POLITICA_ESTRITA_OPERACAO):
-        logger.warning("Política estrita de operação DESLIGADA "
-                       "(--sem-politica-estrita-operacao): o lote pode "
-                       "trazer operação fora do registro e inflar "
-                       "OPERACAO/DADO_OPERACAO/LANCAMENTO/ESPECIFICACAO.")
+    if not politica_estrita_operacao and produto in PRODUTOS_COM_POLITICA_ESTRITA_OPERACAO:
+        logger.warning(
+            "Política estrita de operação DESLIGADA "
+            "(--sem-politica-estrita-operacao): o lote pode "
+            "trazer operação fora do registro e inflar "
+            "OPERACAO/DADO_OPERACAO/LANCAMENTO/ESPECIFICACAO."
+        )
 
     if phase == "materialize":
         valores = [int(value) for value in planned_artifact["selected_num_ifs"]]
@@ -9775,9 +9975,7 @@ def executa_clonagem(spark, config, spec: dict, *,
         n_clones_estimado=requested_count * fator_k * 1000,
         pk_passo=pk_passo,
         source_frames=(snapshot_lotes if phase == "materialize" else None),
-        frozen_table_plans=(
-            planned_artifact["tables"] if phase == "materialize" else None
-        ),
+        frozen_table_plans=(planned_artifact["tables"] if phase == "materialize" else None),
     )
     ordem = ordem_topologica(planos)
     logger.info("Ordem de sintetização (%d tabela(s)): %s", len(ordem), ordem)
@@ -9866,13 +10064,9 @@ def executa_clonagem(spark, config, spec: dict, *,
 
     # Materialize consumes the K already frozen by plan and never readjusts it.
     if phase != "materialize" and ajusta_fator_k:
-        fator_k = _ajusta_fator_k_por_dominio(
-            fator_k, n_instrumentos, len(valores)
-        )
+        fator_k = _ajusta_fator_k_por_dominio(fator_k, n_instrumentos, len(valores))
     if enable_genai and fator_k > GENAI_MAX_FACTOR_K:
-        raise ValueError(
-            f"GenAI final adjusted fator_k must be <= {GENAI_MAX_FACTOR_K}"
-        )
+        raise ValueError(f"GenAI final adjusted fator_k must be <= {GENAI_MAX_FACTOR_K}")
 
     # Tipo do instrumento DERIVADO do lote — antes de qualquer round-trip Oracle.
     # É isto que substitui o antigo literal por produto e o que impede alocar
@@ -9883,9 +10077,7 @@ def executa_clonagem(spark, config, spec: dict, *,
             int(planned_artifact["cod_if"]["oracle_type"]),
         )
     elif selected_lotes is not None:
-        tipo_derivado = _deriva_tipo_oracle_do_lote(
-            selected_lotes[TABELA_RAIZ], tipo_oracle
-        )
+        tipo_derivado = _deriva_tipo_oracle_do_lote(selected_lotes[TABELA_RAIZ], tipo_oracle)
     else:
         tipo_derivado = _deriva_tipo_oracle(spark, config, valores, tipo_oracle)
     business_policy = _resolve_business_policy(business_policy, tipo_derivado)
@@ -9925,9 +10117,7 @@ def executa_clonagem(spark, config, spec: dict, *,
     _diagnostico_lastro(produto, lotes)
 
     if phase == "materialize":
-        final_lote_counts = {
-            table: int(count) for table, count in snapshot_lote_counts.items()
-        }
+        final_lote_counts = {table: int(count) for table, count in snapshot_lote_counts.items()}
         if set(final_lote_counts) != set(lotes):
             raise ValueError("materialize: contagens do snapshot divergem do table_set")
     elif closure_lote_counts:
@@ -9936,21 +10126,14 @@ def executa_clonagem(spark, config, spec: dict, *,
         with _perf_timer("final_lote_counts", product=product_profile.name):
             final_lote_counts = _count_final_lotes(lotes)
 
-    active_genai_descriptor = (
-        dict(genai_frozen.descriptor) if genai_frozen is not None else None
-    )
-    genai_replacements = (
-        genai_frozen.replacements if genai_frozen is not None else None
-    )
+    active_genai_descriptor = dict(genai_frozen.descriptor) if genai_frozen is not None else None
+    genai_replacements = genai_frozen.replacements if genai_frozen is not None else None
     if enable_genai and phase != "materialize":
         if genai_execution is None:
             raise ValueError("GenAI execution configuration was not resolved")
         genai_policy = genai_execution.policy
         column_types = {
-            table: {
-                field.name: field.dataType.simpleString()
-                for field in frame.schema.fields
-            }
+            table: {field.name: field.dataType.simpleString() for field in frame.schema.fields}
             for table, frame in lotes.items()
         }
         validate_genai_policy_runtime(
@@ -9966,9 +10149,7 @@ def executa_clonagem(spark, config, spec: dict, *,
             if genai_execution.adapter is None:
                 raise ValueError("GenAI adapter was not configured")
             _assert_exact_output_absent(spark, genai_execution.artifact_root)
-            aggregates = collect_genai_instruments(
-                lotes, selected_provenances, planos
-            )
+            aggregates = collect_genai_instruments(lotes, selected_provenances, planos)
             requests = tuple(
                 build_genai_request(
                     aggregate,
@@ -9978,9 +10159,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                 )
                 for aggregate in aggregates
             )
-            generation = generate_genai_replacements(
-                requests, adapter=genai_execution.adapter
-            )
+            generation = generate_genai_replacements(requests, adapter=genai_execution.adapter)
             active_genai_descriptor = write_genai_artifacts(
                 spark,
                 genai_execution.artifact_root,
@@ -9992,9 +10171,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                 source_policy_uri=genai_execution.policy_uri,
             )
             if phase == "all":
-                genai_replacements = load_genai_replacements(
-                    spark, active_genai_descriptor
-                )
+                genai_replacements = load_genai_replacements(spark, active_genai_descriptor)
     if selected_provenances is not None:
         for provenance in selected_provenances.values():
             provenance.unpersist(blocking=False)
@@ -10036,9 +10213,7 @@ def executa_clonagem(spark, config, spec: dict, *,
             faltantes_uri=faltantes_parquet,
             query_num_if_uri=query_num_if_path or product_profile.query_filename,
             selected_lote=selected_lote_descriptor,
-            frozen_table_plans=(
-                planned_artifact["tables"] if phase == "materialize" else None
-            ),
+            frozen_table_plans=(planned_artifact["tables"] if phase == "materialize" else None),
             prazo_vencimento_dias=prazo_vencimento_dias,
             anular_cols=anular_cols,
             meu_numero_prefix=requested_meu_numero_prefix,
@@ -10046,7 +10221,8 @@ def executa_clonagem(spark, config, spec: dict, *,
             genai_descriptor=active_genai_descriptor,
             schema_version=(
                 int(planned_artifact["schema_version"])
-                if phase == "materialize" else ENGORDA_PLAN_SCHEMA_VERSION
+                if phase == "materialize"
+                else ENGORDA_PLAN_SCHEMA_VERSION
             ),
         )
     if phase == "plan":
@@ -10063,9 +10239,7 @@ def executa_clonagem(spark, config, spec: dict, *,
                 "materialize divergiu do plano congelado; RAW/spec/destino/"
                 "seleção ou cardinalidades mudaram"
             )
-        validated_reservation = _validate_reservation_artifact(
-            validated_plan, reservation
-        )
+        validated_reservation = _validate_reservation_artifact(validated_plan, reservation)
         _validate_reservation_live_pk_floors(planos, validated_reservation)
         _inject_reserved_pk_starts(planos, validated_reservation)
 
@@ -10108,9 +10282,12 @@ def executa_clonagem(spark, config, spec: dict, *,
         # conferido no valor que vai ser gravado, não no valor sintetizado.
         if product_profile.date_strategy == "standard":
             clones, cols_data = aplica_regras_engorda(
-                clones, t, engorda_ts=engorda_ts,
+                clones,
+                t,
+                engorda_ts=engorda_ts,
                 controle_operacional_date=controle_operacional_date,
-                prazo_vencimento_dias=prazo_vencimento_dias)
+                prazo_vencimento_dias=prazo_vencimento_dias,
+            )
             if t == CONDICAO_IF_TABLE and TABELA_RAIZ in resultados:
                 clones, cols_shift = ajusta_datas_condicao_if(
                     clones,
@@ -10135,42 +10312,53 @@ def executa_clonagem(spark, config, spec: dict, *,
             cols_data = []
         # Faltantes allowlisted são anulados seletivamente após todo remap e
         # antes de checkpoint, validação e geração de chaves de negócio.
-        clones, cols_anuladas_seletivas, contagens_seletivas = (
-            aplica_nulificacao_faltantes(
-                clones, t, faltantes,
-                product_profile.integrity.selective_missing_keys,
-            )
+        clones, cols_anuladas_seletivas, contagens_seletivas = aplica_nulificacao_faltantes(
+            clones,
+            t,
+            faltantes,
+            product_profile.integrity.selective_missing_keys,
         )
         # Anulação integral de colunas de drift (item 2), também antes do
         # checkpoint/validação: a gravação precisa enxergar o valor já nulo.
         clones, cols_anuladas_integrais = aplica_nulificacao(
-            clones, t, anular_cols, _not_null_cols(spec[t]))
-        cols_anuladas = _colunas_anuladas_resumo(
-            cols_anuladas_integrais, cols_anuladas_seletivas
+            clones, t, anular_cols, _not_null_cols(spec[t])
         )
+        cols_anuladas = _colunas_anuladas_resumo(cols_anuladas_integrais, cols_anuladas_seletivas)
         clones = clones.localCheckpoint(eager=True)  # congela p/ validar e gravar
 
-        cols_remap = sorted({*plano.pk_cols,
-                             *(c for fk in plano.fks_remap for c in fk.columns)}
-                            & set(clones.columns))
+        cols_remap = sorted(
+            {*plano.pk_cols, *(c for fk in plano.fks_remap for c in fk.columns)}
+            & set(clones.columns)
+        )
         erros = valida_tabela(spec[t], plano, clones, n_lote, fator_k)
-        stats[t] = {"lote": n_lote, "clones": n_lote * fator_k,
-                    "colunas_remapeadas": cols_remap,
-                    "colunas_data": cols_data, "colunas_anuladas": cols_anuladas,
-                    "colunas_anuladas_seletivas": cols_anuladas_seletivas,
-                    "faltantes_seletivos": contagens_seletivas,
-                    "erros": erros}
-        logger.info("[%s] lote=%d sinteticos=%d remapeadas=%s datas=%s anuladas=%s %s",
-                    t, n_lote, n_lote * fator_k, cols_remap, cols_data or "-",
-                    cols_anuladas or "-",
-                    "ERROS: " + "; ".join(erros) if erros else "OK")
+        stats[t] = {
+            "lote": n_lote,
+            "clones": n_lote * fator_k,
+            "colunas_remapeadas": cols_remap,
+            "colunas_data": cols_data,
+            "colunas_anuladas": cols_anuladas,
+            "colunas_anuladas_seletivas": cols_anuladas_seletivas,
+            "faltantes_seletivos": contagens_seletivas,
+            "erros": erros,
+        }
+        logger.info(
+            "[%s] lote=%d sinteticos=%d remapeadas=%s datas=%s anuladas=%s %s",
+            t,
+            n_lote,
+            n_lote * fator_k,
+            cols_remap,
+            cols_data or "-",
+            cols_anuladas or "-",
+            "ERROS: " + "; ".join(erros) if erros else "OK",
+        )
         if erros:
             erros_globais.extend(f"{t}: {e}" for e in erros)
         resultados[t] = (clones, n_lote)
 
     if erros_globais:
-        raise ValueError("Validação pré-escrita FALHOU (nada foi gravado):\n  - "
-                         + "\n  - ".join(erros_globais))
+        raise ValueError(
+            "Validação pré-escrita FALHOU (nada foi gravado):\n  - " + "\n  - ".join(erros_globais)
+        )
     _validate_disabled_operation_output(resultados, operation_policy)
 
     # Relatório de conferência (sai também no --dry-run): chaves original ->
@@ -10181,8 +10369,7 @@ def executa_clonagem(spark, config, spec: dict, *,
     save_base = clone_base_path(config)
     if TABELA_RAIZ not in resultados:
         raise ValueError(f"plano precisa produzir {TABELA_RAIZ}")
-    if (operation_policy is not None
-            and operation_policy.table not in resultados):
+    if operation_policy is not None and operation_policy.table not in resultados:
         raise ValueError(
             "política de chaves de negócio exige a tabela "
             f"{operation_policy.table} no spec (inclua-a no fecho do produto ou "
@@ -10196,17 +10383,26 @@ def executa_clonagem(spark, config, spec: dict, *,
             instrumentos, COL_NUM_IF, "COD_IF", "NUM_IF_NOVO", "COD_IF_ORIG"
         ).localCheckpoint(eager=True)
         mapa_cod_if = _materialize_code_map(
-            spark, slots_if, code_kind="COD_IF",
+            spark,
+            slots_if,
+            code_kind="COD_IF",
             generated_alias="COD_IF_GERADO",
-            out_path=(None if is_dry_run
-                      else f"{output_base}/{MAPA_COD_IF_TABLE}"),
-            dry_run=is_dry_run, offline=no_oracle, credentials=credentials,
+            out_path=(None if is_dry_run else f"{output_base}/{MAPA_COD_IF_TABLE}"),
+            dry_run=is_dry_run,
+            offline=no_oracle,
+            credentials=credentials,
             batch_size=oracle_code_batch_size,
-            engorda_date=code_allocation_date, policy=business_policy)
+            engorda_date=code_allocation_date,
+            policy=business_policy,
+        )
         instrumentos = _attach_generated_code(
-            instrumentos, mapa_cod_if, pk_col=COL_NUM_IF,
-            new_pk_alias="NUM_IF_NOVO", code_col="COD_IF",
-            generated_alias="COD_IF_GERADO").localCheckpoint(eager=True)
+            instrumentos,
+            mapa_cod_if,
+            pk_col=COL_NUM_IF,
+            new_pk_alias="NUM_IF_NOVO",
+            code_col="COD_IF",
+            generated_alias="COD_IF_GERADO",
+        ).localCheckpoint(eager=True)
         resultados[TABELA_RAIZ] = (instrumentos, n_raiz)
 
         operacoes: Optional[DataFrame] = None
@@ -10216,29 +10412,40 @@ def executa_clonagem(spark, config, spec: dict, *,
             operacoes = _propagate_root_cod_if(instrumentos, operacoes)
 
             slots_operacao = _code_slots(
-                operacoes, "NUM_ID_OPERACAO", "COD_OPERACAO",
-                "NUM_ID_OPERACAO_NOVO", "COD_OPERACAO_ORIG"
+                operacoes,
+                "NUM_ID_OPERACAO",
+                "COD_OPERACAO",
+                "NUM_ID_OPERACAO_NOVO",
+                "COD_OPERACAO_ORIG",
             ).localCheckpoint(eager=True)
             mapa_cod_operacao = _materialize_code_map(
-                spark, slots_operacao, code_kind="COD_OPERACAO",
+                spark,
+                slots_operacao,
+                code_kind="COD_OPERACAO",
                 generated_alias="COD_OPERACAO_GERADO",
-                out_path=(None if is_dry_run
-                          else f"{output_base}/{MAPA_COD_OPERACAO_TABLE}"),
-                dry_run=is_dry_run, offline=no_oracle, credentials=credentials,
+                out_path=(None if is_dry_run else f"{output_base}/{MAPA_COD_OPERACAO_TABLE}"),
+                dry_run=is_dry_run,
+                offline=no_oracle,
+                credentials=credentials,
                 batch_size=oracle_code_batch_size,
-                engorda_date=code_allocation_date, policy=business_policy)
+                engorda_date=code_allocation_date,
+                policy=business_policy,
+            )
             operacoes = _attach_generated_code(
-                operacoes, mapa_cod_operacao, pk_col="NUM_ID_OPERACAO",
-                new_pk_alias="NUM_ID_OPERACAO_NOVO", code_col="COD_OPERACAO",
-                generated_alias="COD_OPERACAO_GERADO")
+                operacoes,
+                mapa_cod_operacao,
+                pk_col="NUM_ID_OPERACAO",
+                new_pk_alias="NUM_ID_OPERACAO_NOVO",
+                code_col="COD_OPERACAO",
+                generated_alias="COD_OPERACAO_GERADO",
+            )
             if operation_policy.generate_meu_numero:
                 if active_meu_descriptor is None:
                     raise RuntimeError("descriptor meu_numero não foi resolvido")
                 if _meu_preflight_required(active_meu_descriptor):
                     if (
                         phase == "materialize"
-                        and planned_artifact["schema_version"]
-                        == ENGORDA_LEGACY_PLAN_SCHEMA_VERSION
+                        and planned_artifact["schema_version"] == ENGORDA_LEGACY_PLAN_SCHEMA_VERSION
                     ):
                         operacoes = _generate_meu_numeros(
                             operacoes,
@@ -10261,21 +10468,27 @@ def executa_clonagem(spark, config, spec: dict, *,
 
         _validate_business_keys(instrumentos, operacoes, business_policy)
 
-        if (not is_dry_run and not no_oracle and operation_policy is not None
-                and operation_policy.generate_meu_numero
-                and active_meu_descriptor is not None
-                and _meu_preflight_required(active_meu_descriptor)):
-            if (credentials is None or meu_numero_prefix is None
-                    or operacoes is None):
+        if (
+            not is_dry_run
+            and not no_oracle
+            and operation_policy is not None
+            and operation_policy.generate_meu_numero
+            and active_meu_descriptor is not None
+            and _meu_preflight_required(active_meu_descriptor)
+        ):
+            if credentials is None or meu_numero_prefix is None or operacoes is None:
                 raise RuntimeError(
-                    "credenciais Oracle, prefixo e operações são obrigatórios "
-                    "no preflight"
+                    "credenciais Oracle, prefixo e operações são obrigatórios no preflight"
                 )
             preflight_path = f"{output_base}/__PREFLIGHT_MEU"
             try:
                 existing = _read_existing_meu_tuples(
-                    spark, credentials, engorda_date=code_allocation_date,
-                    prefix=meu_numero_prefix, temp_path=preflight_path)
+                    spark,
+                    credentials,
+                    engorda_date=code_allocation_date,
+                    prefix=meu_numero_prefix,
+                    temp_path=preflight_path,
+                )
                 _assert_no_meu_collisions(operacoes, existing)
             finally:
                 _delete_path(spark, preflight_path)
@@ -10289,12 +10502,16 @@ def executa_clonagem(spark, config, spec: dict, *,
             out_path = f"{output_base}/{t}"
             logger.info("Gravando staging %s -> %s", t, out_path)
             escreve_tabela(
-                spark, clones, out_path, expected_rows=n_lote * fator_k,
+                spark,
+                clones,
+                out_path,
+                expected_rows=n_lote * fator_k,
             )
-        mapa_if = (mapeamentos[TABELA_RAIZ]
-                   .select(F.col(f"old_{COL_NUM_IF}").alias("NUM_IF_ORIG"),
-                           F.col(K_COL).alias("K"),
-                           F.col(f"new_{COL_NUM_IF}").alias("NUM_IF_NOVO")))
+        mapa_if = mapeamentos[TABELA_RAIZ].select(
+            F.col(f"old_{COL_NUM_IF}").alias("NUM_IF_ORIG"),
+            F.col(K_COL).alias("K"),
+            F.col(f"new_{COL_NUM_IF}").alias("NUM_IF_NOVO"),
+        )
         escreve_tabela(
             spark,
             mapa_if,
@@ -10311,40 +10528,48 @@ def executa_clonagem(spark, config, spec: dict, *,
 
     if dry_run:
         _prepare_outputs(None, True)
-        logger.info("--dry-run: validações OK; NADA gravado (destino seria %s).",
-                    save_base)
+        logger.info("--dry-run: validações OK; NADA gravado (destino seria %s).", save_base)
     else:
         save_base = _valida_destino(config)
         require_absent = bool(config.get("DATAGEN_OUTPUT_URI"))
         if require_absent:
             _assert_exact_output_absent(spark, save_base)
         _stage_and_publish(
-            spark, save_base,
+            spark,
+            save_base,
             lambda staging_base: _prepare_outputs(staging_base, False),
             require_absent=require_absent,
         )
         logger.info("Staging validado e publicado em %s.", save_base)
 
     logger.info("=" * 78)
-    logger.info("RESUMO DA SINTETIZAÇÃO (%.1fs) — produto %s, %s=%d, "
-                "%d instrumento(s) × K=%d, data de engorda %s, %s",
-                time.perf_counter() - inicio, product_profile.name,
-                COL_NUM_TIPO_IF, tipo_derivado, len(valores), fator_k,
-                engorda_ts.isoformat(sep=" "),
-                (
-                    "DRY-RUN (nada gravado)"
-                    if dry_run else (
-                        f"OFFLINE gravado em {save_base}"
-                        if no_oracle else f"gravado em {save_base}"
-                    )
-                ))
+    logger.info(
+        "RESUMO DA SINTETIZAÇÃO (%.1fs) — produto %s, %s=%d, "
+        "%d instrumento(s) × K=%d, data de engorda %s, %s",
+        time.perf_counter() - inicio,
+        product_profile.name,
+        COL_NUM_TIPO_IF,
+        tipo_derivado,
+        len(valores),
+        fator_k,
+        engorda_ts.isoformat(sep=" "),
+        (
+            "DRY-RUN (nada gravado)"
+            if dry_run
+            else (f"OFFLINE gravado em {save_base}" if no_oracle else f"gravado em {save_base}")
+        ),
+    )
     for t in ordem:
         s = stats.get(t, {})
-        logger.info("  %-32s lote=%-8s sinteticos=%-8s remap=%s datas=%s anuladas=%s",
-                    t, s.get("lote", "-"), s.get("clones", "-"),
-                    ",".join(s.get("colunas_remapeadas", [])) or "-",
-                    ",".join(s.get("colunas_data", [])) or "-",
-                    ",".join(s.get("colunas_anuladas", [])) or "-")
+        logger.info(
+            "  %-32s lote=%-8s sinteticos=%-8s remap=%s datas=%s anuladas=%s",
+            t,
+            s.get("lote", "-"),
+            s.get("clones", "-"),
+            ",".join(s.get("colunas_remapeadas", [])) or "-",
+            ",".join(s.get("colunas_data", [])) or "-",
+            ",".join(s.get("colunas_anuladas", [])) or "-",
+        )
     logger.info("=" * 78)
     _loga_contagens_dominio(spark, config, dry_run)
     return stats
@@ -10398,11 +10623,22 @@ def create_spark_session(app_name: str) -> SparkSession:
 def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
     if not isinstance(job, EngordaJob):
         raise TypeError("job precisa ser uma instância de EngordaJob")
-    for field_name in ("query_num_if_path", "specs_uri", "clone_prefix",
-                       "cod_if_pattern", "cod_if_dry_prefix", "plan_uri",
-                       "reservation_uri", "raw_uri", "output_uri", "genai_policy",
-                       "genai_endpoint_id", "genai_compartment_id", "genai_region",
-                       "genai_artifact_root"):
+    for field_name in (
+        "query_num_if_path",
+        "specs_uri",
+        "clone_prefix",
+        "cod_if_pattern",
+        "cod_if_dry_prefix",
+        "plan_uri",
+        "reservation_uri",
+        "raw_uri",
+        "output_uri",
+        "genai_policy",
+        "genai_endpoint_id",
+        "genai_compartment_id",
+        "genai_region",
+        "genai_artifact_root",
+    ):
         value = getattr(job, field_name)
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise ValueError(f"{field_name} precisa ser texto não vazio")
@@ -10411,8 +10647,7 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
             re.compile(job.cod_if_pattern)
         except re.error as exc:
             raise ValueError(f"cod_if_pattern inválido: {exc}") from exc
-    if job.tipo_oracle is not None and (
-            type(job.tipo_oracle) is not int or job.tipo_oracle < 1):
+    if job.tipo_oracle is not None and (type(job.tipo_oracle) is not int or job.tipo_oracle < 1):
         raise ValueError("tipo_oracle deve ser inteiro >= 1")
     # O perfil é construído já com os overrides: assim a compatibilidade
     # pattern × prefixo dry-run falha no startup, e não no meio do run.
@@ -10426,14 +10661,9 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
     )
     if job.phase not in ENGORDA_PHASES:
         raise ValueError(f"phase inválida: {job.phase!r}")
-    if (job.phase in {"all", "plan"}
-            and (job.num_ifs is None) == (job.n_instrumentos is None)):
-        raise ValueError(
-            "informe exatamente um entre num_ifs e n_instrumentos"
-        )
-    if job.phase == "materialize" and (
-        job.num_ifs is not None or job.n_instrumentos is not None
-    ):
+    if job.phase in {"all", "plan"} and (job.num_ifs is None) == (job.n_instrumentos is None):
+        raise ValueError("informe exatamente um entre num_ifs e n_instrumentos")
+    if job.phase == "materialize" and (job.num_ifs is not None or job.n_instrumentos is not None):
         raise ValueError("materialize consome a seleção do plano e não reamostra")
     if job.phase in {"plan", "materialize"} and (
         not job.plan_uri or not job.raw_uri or not job.output_uri
@@ -10446,8 +10676,10 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
             raise ValueError("num_ifs precisa ser uma sequência de inteiros")
         if not job.num_ifs:
             raise ValueError("num_ifs não pode ser vazio")
-        if any(not isinstance(value, int) or isinstance(value, bool) or value <= 0
-               for value in job.num_ifs):
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value <= 0
+            for value in job.num_ifs
+        ):
             raise ValueError("num_ifs deve conter apenas inteiros positivos")
         if len(set(job.num_ifs)) != len(job.num_ifs):
             raise ValueError("num_ifs não pode conter valores duplicados")
@@ -10455,11 +10687,8 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
         if type(job.n_instrumentos) is not int or job.n_instrumentos < 1:
             raise ValueError("n_instrumentos deve ser inteiro >= 1")
     if job.enable_genai:
-        selected_count = (
-            len(job.num_ifs) if job.num_ifs is not None else job.n_instrumentos
-        )
-        if (selected_count is not None
-                and selected_count > GENAI_MAX_SOURCE_INSTRUMENTS):
+        selected_count = len(job.num_ifs) if job.num_ifs is not None else job.n_instrumentos
+        if selected_count is not None and selected_count > GENAI_MAX_SOURCE_INSTRUMENTS:
             raise ValueError(
                 f"GenAI supports at most {GENAI_MAX_SOURCE_INSTRUMENTS} source instruments"
             )
@@ -10481,15 +10710,12 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
             if not job.genai_compartment_id.startswith("ocid1.compartment."):
                 raise ValueError("genai_compartment_id must be a compartment OCID")
             if job.phase == "all" and not job.genai_artifact_root:
-                raise ValueError(
-                    "genai_artifact_root is required when GenAI is enabled for all"
-                )
+                raise ValueError("genai_artifact_root is required when GenAI is enabled for all")
             output = (job.output_uri or "").rstrip("/")
             artifact = (job.genai_artifact_root or "").rstrip("/")
             if output and (artifact == output or artifact.startswith(output + "/")):
                 raise ValueError("genai_artifact_root must be outside output_uri")
-    for field_name in ("fator_k", "pk_passo", "max_passadas",
-                       "oracle_code_batch_size"):
+    for field_name in ("fator_k", "pk_passo", "max_passadas", "oracle_code_batch_size"):
         value = getattr(job, field_name)
         if type(value) is not int or value < 1:
             raise ValueError(f"{field_name} deve ser inteiro >= 1")
@@ -10504,13 +10730,10 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
         if value is not None and (type(value) is not int or value < 1):
             raise ValueError(f"{field_name} deve ser inteiro >= 1")
     if not isinstance(job.tratar_como_static, (tuple, list, set)) or any(
-            not isinstance(table, str) or not table.strip()
-            for table in job.tratar_como_static):
+        not isinstance(table, str) or not table.strip() for table in job.tratar_como_static
+    ):
         raise ValueError("tratar_como_static deve conter nomes de tabela")
-    runtime_static = {
-        table_path_name(table.strip().upper())
-        for table in job.tratar_como_static
-    }
+    runtime_static = {table_path_name(table.strip().upper()) for table in job.tratar_como_static}
     protected_tables = {TABELA_RAIZ}
     operation_policy = profile.business_keys.operation
     if operation_policy is not None:
@@ -10520,16 +10743,17 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
         raise ValueError(f"tabela(s) obrigatória(s) não podem ser static: {forbidden}")
     if job.engorda_ts is not None and not isinstance(job.engorda_ts, datetime):
         raise ValueError("engorda_ts precisa ser datetime")
-    if (job.controle_operacional_date is not None
-            and (not isinstance(job.controle_operacional_date, date)
-                 or isinstance(job.controle_operacional_date, datetime))):
+    if job.controle_operacional_date is not None and (
+        not isinstance(job.controle_operacional_date, date)
+        or isinstance(job.controle_operacional_date, datetime)
+    ):
         raise ValueError("controle_operacional_date precisa ser date")
-    if (job.controle_operacional_date is not None
-            and not (job.dry_run or job.no_oracle)
-            and job.phase != "materialize"):
-        raise ValueError(
-            "controle_operacional_date só pode ser informado sem acesso Oracle"
-        )
+    if (
+        job.controle_operacional_date is not None
+        and not (job.dry_run or job.no_oracle)
+        and job.phase != "materialize"
+    ):
+        raise ValueError("controle_operacional_date só pode ser informado sem acesso Oracle")
     for field_name in (
         "poda_subtipo",
         "poda_cronograma_resgate",
@@ -10548,17 +10772,15 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
         if type(valor) is not int or valor < 1:
             raise ValueError(f"{field_name} precisa ser inteiro >= 1")
     if job.anular_cols is not None:
-        _merge_nullification_mappings(
-            profile.integrity.nullify_mapping(), job.anular_cols
-        )
-    if (job.phase == "all" and operation_policy is not None
-            and operation_policy.generate_meu_numero
-            and not (job.dry_run or job.no_oracle)):
-        raise ValueError(
-            "meu-número live exige phase plan -> reserve -> materialize"
-        )
-    if (job.phase == "all" and operation_policy is not None
-            and operation_policy.generate_meu_numero):
+        _merge_nullification_mappings(profile.integrity.nullify_mapping(), job.anular_cols)
+    if (
+        job.phase == "all"
+        and operation_policy is not None
+        and operation_policy.generate_meu_numero
+        and not (job.dry_run or job.no_oracle)
+    ):
+        raise ValueError("meu-número live exige phase plan -> reserve -> materialize")
+    if job.phase == "all" and operation_policy is not None and operation_policy.generate_meu_numero:
         try:
             _validate_meu_numero_prefix(job.meu_numero_prefix)
         except argparse.ArgumentTypeError as exc:
@@ -10569,28 +10791,27 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
 def executar_job(job: EngordaJob) -> Dict[str, dict]:
     """Executa um job configurado sem duplicar bootstrap entre CLI e runner."""
     profile = _validate_engorda_job(job)
-    config = dict(get_engorda_env(
-        job.specs_uri,
-        raw_uri_override=job.raw_uri,
-        output_uri_override=job.output_uri,
-    ))
+    config = dict(
+        get_engorda_env(
+            job.specs_uri,
+            raw_uri_override=job.raw_uri,
+            output_uri_override=job.output_uri,
+        )
+    )
     if job.clone_prefix is not None:
         config["DATAGEN_CLONE_PREFIX"] = _normalize_clone_prefix(job.clone_prefix)
     elif not os.environ.get("DATAGEN_CLONE_PREFIX"):
-        config["DATAGEN_CLONE_PREFIX"] = _normalize_clone_prefix(
-            profile.default_clone_prefix
-        )
+        config["DATAGEN_CLONE_PREFIX"] = _normalize_clone_prefix(profile.default_clone_prefix)
     else:
-        config["DATAGEN_CLONE_PREFIX"] = _normalize_clone_prefix(
-            config["DATAGEN_CLONE_PREFIX"]
-        )
+        config["DATAGEN_CLONE_PREFIX"] = _normalize_clone_prefix(config["DATAGEN_CLONE_PREFIX"])
     genai_artifact_root = job.genai_artifact_root
     if job.enable_genai and job.phase == "plan" and not genai_artifact_root:
         genai_artifact_root = _default_genai_artifact_root(job.plan_uri)
-    if (job.enable_genai and job.phase in {"all", "plan"}
-            and _mesmo_ou_ancestral(
-                clone_base_path(config), genai_artifact_root
-            )):
+    if (
+        job.enable_genai
+        and job.phase in {"all", "plan"}
+        and _mesmo_ou_ancestral(clone_base_path(config), genai_artifact_root)
+    ):
         raise ValueError("genai_artifact_root must be outside the synthetic table root")
     logger.info(
         "Job produto=%s phase=%s query=%s specs=%s destino=%s tipo_oracle=%s "
@@ -10607,8 +10828,7 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
 
     spark = create_spark_session(f"DataGenEngorda_{profile.name}")
     try:
-        if (job.enable_genai and job.phase in {"all", "plan"}
-                and not job.dry_run):
+        if job.enable_genai and job.phase in {"all", "plan"} and not job.dry_run:
             _assert_exact_output_absent(spark, genai_artifact_root)
         specs_uri = job.specs_uri or config["DATAGEN_SPECS_URI"]
         planned_artifact = None
@@ -10653,9 +10873,7 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
         prazo_vencimento_dias = job.prazo_vencimento_dias
         anular_cols = job.anular_cols
         if job.phase == "materialize":
-            planned_artifact = _validate_plan_artifact(
-                _read_json_artifact(spark, job.plan_uri)
-            )
+            planned_artifact = _validate_plan_artifact(_read_json_artifact(spark, job.plan_uri))
             reservation = _validate_reservation_artifact(
                 planned_artifact,
                 _read_json_artifact(spark, job.reservation_uri),
@@ -10667,26 +10885,18 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
                 and planned_artifact["genai"].get("enabled") is True
             )
             if job.enable_genai != planned_genai:
-                raise ValueError(
-                    "materialize --enable-genai diverge do descriptor GenAI do plano"
-                )
+                raise ValueError("materialize --enable-genai diverge do descriptor GenAI do plano")
             if planned_genai:
                 descriptor = dict(planned_artifact["genai"])
                 genai_frozen = GenAiFrozenArtifacts(
                     descriptor=descriptor,
                     replacements=load_genai_replacements(spark, descriptor),
                 )
-            planned_no_oracle = (
-                planned_artifact.get("oracle_access", "live") == "disabled"
-            )
+            planned_no_oracle = planned_artifact.get("oracle_access", "live") == "disabled"
             if job.no_oracle != planned_no_oracle:
-                raise ValueError(
-                    "materialize --no-oracle diverge do oracle_access do plano"
-                )
+                raise ValueError("materialize --no-oracle diverge do oracle_access do plano")
             lineage = {
-                "raw_uri": _area(
-                    config["DATAGEN_RAW_BASE_URI"], config.get("DATAGEN_RAW_PREFIX")
-                ),
+                "raw_uri": _area(config["DATAGEN_RAW_BASE_URI"], config.get("DATAGEN_RAW_PREFIX")),
                 "output_uri": clone_base_path(config),
                 "specs_uri": specs_uri,
                 "faltantes_uri": job.faltantes_parquet,
@@ -10699,15 +10909,13 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
             }
             if mismatches:
                 raise ValueError(f"lineage do materialize diverge do plano: {mismatches}")
-            snapshot_lotes, snapshot_faltantes, snapshot_lote_counts = (
-                _load_selected_lote_snapshot(
-                    spark,
-                    job.plan_uri,
-                    planned_artifact["selected_lote"],
-                    expected_tables=set(planned_artifact["tables"]),
-                    selected_num_ifs=planned_artifact["selected_num_ifs"],
-                    selective_keys=profile.integrity.selective_missing_keys,
-                )
+            snapshot_lotes, snapshot_faltantes, snapshot_lote_counts = _load_selected_lote_snapshot(
+                spark,
+                job.plan_uri,
+                planned_artifact["selected_lote"],
+                expected_tables=set(planned_artifact["tables"]),
+                selected_num_ifs=planned_artifact["selected_num_ifs"],
+                selective_keys=profile.integrity.selective_missing_keys,
             )
             num_ifs = None
             n_instrumentos = None
@@ -10723,7 +10931,9 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
             anular_cols = planned_artifact.get("anular_cols") or None
         spec = load_specs(spark, specs_uri)
         return executa_clonagem(
-            spark, config, spec,
+            spark,
+            config,
+            spec,
             product_profile=profile,
             meu_numero_prefix=job.meu_numero_prefix,
             num_ifs=num_ifs,
@@ -10780,7 +10990,8 @@ def _parse_num_ifs(txt: str) -> List[int]:
         valores = [int(v.strip()) for v in txt.split(",") if v.strip()]
     except ValueError:
         raise argparse.ArgumentTypeError(
-            "--num-ifs deve ser lista de inteiros separados por vírgula")
+            "--num-ifs deve ser lista de inteiros separados por vírgula"
+        )
     if not valores:
         # Lista vazia cairia em silêncio no ramo de SORTEIO (if num_ifs:) e
         # clonaria um instrumento aleatório — melhor abortar aqui.
@@ -10832,7 +11043,8 @@ def _parse_data_engorda(txt: str) -> datetime:
         except ValueError:
             continue
     raise argparse.ArgumentTypeError(
-        "--data-engorda deve ser 'YYYY-MM-DD' ou 'YYYY-MM-DD HH:MM:SS'")
+        "--data-engorda deve ser 'YYYY-MM-DD' ou 'YYYY-MM-DD HH:MM:SS'"
+    )
 
 
 def _parse_controle_operacional_date(txt: str) -> date:
@@ -10840,97 +11052,162 @@ def _parse_controle_operacional_date(txt: str) -> date:
         return date.fromisoformat(txt.strip())
     except ValueError:
         raise argparse.ArgumentTypeError(
-            "--data-controle-operacional deve ser 'YYYY-MM-DD'") from None
+            "--data-controle-operacional deve ser 'YYYY-MM-DD'"
+        ) from None
 
 
 def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Motor multi-produto de sintetização por entidade "
-                    "(synthesize-and-remap), dirigido por query SQL, "
-                    "spec_config.json, produto e parâmetros.")
+        "(synthesize-and-remap), dirigido por query SQL, "
+        "spec_config.json, produto e parâmetros."
+    )
     parser.add_argument(
-        "--produto", required=True, type=_parse_produto,
+        "--produto",
+        required=True,
+        type=_parse_produto,
         help="Produto que seleciona a query no catálogo SQL, as tabelas "
-             "engordáveis no spec único e o default de --clone-prefix "
-             f"({DEFAULT_CLONE_PREFIX}/<produto>).",
+        "engordáveis no spec único e o default de --clone-prefix "
+        f"({DEFAULT_CLONE_PREFIX}/<produto>).",
     )
     parser.add_argument("--phase", choices=ENGORDA_PHASES, default="all")
     grupo = parser.add_mutually_exclusive_group(required=False)
-    grupo.add_argument("--num-ifs", type=_parse_num_ifs, default=None,
-                       help="Lista explícita de NUM_IF (ex.: 123,456). Aceita 1 só.")
-    grupo.add_argument("--n-instrumentos", type=positive_int, default=None,
-                       help="Sorteia N instrumentos do domínio definido pela "
-                            "query SQL; usa --seed.")
-    parser.add_argument("--query-num-if-sql", dest="query_num_if_path", default=None,
-                        help="Override do catálogo SQL único de produtos; caminho "
-                             "local ou URI. Default: queries_produtos.sql ao lado "
-                             "do script. O bloco de --produto deve retornar NUM_IF.")
-    parser.add_argument("--fator-k", type=positive_int, default=1,
-                        help="Sintéticos por instrumento (default 1).")
-    parser.add_argument("--meu-numero-prefix", type=_validate_meu_numero_prefix,
-                        default=None,
-                        help="Prefixo de 3 dígitos (primeiro 1-9); obrigatório "
-                             "enquanto a política de OPERACAO gerar meu-número.")
-    parser.add_argument("--tipo-oracle", type=positive_int, default=None,
-                        help=f"OPCIONAL. O {COL_NUM_TIPO_IF} é DERIVADO das linhas "
-                             "do lote; informe apenas para CONFERIR (diverge -> "
-                             "aborta) ou para escolher o tipo da alocação num lote "
-                             "legitimamente multi-tipo.")
-    parser.add_argument("--cod-if-padrao", dest="cod_if_pattern",
-                        type=_parse_regex, default=None,
-                        help="OPCIONAL. Aperta a validação estrutural do COD_IF "
-                             f"(default {DEFAULT_COD_IF_PATTERN!r}, agnóstico de "
-                             "produto). Ajuste --cod-if-dry-prefix junto.")
-    parser.add_argument("--cod-if-dry-prefix", dest="cod_if_dry_prefix",
-                        default=None,
-                        help="OPCIONAL. Prefixo do placeholder de COD_IF no "
-                             f"--dry-run (default {DEFAULT_COD_IF_DRY_PREFIX!r}). "
-                             "Precisa casar com --cod-if-padrao.")
-    parser.add_argument("--oracle-code-batch-size", type=positive_int,
-                        default=DEFAULT_ORACLE_CODE_BATCH_SIZE,
-                        help="Códigos Oracle por round-trip (default 50000).")
-    parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
-                        help="Semente do sorteio de instrumentos.")
-    parser.add_argument("--pk-offset", type=nonneg_int, default=0,
-                        help="Piso absoluto para as PKs novas (como no engorda). "
-                             "Default 0 (sem piso).")
-    parser.add_argument("--pk-safety-band", type=nonneg_int, default=0,
-                        help="Folga acima do max real de cada PK: distância "
-                             "entre o max real e a PRIMEIRA PK nova. Default 0.")
-    parser.add_argument("--pk-passo", type=positive_int, default=1,
-                        help="Folga ENTRE PKs novas consecutivas (incremento). "
-                             "1 = contíguo (default); 10 deixa 9 valores livres "
-                             "entre cada sintético. Só vale para PK OFFSET_PROPRIO.")
-    parser.add_argument("--offset-num-if", type=positive_int, default=None,
-                        help="Início explícito do NUM_IF novo (> max real).")
-    parser.add_argument("--data-engorda", type=_parse_data_engorda, default=None,
-                        help="Data/hora do run usada nas colunas DAT_* "
-                             "('YYYY-MM-DD' ou 'YYYY-MM-DD HH:MM:SS'). "
-                              "Default: instante de início do script.")
+    grupo.add_argument(
+        "--num-ifs",
+        type=_parse_num_ifs,
+        default=None,
+        help="Lista explícita de NUM_IF (ex.: 123,456). Aceita 1 só.",
+    )
+    grupo.add_argument(
+        "--n-instrumentos",
+        type=positive_int,
+        default=None,
+        help="Sorteia N instrumentos do domínio definido pela query SQL; usa --seed.",
+    )
+    parser.add_argument(
+        "--query-num-if-sql",
+        dest="query_num_if_path",
+        default=None,
+        help="Override do catálogo SQL único de produtos; caminho "
+        "local ou URI. Default: queries_produtos.sql ao lado "
+        "do script. O bloco de --produto deve retornar NUM_IF.",
+    )
+    parser.add_argument(
+        "--fator-k", type=positive_int, default=1, help="Sintéticos por instrumento (default 1)."
+    )
+    parser.add_argument(
+        "--meu-numero-prefix",
+        type=_validate_meu_numero_prefix,
+        default=None,
+        help="Prefixo de 3 dígitos (primeiro 1-9); obrigatório "
+        "enquanto a política de OPERACAO gerar meu-número.",
+    )
+    parser.add_argument(
+        "--tipo-oracle",
+        type=positive_int,
+        default=None,
+        help=f"OPCIONAL. O {COL_NUM_TIPO_IF} é DERIVADO das linhas "
+        "do lote; informe apenas para CONFERIR (diverge -> "
+        "aborta) ou para escolher o tipo da alocação num lote "
+        "legitimamente multi-tipo.",
+    )
+    parser.add_argument(
+        "--cod-if-padrao",
+        dest="cod_if_pattern",
+        type=_parse_regex,
+        default=None,
+        help="OPCIONAL. Aperta a validação estrutural do COD_IF "
+        f"(default {DEFAULT_COD_IF_PATTERN!r}, agnóstico de "
+        "produto). Ajuste --cod-if-dry-prefix junto.",
+    )
+    parser.add_argument(
+        "--cod-if-dry-prefix",
+        dest="cod_if_dry_prefix",
+        default=None,
+        help="OPCIONAL. Prefixo do placeholder de COD_IF no "
+        f"--dry-run (default {DEFAULT_COD_IF_DRY_PREFIX!r}). "
+        "Precisa casar com --cod-if-padrao.",
+    )
+    parser.add_argument(
+        "--oracle-code-batch-size",
+        type=positive_int,
+        default=DEFAULT_ORACLE_CODE_BATCH_SIZE,
+        help="Códigos Oracle por round-trip (default 50000).",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=DEFAULT_SEED, help="Semente do sorteio de instrumentos."
+    )
+    parser.add_argument(
+        "--pk-offset",
+        type=nonneg_int,
+        default=0,
+        help="Piso absoluto para as PKs novas (como no engorda). Default 0 (sem piso).",
+    )
+    parser.add_argument(
+        "--pk-safety-band",
+        type=nonneg_int,
+        default=0,
+        help="Folga acima do max real de cada PK: distância "
+        "entre o max real e a PRIMEIRA PK nova. Default 0.",
+    )
+    parser.add_argument(
+        "--pk-passo",
+        type=positive_int,
+        default=1,
+        help="Folga ENTRE PKs novas consecutivas (incremento). "
+        "1 = contíguo (default); 10 deixa 9 valores livres "
+        "entre cada sintético. Só vale para PK OFFSET_PROPRIO.",
+    )
+    parser.add_argument(
+        "--offset-num-if",
+        type=positive_int,
+        default=None,
+        help="Início explícito do NUM_IF novo (> max real).",
+    )
+    parser.add_argument(
+        "--data-engorda",
+        type=_parse_data_engorda,
+        default=None,
+        help="Data/hora do run usada nas colunas DAT_* "
+        "('YYYY-MM-DD' ou 'YYYY-MM-DD HH:MM:SS'). "
+        "Default: instante de início do script.",
+    )
     parser.add_argument(
         "--data-controle-operacional",
         type=_parse_controle_operacional_date,
         default=None,
         help="Override de CETIP.CONTROLE_OPERACIONAL.DAT_CTL_OPER apenas para "
-             "dry-run (YYYY-MM-DD). Execuções reais sempre consultam NUM_ORDEM=0 "
-             "e NUM_SISTEMA IS NULL; dry-run sem valor usa a data da engorda.",
+        "dry-run (YYYY-MM-DD). Execuções reais sempre consultam NUM_ORDEM=0 "
+        "e NUM_SISTEMA IS NULL; dry-run sem valor usa a data da engorda.",
     )
-    parser.add_argument("--prazo-vencimento-dias", type=positive_int, default=None,
-                        help=f"{ENGORDA_COL_DAT_VENCIMENTO} = data operacional + N "
-                             "dias. Default: preserva o prazo original da linha "
-                             f"sintetizada ({ENGORDA_COL_DAT_VENCIMENTO} - "
-                             f"{ENGORDA_COL_DAT_EMISSAO}); prazo inválido cai em "
-                             f"{DEFAULT_DT_VENCIMENTO_PRAZO_DIAS} dias.")
-    parser.add_argument("--tratar-como-static", default="",
-                        help="Tabelas a excluir da sintetização (vírgula).")
-    parser.add_argument("--max-passadas", type=positive_int, default=6,
-                        help="Passadas máximas do pertencimento (ciclos de FK). "
-                             "Não estabilizou -> aborta pedindo aumento. Default 6.")
-    parser.add_argument("--sem-poda-subtipo", action="store_true",
-                        help="DESLIGA a poda de domínio do item 1 (por padrão os "
-                             "NUM_IF que gerariam CONDICAO_IF dangling são tirados "
-                             "do domínio e repostos por outra amostra). Use só p/ "
-                             "depurar — o sintético pode sair com dangling (Cat 1).")
+    parser.add_argument(
+        "--prazo-vencimento-dias",
+        type=positive_int,
+        default=None,
+        help=f"{ENGORDA_COL_DAT_VENCIMENTO} = data operacional + N "
+        "dias. Default: preserva o prazo original da linha "
+        f"sintetizada ({ENGORDA_COL_DAT_VENCIMENTO} - "
+        f"{ENGORDA_COL_DAT_EMISSAO}); prazo inválido cai em "
+        f"{DEFAULT_DT_VENCIMENTO_PRAZO_DIAS} dias.",
+    )
+    parser.add_argument(
+        "--tratar-como-static", default="", help="Tabelas a excluir da sintetização (vírgula)."
+    )
+    parser.add_argument(
+        "--max-passadas",
+        type=positive_int,
+        default=6,
+        help="Passadas máximas do pertencimento (ciclos de FK). "
+        "Não estabilizou -> aborta pedindo aumento. Default 6.",
+    )
+    parser.add_argument(
+        "--sem-poda-subtipo",
+        action="store_true",
+        help="DESLIGA a poda de domínio do item 1 (por padrão os "
+        "NUM_IF que gerariam CONDICAO_IF dangling são tirados "
+        "do domínio e repostos por outra amostra). Use só p/ "
+        "depurar — o sintético pode sair com dangling (Cat 1).",
+    )
     parser.add_argument(
         "--sem-politica-estrita-operacao",
         action="store_true",
@@ -10961,35 +11238,47 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "válido; use apenas para depuração."
         ),
     )
-    parser.add_argument("--sem-filtro-ativos", action="store_true",
-                        help="DESLIGA o filtro de linhas logicamente excluídas no "
-                             "fecho (por padrão CONDICAO_IF/RESGATE/CONDICAO_RESGATE "
-                             "entram só com DAT_EXCLUSAO nula / IND_EXCLUIDO<>S). "
-                             "Use só p/ depurar: sem o filtro, cronogramas de "
-                             "resgate saem com pai inativo.")
-    parser.add_argument("--faltantes-arg", default=None,
-                        help="Hint offline de chaves inexistentes, usado na poda "
-                             "do dry-run. Runs reais ignoram este estado histórico "
-                             "e consultam todas as FKs no Oracle live. Formato: "
-                             "'TABELA.COLUNA=v1,v2;TAB2.COL2=v3'. Os NUM_IF que "
-                             "as referenciam são podados do domínio. Ex.: "
-                             "'CARTEIRA_COMITENTE.NUM_ID_ENTIDADE=343..;"
-                             "CARTEIRA_COMITENTE.NUM_CONTA=95..'.")
-    parser.add_argument("--faltantes-parquet", default=None,
-                        help="Hint offline Parquet TABELA/COLUNA/VALOR para dry-run; "
-                             "não é autoritativo em execução real.")
-    parser.add_argument("--anular-cols", default=None,
-                        help="Item 2 (override/extra): colunas nullable a ANULAR "
-                             "nos sintéticos, formato 'TABELA.COL,COL2;TAB2.COL3'. "
-                             "Somam-se às colunas declaradas pelo schema.")
     parser.add_argument(
-        "--clone-prefix", default=None,
-        help="Prefixo exclusivo de saída. Precedência: argumento, env, "
-             f"default {DEFAULT_CLONE_PREFIX}/<produto>. Dois produtos NÃO podem "
-             "compartilhar o mesmo prefixo — o segundo run publica por cima.",
+        "--sem-filtro-ativos",
+        action="store_true",
+        help="DESLIGA o filtro de linhas logicamente excluídas no "
+        "fecho (por padrão CONDICAO_IF/RESGATE/CONDICAO_RESGATE "
+        "entram só com DAT_EXCLUSAO nula / IND_EXCLUIDO<>S). "
+        "Use só p/ depurar: sem o filtro, cronogramas de "
+        "resgate saem com pai inativo.",
     )
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Valida e loga; não grava nada.")
+    parser.add_argument(
+        "--faltantes-arg",
+        default=None,
+        help="Hint offline de chaves inexistentes, usado na poda "
+        "do dry-run. Runs reais ignoram este estado histórico "
+        "e consultam todas as FKs no Oracle live. Formato: "
+        "'TABELA.COLUNA=v1,v2;TAB2.COL2=v3'. Os NUM_IF que "
+        "as referenciam são podados do domínio. Ex.: "
+        "'CARTEIRA_COMITENTE.NUM_ID_ENTIDADE=343..;"
+        "CARTEIRA_COMITENTE.NUM_CONTA=95..'.",
+    )
+    parser.add_argument(
+        "--faltantes-parquet",
+        default=None,
+        help="Hint offline Parquet TABELA/COLUNA/VALOR para dry-run; "
+        "não é autoritativo em execução real.",
+    )
+    parser.add_argument(
+        "--anular-cols",
+        default=None,
+        help="Item 2 (override/extra): colunas nullable a ANULAR "
+        "nos sintéticos, formato 'TABELA.COL,COL2;TAB2.COL3'. "
+        "Somam-se às colunas declaradas pelo schema.",
+    )
+    parser.add_argument(
+        "--clone-prefix",
+        default=None,
+        help="Prefixo exclusivo de saída. Precedência: argumento, env, "
+        f"default {DEFAULT_CLONE_PREFIX}/<produto>. Dois produtos NÃO podem "
+        "compartilhar o mesmo prefixo — o segundo run publica por cima.",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Valida e loga; não grava nada.")
     parser.add_argument(
         "--no-oracle",
         action="store_true",
@@ -10999,10 +11288,13 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "para load."
         ),
     )
-    parser.add_argument("--specs", default=None,
-                        help="Override de DATAGEN_SPECS_URI (specs.json único). "
-                             "É o spec que DEFINE quais tabelas são engordadas: "
-                             "as não-static presentes nele.")
+    parser.add_argument(
+        "--specs",
+        default=None,
+        help="Override de DATAGEN_SPECS_URI (specs.json único). "
+        "É o spec que DEFINE quais tabelas são engordadas: "
+        "as não-static presentes nele.",
+    )
     parser.add_argument("--plan-uri", default=None)
     parser.add_argument("--reservation-uri", default=None)
     parser.add_argument("--raw-uri", default=None)
@@ -11023,15 +11315,14 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         parser.error(f"--phase {args.phase} exige --plan-uri")
     if args.phase == "materialize" and not args.reservation_uri:
         parser.error("--phase materialize exige --reservation-uri")
-    if args.phase in {"plan", "materialize"} and (
-        not args.raw_uri or not args.output_uri
-    ):
+    if args.phase in {"plan", "materialize"} and (not args.raw_uri or not args.output_uri):
         parser.error(f"--phase {args.phase} exige --raw-uri e --output-uri")
     return args
 
 
-def _merge_anular_cols(base: Mapping[str, Sequence[str]],
-                       txt: Optional[str]) -> Dict[str, Tuple[str, ...]]:
+def _merge_anular_cols(
+    base: Mapping[str, Sequence[str]], txt: Optional[str]
+) -> Dict[str, Tuple[str, ...]]:
     """Funde o default de anulação com o --anular-cols ('TAB.COL,COL2;TAB2.COL3'),
     preservando ordem e sem duplicar coluna por tabela."""
     merged: Dict[str, List[str]] = {t: list(cols) for t, cols in base.items()}
@@ -11042,7 +11333,8 @@ def _merge_anular_cols(base: Mapping[str, Sequence[str]],
         tab, sep, cols = grupo.partition(".")
         if not sep or not cols.strip():
             raise argparse.ArgumentTypeError(
-                f"--anular-cols: entrada inválida {grupo!r} (use TABELA.COL,COL2;...).")
+                f"--anular-cols: entrada inválida {grupo!r} (use TABELA.COL,COL2;...)."
+            )
         tab = table_path_name(tab.strip().upper())
         alvo = merged.setdefault(tab, [])
         for c in cols.split(","):
@@ -11054,57 +11346,56 @@ def _merge_anular_cols(base: Mapping[str, Sequence[str]],
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_arguments(argv)
-    executar_job(EngordaJob(
-        produto=args.produto,
-        num_ifs=tuple(args.num_ifs) if args.num_ifs is not None else None,
-        n_instrumentos=args.n_instrumentos,
-        fator_k=args.fator_k,
-        meu_numero_prefix=args.meu_numero_prefix,
-        query_num_if_path=args.query_num_if_path,
-        seed=args.seed,
-        pk_offset=args.pk_offset,
-        pk_safety_band=args.pk_safety_band,
-        pk_passo=args.pk_passo,
-        offset_num_if=args.offset_num_if,
-        tratar_como_static=tuple(
-            table for table in args.tratar_como_static.split(",") if table.strip()
-        ),
-        max_passadas=args.max_passadas,
-        engorda_ts=args.data_engorda,
-        controle_operacional_date=args.data_controle_operacional,
-        prazo_vencimento_dias=args.prazo_vencimento_dias,
-        faltantes_arg=args.faltantes_arg,
-        faltantes_parquet=args.faltantes_parquet,
-        poda_subtipo=not args.sem_poda_subtipo,
-        poda_cronograma_resgate=not args.sem_poda_cronograma_resgate,
-        poda_conta=not args.sem_poda_conta,
-        politica_estrita_operacao=not args.sem_politica_estrita_operacao,
-        ajusta_fator_k=not args.sem_ajuste_k,
-        somente_ativos=not args.sem_filtro_ativos,
-        anular_cols=(
-            _merge_anular_cols({}, args.anular_cols)
-            if args.anular_cols else None
-        ),
-        oracle_code_batch_size=args.oracle_code_batch_size,
-        tipo_oracle=args.tipo_oracle,
-        cod_if_pattern=args.cod_if_pattern,
-        cod_if_dry_prefix=args.cod_if_dry_prefix,
-        dry_run=args.dry_run,
-        no_oracle=args.no_oracle,
-        specs_uri=args.specs,
-        clone_prefix=args.clone_prefix,
-        phase=args.phase,
-        plan_uri=args.plan_uri,
-        reservation_uri=args.reservation_uri,
-        raw_uri=args.raw_uri,
-        output_uri=args.output_uri,
-        enable_genai=args.enable_genai,
-        genai_policy=args.genai_policy,
-        genai_endpoint_id=args.genai_endpoint_id,
-        genai_compartment_id=args.genai_compartment_id,
-        genai_region=args.genai_region,
-        genai_artifact_root=args.genai_artifact_root,
-    ))
+    executar_job(
+        EngordaJob(
+            produto=args.produto,
+            num_ifs=tuple(args.num_ifs) if args.num_ifs is not None else None,
+            n_instrumentos=args.n_instrumentos,
+            fator_k=args.fator_k,
+            meu_numero_prefix=args.meu_numero_prefix,
+            query_num_if_path=args.query_num_if_path,
+            seed=args.seed,
+            pk_offset=args.pk_offset,
+            pk_safety_band=args.pk_safety_band,
+            pk_passo=args.pk_passo,
+            offset_num_if=args.offset_num_if,
+            tratar_como_static=tuple(
+                table for table in args.tratar_como_static.split(",") if table.strip()
+            ),
+            max_passadas=args.max_passadas,
+            engorda_ts=args.data_engorda,
+            controle_operacional_date=args.data_controle_operacional,
+            prazo_vencimento_dias=args.prazo_vencimento_dias,
+            faltantes_arg=args.faltantes_arg,
+            faltantes_parquet=args.faltantes_parquet,
+            poda_subtipo=not args.sem_poda_subtipo,
+            poda_cronograma_resgate=not args.sem_poda_cronograma_resgate,
+            poda_conta=not args.sem_poda_conta,
+            politica_estrita_operacao=not args.sem_politica_estrita_operacao,
+            ajusta_fator_k=not args.sem_ajuste_k,
+            somente_ativos=not args.sem_filtro_ativos,
+            anular_cols=(_merge_anular_cols({}, args.anular_cols) if args.anular_cols else None),
+            oracle_code_batch_size=args.oracle_code_batch_size,
+            tipo_oracle=args.tipo_oracle,
+            cod_if_pattern=args.cod_if_pattern,
+            cod_if_dry_prefix=args.cod_if_dry_prefix,
+            dry_run=args.dry_run,
+            no_oracle=args.no_oracle,
+            specs_uri=args.specs,
+            clone_prefix=args.clone_prefix,
+            phase=args.phase,
+            plan_uri=args.plan_uri,
+            reservation_uri=args.reservation_uri,
+            raw_uri=args.raw_uri,
+            output_uri=args.output_uri,
+            enable_genai=args.enable_genai,
+            genai_policy=args.genai_policy,
+            genai_endpoint_id=args.genai_endpoint_id,
+            genai_compartment_id=args.genai_compartment_id,
+            genai_region=args.genai_region,
+            genai_artifact_root=args.genai_artifact_root,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------

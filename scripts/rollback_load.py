@@ -277,16 +277,18 @@ def rollback_table(spark, properties, entry, chunk_size, index, total, dry_run=F
         ranges = pk_chunk_ranges(lower - 1, upper, chunk_size)
         logger.info(
             "[%d/%d] %s: %s exact synthetic PK [%s, %s] in %d chunk(s)",
-            index, total, entry["table"],
+            index,
+            total,
+            entry["table"],
             "DRY RUN — would delete" if dry_run else "deleting",
-            lower, upper, len(ranges),
+            lower,
+            upper,
+            len(ranges),
         )
         if dry_run:
             return len(ranges)
         for lo, hi in ranges:
-            execute_statement(
-                spark, properties, delete_above_sql(owner, name, pk_col, lo, hi)
-            )
+            execute_statement(spark, properties, delete_above_sql(owner, name, pk_col, lo, hi))
         return len(ranges)
 
     max_before = entry["max_pk_before"]
@@ -307,9 +309,13 @@ def rollback_table(spark, properties, entry, chunk_size, index, total, dry_run=F
         return 0
     logger.info(
         "[%d/%d] %s: %s PK (%s, %s] in %d chunk(s)",
-        index, total, entry["table"],
+        index,
+        total,
+        entry["table"],
         "DRY RUN — would delete" if dry_run else "deleting",
-        lower_exclusive, current_max, len(ranges),
+        lower_exclusive,
+        current_max,
+        len(ranges),
     )
     if dry_run:
         return len(ranges)
@@ -325,9 +331,7 @@ def main() -> None:
     properties = build_connection_properties(config)
     failures = []
     try:
-        manifest = read_manifest(
-            spark, config, run_id=args.run_id, manifest_uri=args.manifest_uri
-        )
+        manifest = read_manifest(spark, config, run_id=args.run_id, manifest_uri=args.manifest_uri)
         require_exact_load_manifest(manifest)
         entries = [e for e in manifest.get("tables", [])]
         # Delete children before parents (reverse of the parent-first load order)
@@ -346,10 +350,16 @@ def main() -> None:
         logger.info("Rolling back manifest=%s: %d rollbackable table(s)", source, total)
         for index, entry in enumerate(rollbackable, start=1):
             try:
-                rollback_table(spark, properties, entry, args.chunk_size, index, total,
-                               dry_run=args.dry_run)
-                logger.info("[%d/%d] %s: %s", index, total, entry["table"],
-                            "would be rolled back" if args.dry_run else "rolled back")
+                rollback_table(
+                    spark, properties, entry, args.chunk_size, index, total, dry_run=args.dry_run
+                )
+                logger.info(
+                    "[%d/%d] %s: %s",
+                    index,
+                    total,
+                    entry["table"],
+                    "would be rolled back" if args.dry_run else "rolled back",
+                )
             except Exception as exc:
                 logger.exception("[%d/%d] %s: FAILED: %s", index, total, entry["table"], exc)
                 failures.append(entry["table"])

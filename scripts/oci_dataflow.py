@@ -23,20 +23,14 @@ classify_state = _implementation.classify_state
 def build_run_create_command(
     arguments: Sequence[str], display_name: str, opts: Mapping[str, Any]
 ) -> list[str]:
-    return _implementation._build_run_create_command(
-        arguments, display_name, opts, oci_auth_flags
-    )
+    return _implementation._build_run_create_command(arguments, display_name, opts, oci_auth_flags)
 
 
-def build_run_get_command(
-    run_id: str, opts: Mapping[str, Any] | None = None
-) -> list[str]:
+def build_run_get_command(run_id: str, opts: Mapping[str, Any] | None = None) -> list[str]:
     return _implementation._build_run_get_command(run_id, opts, oci_auth_flags)
 
 
-def build_run_cancel_command(
-    run_id: str, opts: Mapping[str, Any] | None = None
-) -> list[str]:
+def build_run_cancel_command(run_id: str, opts: Mapping[str, Any] | None = None) -> list[str]:
     return _implementation._build_run_cancel_command(run_id, opts, oci_auth_flags)
 
 

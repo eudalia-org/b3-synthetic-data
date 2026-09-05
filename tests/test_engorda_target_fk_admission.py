@@ -97,9 +97,7 @@ def test_transient_oci_action_stops_after_bounded_attempts(monkeypatch):
     assert waits == [35, 70]
 
 
-def test_read_pk_max_recreates_transiently_failed_spark_action(
-    spark, tmp_path, monkeypatch
-):
+def test_read_pk_max_recreates_transiently_failed_spark_action(spark, tmp_path, monkeypatch):
     source = tmp_path / "RAW_TABLE"
     spark.createDataFrame([(1,), (9,)], "ID long").write.parquet(str(source))
     frame_class = type(spark.read.parquet(str(source)))
@@ -122,9 +120,7 @@ def test_read_pk_max_recreates_transiently_failed_spark_action(
     assert waits == [35]
 
 
-def test_domain_checkpoint_recreates_query_after_transient_oci_failure(
-    spark, monkeypatch
-):
+def test_domain_checkpoint_recreates_query_after_transient_oci_failure(spark, monkeypatch):
     domain = spark.createDataFrame([(1,), (2,)], "NUM_IF long")
     frame_class = type(domain)
     original_checkpoint = frame_class.localCheckpoint
@@ -230,10 +226,12 @@ def spark():
 
 
 def test_oracle_parent_lookup_batches_composite_keys_and_closes(monkeypatch):
-    connection = _Connection([
-        [("1.0", "A")],
-        [("3", "C")],
-    ])
+    connection = _Connection(
+        [
+            [("1.0", "A")],
+            [("3", "C")],
+        ]
+    )
     monkeypatch.setattr(eng, "_open_oracle_connection", lambda *_args: connection)
 
     found = eng._oracle_existing_parent_keys(
@@ -249,8 +247,7 @@ def test_oracle_parent_lookup_batches_composite_keys_and_closes(monkeypatch):
     assert found == {("1", "A"), ("3", "C")}
     assert len(connection.statements) == 2
     assert connection.statements[0].sql == (
-        "SELECT DISTINCT ID, KIND FROM CETIP.PARENT "
-        "WHERE (ID, KIND) IN ((?, ?), (?, ?))"
+        "SELECT DISTINCT ID, KIND FROM CETIP.PARENT WHERE (ID, KIND) IN ((?, ?), (?, ?))"
     )
     assert connection.statements[0].binds == {1: "1", 2: "A", 3: "2", 4: "B"}
     assert all(statement.closed for statement in connection.statements)
@@ -258,7 +255,7 @@ def test_oracle_parent_lookup_batches_composite_keys_and_closes(monkeypatch):
 
 
 def test_live_oracle_pk_max_raises_reservation_floor(monkeypatch):
-    connection = _Connection([[('150',)]])
+    connection = _Connection([[("150",)]])
     monkeypatch.setattr(eng, "_open_oracle_connection", lambda *_args: connection)
     plan = eng.PlanoTabela(
         "OPERACAO",
@@ -267,25 +264,17 @@ def test_live_oracle_pk_max_raises_reservation_floor(monkeypatch):
         pk_start=100,
     )
 
-    eng._apply_oracle_pk_floors(
-        object(), ("url", "user", "password"), {"OPERACAO": plan}
-    )
+    eng._apply_oracle_pk_floors(object(), ("url", "user", "password"), {"OPERACAO": plan})
 
     assert plan.pk_start == 151
-    assert connection.statements[0].sql == (
-        "SELECT MAX(NUM_ID_OPERACAO) FROM CETIP.OPERACAO"
-    )
+    assert connection.statements[0].sql == ("SELECT MAX(NUM_ID_OPERACAO) FROM CETIP.OPERACAO")
     assert connection.closed
 
 
 def _fixture(spark):
     sources = {
-        "EVENTO": spark.createDataFrame(
-            [], "NUM_IF long, NUM_TIPO_EVENTO_LEGADO string"
-        ),
-        eng.TABELA_RAIZ: spark.createDataFrame(
-            [(1,), (2,), (3,), (4,)], "NUM_IF long"
-        ),
+        "EVENTO": spark.createDataFrame([], "NUM_IF long, NUM_TIPO_EVENTO_LEGADO string"),
+        eng.TABELA_RAIZ: spark.createDataFrame([(1,), (2,), (3,), (4,)], "NUM_IF long"),
         "OPERACAO": spark.createDataFrame(
             [(11, 1), (12, 2), (13, 3), (14, 4)],
             "NUM_ID_OPERACAO long, NUM_IF long",
@@ -296,8 +285,7 @@ def _fixture(spark):
         ),
         "ESPECIFICACAO_COMITENTE": spark.createDataFrame(
             [(31, 21, 100), (32, 22, 901), (33, 23, 100), (34, 24, 100)],
-            "NUM_ID_ESPECIFICACAO_COMITENTE long, "
-            "NUM_ID_ESPECIFICACAO long, NUM_ID_ENTIDADE long",
+            "NUM_ID_ESPECIFICACAO_COMITENTE long, NUM_ID_ESPECIFICACAO long, NUM_ID_ENTIDADE long",
         ),
         "CARTEIRA_COMITENTE": spark.createDataFrame(
             [(41, 1, 900), (42, 2, 100), (43, 3, 100), (44, 4, 100)],
@@ -312,20 +300,24 @@ def _fixture(spark):
         },
         "OPERACAO": {
             "pk_cols": ["NUM_ID_OPERACAO"],
-            "foreign_keys": [{
-                "columns": ["NUM_IF"],
-                "parent_table": eng.TABELA_RAIZ,
-                "parent_columns": ["NUM_IF"],
-            }],
+            "foreign_keys": [
+                {
+                    "columns": ["NUM_IF"],
+                    "parent_table": eng.TABELA_RAIZ,
+                    "parent_columns": ["NUM_IF"],
+                }
+            ],
             "static": False,
         },
         "ESPECIFICACAO": {
             "pk_cols": ["NUM_ID_ESPECIFICACAO"],
-            "foreign_keys": [{
-                "columns": ["NUM_ID_OPERACAO"],
-                "parent_table": "OPERACAO",
-                "parent_columns": ["NUM_ID_OPERACAO"],
-            }],
+            "foreign_keys": [
+                {
+                    "columns": ["NUM_ID_OPERACAO"],
+                    "parent_table": "OPERACAO",
+                    "parent_columns": ["NUM_ID_OPERACAO"],
+                }
+            ],
             "static": False,
         },
         "ESPECIFICACAO_COMITENTE": {
@@ -378,19 +370,19 @@ def _fixture(spark):
         "ESPECIFICACAO": eng.PlanoTabela(
             "ESPECIFICACAO",
             ("NUM_ID_ESPECIFICACAO",),
-            [eng.FkRemap(
-                ("NUM_ID_OPERACAO",), "OPERACAO", ("NUM_ID_OPERACAO",), True
-            )],
+            [eng.FkRemap(("NUM_ID_OPERACAO",), "OPERACAO", ("NUM_ID_OPERACAO",), True)],
         ),
         "ESPECIFICACAO_COMITENTE": eng.PlanoTabela(
             "ESPECIFICACAO_COMITENTE",
             ("NUM_ID_ESPECIFICACAO_COMITENTE",),
-            [eng.FkRemap(
-                ("NUM_ID_ESPECIFICACAO",),
-                "ESPECIFICACAO",
-                ("NUM_ID_ESPECIFICACAO",),
-                True,
-            )],
+            [
+                eng.FkRemap(
+                    ("NUM_ID_ESPECIFICACAO",),
+                    "ESPECIFICACAO",
+                    ("NUM_ID_ESPECIFICACAO",),
+                    True,
+                )
+            ],
         ),
         "CARTEIRA_COMITENTE": eng.PlanoTabela(
             "CARTEIRA_COMITENTE",
@@ -417,9 +409,7 @@ def _root_only_selection_harness(spark, monkeypatch, domain, reject=None):
             "static": False,
         }
     }
-    plans = {
-        eng.TABELA_RAIZ: eng.PlanoTabela(eng.TABELA_RAIZ, (eng.COL_NUM_IF,))
-    }
+    plans = {eng.TABELA_RAIZ: eng.PlanoTabela(eng.TABELA_RAIZ, (eng.COL_NUM_IF,))}
     pages = []
     current_candidates = []
     monkeypatch.setattr(
@@ -440,9 +430,7 @@ def _root_only_selection_harness(spark, monkeypatch, domain, reject=None):
     ):
         current_candidates[:] = candidates
         pages.append(list(candidates))
-        root = spark.createDataFrame(
-            [(value,) for value in candidates], domain.schema
-        )
+        root = spark.createDataFrame([(value,) for value in candidates], domain.schema)
         provenance = root.select(
             eng.COL_NUM_IF,
             F.col(eng.COL_NUM_IF).alias(eng.ROOT_PROVENANCE_COL),
@@ -527,9 +515,7 @@ def test_hash_band_plan_targets_bounded_expected_size(
     [(512, 128, 128), (256, 128, 128), (64, 128, 64), (512, 1, 8)],
 )
 def test_small_plan_shuffle_partition_target(configured, parallelism, expected):
-    assert eng._small_plan_shuffle_partition_target(
-        configured, parallelism
-    ) == expected
+    assert eng._small_plan_shuffle_partition_target(configured, parallelism) == expected
 
 
 def test_product_domain_query_construction_stays_lazy(spark, monkeypatch):
@@ -557,9 +543,7 @@ def test_product_domain_query_construction_stays_lazy(spark, monkeypatch):
 
 def test_materialized_domain_rejects_null_num_if(spark, monkeypatch):
     domain = spark.createDataFrame([(None,), (1,)], "NUM_IF long")
-    profile = dataclasses.replace(
-        eng.get_product_profile("cdb_simplificado"), name="test_domain"
-    )
+    profile = dataclasses.replace(eng.get_product_profile("cdb_simplificado"), name="test_domain")
     monkeypatch.setattr(eng, "_dominio_num_if_produto", lambda *_args, **_kwargs: domain)
 
     with pytest.raises(ValueError, match="NUM_IF nulo"):
@@ -581,9 +565,7 @@ def test_hash_band_plan_rejects_invalid_counts(domain_count, requested):
         eng._hash_band_plan(domain_count, requested)
 
 
-def test_hash_band_sampling_is_bounded_and_seeded_on_200k_domain(
-    spark, monkeypatch
-):
+def test_hash_band_sampling_is_bounded_and_seeded_on_200k_domain(spark, monkeypatch):
     domain = (
         spark.range(200_000)
         .select((F.col("id") + 1).alias(eng.COL_NUM_IF))
@@ -632,9 +614,7 @@ def test_target_selection_returns_materialized_final_counts(spark, monkeypatch):
         frame.unpersist(blocking=False)
 
 
-def test_hash_band_admission_refills_across_pages_and_bands_exactly(
-    spark, monkeypatch
-):
+def test_hash_band_admission_refills_across_pages_and_bands_exactly(spark, monkeypatch):
     domain = (
         spark.range(5000)
         .select((F.col("id") + 1).alias(eng.COL_NUM_IF))
@@ -643,17 +623,15 @@ def test_hash_band_admission_refills_across_pages_and_bands_exactly(
     _, band_count, _ = eng._hash_band_plan(5000, 10)
     band_by_root = {
         int(row[eng.COL_NUM_IF]): int(row["__band"])
-        for row in eng._ranked_hash_band_domain(
-            domain, seed=42, band_count=band_count
-        ).select(eng.COL_NUM_IF, "__band").collect()
+        for row in eng._ranked_hash_band_domain(domain, seed=42, band_count=band_count)
+        .select(eng.COL_NUM_IF, "__band")
+        .collect()
     }
     run, pages = _root_only_selection_harness(
         spark,
         monkeypatch,
         domain,
-        reject=lambda candidates: {
-            value for value in candidates if band_by_root[value] == 0
-        },
+        reject=lambda candidates: {value for value in candidates if band_by_root[value] == 0},
     )
 
     selection = run(n_instrumentos=10, seed=42)
@@ -672,9 +650,7 @@ def test_hash_band_admission_refills_across_pages_and_bands_exactly(
     domain.unpersist(blocking=False)
 
 
-def test_explicit_target_selection_does_not_use_hash_bands(
-    spark, monkeypatch
-):
+def test_explicit_target_selection_does_not_use_hash_bands(spark, monkeypatch):
     domain = spark.range(20).select((F.col("id") + 1).alias(eng.COL_NUM_IF))
     run, _pages = _root_only_selection_harness(spark, monkeypatch, domain)
     monkeypatch.setattr(
@@ -690,16 +666,12 @@ def test_explicit_target_selection_does_not_use_hash_bands(
         frame.unpersist(blocking=False)
 
 
-def test_target_fk_admission_streams_all_child_edges_once(
-    spark, monkeypatch
-):
+def test_target_fk_admission_streams_all_child_edges_once(spark, monkeypatch):
     child = spark.createDataFrame(
         [(1, 10, "A", Decimal("1.5000"), "X")],
         "ID long, FK_A long, FK_B string, FK_N decimal(10,4), FK_KIND string",
     )
-    provenance = spark.createDataFrame(
-        [(1, 100)], f"ID long, {eng.ROOT_PROVENANCE_COL} long"
-    )
+    provenance = spark.createDataFrame([(1, 100)], f"ID long, {eng.ROOT_PROVENANCE_COL} long")
     spec = {
         "CHILD": {
             "pk_cols": ["ID"],
@@ -775,13 +747,9 @@ def test_target_fk_admission_bounds_iterator_partition_fanout(spark, monkeypatch
     spark.conf.set("spark.sql.adaptive.enabled", "false")
     spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
     parent = spark.range(32).selectExpr("id AS ID").repartition(32)
-    parent_provenance = parent.selectExpr(
-        "ID", f"ID AS {eng.ROOT_PROVENANCE_COL}"
-    ).repartition(32)
+    parent_provenance = parent.selectExpr("ID", f"ID AS {eng.ROOT_PROVENANCE_COL}").repartition(32)
     child = spark.range(32).selectExpr("id AS ID", "id AS FK").repartition(32)
-    provenance = child.selectExpr(
-        "ID", f"ID AS {eng.ROOT_PROVENANCE_COL}"
-    ).repartition(32)
+    provenance = child.selectExpr("ID", f"ID AS {eng.ROOT_PROVENANCE_COL}").repartition(32)
     iterator_partitions = []
     frame_class = type(child)
     original_iterator = frame_class.toLocalIterator
@@ -798,17 +766,20 @@ def test_target_fk_admission_bounds_iterator_partition_fanout(spark, monkeypatch
                 "PARENT": {"pk_cols": ["ID"], "foreign_keys": []},
                 "CHILD": {
                     "pk_cols": ["ID"],
-                    "foreign_keys": [{
-                        "columns": ["FK"],
-                        "parent_table": "PARENT",
-                        "parent_columns": ["ID"],
-                    }],
-                }
+                    "foreign_keys": [
+                        {
+                            "columns": ["FK"],
+                            "parent_table": "PARENT",
+                            "parent_columns": ["ID"],
+                        }
+                    ],
+                },
             },
             {
                 "PARENT": eng.PlanoTabela("PARENT", ("ID",)),
                 "CHILD": eng.PlanoTabela(
-                    "CHILD", ("ID",),
+                    "CHILD",
+                    ("ID",),
                     [eng.FkRemap(("FK",), "PARENT", ("ID",), False)],
                 ),
             },
@@ -833,17 +804,11 @@ def test_target_fk_admission_bounds_iterator_partition_fanout(spark, monkeypatch
     assert missing is None
 
 
-def test_target_fk_admission_skips_iterators_for_known_empty_tables(
-    spark, monkeypatch
-):
+def test_target_fk_admission_skips_iterators_for_known_empty_tables(spark, monkeypatch):
     parent = spark.createDataFrame([], "ID long")
     child = spark.createDataFrame([], "ID long, FK long")
-    parent_provenance = spark.createDataFrame(
-        [], f"ID long, {eng.ROOT_PROVENANCE_COL} long"
-    )
-    child_provenance = spark.createDataFrame(
-        [], f"ID long, {eng.ROOT_PROVENANCE_COL} long"
-    )
+    parent_provenance = spark.createDataFrame([], f"ID long, {eng.ROOT_PROVENANCE_COL} long")
+    child_provenance = spark.createDataFrame([], f"ID long, {eng.ROOT_PROVENANCE_COL} long")
     frame_class = type(child)
     monkeypatch.setattr(
         frame_class,
@@ -857,17 +822,20 @@ def test_target_fk_admission_skips_iterators_for_known_empty_tables(
             "PARENT": {"pk_cols": ["ID"], "foreign_keys": []},
             "CHILD": {
                 "pk_cols": ["ID"],
-                "foreign_keys": [{
-                    "columns": ["FK"],
-                    "parent_table": "PARENT",
-                    "parent_columns": ["ID"],
-                }],
+                "foreign_keys": [
+                    {
+                        "columns": ["FK"],
+                        "parent_table": "PARENT",
+                        "parent_columns": ["ID"],
+                    }
+                ],
             },
         },
         {
             "PARENT": eng.PlanoTabela("PARENT", ("ID",)),
             "CHILD": eng.PlanoTabela(
-                "CHILD", ("ID",),
+                "CHILD",
+                ("ID",),
                 [eng.FkRemap(("FK",), "PARENT", ("ID",), False)],
             ),
         },
@@ -888,12 +856,8 @@ def test_target_fk_admission_skips_iterators_for_known_empty_tables(
 def test_empty_internal_parent_still_checks_nonempty_child_in_oracle(spark):
     parent = spark.createDataFrame([], "ID long")
     child = spark.createDataFrame([(1, 99)], "ID long, FK long")
-    parent_provenance = spark.createDataFrame(
-        [], f"ID long, {eng.ROOT_PROVENANCE_COL} long"
-    )
-    child_provenance = spark.createDataFrame(
-        [(1, 10)], f"ID long, {eng.ROOT_PROVENANCE_COL} long"
-    )
+    parent_provenance = spark.createDataFrame([], f"ID long, {eng.ROOT_PROVENANCE_COL} long")
+    child_provenance = spark.createDataFrame([(1, 10)], f"ID long, {eng.ROOT_PROVENANCE_COL} long")
     lookups = []
 
     def lookup(table, columns, keys, numeric_flags):
@@ -906,17 +870,20 @@ def test_empty_internal_parent_still_checks_nonempty_child_in_oracle(spark):
             "PARENT": {"pk_cols": ["ID"], "foreign_keys": []},
             "CHILD": {
                 "pk_cols": ["ID"],
-                "foreign_keys": [{
-                    "columns": ["FK"],
-                    "parent_table": "PARENT",
-                    "parent_columns": ["ID"],
-                }],
+                "foreign_keys": [
+                    {
+                        "columns": ["FK"],
+                        "parent_table": "PARENT",
+                        "parent_columns": ["ID"],
+                    }
+                ],
             },
         },
         {
             "PARENT": eng.PlanoTabela("PARENT", ("ID",)),
             "CHILD": eng.PlanoTabela(
-                "CHILD", ("ID",),
+                "CHILD",
+                ("ID",),
                 [eng.FkRemap(("FK",), "PARENT", ("ID",), False)],
             ),
         },
@@ -935,9 +902,7 @@ def test_empty_internal_parent_still_checks_nonempty_child_in_oracle(spark):
     assert missing is None
 
 
-def test_target_fk_admission_streams_multiple_parent_column_sets_once(
-    spark, monkeypatch
-):
+def test_target_fk_admission_streams_multiple_parent_column_sets_once(spark, monkeypatch):
     parent = spark.createDataFrame(
         [(1, 10, "A"), (2, 20, "B")],
         "ID long, PARENT_ID long, PARENT_CODE string",
@@ -1003,9 +968,7 @@ def test_target_fk_admission_streams_multiple_parent_column_sets_once(
         lambda *_args: pytest.fail("internally satisfied keys reached Oracle"),
     )
 
-    assert projections.count((
-        eng.ROOT_PROVENANCE_COL, "PARENT_ID", "PARENT_CODE"
-    )) == 1
+    assert projections.count((eng.ROOT_PROVENANCE_COL, "PARENT_ID", "PARENT_CODE")) == 1
     assert projections.count((eng.ROOT_PROVENANCE_COL, "FK_ID", "FK_CODE")) == 1
     assert rejected == set()
     assert reasons == {}
@@ -1055,14 +1018,8 @@ def test_target_fk_admission_keeps_selective_and_hard_edges_isolated(spark):
     )
 
     assert rejected == {202}
-    assert reasons == {
-        202: {
-            "FK CHILD.['FK_HARD'] -> HARD_PARENT.['CODE']"
-        }
-    }
-    assert [tuple(row) for row in missing.collect()] == [
-        (101, "CHILD", "FK_SELECTIVE", "S1")
-    ]
+    assert reasons == {202: {"FK CHILD.['FK_HARD'] -> HARD_PARENT.['CODE']"}}
+    assert [tuple(row) for row in missing.collect()] == [(101, "CHILD", "FK_SELECTIVE", "S1")]
 
 
 def test_target_fk_admission_mixed_edges_have_exact_outputs(spark):
@@ -1121,12 +1078,14 @@ def test_target_fk_admission_mixed_edges_have_exact_outputs(spark):
         "CHILD": eng.PlanoTabela(
             "CHILD",
             ("ID",),
-            [eng.FkRemap(
-                ("FK_INTERNAL_NUMBER", "FK_INTERNAL_KIND"),
-                "INTERNAL_PARENT",
-                ("PARENT_NUMBER", "PARENT_KIND"),
-                False,
-            )],
+            [
+                eng.FkRemap(
+                    ("FK_INTERNAL_NUMBER", "FK_INTERNAL_KIND"),
+                    "INTERNAL_PARENT",
+                    ("PARENT_NUMBER", "PARENT_KIND"),
+                    False,
+                )
+            ],
         ),
     }
     probes = []
@@ -1168,12 +1127,8 @@ def test_target_fk_admission_mixed_edges_have_exact_outputs(spark):
         ("HARD_PARENT", ("CODE",), [("H1",), ("H2",)], (False,)),
     ]
     assert rejected == {202}
-    assert reasons == {
-        202: {"FK CHILD.['FK_HARD'] -> HARD_PARENT.['CODE']"}
-    }
-    assert [tuple(row) for row in missing.collect()] == [
-        (101, "CHILD", "FK_SELECTIVE", "S1")
-    ]
+    assert reasons == {202: {"FK CHILD.['FK_HARD'] -> HARD_PARENT.['CODE']"}}
+    assert [tuple(row) for row in missing.collect()] == [(101, "CHILD", "FK_SELECTIVE", "S1")]
     assert [
         (field.name, field.dataType.simpleString(), field.nullable)
         for field in missing.schema.fields
@@ -1185,13 +1140,9 @@ def test_target_fk_admission_mixed_edges_have_exact_outputs(spark):
     ]
 
 
-def test_target_fk_admission_keeps_100k_keys_in_900_batches_without_collect(
-    spark, monkeypatch
-):
+def test_target_fk_admission_keeps_100k_keys_in_900_batches_without_collect(spark, monkeypatch):
     child = spark.range(100_000).selectExpr("id AS ID", "id AS FK")
-    provenance = child.selectExpr(
-        "ID", f"ID AS {eng.ROOT_PROVENANCE_COL}"
-    )
+    provenance = child.selectExpr("ID", f"ID AS {eng.ROOT_PROVENANCE_COL}")
     batch_sizes = []
     frame_class = type(child)
 
@@ -1209,11 +1160,13 @@ def test_target_fk_admission_keeps_100k_keys_in_900_batches_without_collect(
         {
             "CHILD": {
                 "pk_cols": ["ID"],
-                "foreign_keys": [{
-                    "columns": ["FK"],
-                    "parent_table": "PARENT",
-                    "parent_columns": ["ID"],
-                }],
+                "foreign_keys": [
+                    {
+                        "columns": ["FK"],
+                        "parent_table": "PARENT",
+                        "parent_columns": ["ID"],
+                    }
+                ],
             }
         },
         {"CHILD": eng.PlanoTabela("CHILD", ("ID",))},
@@ -1235,20 +1188,20 @@ def test_target_fk_admission_keeps_100k_keys_in_900_batches_without_collect(
 
 def test_target_fk_admission_empty_child_has_no_oracle_work(spark):
     child = spark.createDataFrame([], "ID long, FK string")
-    provenance = spark.createDataFrame(
-        [], f"ID long, {eng.ROOT_PROVENANCE_COL} long"
-    )
+    provenance = spark.createDataFrame([], f"ID long, {eng.ROOT_PROVENANCE_COL} long")
 
     rejected, reasons, missing = eng._target_fk_rejections(
         spark,
         {
             "CHILD": {
                 "pk_cols": ["ID"],
-                "foreign_keys": [{
-                    "columns": ["FK"],
-                    "parent_table": "PARENT",
-                    "parent_columns": ["CODE"],
-                }],
+                "foreign_keys": [
+                    {
+                        "columns": ["FK"],
+                        "parent_table": "PARENT",
+                        "parent_columns": ["CODE"],
+                    }
+                ],
             }
         },
         {"CHILD": eng.PlanoTabela("CHILD", ("ID",))},
@@ -1265,15 +1218,11 @@ def test_target_fk_admission_empty_child_has_no_oracle_work(spark):
     assert missing is None
 
 
-def test_target_fk_admission_refills_direct_and_transitive_orphans(
-    spark, monkeypatch
-):
+def test_target_fk_admission_refills_direct_and_transitive_orphans(spark, monkeypatch):
     sources, spec, plans, profile = _fixture(spark)
     domain = sources[eng.TABELA_RAIZ].select(eng.COL_NUM_IF)
     monkeypatch.setattr(eng, "_read_source", lambda _spark, _config, table: sources[table])
-    monkeypatch.setattr(
-        eng, "_dominio_num_if_produto", lambda *_args, **_kwargs: domain
-    )
+    monkeypatch.setattr(eng, "_dominio_num_if_produto", lambda *_args, **_kwargs: domain)
     probes = []
 
     def existing_keys(_table, _columns, keys, _numeric_flags):
@@ -1297,40 +1246,40 @@ def test_target_fk_admission_refills_direct_and_transitive_orphans(
 
     assert selection.values == [3, 4]
     assert selection.missing_keys is None
-    assert {
-        row.NUM_IF
-        for row in selection.lotes[eng.TABELA_RAIZ].select("NUM_IF").collect()
-    } == {3, 4}
+    assert {row.NUM_IF for row in selection.lotes[eng.TABELA_RAIZ].select("NUM_IF").collect()} == {
+        3,
+        4,
+    }
     assert ("900",) in probes and ("901",) in probes
     assert set(probes) <= {("100",), ("900",), ("901",)}
 
 
 @pytest.mark.parametrize("defect", ["schedule", "event_family"])
-def test_live_admission_applies_cdb_guards_to_refill_and_explicit_roots(
-    spark, monkeypatch, defect
-):
+def test_live_admission_applies_cdb_guards_to_refill_and_explicit_roots(spark, monkeypatch, defect):
     sources, spec, plans, _ = _fixture(spark)
-    sources.update({
-        eng.CONDICAO_IF_TABLE: spark.createDataFrame(
-            [(root, 100 + root, "20", None) for root in range(1, 5)],
-            "NUM_IF long, NUM_CONDICAO_IF long, COD_TIPO_CONDICAO_IF string, "
-            "DAT_EXCLUSAO string",
-        ),
-        eng.RESGATE_TABELA: spark.createDataFrame(
-            [(100 + root, "COM TABELA", None) for root in range(1, 5)],
-            "NUM_CONDICAO_IF long, COD_COND_RESGATE string, DAT_EXCLUSAO string",
-        ),
-        eng.CRONOGRAMA_TABELA: spark.createDataFrame(
-            [
-                (101, "2026-01-01", "50", None),
-                (102, "2026-01-01", "50", None),
-                (103, "bad" if defect == "schedule" else "2026-01-01", "50", None),
-                (104, "2026-01-01", "150", None),
-            ],
-            "NUM_CONDICAO_IF long, DAT_RESGATE string, VAL_PERCENTUAL string, "
-            "IND_EXCLUIDO string",
-        ),
-    })
+    sources.update(
+        {
+            eng.CONDICAO_IF_TABLE: spark.createDataFrame(
+                [(root, 100 + root, "20", None) for root in range(1, 5)],
+                "NUM_IF long, NUM_CONDICAO_IF long, COD_TIPO_CONDICAO_IF string, "
+                "DAT_EXCLUSAO string",
+            ),
+            eng.RESGATE_TABELA: spark.createDataFrame(
+                [(100 + root, "COM TABELA", None) for root in range(1, 5)],
+                "NUM_CONDICAO_IF long, COD_COND_RESGATE string, DAT_EXCLUSAO string",
+            ),
+            eng.CRONOGRAMA_TABELA: spark.createDataFrame(
+                [
+                    (101, "2026-01-01", "50", None),
+                    (102, "2026-01-01", "50", None),
+                    (103, "bad" if defect == "schedule" else "2026-01-01", "50", None),
+                    (104, "2026-01-01", "150", None),
+                ],
+                "NUM_CONDICAO_IF long, DAT_RESGATE string, VAL_PERCENTUAL string, "
+                "IND_EXCLUIDO string",
+            ),
+        }
+    )
     if defect == "event_family":
         sources["EVENTO"] = spark.createDataFrame(
             [(3, "83"), (4, "85")], "NUM_IF long, NUM_TIPO_EVENTO_LEGADO string"
@@ -1380,15 +1329,11 @@ def test_live_admission_applies_cdb_guards_to_refill_and_explicit_roots(
         )
 
 
-def test_target_fk_admission_does_not_replace_explicit_instruments(
-    spark, monkeypatch
-):
+def test_target_fk_admission_does_not_replace_explicit_instruments(spark, monkeypatch):
     sources, spec, plans, profile = _fixture(spark)
     domain = sources[eng.TABELA_RAIZ].select(eng.COL_NUM_IF)
     monkeypatch.setattr(eng, "_read_source", lambda _spark, _config, table: sources[table])
-    monkeypatch.setattr(
-        eng, "_dominio_num_if_produto", lambda *_args, **_kwargs: domain
-    )
+    monkeypatch.setattr(eng, "_dominio_num_if_produto", lambda *_args, **_kwargs: domain)
 
     def existing_keys(_table, _columns, keys, _numeric_flags):
         return {key for key in keys if key != ("900",)}
@@ -1414,9 +1359,7 @@ def test_target_fk_admission_fails_closed_when_lookup_fails(spark, monkeypatch):
     sources, spec, plans, profile = _fixture(spark)
     domain = sources[eng.TABELA_RAIZ].select(eng.COL_NUM_IF)
     monkeypatch.setattr(eng, "_read_source", lambda _spark, _config, table: sources[table])
-    monkeypatch.setattr(
-        eng, "_dominio_num_if_produto", lambda *_args, **_kwargs: domain
-    )
+    monkeypatch.setattr(eng, "_dominio_num_if_produto", lambda *_args, **_kwargs: domain)
 
     def unavailable(*_args):
         raise RuntimeError("oracle unavailable")
@@ -1438,24 +1381,18 @@ def test_target_fk_admission_fails_closed_when_lookup_fails(spark, monkeypatch):
         )
 
 
-def test_target_fk_admission_preserves_nullable_allowlisted_fk(
-    spark, monkeypatch
-):
+def test_target_fk_admission_preserves_nullable_allowlisted_fk(spark, monkeypatch):
     sources, spec, plans, profile = _fixture(spark)
     spec["ESPECIFICACAO_COMITENTE"]["not_null_cols"] = []
     profile = dataclasses.replace(
         profile,
         integrity=eng.IntegrityPolicy(
-            selective_missing_keys=frozenset({
-                ("ESPECIFICACAO_COMITENTE", "NUM_ID_ENTIDADE")
-            })
+            selective_missing_keys=frozenset({("ESPECIFICACAO_COMITENTE", "NUM_ID_ENTIDADE")})
         ),
     )
     domain = sources[eng.TABELA_RAIZ].select(eng.COL_NUM_IF)
     monkeypatch.setattr(eng, "_read_source", lambda _spark, _config, table: sources[table])
-    monkeypatch.setattr(
-        eng, "_dominio_num_if_produto", lambda *_args, **_kwargs: domain
-    )
+    monkeypatch.setattr(eng, "_dominio_num_if_produto", lambda *_args, **_kwargs: domain)
 
     def existing_keys(_table, _columns, keys, _numeric_flags):
         return {key for key in keys if key != ("901",)}
@@ -1481,15 +1418,11 @@ def test_target_fk_admission_preserves_nullable_allowlisted_fk(
     ]
 
 
-def test_target_fk_admission_fails_without_partial_selection(
-    spark, monkeypatch
-):
+def test_target_fk_admission_fails_without_partial_selection(spark, monkeypatch):
     sources, spec, plans, profile = _fixture(spark)
     domain = sources[eng.TABELA_RAIZ].select(eng.COL_NUM_IF)
     monkeypatch.setattr(eng, "_read_source", lambda _spark, _config, table: sources[table])
-    monkeypatch.setattr(
-        eng, "_dominio_num_if_produto", lambda *_args, **_kwargs: domain
-    )
+    monkeypatch.setattr(eng, "_dominio_num_if_produto", lambda *_args, **_kwargs: domain)
 
     with pytest.raises(ValueError, match=r"2 instrumento.*pedi 3"):
         eng.seleciona_instrumentos_destino(
@@ -1510,9 +1443,7 @@ def test_target_fk_admission_fails_without_partial_selection(
         )
 
 
-def test_target_fk_admission_allows_nonempty_sampled_deficit_for_k_adjustment(
-    spark, monkeypatch
-):
+def test_target_fk_admission_allows_nonempty_sampled_deficit_for_k_adjustment(spark, monkeypatch):
     sources, spec, plans, profile = _fixture(spark)
     domain = sources[eng.TABELA_RAIZ].select(eng.COL_NUM_IF)
     monkeypatch.setattr(eng, "_read_source", lambda _s, _c, table: sources[table])
@@ -1540,16 +1471,12 @@ def test_target_fk_admission_allows_nonempty_sampled_deficit_for_k_adjustment(
     assert selection.values == [3, 4]
 
 
-def test_target_fk_admission_skips_fks_nullified_before_write(
-    spark, monkeypatch
-):
+def test_target_fk_admission_skips_fks_nullified_before_write(spark, monkeypatch):
     sources, spec, plans, profile = _fixture(spark)
     spec["CARTEIRA_COMITENTE"]["not_null_cols"] = []
     domain = sources[eng.TABELA_RAIZ].select(eng.COL_NUM_IF)
     monkeypatch.setattr(eng, "_read_source", lambda _spark, _config, table: sources[table])
-    monkeypatch.setattr(
-        eng, "_dominio_num_if_produto", lambda *_args, **_kwargs: domain
-    )
+    monkeypatch.setattr(eng, "_dominio_num_if_produto", lambda *_args, **_kwargs: domain)
     probes = []
 
     def existing_keys(_table, _columns, keys, _numeric_flags):
@@ -1576,15 +1503,11 @@ def test_target_fk_admission_skips_fks_nullified_before_write(
     assert ("900",) not in probes
 
 
-def test_target_fk_admission_does_not_skip_not_null_nullification(
-    spark, monkeypatch
-):
+def test_target_fk_admission_does_not_skip_not_null_nullification(spark, monkeypatch):
     sources, spec, plans, profile = _fixture(spark)
     domain = sources[eng.TABELA_RAIZ].select(eng.COL_NUM_IF)
     monkeypatch.setattr(eng, "_read_source", lambda _spark, _config, table: sources[table])
-    monkeypatch.setattr(
-        eng, "_dominio_num_if_produto", lambda *_args, **_kwargs: domain
-    )
+    monkeypatch.setattr(eng, "_dominio_num_if_produto", lambda *_args, **_kwargs: domain)
 
     with pytest.raises(ValueError, match=r"FK.*NUM_IF 1"):
         eng.seleciona_instrumentos_destino(
@@ -1607,9 +1530,7 @@ def test_target_fk_admission_does_not_skip_not_null_nullification(
 
 
 def test_selective_nullification_uses_numeric_fk_canonicalization(spark):
-    source = spark.createDataFrame(
-        [(1, Decimal("1.5000"))], "ID long, FK decimal(10,4)"
-    )
+    source = spark.createDataFrame([(1, Decimal("1.5000"))], "ID long, FK decimal(10,4)")
     missing = spark.createDataFrame(
         [("CHILD", "FK", "1.5")], "TABELA string, COLUNA string, VALOR string"
     )
@@ -1627,9 +1548,7 @@ def test_selective_nullification_uses_numeric_fk_canonicalization(spark):
 
 def test_offline_faltantes_preserve_text_key_identity(spark, monkeypatch):
     domain = spark.createDataFrame([(1,), (2,)], "NUM_IF long")
-    child = spark.createDataFrame(
-        [(1, "A.0"), (2, "A")], "NUM_IF long, FK string"
-    )
+    child = spark.createDataFrame([(1, "A.0"), (2, "A")], "NUM_IF long, FK string")
     missing = spark.createDataFrame(
         [("CHILD", "FK", "A.0")], "TABELA string, COLUNA string, VALOR string"
     )
@@ -1681,10 +1600,13 @@ def test_materialize_job_consumes_frozen_plan_without_resampling(tmp_path, monke
                     "schema": {
                         "type": "struct",
                         "fields": [
-                            {"name": "NUM_IF", "type": "long", "nullable": True,
-                             "metadata": {}},
-                            {"name": "NUM_TIPO_IF", "type": "long", "nullable": True,
-                             "metadata": {}},
+                            {"name": "NUM_IF", "type": "long", "nullable": True, "metadata": {}},
+                            {
+                                "name": "NUM_TIPO_IF",
+                                "type": "long",
+                                "nullable": True,
+                                "metadata": {},
+                            },
                         ],
                     },
                 }
@@ -1718,9 +1640,7 @@ def test_materialize_job_consumes_frozen_plan_without_resampling(tmp_path, monke
         "schema_version": eng.ENGORDA_LEGACY_RESERVATION_SCHEMA_VERSION,
         "plan_id": plan["plan_id"],
         "product": "cdb_simplificado",
-        "table_pks": {
-            eng.TABELA_RAIZ: {"count": 6, "start": 200, "end": 205, "step": 1}
-        },
+        "table_pks": {eng.TABELA_RAIZ: {"count": 6, "start": 200, "end": 205, "step": 1}},
         "cod_operacao": {"strategy": "oracle_allocator", "count": 0},
         "meu_numero": {"prefix": None, "count": 0, "start": None, "end": None},
     }
@@ -1761,16 +1681,18 @@ def test_materialize_job_consumes_frozen_plan_without_resampling(tmp_path, monke
         lambda *_args, **kwargs: captured.update(kwargs) or {},
     )
 
-    eng.executar_job(eng.EngordaJob(
-        produto="cdb_simplificado",
-        phase="materialize",
-        plan_uri=str(plan_path),
-        reservation_uri=str(reservation_path),
-        raw_uri="oci://raw@ns/run/RAW",
-        output_uri="oci://out@ns/run/synthetic/cdb",
-        specs_uri="oci://cfg@ns/spec.json",
-        faltantes_parquet="oci://cfg@ns/faltantes",
-    ))
+    eng.executar_job(
+        eng.EngordaJob(
+            produto="cdb_simplificado",
+            phase="materialize",
+            plan_uri=str(plan_path),
+            reservation_uri=str(reservation_path),
+            raw_uri="oci://raw@ns/run/RAW",
+            output_uri="oci://out@ns/run/synthetic/cdb",
+            specs_uri="oci://cfg@ns/spec.json",
+            faltantes_parquet="oci://cfg@ns/faltantes",
+        )
+    )
 
     assert captured["num_ifs"] is None
     assert captured["n_instrumentos"] is None
@@ -1904,12 +1826,13 @@ def test_selected_lote_snapshot_roundtrip_preserves_empty_and_selective_missing(
     assert descriptor["schema_version"] == eng.ENGORDA_SELECTED_LOTE_SCHEMA_VERSION
     assert descriptor["table_set"] == ["CHILD", eng.TABELA_RAIZ]
     assert descriptor["tables"]["CHILD"]["row_count"] == 0
-    assert spark.sparkContext._jsc.hadoopConfiguration().get(
-        "mapreduce.fileoutputcommitter.algorithm.version"
-    ) == "2"
-    assert len(list(Path(descriptor["tables"][eng.TABELA_RAIZ]["path"]).glob(
-        "part-*"
-    ))) == 1
+    assert (
+        spark.sparkContext._jsc.hadoopConfiguration().get(
+            "mapreduce.fileoutputcommitter.algorithm.version"
+        )
+        == "2"
+    )
+    assert len(list(Path(descriptor["tables"][eng.TABELA_RAIZ]["path"]).glob("part-*"))) == 1
     assert counts == {"CHILD": 0, eng.TABELA_RAIZ: 2}
     assert lotes[eng.TABELA_RAIZ].orderBy("NUM_IF").collect() == root.orderBy("NUM_IF").collect()
     assert lotes["CHILD"].count() == 0
@@ -1932,9 +1855,7 @@ def test_selected_lote_snapshot_roundtrip_preserves_empty_and_selective_missing(
             "row_count",
         ),
         (
-            lambda value: value["tables"]["CHILD"]["schema"]["fields"][0].update(
-                nullable=False
-            ),
+            lambda value: value["tables"]["CHILD"]["schema"]["fields"][0].update(nullable=False),
             "schema",
         ),
         (
@@ -2042,9 +1963,7 @@ def test_offline_snapshot_keeps_only_allowlisted_selective_missing(spark, tmp_pa
         selective_keys=selective_keys,
     )
 
-    assert [tuple(row) for row in loaded.collect()] == [
-        ("CHILD", "NULLABLE_FK", "900")
-    ]
+    assert [tuple(row) for row in loaded.collect()] == [("CHILD", "NULLABLE_FK", "900")]
     assert eng._faltantes_seletivos_para_snapshot(missing, frozenset()) is None
 
 
@@ -2157,9 +2076,7 @@ def test_phase_plan_freezes_adjusted_k_for_admitted_domain_deficit(spark, monkey
         def close(self):
             pass
 
-    admitted_root = spark.createDataFrame(
-        [(20, 49)], "NUM_IF long, NUM_TIPO_IF long"
-    )
+    admitted_root = spark.createDataFrame([(20, 49)], "NUM_IF long, NUM_TIPO_IF long")
     profile = eng.get_product_profile("cdb_resgate")
     config = {
         "DATAGEN_RAW_BASE_URI": "oci://raw@ns/run/RAW",
@@ -2184,25 +2101,30 @@ def test_phase_plan_freezes_adjusted_k_for_admitted_domain_deficit(spark, monkey
     monkeypatch.setattr(eng, "_valida_contrato_nulificacao_seletiva", lambda *_: None)
     monkeypatch.setattr(eng, "_carrega_faltantes", lambda *_: None)
     monkeypatch.setattr(eng, "_oracle_credentials", lambda *_: ("url", "user", "pw"))
-    monkeypatch.setattr(
-        eng, "_read_controle_operacional_date", lambda *_: date(2026, 8, 20)
-    )
+    monkeypatch.setattr(eng, "_read_controle_operacional_date", lambda *_: date(2026, 8, 20))
     monkeypatch.setattr(eng, "_open_oracle_connection", lambda *_: Connection())
-    monkeypatch.setattr(eng, "monta_plano", lambda *_args, **_kwargs: {
-        eng.TABELA_RAIZ: eng.PlanoTabela(
-            eng.TABELA_RAIZ,
-            (eng.COL_NUM_IF,),
-            pk_regra="OFFSET_PROPRIO",
-            pk_start=100,
-        )
-    })
+    monkeypatch.setattr(
+        eng,
+        "monta_plano",
+        lambda *_args, **_kwargs: {
+            eng.TABELA_RAIZ: eng.PlanoTabela(
+                eng.TABELA_RAIZ,
+                (eng.COL_NUM_IF,),
+                pk_regra="OFFSET_PROPRIO",
+                pk_start=100,
+            )
+        },
+    )
     monkeypatch.setattr(eng, "ordem_topologica", lambda *_: [eng.TABELA_RAIZ])
 
     def select_admitted(*_args, **kwargs):
         assert kwargs["poda_cronograma_resgate"] is True
         assert kwargs["permitir_lote_menor"] is True
         return eng.TargetInstrumentSelection(
-            [20], None, {eng.TABELA_RAIZ: admitted_root}, None,
+            [20],
+            None,
+            {eng.TABELA_RAIZ: admitted_root},
+            None,
             {eng.TABELA_RAIZ: 1},
         )
 
@@ -2226,6 +2148,7 @@ def test_phase_plan_freezes_adjusted_k_for_admitted_domain_deficit(spark, monkey
         return {"snapshot": "descriptor"}
 
     monkeypatch.setattr(eng, "_create_selected_lote_snapshot", snapshot)
+
     def build_plan(**kwargs):
         assert kwargs["valores"] == [20]
         assert kwargs["fator_k"] == 4
@@ -2253,9 +2176,7 @@ def test_materialize_uses_frozen_lotes_and_rejects_spec_hash_divergence_before_s
     class AllocatorReached(RuntimeError):
         pass
 
-    root = spark.createDataFrame(
-        [(10, 49, "OLD")], "NUM_IF long, NUM_TIPO_IF long, COD_IF string"
-    )
+    root = spark.createDataFrame([(10, 49, "OLD")], "NUM_IF long, NUM_TIPO_IF long, COD_IF string")
     profile = eng.get_product_profile("cdb_simplificado")
     profile = dataclasses.replace(
         profile,
@@ -2308,9 +2229,7 @@ def test_materialize_uses_frozen_lotes_and_rejects_spec_hash_divergence_before_s
         }
     }
     normalized_spec = eng.normalize_specs(spec)
-    spec_sha256 = hashlib.sha256(
-        eng._canonical_json(normalized_spec).encode("ascii")
-    ).hexdigest()
+    spec_sha256 = hashlib.sha256(eng._canonical_json(normalized_spec).encode("ascii")).hexdigest()
     plan = eng._build_engorda_plan(
         config=config,
         specs_uri=config["DATAGEN_SPECS_URI"],
@@ -2335,9 +2254,7 @@ def test_materialize_uses_frozen_lotes_and_rejects_spec_hash_divergence_before_s
         "schema_version": eng.ENGORDA_RESERVATION_SCHEMA_VERSION,
         "plan_id": plan["plan_id"],
         "product": profile.name,
-        "table_pks": {
-            eng.TABELA_RAIZ: {"count": 1, "start": 200, "end": 200, "step": 1}
-        },
+        "table_pks": {eng.TABELA_RAIZ: {"count": 1, "start": 200, "end": 200, "step": 1}},
         "cod_operacao": {"strategy": "oracle_allocator", "count": 0},
         "meu_numero": {
             "strategy": eng.MEU_NUMERO_GROUPED_STRATEGY,
@@ -2414,9 +2331,7 @@ def test_materialize_uses_frozen_lotes_and_rejects_spec_hash_divergence_before_s
     monkeypatch.setattr(
         eng,
         "_count_final_lotes",
-        lambda *_: (_ for _ in ()).throw(
-            AssertionError("materialize recounted frozen snapshot")
-        ),
+        lambda *_: (_ for _ in ()).throw(AssertionError("materialize recounted frozen snapshot")),
     )
 
     with pytest.raises(AllocatorReached):
@@ -2485,33 +2400,31 @@ def test_phase_all_performs_no_snapshot_io(spark, monkeypatch):
     monkeypatch.setattr(eng, "_valida_contrato_nulificacao_seletiva", lambda *_: None)
     monkeypatch.setattr(eng, "_carrega_faltantes", lambda *_: None)
     monkeypatch.setattr(eng, "_oracle_credentials", lambda *_: None)
-    monkeypatch.setattr(eng, "monta_plano", lambda *_args, **_kwargs: {
-        eng.TABELA_RAIZ: eng.PlanoTabela(
-            eng.TABELA_RAIZ,
-            (eng.COL_NUM_IF,),
-            pk_regra="OFFSET_PROPRIO",
-            pk_start=100,
-        )
-    })
+    monkeypatch.setattr(
+        eng,
+        "monta_plano",
+        lambda *_args, **_kwargs: {
+            eng.TABELA_RAIZ: eng.PlanoTabela(
+                eng.TABELA_RAIZ,
+                (eng.COL_NUM_IF,),
+                pk_regra="OFFSET_PROPRIO",
+                pk_start=100,
+            )
+        },
+    )
     monkeypatch.setattr(eng, "ordem_topologica", lambda *_: [eng.TABELA_RAIZ])
     monkeypatch.setattr(eng, "seleciona_instrumentos", lambda *_args, **_kwargs: [10])
     monkeypatch.setattr(eng, "_deriva_tipo_oracle", lambda *_: 49)
-    monkeypatch.setattr(eng, "calcula_lotes", lambda *_args, **_kwargs: {
-        eng.TABELA_RAIZ: root
-    })
+    monkeypatch.setattr(eng, "calcula_lotes", lambda *_args, **_kwargs: {eng.TABELA_RAIZ: root})
     monkeypatch.setattr(
         eng,
         "_create_selected_lote_snapshot",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("phase all wrote snapshot")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("phase all wrote snapshot")),
     )
     monkeypatch.setattr(
         eng,
         "_load_selected_lote_snapshot",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("phase all read snapshot")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("phase all read snapshot")),
     )
     monkeypatch.setattr(
         eng,
@@ -2557,9 +2470,7 @@ def test_exact_pipeline_output_refuses_overwrite():
         sparkContext=SimpleNamespace(
             _jvm=SimpleNamespace(
                 org=SimpleNamespace(
-                    apache=SimpleNamespace(
-                        hadoop=SimpleNamespace(fs=SimpleNamespace(Path=Path))
-                    )
+                    apache=SimpleNamespace(hadoop=SimpleNamespace(fs=SimpleNamespace(Path=Path)))
                 )
             ),
             _jsc=SimpleNamespace(hadoopConfiguration=lambda: object()),
@@ -2567,14 +2478,10 @@ def test_exact_pipeline_output_refuses_overwrite():
     )
 
     with pytest.raises(ValueError, match="imutável já existe"):
-        eng._assert_exact_output_absent(
-            spark, "oci://bucket@ns/run/synthetic/product"
-        )
+        eng._assert_exact_output_absent(spark, "oci://bucket@ns/run/synthetic/product")
 
 
-def test_require_absent_rechecks_after_staging_and_preserves_raced_output(
-    spark, tmp_path
-):
+def test_require_absent_rechecks_after_staging_and_preserves_raced_output(spark, tmp_path):
     final_path = tmp_path / "final"
 
     def prepare(staging_path):

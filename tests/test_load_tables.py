@@ -135,8 +135,7 @@ class TestNameAndPathHelpers:
             "DATAGEN_LOAD_PREFIX": "synthetic",
         }
         assert (
-            load_tables.build_load_path(config, "ORDERS")
-            == "oci://bucket@ns/load/synthetic/ORDERS"
+            load_tables.build_load_path(config, "ORDERS") == "oci://bucket@ns/load/synthetic/ORDERS"
         )
 
     def test_build_load_path_without_prefix(self):
@@ -203,8 +202,7 @@ class TestOracleAuditInsert:
         columns = ["NUM_ID_OPERACAO", "DAT_INCLUSAO", "VAL_TIME_STAMP_ATUALIZACAO"]
         audit = load_tables.oracle_audit_columns("OPERACAO", columns)
 
-        sql, payload = load_tables.build_oracle_audit_insert_sql(
-            "CETIP.OPERACAO", columns, audit)
+        sql, payload = load_tables.build_oracle_audit_insert_sql("CETIP.OPERACAO", columns, audit)
 
         assert payload == ["NUM_ID_OPERACAO"]
         assert sql == (
@@ -219,8 +217,7 @@ class TestOracleAuditInsert:
         with pytest.raises(ValueError):
             load_tables.build_oracle_audit_insert_sql("OPERACAO", ["ID"], {})
         with pytest.raises(ValueError):
-            load_tables.build_oracle_audit_insert_sql(
-                "CETIP.OPERACAO;DROP", ["ID"], {})
+            load_tables.build_oracle_audit_insert_sql("CETIP.OPERACAO;DROP", ["ID"], {})
 
 
 class TestPositiveInt:
@@ -229,11 +226,13 @@ class TestPositiveInt:
 
     def test_rejects_non_integer(self):
         import argparse
+
         with pytest.raises(argparse.ArgumentTypeError):
             load_tables.positive_int("abc")
 
     def test_rejects_zero_and_negative(self):
         import argparse
+
         with pytest.raises(argparse.ArgumentTypeError):
             load_tables.positive_int("0")
         with pytest.raises(argparse.ArgumentTypeError):
@@ -291,8 +290,11 @@ FK_SPECS = {
     "JUROS_FLUTUANTE": {
         "pk_cols": ["NUM_CONDICAO_IF"],
         "foreign_keys": [
-            {"columns": ["NUM_CONDICAO_IF"], "parent_table": "CONDICAO_IF",
-             "parent_columns": ["NUM_CONDICAO_IF"]}
+            {
+                "columns": ["NUM_CONDICAO_IF"],
+                "parent_table": "CONDICAO_IF",
+                "parent_columns": ["NUM_CONDICAO_IF"],
+            }
         ],
     },
     "CONDICAO_IF": {"pk_cols": ["NUM_CONDICAO_IF"]},
@@ -301,9 +303,10 @@ FK_SPECS = {
 
 class TestTopoSortForLoad:
     def test_parent_before_child_regardless_of_input_order(self):
-        assert load_tables.topo_sort_for_load(
-            FK_SPECS, ["JUROS_FLUTUANTE", "CONDICAO_IF"]
-        ) == ["CONDICAO_IF", "JUROS_FLUTUANTE"]
+        assert load_tables.topo_sort_for_load(FK_SPECS, ["JUROS_FLUTUANTE", "CONDICAO_IF"]) == [
+            "CONDICAO_IF",
+            "JUROS_FLUTUANTE",
+        ]
 
     def test_schema_qualified_names_are_resolved(self):
         assert load_tables.topo_sort_for_load(
@@ -318,47 +321,71 @@ class TestTopoSortForLoad:
         ) == ["OTHER", "CONDICAO_IF", "JUROS_FLUTUANTE"]
 
     def test_unsupported_self_reference_is_rejected(self):
-        specs = {"USUARIO": {"pk_cols": ["NUM_ID_ENTIDADE"], "foreign_keys": [
-            {"columns": ["NUM_ID_SUP"], "parent_table": "USUARIO",
-             "parent_columns": ["NUM_ID_ENTIDADE"]}]}}
+        specs = {
+            "USUARIO": {
+                "pk_cols": ["NUM_ID_ENTIDADE"],
+                "foreign_keys": [
+                    {
+                        "columns": ["NUM_ID_SUP"],
+                        "parent_table": "USUARIO",
+                        "parent_columns": ["NUM_ID_ENTIDADE"],
+                    }
+                ],
+            }
+        }
         with pytest.raises(ValueError, match="self-referencing"):
             load_tables.topo_sort_for_load(specs, ["USUARIO"])
 
     def test_null_on_insert_self_reference_is_allowed(self):
-        specs = {"INSTRUMENTO_FINANCEIRO": {
-            "pk_cols": ["NUM_IF"],
-            "foreign_keys": [{
-                "columns": ["NUM_IF_ORIGEM"],
-                "parent_table": "CETIP.INSTRUMENTO_FINANCEIRO",
-                "parent_columns": ["NUM_IF"],
-            }],
-        }}
-        assert load_tables.topo_sort_for_load(
-            specs, ["INSTRUMENTO_FINANCEIRO"]
-        ) == ["INSTRUMENTO_FINANCEIRO"]
+        specs = {
+            "INSTRUMENTO_FINANCEIRO": {
+                "pk_cols": ["NUM_IF"],
+                "foreign_keys": [
+                    {
+                        "columns": ["NUM_IF_ORIGEM"],
+                        "parent_table": "CETIP.INSTRUMENTO_FINANCEIRO",
+                        "parent_columns": ["NUM_IF"],
+                    }
+                ],
+            }
+        }
+        assert load_tables.topo_sort_for_load(specs, ["INSTRUMENTO_FINANCEIRO"]) == [
+            "INSTRUMENTO_FINANCEIRO"
+        ]
 
     def test_schema_qualified_parent_still_orders_before_child(self):
         specs = {
             **FK_SPECS,
             "JUROS_FLUTUANTE": {
                 **FK_SPECS["JUROS_FLUTUANTE"],
-                "foreign_keys": [{
-                    "columns": ["NUM_CONDICAO_IF"],
-                    "parent_table": "CETIP.CONDICAO_IF",
-                    "parent_columns": ["NUM_CONDICAO_IF"],
-                }],
+                "foreign_keys": [
+                    {
+                        "columns": ["NUM_CONDICAO_IF"],
+                        "parent_table": "CETIP.CONDICAO_IF",
+                        "parent_columns": ["NUM_CONDICAO_IF"],
+                    }
+                ],
             },
         }
-        assert load_tables.topo_sort_for_load(
-            specs, ["JUROS_FLUTUANTE", "CONDICAO_IF"]
-        ) == ["CONDICAO_IF", "JUROS_FLUTUANTE"]
+        assert load_tables.topo_sort_for_load(specs, ["JUROS_FLUTUANTE", "CONDICAO_IF"]) == [
+            "CONDICAO_IF",
+            "JUROS_FLUTUANTE",
+        ]
 
     def test_cycle_is_rejected(self):
         specs = {
-            "A": {"pk_cols": ["AID"], "foreign_keys": [
-                {"columns": ["BID"], "parent_table": "B", "parent_columns": ["BID"]}]},
-            "B": {"pk_cols": ["BID"], "foreign_keys": [
-                {"columns": ["AID"], "parent_table": "A", "parent_columns": ["AID"]}]},
+            "A": {
+                "pk_cols": ["AID"],
+                "foreign_keys": [
+                    {"columns": ["BID"], "parent_table": "B", "parent_columns": ["BID"]}
+                ],
+            },
+            "B": {
+                "pk_cols": ["BID"],
+                "foreign_keys": [
+                    {"columns": ["AID"], "parent_table": "A", "parent_columns": ["AID"]}
+                ],
+            },
         }
         with pytest.raises(ValueError, match="cycle"):
             load_tables.topo_sort_for_load(specs, ["A", "B"])
@@ -366,13 +393,13 @@ class TestTopoSortForLoad:
 
 class TestResolveLoadTablesTopoOrder:
     def test_requested_child_first_is_reordered_parent_first(self):
-        assert load_tables.resolve_load_tables(
-            FK_SPECS, ["JUROS_FLUTUANTE", "CONDICAO_IF"]
-        ) == ["CONDICAO_IF", "JUROS_FLUTUANTE"]
+        assert load_tables.resolve_load_tables(FK_SPECS, ["JUROS_FLUTUANTE", "CONDICAO_IF"]) == [
+            "CONDICAO_IF",
+            "JUROS_FLUTUANTE",
+        ]
 
     def test_all_non_static_path_is_topo_ordered(self):
-        assert load_tables.resolve_load_tables(FK_SPECS, None) == [
-            "CONDICAO_IF", "JUROS_FLUTUANTE"]
+        assert load_tables.resolve_load_tables(FK_SPECS, None) == ["CONDICAO_IF", "JUROS_FLUTUANTE"]
 
 
 class TestGuardApplies:
@@ -417,14 +444,11 @@ class TestBuildExistingKeysQuery:
     def test_builds_bounded_subquery(self):
         q = load_tables.build_existing_keys_query("ADMIN", "LANCAMENTO", "NUM_ID", 10, 99)
         assert q == (
-            "(SELECT NUM_ID FROM ADMIN.LANCAMENTO "
-            "WHERE NUM_ID BETWEEN 10 AND 99) DATAGEN_KEYS"
+            "(SELECT NUM_ID FROM ADMIN.LANCAMENTO WHERE NUM_ID BETWEEN 10 AND 99) DATAGEN_KEYS"
         )
 
     def test_accepts_decimal_bounds(self):
-        q = load_tables.build_existing_keys_query(
-            "ADMIN", "T", "PK", Decimal("5"), Decimal("9")
-        )
+        q = load_tables.build_existing_keys_query("ADMIN", "T", "PK", Decimal("5"), Decimal("9"))
         assert "BETWEEN 5 AND 9" in q
 
     def test_rejects_non_numeric_bounds(self):
@@ -444,10 +468,15 @@ class TestBuildExistingKeysQuery:
 
 class TestManifest:
     def test_build_manifest_shape(self):
-        entries = [{
-            "table": "LANCAMENTO", "expected_rows": 3, "rollbackable": True,
-            "synthetic_pk_min": 10, "synthetic_pk_max": 12,
-        }]
+        entries = [
+            {
+                "table": "LANCAMENTO",
+                "expected_rows": 3,
+                "rollbackable": True,
+                "synthetic_pk_min": 10,
+                "synthetic_pk_max": 12,
+            }
+        ]
         m = load_tables.build_manifest(
             run_id="RID",
             product="cdb_pos",
@@ -532,7 +561,8 @@ class TestManifest:
         assert entries[0]["synthetic_pk_max"] == 12
         assert entries[0]["rollbackable"] is True
         assert [item["kind"] for item in transformations] == [
-            "nullify-self-reference", "oracle-audit-substitution"
+            "nullify-self-reference",
+            "oracle-audit-substitution",
         ]
 
 
@@ -572,9 +602,7 @@ class TestValidationReportGate:
     def test_rejects_invalid_report_contract(self, replacement, message):
         report = {**self.BASE_REPORT, **replacement}
         with pytest.raises(ValueError, match=message):
-            load_tables.validation_table_inventory(
-                report, "cdb", "oci://bucket@ns/synthetic"
-            )
+            load_tables.validation_table_inventory(report, "cdb", "oci://bucket@ns/synthetic")
 
     def test_rejects_non_object_json(self, tmp_path):
         path = tmp_path / "report.json"
@@ -586,10 +614,14 @@ class TestValidationReportGate:
 class TestOfflineInput:
     def test_rejects_no_oracle_marker_before_load(self, tmp_path):
         marker = tmp_path / load_tables.OFFLINE_ARTIFACT_MARKER
-        marker.write_text(json.dumps({
-            "artifact_type": "datagen_offline_synthetic",
-            "load_eligible": False,
-        }))
+        marker.write_text(
+            json.dumps(
+                {
+                    "artifact_type": "datagen_offline_synthetic",
+                    "load_eligible": False,
+                }
+            )
+        )
 
         with pytest.raises(ValueError, match="not eligible for load"):
             load_tables.reject_offline_input(None, str(tmp_path))
@@ -608,9 +640,7 @@ class TestExpectedTargetSchema:
 
     def test_rejects_inventory_owner_outside_target_schema(self):
         with pytest.raises(ValueError, match="expected CETIP"):
-            load_tables.require_inventory_target_schema(
-                ["OTHER.INSTRUMENTO_FINANCEIRO"], "CETIP"
-            )
+            load_tables.require_inventory_target_schema(["OTHER.INSTRUMENTO_FINANCEIRO"], "CETIP")
 
     def test_accepts_unqualified_and_matching_owner(self):
         load_tables.require_inventory_target_schema(
@@ -620,12 +650,18 @@ class TestExpectedTargetSchema:
 
 class TestSkipValidationArg:
     REQUIRED_ARGS = [
-        "--validation-report", "report.json",
-        "--product", "cdb_pos",
-        "--validation-product", "cdb",
-        "--manifest-uri", "manifest.json",
-        "--pipeline-manifest-uri", "pipeline.json",
-        "--expected-target-schema", "CETIP",
+        "--validation-report",
+        "report.json",
+        "--product",
+        "cdb_pos",
+        "--validation-product",
+        "cdb",
+        "--manifest-uri",
+        "manifest.json",
+        "--pipeline-manifest-uri",
+        "pipeline.json",
+        "--expected-target-schema",
+        "CETIP",
     ]
 
     def test_default_false(self, monkeypatch):
@@ -633,9 +669,7 @@ class TestSkipValidationArg:
         assert load_tables.parse_arguments().skip_validation is False
 
     def test_flag_true(self, monkeypatch):
-        monkeypatch.setattr(
-            "sys.argv", ["load_tables", *self.REQUIRED_ARGS, "--skip-validation"]
-        )
+        monkeypatch.setattr("sys.argv", ["load_tables", *self.REQUIRED_ARGS, "--skip-validation"])
         assert load_tables.parse_arguments().skip_validation is True
 
     def test_requires_orchestrated_contract(self, monkeypatch):
@@ -644,13 +678,21 @@ class TestSkipValidationArg:
             load_tables.parse_arguments()
 
     def test_parses_input_and_tuning_overrides(self, monkeypatch):
-        monkeypatch.setattr("sys.argv", [
-            "load_tables", *self.REQUIRED_ARGS,
-            "--input-base", "oci://exact", "--num-partitions", "8",
-            "--batch-size", "500", "--previous-load-manifest", "previous.json",
-        ])
-        args = load_tables.parse_arguments()
-        assert (args.input_base, args.num_partitions, args.batch_size) == (
-            "oci://exact", 8, 500
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "load_tables",
+                *self.REQUIRED_ARGS,
+                "--input-base",
+                "oci://exact",
+                "--num-partitions",
+                "8",
+                "--batch-size",
+                "500",
+                "--previous-load-manifest",
+                "previous.json",
+            ],
         )
+        args = load_tables.parse_arguments()
+        assert (args.input_base, args.num_partitions, args.batch_size) == ("oci://exact", 8, 500)
         assert args.previous_load_manifest == "previous.json"

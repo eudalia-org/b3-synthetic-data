@@ -138,10 +138,7 @@ class TestPaths:
         assert engorda_tables.table_path_name("ORDERS") == "ORDERS"
 
     def test_raw_path_with_prefix(self):
-        assert (
-            engorda_tables.raw_path(self.CONFIG, "ORDERS")
-            == "oci://raw@ns/datagen/raw/ORDERS"
-        )
+        assert engorda_tables.raw_path(self.CONFIG, "ORDERS") == "oci://raw@ns/datagen/raw/ORDERS"
 
     def test_raw_path_reduces_dotted_name(self):
         assert (
@@ -154,9 +151,7 @@ class TestPaths:
 
     def test_synthetic_base_with_prefix(self):
         cfg = dict(self.CONFIG, DATAGEN_SYNTHETIC_PREFIX="datagen/synthetic")
-        assert (
-            engorda_tables.synthetic_base_path(cfg) == "oci://syn@ns/datagen/synthetic"
-        )
+        assert engorda_tables.synthetic_base_path(cfg) == "oci://syn@ns/datagen/synthetic"
 ```
 
 - [ ] **Step 2: Run and confirm failure** — Run: `uv run pytest tests/test_engorda_tables.py::TestPaths -v` → FAIL (functions not defined).
@@ -248,9 +243,7 @@ def get_engorda_env() -> dict[str, str]:
         logger.error("Missing required environment variable(s): %s", ", ".join(missing))
         sys.exit(1)
     config["DATAGEN_RAW_PREFIX"] = os.environ.get("DATAGEN_RAW_PREFIX", "").strip("/")
-    config["DATAGEN_SYNTHETIC_PREFIX"] = os.environ.get(
-        "DATAGEN_SYNTHETIC_PREFIX", ""
-    ).strip("/")
+    config["DATAGEN_SYNTHETIC_PREFIX"] = os.environ.get("DATAGEN_SYNTHETIC_PREFIX", "").strip("/")
     return config
 ```
 
@@ -285,9 +278,7 @@ class TestNormalizeSpecs:
         raw = {
             "ADMIN.ORDERS": {
                 "pk_cols": ["ORDER_ID"],
-                "foreign_keys": [
-                    {"columns": ["CUSTOMER_ID"], "parent_table": "ADMIN.CUSTOMERS"}
-                ],
+                "foreign_keys": [{"columns": ["CUSTOMER_ID"], "parent_table": "ADMIN.CUSTOMERS"}],
             },
             "ADMIN.CUSTOMERS": {"pk_cols": ["CUSTOMER_ID"], "static": True},
         }
@@ -374,10 +365,14 @@ class TestConnectedComponents:
     def test_chain_is_one_component(self):
         specs = {
             "CUSTOMERS": {"pk_cols": ["CID"]},
-            "ORDERS": {"pk_cols": ["OID"],
-                       "foreign_keys": [{"columns": ["CID"], "parent_table": "CUSTOMERS"}]},
-            "ITEMS": {"pk_cols": ["IID"],
-                      "foreign_keys": [{"columns": ["OID"], "parent_table": "ORDERS"}]},
+            "ORDERS": {
+                "pk_cols": ["OID"],
+                "foreign_keys": [{"columns": ["CID"], "parent_table": "CUSTOMERS"}],
+            },
+            "ITEMS": {
+                "pk_cols": ["IID"],
+                "foreign_keys": [{"columns": ["OID"], "parent_table": "ORDERS"}],
+            },
         }
         assert self._comps(specs) == [["CUSTOMERS", "ITEMS", "ORDERS"]]
 
@@ -395,8 +390,10 @@ class TestConnectedComponents:
 
     def test_fk_to_absent_parent_is_no_edge(self):
         specs = {
-            "ORDERS": {"pk_cols": ["OID"],
-                       "foreign_keys": [{"columns": ["CID"], "parent_table": "MISSING"}]},
+            "ORDERS": {
+                "pk_cols": ["OID"],
+                "foreign_keys": [{"columns": ["CID"], "parent_table": "MISSING"}],
+            },
             "OTHER": {"pk_cols": ["ID"]},
         }
         # MISSING is not a node, so ORDERS stays isolated from OTHER.
@@ -461,8 +458,10 @@ per table. Encodes the Volume rules from the spec.
 class TestEffectiveNRows:
     SPECS = {
         "CUSTOMERS": {"pk_cols": ["CID"]},  # parent (referenced by ORDERS)
-        "ORDERS": {"pk_cols": ["OID"],
-                   "foreign_keys": [{"columns": ["CID"], "parent_table": "CUSTOMERS"}]},
+        "ORDERS": {
+            "pk_cols": ["OID"],
+            "foreign_keys": [{"columns": ["CID"], "parent_table": "CUSTOMERS"}],
+        },
     }
 
     def test_scales_non_static(self):
@@ -563,9 +562,18 @@ class TestParseArguments:
 
     def test_overrides(self, monkeypatch):
         monkeypatch.setattr(
-            sys, "argv",
-            ["engorda_tables.py", "--scale-factor", "3", "--seed", "7",
-             "--continue-on-error", "--specs", "oci://cfg@ns/s.json"],
+            sys,
+            "argv",
+            [
+                "engorda_tables.py",
+                "--scale-factor",
+                "3",
+                "--seed",
+                "7",
+                "--continue-on-error",
+                "--specs",
+                "oci://cfg@ns/s.json",
+            ],
         )
         args = engorda_tables.parse_arguments()
         assert args.scale_factor == 3.0
@@ -585,14 +593,23 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate synthetic relational Parquet from ingested raw Parquet."
     )
-    parser.add_argument("--scale-factor", type=float, default=DEFAULT_SCALE_FACTOR,
-                        help="Global row-count multiplier for non-static tables.")
-    parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
-                        help="Synthesis seed.")
-    parser.add_argument("--continue-on-error", action="store_true",
-                        help="Continue with remaining components after a failure, then exit non-zero.")
-    parser.add_argument("--specs", default=None,
-                        help="Override DATAGEN_SPECS_URI (URI of a single specs.json object).")
+    parser.add_argument(
+        "--scale-factor",
+        type=float,
+        default=DEFAULT_SCALE_FACTOR,
+        help="Global row-count multiplier for non-static tables.",
+    )
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Synthesis seed.")
+    parser.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Continue with remaining components after a failure, then exit non-zero.",
+    )
+    parser.add_argument(
+        "--specs",
+        default=None,
+        help="Override DATAGEN_SPECS_URI (URI of a single specs.json object).",
+    )
     return parser.parse_args()
 ```
 
@@ -672,17 +689,17 @@ constants and the entrypoint helpers), trimmed to Parquet-only paths, with one p
   `run_synthesis_from_tables`, the `save_synthetic_tables(...)` call omits `save_mode`. Add it:
 
 ```python
-    if save_path:
-        save_synthetic_tables(
-            synthetic,
-            save_path,
-            save_format=save_format,
-            save_options=save_options,
-            save_single_file=save_single_file,
-            save_error_policy=save_error_policy,
-            save_mode=save_mode,          # <-- ADD THIS LINE (upstream omits it)
-            verbose=verbose,
-        )
+if save_path:
+    save_synthetic_tables(
+        synthetic,
+        save_path,
+        save_format=save_format,
+        save_options=save_options,
+        save_single_file=save_single_file,
+        save_error_policy=save_error_policy,
+        save_mode=save_mode,  # <-- ADD THIS LINE (upstream omits it)
+        verbose=verbose,
+    )
 ```
 
   Also remove the `oci` parameter handling at the top of `run_synthesis_from_tables` (the
@@ -728,11 +745,14 @@ class TestLoadSpecs:
         class _RDD:
             def collect(self_inner):
                 return records
+
         class _SC:
             def wholeTextFiles(self_inner, uri):
                 return _RDD()
+
         class _Spark:
             sparkContext = _SC()
+
         return _Spark()
 
     def test_loads_and_normalizes(self):
@@ -821,8 +841,10 @@ git commit -m "feat: add parquet read, df release, and specs loading"
 class TestEngordaLoop:
     def _config(self):
         return {
-            "DATAGEN_RAW_BASE_URI": "oci://raw@ns", "DATAGEN_RAW_PREFIX": "",
-            "DATAGEN_SYNTHETIC_BASE_URI": "oci://syn@ns", "DATAGEN_SYNTHETIC_PREFIX": "",
+            "DATAGEN_RAW_BASE_URI": "oci://raw@ns",
+            "DATAGEN_RAW_PREFIX": "",
+            "DATAGEN_SYNTHETIC_BASE_URI": "oci://syn@ns",
+            "DATAGEN_SYNTHETIC_PREFIX": "",
         }
 
     def test_processes_each_component_and_releases(self, monkeypatch):
@@ -835,13 +857,14 @@ class TestEngordaLoop:
         released = []
 
         class FakeDF:
-            def __init__(self, name): self.name = name
-            def count(self): return 10
+            def __init__(self, name):
+                self.name = name
 
-        monkeypatch.setattr(engorda_tables, "read_parquet",
-                            lambda spark, path: FakeDF(path))
-        monkeypatch.setattr(engorda_tables, "release",
-                            lambda *dfs: released.extend(dfs))
+            def count(self):
+                return 10
+
+        monkeypatch.setattr(engorda_tables, "read_parquet", lambda spark, path: FakeDF(path))
+        monkeypatch.setattr(engorda_tables, "release", lambda *dfs: released.extend(dfs))
 
         def fake_run(tables, comp_specs, **kwargs):
             synth_calls.append((set(comp_specs), kwargs["n_rows_by_table"]))
@@ -849,8 +872,14 @@ class TestEngordaLoop:
 
         monkeypatch.setattr(engorda_tables, "run_synthesis_from_tables", fake_run)
 
-        engorda_tables.engorda(spark=object(), config=self._config(), specs=specs,
-                               scale_factor=2.0, seed=42, continue_on_error=False)
+        engorda_tables.engorda(
+            spark=object(),
+            config=self._config(),
+            specs=specs,
+            scale_factor=2.0,
+            seed=42,
+            continue_on_error=False,
+        )
 
         processed = sorted(sorted(s) for s, _ in synth_calls)
         assert processed == [["A", "B"], ["C"]]
@@ -860,17 +889,26 @@ class TestEngordaLoop:
         specs = {"A": {"pk_cols": ["ID"]}, "C": {"pk_cols": ["ID"]}}
 
         class FakeDF:
-            def count(self): return 5
+            def count(self):
+                return 5
+
         monkeypatch.setattr(engorda_tables, "read_parquet", lambda s, p: FakeDF())
         monkeypatch.setattr(engorda_tables, "release", lambda *dfs: None)
 
         def fake_run(tables, comp_specs, **kwargs):
             raise RuntimeError("boom")
+
         monkeypatch.setattr(engorda_tables, "run_synthesis_from_tables", fake_run)
 
         with pytest.raises(SystemExit):
-            engorda_tables.engorda(spark=object(), config=self._config(), specs=specs,
-                                   scale_factor=1.0, seed=42, continue_on_error=True)
+            engorda_tables.engorda(
+                spark=object(),
+                config=self._config(),
+                specs=specs,
+                scale_factor=1.0,
+                seed=42,
+                continue_on_error=True,
+            )
 ```
 
 - [ ] **Step 2: Run and confirm failure** → FAIL
@@ -901,13 +939,23 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error) -> None
             n_rows = effective_n_rows(comp_specs, counts, scale_factor)
             logger.info("[%d/%d] Component {%s}: n_rows=%s", index, total, label, n_rows)
             synthetic = run_synthesis_from_tables(
-                comp_tables, comp_specs,
-                n_rows_by_table=n_rows, seed=seed,
-                save_path=save_base, save_format="parquet",
-                save_mode="overwrite", validate_mode="full", verbose=False,
+                comp_tables,
+                comp_specs,
+                n_rows_by_table=n_rows,
+                seed=seed,
+                save_path=save_base,
+                save_format="parquet",
+                save_mode="overwrite",
+                validate_mode="full",
+                verbose=False,
             )
-            logger.info("[%d/%d] Component {%s} done in %.1fs",
-                        index, total, label, time.perf_counter() - started)
+            logger.info(
+                "[%d/%d] Component {%s} done in %.1fs",
+                index,
+                total,
+                label,
+                time.perf_counter() - started,
+            )
         except Exception as exc:
             logger.exception("[%d/%d] Component {%s} failed: %s", index, total, label, exc)
             failures.append(label)
@@ -920,8 +968,12 @@ def engorda(spark, config, specs, scale_factor, seed, continue_on_error) -> None
             except Exception:
                 pass
 
-    logger.info("Finished: %d/%d component(s) in %.1fs",
-                total - len(failures), total, time.perf_counter() - run_started)
+    logger.info(
+        "Finished: %d/%d component(s) in %.1fs",
+        total - len(failures),
+        total,
+        time.perf_counter() - run_started,
+    )
     if failures:
         logger.error("Failed component(s): %s", "; ".join(failures))
         sys.exit(1)
@@ -987,6 +1039,7 @@ pyspark = pytest.importorskip("pyspark")
 @pytest.fixture(scope="module")
 def spark():
     from pyspark.sql import SparkSession
+
     session = (
         SparkSession.builder.appName("engorda-test")
         .master("local[2]")
@@ -1013,18 +1066,22 @@ class TestEngordaIntegration:
         orders.write.parquet(str(raw / "ORDERS"))
 
         config = {
-            "DATAGEN_RAW_BASE_URI": str(raw), "DATAGEN_RAW_PREFIX": "",
-            "DATAGEN_SYNTHETIC_BASE_URI": str(syn), "DATAGEN_SYNTHETIC_PREFIX": "",
+            "DATAGEN_RAW_BASE_URI": str(raw),
+            "DATAGEN_RAW_PREFIX": "",
+            "DATAGEN_SYNTHETIC_BASE_URI": str(syn),
+            "DATAGEN_SYNTHETIC_PREFIX": "",
         }
         specs = {
             "CUSTOMERS": {"pk_cols": ["CUSTOMER_ID"]},
-            "ORDERS": {"pk_cols": ["ORDER_ID"],
-                       "foreign_keys": [{"columns": ["CUSTOMER_ID"],
-                                         "parent_table": "CUSTOMERS"}]},
+            "ORDERS": {
+                "pk_cols": ["ORDER_ID"],
+                "foreign_keys": [{"columns": ["CUSTOMER_ID"], "parent_table": "CUSTOMERS"}],
+            },
         }
 
-        engorda_tables.engorda(spark, config, specs, scale_factor=3.0, seed=1,
-                               continue_on_error=False)
+        engorda_tables.engorda(
+            spark, config, specs, scale_factor=3.0, seed=1, continue_on_error=False
+        )
 
         out_customers = spark.read.parquet(str(syn / "CUSTOMERS"))
         out_orders = spark.read.parquet(str(syn / "ORDERS"))

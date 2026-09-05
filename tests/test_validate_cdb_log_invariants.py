@@ -71,10 +71,30 @@ def valid_tables(spark):
         ),
         "OPERACAO": spark.createDataFrame(
             [
-                (1001, "20260101", "0000000000000001", 10, 11, "A1", "B1", 100,
-                 "1.000", "CDB101ABCDE"),
-                (1002, "20260101", "0000000000000002", 20, 21, "A2", "B2", 100,
-                 "2.000", "CDB202FGHIJ"),
+                (
+                    1001,
+                    "20260101",
+                    "0000000000000001",
+                    10,
+                    11,
+                    "A1",
+                    "B1",
+                    100,
+                    "1.000",
+                    "CDB101ABCDE",
+                ),
+                (
+                    1002,
+                    "20260101",
+                    "0000000000000002",
+                    20,
+                    21,
+                    "A2",
+                    "B2",
+                    100,
+                    "2.000",
+                    "CDB202FGHIJ",
+                ),
             ],
             "NUM_ID_OPERACAO long, DAT_OPERACAO string, COD_OPERACAO string, "
             "NUM_CONTA_PARTICIPANTE_P1 long, NUM_CONTA_PARTICIPANTE_P2 long, "
@@ -83,8 +103,7 @@ def valid_tables(spark):
         ),
         "DADO_OPERACAO": spark.createDataFrame(
             [(1, 1001, 502), (2, 1001, 503), (3, 1002, 502), (4, 1002, 503)],
-            "NUM_ID_DADO_OPERACAO long, NUM_ID_OPERACAO long, "
-            "NUM_ID_TIPO_DADO_OPERACAO long",
+            "NUM_ID_DADO_OPERACAO long, NUM_ID_OPERACAO long, NUM_ID_TIPO_DADO_OPERACAO long",
         ),
     }
 
@@ -128,9 +147,7 @@ def test_empty_root_cod_if_fails_cross_table_match_and_format(spark, root_cod_if
         "COD_IF", pyspark.sql.functions.lit(root_cod_if).cast("string")
     )
 
-    global_findings = by_id(
-        validator.check_log_invariants(tables, sample=5)
-    )
+    global_findings = by_id(validator.check_log_invariants(tables, sample=5))
     profile_finding = by_id(
         validator.check_log_invariants(tables, sample=5, registration_profile=True)
     )["8b.cod_if_format"]
@@ -171,15 +188,19 @@ def test_operation_cod_if_mismatch_is_error_and_samples_cross_table_values(
         ).otherwise(pyspark.sql.functions.col("NUM_IF")),
     )
 
-    finding = by_id(validator.check_log_invariants(tables, sample=5))[
-        "8a.operacao_cod_if_match"
-    ]
+    finding = by_id(validator.check_log_invariants(tables, sample=5))["8a.operacao_cod_if_match"]
 
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 1
 
-    assert finding.sample == [[1001, operation_num_if, expected_root, operation_cod_if.strip()
-                               if operation_cod_if is not None else None]]
+    assert finding.sample == [
+        [
+            1001,
+            operation_num_if,
+            expected_root,
+            operation_cod_if.strip() if operation_cod_if is not None else None,
+        ]
+    ]
 
 
 def test_duplicate_cod_operacao_is_error_and_samples_operations(spark):
@@ -213,9 +234,7 @@ def test_cdb_event_requires_observed_condition_family(
         pyspark.sql.functions.col("NUM_CONDICAO_IF") >= 20
     )
 
-    finding = by_id(validator.check_log_invariants(tables, sample=5))[
-        "8a.event_condition_family"
-    ]
+    finding = by_id(validator.check_log_invariants(tables, sample=5))["8a.event_condition_family"]
 
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 1
@@ -231,9 +250,7 @@ def test_cdb_event_family_check_ignores_other_event_types_and_cardinality(spark)
         )
     )
 
-    finding = by_id(validator.check_log_invariants(tables, sample=5))[
-        "8a.event_condition_family"
-    ]
+    finding = by_id(validator.check_log_invariants(tables, sample=5))["8a.event_condition_family"]
 
     assert finding.passed
 
@@ -243,15 +260,15 @@ def test_rdb_event_requires_observed_resgate_family(spark):
     tables["INSTRUMENTO_FINANCEIRO"] = tables["INSTRUMENTO_FINANCEIRO"].withColumn(
         "NUM_TIPO_IF", pyspark.sql.functions.lit(50)
     )
-    tables["RESGATE"] = tables["RESGATE"].where(
-        pyspark.sql.functions.col("NUM_CONDICAO_IF") != 12
-    )
+    tables["RESGATE"] = tables["RESGATE"].where(pyspark.sql.functions.col("NUM_CONDICAO_IF") != 12)
 
-    finding = by_id(validator.check_log_invariants(
-        tables,
-        sample=5,
-        profile=validator.VALIDATION_PROFILES["rdb"],
-    ))["8a.event_condition_family"]
+    finding = by_id(
+        validator.check_log_invariants(
+            tables,
+            sample=5,
+            profile=validator.VALIDATION_PROFILES["rdb"],
+        )
+    )["8a.event_condition_family"]
 
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 1
@@ -261,11 +278,13 @@ def test_rdb_event_requires_observed_resgate_family(spark):
         "INSTRUMENTO_FINANCEIRO"
     ].withColumn("NUM_TIPO_IF", pyspark.sql.functions.lit(50))
     missing_subtype.pop("RESGATE")
-    unavailable = by_id(validator.check_log_invariants(
-        missing_subtype,
-        sample=5,
-        profile=validator.VALIDATION_PROFILES["rdb"],
-    ))["8a.event_condition_family"]
+    unavailable = by_id(
+        validator.check_log_invariants(
+            missing_subtype,
+            sample=5,
+            profile=validator.VALIDATION_PROFILES["rdb"],
+        )
+    )["8a.event_condition_family"]
     assert unavailable.severity == validator.SEV_ERROR
 
 
@@ -279,11 +298,13 @@ def test_rdb_juros_event_does_not_require_unrelated_resgate_table(spark):
     )
     tables.pop("RESGATE")
 
-    finding = by_id(validator.check_log_invariants(
-        tables,
-        sample=5,
-        profile=validator.VALIDATION_PROFILES["rdb"],
-    ))["8a.event_condition_family"]
+    finding = by_id(
+        validator.check_log_invariants(
+            tables,
+            sample=5,
+            profile=validator.VALIDATION_PROFILES["rdb"],
+        )
+    )["8a.event_condition_family"]
 
     assert finding.passed
 
@@ -294,13 +315,9 @@ def test_operation_cod_if_duplicate_root_key_is_one_error_per_operation(spark):
         [(1, 49, None, "OTHER", 55, "S", "N", 25, "N", "N", "N")],
         tables["INSTRUMENTO_FINANCEIRO"].schema,
     )
-    tables["INSTRUMENTO_FINANCEIRO"] = tables["INSTRUMENTO_FINANCEIRO"].unionByName(
-        duplicate
-    )
+    tables["INSTRUMENTO_FINANCEIRO"] = tables["INSTRUMENTO_FINANCEIRO"].unionByName(duplicate)
 
-    finding = by_id(validator.check_log_invariants(tables, sample=5))[
-        "8a.operacao_cod_if_match"
-    ]
+    finding = by_id(validator.check_log_invariants(tables, sample=5))["8a.operacao_cod_if_match"]
 
     assert finding.severity == validator.SEV_ERROR
     assert finding.count == 1
@@ -349,9 +366,9 @@ def test_incomplete_meunumero_tuples_are_ignored(spark):
         "NUM_ID_TIPO_OPER_OBJETO_SERV long",
     )
 
-    finding = by_id(
-        validator.check_log_invariants({"OPERACAO": operation}, sample=5)
-    )["8a.meu_numero_unique"]
+    finding = by_id(validator.check_log_invariants({"OPERACAO": operation}, sample=5))[
+        "8a.meu_numero_unique"
+    ]
 
     assert finding.passed
     assert finding.count == 0
@@ -369,9 +386,9 @@ def test_empty_meunumero_tuple_components_are_ignored(spark):
         "NUM_ID_TIPO_OPER_OBJETO_SERV long",
     )
 
-    finding = by_id(
-        validator.check_log_invariants({"OPERACAO": operation}, sample=5)
-    )["8a.meu_numero_unique"]
+    finding = by_id(validator.check_log_invariants({"OPERACAO": operation}, sample=5))[
+        "8a.meu_numero_unique"
+    ]
 
     assert finding.passed
     assert finding.count == 0
@@ -473,9 +490,7 @@ def test_registration_profile_bad_formats_and_constants_warn(spark):
         "COD_TIPO_EXERCICIO", pyspark.sql.functions.lit("AMERICANA")
     )
 
-    findings = by_id(
-        validator.check_log_invariants(tables, sample=5, registration_profile=True)
-    )
+    findings = by_id(validator.check_log_invariants(tables, sample=5, registration_profile=True))
 
     for check_id in (
         "8b.cod_if_format",
@@ -488,9 +503,7 @@ def test_registration_profile_bad_formats_and_constants_warn(spark):
 
 def test_profile_type_mixes_include_zero_child_parents_and_require_exact_mix(spark):
     tables = valid_tables(spark)
-    tables["CONDICAO_IF"] = tables["CONDICAO_IF"].where(
-        pyspark.sql.functions.col("NUM_IF") == 1
-    )
+    tables["CONDICAO_IF"] = tables["CONDICAO_IF"].where(pyspark.sql.functions.col("NUM_IF") == 1)
     tables["EVENTO"] = tables["EVENTO"].unionByName(
         spark.createDataFrame(
             [(203, 2, 85, None, 1, "N")],
@@ -504,9 +517,7 @@ def test_profile_type_mixes_include_zero_child_parents_and_require_exact_mix(spa
         ).otherwise(pyspark.sql.functions.col("NUM_ID_TIPO_DADO_OPERACAO")),
     )
 
-    findings = by_id(
-        validator.check_log_invariants(tables, sample=5, registration_profile=True)
-    )
+    findings = by_id(validator.check_log_invariants(tables, sample=5, registration_profile=True))
 
     assert_hinted_warn(findings["8c.condicao_type_mix"])
     assert findings["8c.condicao_type_mix"].sample == ["2"]
@@ -518,9 +529,9 @@ def test_profile_type_mix_unavailable_columns_warn(spark):
     tables = valid_tables(spark)
     tables["EVENTO"] = tables["EVENTO"].drop("NUM_TIPO_EVENTO_LEGADO")
 
-    finding = by_id(
-        validator.check_log_invariants(tables, sample=5, registration_profile=True)
-    )["8c.evento_type_mix"]
+    finding = by_id(validator.check_log_invariants(tables, sample=5, registration_profile=True))[
+        "8c.evento_type_mix"
+    ]
 
     assert_hinted_warn(finding)
     assert "NUM_TIPO_EVENTO_LEGADO" in finding.message
@@ -541,8 +552,7 @@ def test_registration_profile_cli_flag(monkeypatch):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["validate_products.py", "--product", "cdb_simplificado",
-         "--registration-profile"],
+        ["validate_products.py", "--product", "cdb_simplificado", "--registration-profile"],
     )
 
     assert validator.parse_args().registration_profile is True
@@ -587,24 +597,28 @@ def test_rdb_generic_cod_if_format_rejects_non_normalized_values(spark, cod_if):
         .withColumn("COD_IF", pyspark.sql.functions.lit(cod_if))
     )
 
-    finding = by_id(validator.check_log_invariants(
-        tables,
-        sample=5,
-        registration_profile=True,
-        profile=validator.VALIDATION_PROFILES["rdb"],
-    ))["8b.cod_if_format"]
+    finding = by_id(
+        validator.check_log_invariants(
+            tables,
+            sample=5,
+            registration_profile=True,
+            profile=validator.VALIDATION_PROFILES["rdb"],
+        )
+    )["8b.cod_if_format"]
 
     assert not finding.passed
     assert finding.severity == validator.SEV_WARN
 
 
 def test_precomputed_subtype_map_matches_curated_map():
-    findings = validator.check_subtype_map_snapshot({
-        "observed_by_table": {
-            "JUROS_FLUTUANTE": ["3"],
-            "RESGATE": ["20"],
+    findings = validator.check_subtype_map_snapshot(
+        {
+            "observed_by_table": {
+                "JUROS_FLUTUANTE": ["3"],
+                "RESGATE": ["20"],
+            }
         }
-    })
+    )
 
     assert len(findings) == 1
     assert findings[0].passed is True
@@ -612,9 +626,9 @@ def test_precomputed_subtype_map_matches_curated_map():
 
 
 def test_precomputed_subtype_map_reports_unexpected_type():
-    findings = validator.check_subtype_map_snapshot({
-        "observed_by_table": {"JUROS_FLUTUANTE": ["2", "3"]}
-    })
+    findings = validator.check_subtype_map_snapshot(
+        {"observed_by_table": {"JUROS_FLUTUANTE": ["2", "3"]}}
+    )
 
     assert len(findings) == 1
     assert findings[0].passed is False

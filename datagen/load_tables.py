@@ -81,7 +81,7 @@ def capacity_from_precision_scale(precision, scale):
         return None
     p = int(precision)
     s = int(scale or 0)
-    return Decimal(10 ** p - 1) / (Decimal(10) ** s)
+    return Decimal(10**p - 1) / (Decimal(10) ** s)
 
 
 def column_alignment_violations(table, synthetic_cols, target_cols):
@@ -89,12 +89,13 @@ def column_alignment_violations(table, synthetic_cols, target_cols):
     out = []
     for col in sorted(synthetic_cols - set(target_cols)):
         out.append(Violation(table, "column_alignment", col, "column not in target table"))
-    required = {
-        c for c, m in target_cols.items() if not m["nullable"] and not m["has_default"]
-    }
+    required = {c for c, m in target_cols.items() if not m["nullable"] and not m["has_default"]}
     for col in sorted(required - synthetic_cols):
-        out.append(Violation(
-            table, "column_alignment", col, "required NOT NULL column missing from synthetic"))
+        out.append(
+            Violation(
+                table, "column_alignment", col, "required NOT NULL column missing from synthetic"
+            )
+        )
     return out
 
 
@@ -109,11 +110,13 @@ def numeric_domain_violations(table, profile, target_cols):
         if cap is None:
             continue
         if prof["max"] is not None and prof["max"] > cap:
-            out.append(Violation(table, "numeric_domain", col,
-                                 f"max {prof['max']} > capacity {cap}"))
+            out.append(
+                Violation(table, "numeric_domain", col, f"max {prof['max']} > capacity {cap}")
+            )
         if prof["min"] is not None and prof["min"] < -cap:
-            out.append(Violation(table, "numeric_domain", col,
-                                 f"min {prof['min']} < -capacity {-cap}"))
+            out.append(
+                Violation(table, "numeric_domain", col, f"min {prof['min']} < -capacity {-cap}")
+            )
     return out
 
 
@@ -125,8 +128,14 @@ def string_length_violations(table, profile, target_cols):
         if meta is None or meta.get("data_length") is None:
             continue
         if prof.get("max_octet") is not None and prof["max_octet"] > meta["data_length"]:
-            out.append(Violation(table, "string_length", col,
-                                 f"max byte length {prof['max_octet']} > {meta['data_length']}"))
+            out.append(
+                Violation(
+                    table,
+                    "string_length",
+                    col,
+                    f"max byte length {prof['max_octet']} > {meta['data_length']}",
+                )
+            )
     return out
 
 
@@ -138,13 +147,17 @@ def not_null_violations(table, profile, target_cols):
         if meta is None or meta.get("nullable", True):
             continue
         if prof.get("null_count", 0) > 0:
-            out.append(Violation(table, "not_null", col,
-                                 f"{prof['null_count']} NULL(s) in NOT NULL column"))
+            out.append(
+                Violation(
+                    table, "not_null", col, f"{prof['null_count']} NULL(s) in NOT NULL column"
+                )
+            )
     return out
 
 
-def uniqueness_violations(table, constraints, total_count, distinct_counts,
-                          prod_collision_counts, nonnull_counts=None):
+def uniqueness_violations(
+    table, constraints, total_count, distinct_counts, prod_collision_counts, nonnull_counts=None
+):
     """constraints: list of (name, tuple(cols)). distinct_counts/prod_collision_counts/
     nonnull_counts keyed by tuple(cols). Flags internal dups and production
     collisions (>0 synthetic keys already in production).
@@ -161,12 +174,24 @@ def uniqueness_violations(table, constraints, total_count, distinct_counts,
         distinct = distinct_counts.get(cols)
         comparand = nonnull_counts.get(cols, total_count)
         if distinct is not None and distinct < comparand:
-            out.append(Violation(table, "uniqueness_internal", label,
-                                 f"{comparand - distinct} duplicate key(s) within synthetic"))
+            out.append(
+                Violation(
+                    table,
+                    "uniqueness_internal",
+                    label,
+                    f"{comparand - distinct} duplicate key(s) within synthetic",
+                )
+            )
         collisions = prod_collision_counts.get(cols, 0)
         if collisions > 0:
-            out.append(Violation(table, "uniqueness_vs_production", label,
-                                 f"{collisions} synthetic key(s) already in production"))
+            out.append(
+                Violation(
+                    table,
+                    "uniqueness_vs_production",
+                    label,
+                    f"{collisions} synthetic key(s) already in production",
+                )
+            )
     return out
 
 
@@ -175,14 +200,29 @@ def fk_to_static_violations(table, orphan_counts):
     out = []
     for (cols, parent), count in orphan_counts.items():
         if count > 0:
-            out.append(Violation(table, "fk_to_static", ",".join(cols),
-                                 f"{count} value(s) not present in static parent {parent}"))
+            out.append(
+                Violation(
+                    table,
+                    "fk_to_static",
+                    ",".join(cols),
+                    f"{count} value(s) not present in static parent {parent}",
+                )
+            )
     return out
 
 
-def validate_table(table, synthetic_cols, profile, target_cols, constraints,
-                   total_count, distinct_counts, prod_collision_counts, fk_orphan_counts,
-                   nonnull_counts=None):
+def validate_table(
+    table,
+    synthetic_cols,
+    profile,
+    target_cols,
+    constraints,
+    total_count,
+    distinct_counts,
+    prod_collision_counts,
+    fk_orphan_counts,
+    nonnull_counts=None,
+):
     """Run all six checks for one table; return the concatenated violations.
     `profile` is the per-column dict (max/min/max_octet/null_count); the numeric
     and string checks read the columns relevant to them."""
@@ -192,8 +232,8 @@ def validate_table(table, synthetic_cols, profile, target_cols, constraints,
     violations += string_length_violations(table, profile, target_cols)
     violations += not_null_violations(table, profile, target_cols)
     violations += uniqueness_violations(
-        table, constraints, total_count, distinct_counts, prod_collision_counts,
-        nonnull_counts)
+        table, constraints, total_count, distinct_counts, prod_collision_counts, nonnull_counts
+    )
     violations += fk_to_static_violations(table, fk_orphan_counts)
     return violations
 
@@ -236,8 +276,7 @@ def profile_synthetic_table(df, target_cols, constraints):
             aggs.append(F.min(actual).alias(f"__min__{up}"))
         if meta.get("is_string"):
             aggs.append(F.max(F.octet_length(F.col(actual))).alias(f"__oct__{up}"))
-        aggs.append(
-            F.count(F.when(F.col(actual).isNull(), F.lit(1))).alias(f"__null__{up}"))
+        aggs.append(F.count(F.when(F.col(actual).isNull(), F.lit(1))).alias(f"__null__{up}"))
     # distinct + non-null-row count per constraint whose columns are all present
     constraint_keys = []
     for _name, cols in constraints:
@@ -265,8 +304,12 @@ def profile_synthetic_table(df, target_cols, constraints):
         }
     distinct_counts = {cols: row[dist_alias] for cols, dist_alias, _nn in constraint_keys}
     nonnull_counts = {cols: row[nn_alias] for cols, _dist, nn_alias in constraint_keys}
-    return {"total_count": row["__total"], "columns": columns,
-            "distinct_counts": distinct_counts, "nonnull_counts": nonnull_counts}
+    return {
+        "total_count": row["__total"],
+        "columns": columns,
+        "distinct_counts": distinct_counts,
+        "nonnull_counts": nonnull_counts,
+    }
 
 
 def read_target_columns(spark, properties, owner, tables):
@@ -277,12 +320,15 @@ def read_target_columns(spark, properties, owner, tables):
     # NVL2(DATA_DEFAULT,...) instead of selecting DATA_DEFAULT itself: DATA_DEFAULT
     # is an Oracle LONG column, and reading LONG via Spark JDBC alongside other
     # columns is flaky (stream-already-closed). We only need the boolean.
-    rows = read_rows(spark, properties,
-                     "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, DATA_PRECISION, "
-                     "DATA_SCALE, DATA_LENGTH, NULLABLE, "
-                     "NVL2(DATA_DEFAULT, 'Y', 'N') AS HAS_DEFAULT "
-                     f"FROM ALL_TAB_COLUMNS WHERE OWNER='{owner}' "
-                     f"AND TABLE_NAME IN ({names})")
+    rows = read_rows(
+        spark,
+        properties,
+        "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, DATA_PRECISION, "
+        "DATA_SCALE, DATA_LENGTH, NULLABLE, "
+        "NVL2(DATA_DEFAULT, 'Y', 'N') AS HAS_DEFAULT "
+        f"FROM ALL_TAB_COLUMNS WHERE OWNER='{owner}' "
+        f"AND TABLE_NAME IN ({names})",
+    )
     out = {}
     numeric = {"NUMBER", "FLOAT", "BINARY_FLOAT", "BINARY_DOUBLE", "INTEGER"}
     # Only single-byte-charset types are length-checked: the string-length check
@@ -310,16 +356,20 @@ def read_target_constraints(spark, properties, owner, tables):
     columns ordered by POSITION."""
     owner = validate_identifier(owner)
     names = ",".join(f"'{validate_identifier(table_path_name(t))}'" for t in tables)
-    rows = read_rows(spark, properties,
-                     "SELECT c.TABLE_NAME, c.CONSTRAINT_NAME, acc.COLUMN_NAME, acc.POSITION "
-                     "FROM ALL_CONSTRAINTS c JOIN ALL_CONS_COLUMNS acc "
-                     "ON c.OWNER=acc.OWNER AND c.CONSTRAINT_NAME=acc.CONSTRAINT_NAME "
-                     f"WHERE c.OWNER='{owner}' AND c.CONSTRAINT_TYPE IN ('P','U') "
-                     f"AND c.TABLE_NAME IN ({names})")
+    rows = read_rows(
+        spark,
+        properties,
+        "SELECT c.TABLE_NAME, c.CONSTRAINT_NAME, acc.COLUMN_NAME, acc.POSITION "
+        "FROM ALL_CONSTRAINTS c JOIN ALL_CONS_COLUMNS acc "
+        "ON c.OWNER=acc.OWNER AND c.CONSTRAINT_NAME=acc.CONSTRAINT_NAME "
+        f"WHERE c.OWNER='{owner}' AND c.CONSTRAINT_TYPE IN ('P','U') "
+        f"AND c.TABLE_NAME IN ({names})",
+    )
     grouped = {}
     for r in rows:
         grouped.setdefault((r["TABLE_NAME"], r["CONSTRAINT_NAME"]), []).append(
-            (int(r["POSITION"]), r["COLUMN_NAME"]))
+            (int(r["POSITION"]), r["COLUMN_NAME"])
+        )
     out = {}
     for (table, name), cols in grouped.items():
         ordered = tuple(c for _pos, c in sorted(cols))
@@ -366,22 +416,29 @@ def count_prod_collisions(spark, properties, config, owner, table_name, df, cons
                 continue
             lo, hi = normalize_pk_bound(lo), normalize_pk_bound(hi)
             existing = read_existing_keys(
-                spark, properties, resolve_num_partitions(config),
-                owner, table_name, actuals[0], lo, hi)
+                spark,
+                properties,
+                resolve_num_partitions(config),
+                owner,
+                table_name,
+                actuals[0],
+                lo,
+                hi,
+            )
             existing = existing.withColumnRenamed(existing.columns[0], actuals[0])
         else:
             col_list = ",".join(validate_identifier(c) for c in cols)
-            q = (f"(SELECT {col_list} FROM {validate_identifier(owner)}."
-                 f"{validate_identifier(table_name)}) DATAGEN_UK")
-            existing = (spark.read.format("jdbc").options(**properties)
-                        .option("dbtable", q).load())
+            q = (
+                f"(SELECT {col_list} FROM {validate_identifier(owner)}."
+                f"{validate_identifier(table_name)}) DATAGEN_UK"
+            )
+            existing = spark.read.format("jdbc").options(**properties).option("dbtable", q).load()
             for syn_col, prod_col in zip(actuals, existing.columns):
                 existing = existing.withColumnRenamed(prod_col, syn_col)
             # A duplicated production tuple would otherwise inflate the inner-join
             # count past the number of colliding synthetic keys.
             existing = existing.dropDuplicates()
-        out[tuple(c.upper() for c in cols)] = _count_key_collisions(
-            syn_keys, existing, actuals)
+        out[tuple(c.upper() for c in cols)] = _count_key_collisions(syn_keys, existing, actuals)
     return out
 
 
@@ -404,10 +461,11 @@ def count_fk_static_orphans(spark, properties, config, specs, df, table, owner_f
             continue
         p_owner, p_name = owner_for(parent)
         col_list = ",".join(validate_identifier(c) for c in pcols)
-        q = (f"(SELECT {col_list} FROM {validate_identifier(p_owner)}."
-             f"{validate_identifier(p_name)}) DATAGEN_FK")
-        parent_keys = spark.read.format("jdbc").options(**properties).option(
-            "dbtable", q).load()
+        q = (
+            f"(SELECT {col_list} FROM {validate_identifier(p_owner)}."
+            f"{validate_identifier(p_name)}) DATAGEN_FK"
+        )
+        parent_keys = spark.read.format("jdbc").options(**properties).option("dbtable", q).load()
         for a, pc in zip(actuals, parent_keys.columns):
             parent_keys = parent_keys.withColumnRenamed(pc, a)
         out[(tuple(cols), parent)] = _count_orphans(df, parent_keys, actuals)
@@ -421,7 +479,9 @@ def validate_load(spark, properties, config, specs, target_schema, tables, limit
         logger.warning(
             "Validation under --limit profiles df.limit(%d), which Spark samples "
             "nondeterministically; the inserted sample may differ. Use a full run "
-            "(no --limit) for an authoritative pre-flight.", limit)
+            "(no --limit) for an authoritative pre-flight.",
+            limit,
+        )
     target_columns = read_target_columns(spark, properties, target_schema, tables)
     target_constraints = read_target_constraints(spark, properties, target_schema, tables)
     violations = []
@@ -429,8 +489,11 @@ def validate_load(spark, properties, config, specs, target_schema, tables, limit
         owner, table_name = owner_for(table)
         tcols = target_columns.get(table_name)
         if tcols is None:
-            violations.append(Violation(table, "column_alignment", "*",
-                                        f"target table {owner}.{table_name} not found"))
+            violations.append(
+                Violation(
+                    table, "column_alignment", "*", f"target table {owner}.{table_name} not found"
+                )
+            )
             continue
         df = spark.read.parquet(build_load_path(config, table_path_name(table)))
         if limit is not None:
@@ -442,9 +505,11 @@ def validate_load(spark, properties, config, specs, target_schema, tables, limit
             constraints = target_constraints.get(table_name, [])
             prof = profile_synthetic_table(df, tcols, constraints)
             prod_collisions = count_prod_collisions(
-                spark, properties, config, owner, table_name, df, constraints)
+                spark, properties, config, owner, table_name, df, constraints
+            )
             fk_orphans = count_fk_static_orphans(
-                spark, properties, config, specs, df, table, owner_for)
+                spark, properties, config, specs, df, table, owner_for
+            )
             violations += validate_table(
                 table=table,
                 synthetic_cols={c.upper() for c in df.columns},
@@ -503,8 +568,9 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--input-base",
-        help=("Exact synthetic input root. Overrides DATAGEN_LOAD_BASE_URI and "
-              "DATAGEN_LOAD_PREFIX."),
+        help=(
+            "Exact synthetic input root. Overrides DATAGEN_LOAD_BASE_URI and DATAGEN_LOAD_PREFIX."
+        ),
     )
     parser.add_argument("--validation-report", required=True)
     parser.add_argument("--product", required=True, help="Generator product name.")
@@ -526,8 +592,8 @@ def parse_arguments() -> argparse.Namespace:
         "--skip-validation",
         action="store_true",
         help="Bypass the pre-flight validation entirely and load. Use only when the target "
-             "constraints have been deliberately disabled/relaxed to accept known "
-             "violations (nulls/orphans); the PK dup-guard still runs.",
+        "constraints have been deliberately disabled/relaxed to accept known "
+        "violations (nulls/orphans); the PK dup-guard still runs.",
     )
     return parser.parse_args()
 
@@ -593,9 +659,7 @@ def get_load_env(
         config["DATAGEN_LOAD_PREFIX"] = ""
     elif env_base:
         config["DATAGEN_LOAD_BASE_URI"] = normalize_input_base(env_base)
-        config["DATAGEN_LOAD_PREFIX"] = os.environ.get(
-            "DATAGEN_LOAD_PREFIX", ""
-        ).strip("/")
+        config["DATAGEN_LOAD_PREFIX"] = os.environ.get("DATAGEN_LOAD_PREFIX", "").strip("/")
     else:
         missing.append("DATAGEN_LOAD_BASE_URI")
 
@@ -613,14 +677,14 @@ def get_load_env(
         "DATAGEN_TARGET_SCHEMA", config["DATAGEN_TARGET_DB_USER"]
     )
     config["DATAGEN_JDBC_NUM_PARTITIONS"] = str(
-        num_partitions if num_partitions is not None else os.environ.get(
-            "DATAGEN_JDBC_NUM_PARTITIONS", DEFAULT_NUM_PARTITIONS
-        )
+        num_partitions
+        if num_partitions is not None
+        else os.environ.get("DATAGEN_JDBC_NUM_PARTITIONS", DEFAULT_NUM_PARTITIONS)
     )
     config["DATAGEN_JDBC_BATCH_SIZE"] = str(
-        batch_size if batch_size is not None else os.environ.get(
-            "DATAGEN_JDBC_BATCH_SIZE", DEFAULT_BATCH_SIZE
-        )
+        batch_size
+        if batch_size is not None
+        else os.environ.get("DATAGEN_JDBC_BATCH_SIZE", DEFAULT_BATCH_SIZE)
     )
     config["DATAGEN_JDBC_READ_TIMEOUT_MS"] = os.environ.get(
         "DATAGEN_JDBC_READ_TIMEOUT_MS", DEFAULT_READ_TIMEOUT_MS
@@ -671,8 +735,7 @@ def reject_offline_input(spark: SparkSession, input_uri: str) -> None:
         return
     marker = read_exact_json_object(spark, marker_uri)
     raise ValueError(
-        "Synthetic input is an offline no-oracle artifact and is not eligible "
-        f"for load: {marker!r}"
+        f"Synthetic input is an offline no-oracle artifact and is not eligible for load: {marker!r}"
     )
 
 
@@ -703,9 +766,7 @@ def read_exact_json_object(spark: SparkSession, uri: str) -> dict:
     return parsed
 
 
-def validation_table_inventory(
-    report: dict, expected_product: str, input_base: str
-) -> list[str]:
+def validation_table_inventory(report: dict, expected_product: str, input_base: str) -> list[str]:
     if report.get("schema_version") != 2:
         raise ValueError("validation report schema_version must be 2")
     verdict = report.get("verdict")
@@ -717,10 +778,7 @@ def validation_table_inventory(
         raise ValueError("validation report counts.error must be an integer")
     if error_count != 0:
         raise ValueError("validation report contains ERROR findings")
-    if (
-        report.get("oracle_access") == "disabled"
-        or report.get("load_eligible") is False
-    ):
+    if report.get("oracle_access") == "disabled" or report.get("load_eligible") is False:
         raise ValueError("validation report was produced without Oracle and is not loadable")
     if report.get("product") != expected_product:
         raise ValueError("validation report product does not match --validation-product")
@@ -766,8 +824,7 @@ def oracle_audit_columns(table: str, columns: list[str]) -> dict[str, str]:
     for column in columns:
         upper = column.upper()
         if upper in configured:
-            out[column] = ("formatted" if upper in ORACLE_AUDIT_FORMATTED_COLUMNS
-                           else "timestamp")
+            out[column] = "formatted" if upper in ORACLE_AUDIT_FORMATTED_COLUMNS else "timestamp"
     return out
 
 
@@ -793,8 +850,7 @@ def build_oracle_audit_insert_sql(
         elif kind == "timestamp":
             values.append("DATAGEN_CLOCK.INSERTED_AT")
         elif kind == "formatted":
-            values.append(
-                "TO_CHAR(DATAGEN_CLOCK.INSERTED_AT, 'YYYYMMDDHH24MISSFF2')")
+            values.append("TO_CHAR(DATAGEN_CLOCK.INSERTED_AT, 'YYYYMMDDHH24MISSFF2')")
         else:
             raise ValueError(f"Unsupported audit expression kind: {kind!r}")
 
@@ -872,13 +928,8 @@ def topo_sort_for_load(specs: dict, tables: list[str]) -> list[str]:
         for fk in _fk_list(specs.get(norm[t], {})):
             parent = table_path_name(str(fk.get("parent_table") or "")).upper()
             if parent == norm[t]:
-                nullable_self_refs = {
-                    column.upper()
-                    for column in NULL_ON_INSERT.get(norm[t], ())
-                }
-                self_ref_columns = {
-                    str(column).upper() for column in (fk.get("columns") or ())
-                }
+                nullable_self_refs = {column.upper() for column in NULL_ON_INSERT.get(norm[t], ())}
+                self_ref_columns = {str(column).upper() for column in (fk.get("columns") or ())}
                 if not self_ref_columns or not self_ref_columns <= nullable_self_refs:
                     raise ValueError(
                         f"Unsupported self-referencing FK in load inventory: {norm[t]}"
@@ -960,9 +1011,7 @@ def normalize_pk_bound(value):
     return value
 
 
-def build_existing_keys_query(
-    owner: str, table_name: str, pk_col: str, lo, hi
-) -> str:
+def build_existing_keys_query(owner: str, table_name: str, pk_col: str, lo, hi) -> str:
     owner = validate_identifier(owner)
     table_name = validate_identifier(table_name)
     pk_col = validate_identifier(pk_col)
@@ -1055,14 +1104,16 @@ def apply_pk_guard(
     col_map = {c.upper(): c for c in df.columns}
     pk_actual = col_map.get(pk_cols[0].upper()) if len(pk_cols) == 1 else None
     pk_is_numeric = bool(
-        pk_actual is not None
-        and isinstance(df.schema[pk_actual].dataType, NumericType)
+        pk_actual is not None and isinstance(df.schema[pk_actual].dataType, NumericType)
     )
 
     if not guard_applies(pk_cols, pk_is_numeric) or pk_actual is None:
         logger.info(
             "[%d/%d] %s: no PK guard (pk_cols=%s) -> appending all rows",
-            index, total, table, pk_cols,
+            index,
+            total,
+            table,
+            pk_cols,
         )
         return df, 0
 
@@ -1075,22 +1126,37 @@ def apply_pk_guard(
     lo, hi = normalize_pk_bound(lo), normalize_pk_bound(hi)
 
     existing = read_existing_keys(
-        spark, properties, resolve_num_partitions(config),
-        owner, table_name, pk_actual, lo, hi,
+        spark,
+        properties,
+        resolve_num_partitions(config),
+        owner,
+        table_name,
+        pk_actual,
+        lo,
+        hi,
     )
     existing = existing.withColumnRenamed(existing.columns[0], pk_actual)
     existing_count = existing.count()
     if existing_count == 0:
         logger.info(
             "[%d/%d] %s: 0 existing keys in PK range [%s, %s] -> appending all rows",
-            index, total, table, lo, hi,
+            index,
+            total,
+            table,
+            lo,
+            hi,
         )
         return df, 0
 
     to_append = df.join(existing, on=pk_actual, how="left_anti")
     logger.info(
         "[%d/%d] %s: %s existing key(s) in PK range [%s, %s] -> skipping already-loaded",
-        index, total, table, f"{existing_count:,}", lo, hi,
+        index,
+        total,
+        table,
+        f"{existing_count:,}",
+        lo,
+        hi,
     )
     return to_append, existing_count
 
@@ -1114,8 +1180,11 @@ def null_self_ref_columns(df, table, null_map):
             df = df.withColumn(real, F.lit(None).cast(df.schema[real].dataType))
             nulled.append(real)
     if nulled:
-        logger.info("%s: nulled self-ref FK column(s) on insert: %s",
-                    table_path_name(table).upper(), ", ".join(nulled))
+        logger.info(
+            "%s: nulled self-ref FK column(s) on insert: %s",
+            table_path_name(table).upper(),
+            ", ".join(nulled),
+        )
     return df
 
 
@@ -1130,20 +1199,22 @@ def write_jdbc_append(
     """Append with Oracle-side audit timestamps when this table has audit columns."""
     audit_columns = oracle_audit_columns(table, df.columns)
     if not audit_columns:
-        (df.write.format("jdbc")
-         .options(**properties)
-         .option("dbtable", dbtable)
-         .option("batchsize", batch_size)
-         .option("isolationLevel", DEFAULT_ISOLATION_LEVEL)
-         .mode("append")
-         .save())
+        (
+            df.write.format("jdbc")
+            .options(**properties)
+            .option("dbtable", dbtable)
+            .option("batchsize", batch_size)
+            .option("isolationLevel", DEFAULT_ISOLATION_LEVEL)
+            .mode("append")
+            .save()
+        )
         return
 
-    sql, payload_columns = build_oracle_audit_insert_sql(
-        dbtable, df.columns, audit_columns)
+    sql, payload_columns = build_oracle_audit_insert_sql(dbtable, df.columns, audit_columns)
     logger.info(
         "%s: Oracle-side insertion timestamps for %s",
-        table_path_name(table).upper(), ", ".join(audit_columns),
+        table_path_name(table).upper(),
+        ", ".join(audit_columns),
     )
     payload = df.select(*payload_columns)
     try:
@@ -1280,28 +1351,32 @@ def manifest_transformations(table: str, columns: list[str]) -> list[dict]:
     table_name = table_path_name(table).upper()
     actual = {column.upper(): column for column in columns}
     transformations = []
-    nulled = [actual[column] for column in NULL_ON_INSERT.get(table_name, [])
-              if column in actual]
+    nulled = [actual[column] for column in NULL_ON_INSERT.get(table_name, []) if column in actual]
     if nulled:
-        transformations.append({
-            "kind": "nullify-self-reference",
-            "table": table,
-            "columns": nulled,
-        })
+        transformations.append(
+            {
+                "kind": "nullify-self-reference",
+                "table": table,
+                "columns": nulled,
+            }
+        )
     audit = oracle_audit_columns(table, columns)
     if audit:
         expressions = {
             column: (
                 "TO_CHAR(DATAGEN_CLOCK.INSERTED_AT, 'YYYYMMDDHH24MISSFF2')"
-                if kind == "formatted" else "DATAGEN_CLOCK.INSERTED_AT"
+                if kind == "formatted"
+                else "DATAGEN_CLOCK.INSERTED_AT"
             )
             for column, kind in audit.items()
         }
-        transformations.append({
-            "kind": "oracle-audit-substitution",
-            "table": table,
-            "columns": expressions,
-        })
+        transformations.append(
+            {
+                "kind": "oracle-audit-substitution",
+                "table": table,
+                "columns": expressions,
+            }
+        )
     return transformations
 
 
@@ -1433,9 +1508,7 @@ def main() -> None:
         input_uri = resolved_input_uri(config)
         reject_offline_input(spark, input_uri)
         report = read_exact_json_object(spark, args.validation_report)
-        inventory = validation_table_inventory(
-            report, args.validation_product, input_uri
-        )
+        inventory = validation_table_inventory(report, args.validation_product, input_uri)
         specs = load_specs(spark, args.specs)
         if args.tables or args.tables_file:
             selected = parse_tables(args.tables, args.tables_file)
@@ -1458,10 +1531,14 @@ def main() -> None:
         else:
             logger.info("Pre-flight validation against %s ...", target_schema)
             violations = validate_load(
-                spark, properties, config, specs, target_schema, tables, args.limit)
+                spark, properties, config, specs, target_schema, tables, args.limit
+            )
             if violations:
-                logger.error("Pre-flight FAILED (%d violation(s)) — nothing inserted:\n%s",
-                             len(violations), format_violation_report(violations))
+                logger.error(
+                    "Pre-flight FAILED (%d violation(s)) — nothing inserted:\n%s",
+                    len(violations),
+                    format_violation_report(violations),
+                )
                 sys.exit(1)
             logger.info("Pre-flight validation passed.")
         if args.dry_run:
@@ -1489,8 +1566,9 @@ def main() -> None:
         path = write_manifest(spark, args.manifest_uri, manifest)
         logger.info("Load run_id=%s; manifest written to %s", run_id, path)
 
-        load_tables(spark, config, specs, tables,
-                    continue_on_error=args.continue_on_error, limit=args.limit)
+        load_tables(
+            spark, config, specs, tables, continue_on_error=args.continue_on_error, limit=args.limit
+        )
     finally:
         spark.stop()
 

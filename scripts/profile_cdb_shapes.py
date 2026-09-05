@@ -45,6 +45,7 @@ self-contained: no imports from the rest of the repo, and it carries its own
 verification — run `spark-submit profile_cdb_shapes.py --self-test` (no data
 needed) to check the profiler against a built-in fixture before a real run.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -210,23 +211,28 @@ CCB_METRICS: List[Metric] = [
     Metric("RESGATE", "RESGATE", via="CONDICAO_IF"),
     Metric("TCTPCRONOGRAMA_CCB", "TCTPCRONOGRAMA_CCB"),
     Metric(
-        "TCTPCRONOGRAMA_CCB_TIPO83", "TCTPCRONOGRAMA_CCB",
+        "TCTPCRONOGRAMA_CCB_TIPO83",
+        "TCTPCRONOGRAMA_CCB",
         where=("NUM_TIPO_EVENTO_LEGADO", "83"),
     ),
     Metric(
-        "TCTPCRONOGRAMA_CCB_TIPO84", "TCTPCRONOGRAMA_CCB",
+        "TCTPCRONOGRAMA_CCB_TIPO84",
+        "TCTPCRONOGRAMA_CCB",
         where=("NUM_TIPO_EVENTO_LEGADO", "84"),
     ),
     Metric(
-        "TCTPCRONOGRAMA_CCB_TIPO85", "TCTPCRONOGRAMA_CCB",
+        "TCTPCRONOGRAMA_CCB_TIPO85",
+        "TCTPCRONOGRAMA_CCB",
         where=("NUM_TIPO_EVENTO_LEGADO", "85"),
     ),
     Metric(
-        "TCTPCRONOGRAMA_CCB_TIPO90", "TCTPCRONOGRAMA_CCB",
+        "TCTPCRONOGRAMA_CCB_TIPO90",
+        "TCTPCRONOGRAMA_CCB",
         where=("NUM_TIPO_EVENTO_LEGADO", "90"),
     ),
     Metric(
-        "TCTPCRONOGRAMA_CCB_TIPO157", "TCTPCRONOGRAMA_CCB",
+        "TCTPCRONOGRAMA_CCB_TIPO157",
+        "TCTPCRONOGRAMA_CCB",
         where=("NUM_TIPO_EVENTO_LEGADO", "157"),
     ),
     Metric("HISTORICO_PU_CURVA", "HISTORICO_PU_CURVA"),
@@ -245,7 +251,8 @@ GRAVAME_METRICS: List[Metric] = [
     Metric("CONTA_GRAVAME", "CONTA", via="GRAVAME_ENDPOINT_ACCOUNT"),
     Metric("ARQUIVO_TRANSF_GRAVAME", "ARQUIVO_TRANSF", via="GRAVAME_TRANSFER"),
     Metric(
-        "ARQUIVO_TRANSF_CONTEUDO_GRAVAME", "ARQUIVO_TRANSF_CONTEUDO",
+        "ARQUIVO_TRANSF_CONTEUDO_GRAVAME",
+        "ARQUIVO_TRANSF_CONTEUDO",
         via="GRAVAME_TRANSFER_CONTENT",
     ),
     Metric("ARQUIVO_IF", "ARQUIVO_IF"),
@@ -253,7 +260,8 @@ GRAVAME_METRICS: List[Metric] = [
     Metric("OPERACAO_GRAVAME_CHAIN", "OPERACAO", via="GRAVAME_OPERATION_CHAIN"),
     Metric("LANCAMENTO_GRAVAME_CHAIN", "LANCAMENTO", via="GRAVAME_LAUNCH_CHAIN"),
     Metric(
-        "DADO_OPERACAO_GRAVAME_CHAIN", "DADO_OPERACAO",
+        "DADO_OPERACAO_GRAVAME_CHAIN",
+        "DADO_OPERACAO",
         via="GRAVAME_OPERATION_DATA_CHAIN",
     ),
     Metric("GRAVAME_GRAU_PENHOR", "GRAVAME_GRAU_PENHOR", via="GRAVAME_PLEDGE"),
@@ -263,9 +271,7 @@ PRODUCT_METRICS: Dict[str, List[Metric]] = {
     "cdb_simplificado": METRICS,
     "cdb": METRICS,
     "rdb": METRICS,
-    "lci": [
-        metric for metric in METRICS if metric.name not in {"ATUALIZACAO_PRE", "SPREAD"}
-    ],
+    "lci": [metric for metric in METRICS if metric.name not in {"ATUALIZACAO_PRE", "SPREAD"}],
     "lca": LCA_METRICS,
     "ccb": CCB_METRICS,
     "gravame": GRAVAME_METRICS,
@@ -274,6 +280,7 @@ PRODUCT_METRICS: Dict[str, List[Metric]] = {
 
 def metrics_for_product(product: str) -> List[Metric]:
     return PRODUCT_METRICS[product]
+
 
 # Write-set of one real CDB-simplificado registration (docs/cetip.out).
 REFERENCE_SHAPE: Dict[str, int] = {
@@ -389,9 +396,7 @@ def active_rows(df: DataFrame, notes: List[str], table: str) -> DataFrame:
         col = _ci(df, candidate)
         if col:
             notes.append(f"{table}: filtered Oracle-null-equivalent {candidate}")
-            return df.where(
-                F.col(col).isNull() | (F.trim(F.col(col).cast("string")) == "")
-            )
+            return df.where(F.col(col).isNull() | (F.trim(F.col(col).cast("string")) == ""))
     return df
 
 
@@ -425,9 +430,7 @@ def build_domain_keys(
         res_ok = res.where(F.upper(F.trim(F.col(res_col).cast("string"))) == "SEM TABELA")
     else:
         res_ok = res
-    res_keys = res_ok.select(
-        F.col(_ci(res, CONDICAO_IF_KEY)).cast("long").alias(CONDICAO_IF_KEY)
-    )
+    res_keys = res_ok.select(F.col(_ci(res, CONDICAO_IF_KEY)).cast("long").alias(CONDICAO_IF_KEY))
     cif_with_res = (
         cif.select(
             F.col(_ci(cif, CONDICAO_IF_KEY)).cast("long").alias(CONDICAO_IF_KEY),
@@ -471,9 +474,7 @@ def build_universe(
     return universe
 
 
-def build_subtype_map_snapshot(
-    tables: Dict[str, DataFrame], universe: DataFrame
-) -> dict:
+def build_subtype_map_snapshot(tables: Dict[str, DataFrame], universe: DataFrame) -> dict:
     """Observe joined-subclass discriminator values within the baseline universe."""
     snapshot = {
         "version": 1,
@@ -568,9 +569,9 @@ def _gravame_operation_chain(
         F.trim(F.col(operation_code).cast("string")).alias("operation_code"),
         F.trim(F.col(original_code).cast("string")).alias("original_code"),
     )
-    chain = operations.join(
-        universe, F.col("operation_if") == F.col(ROOT_KEY), "inner"
-    ).select("operation_id", "operation_code", "original_code", ROOT_KEY)
+    chain = operations.join(universe, F.col("operation_if") == F.col(ROOT_KEY), "inner").select(
+        "operation_id", "operation_code", "original_code", ROOT_KEY
+    )
     frontier = chain
     for _ in range(4):
         parents = frontier.select(
@@ -585,7 +586,9 @@ def _gravame_operation_chain(
 
 
 def _keyed_by_num_if(
-    tables: Dict[str, DataFrame], metric: Metric, notes: List[str],
+    tables: Dict[str, DataFrame],
+    metric: Metric,
+    notes: List[str],
     universe: Optional[DataFrame] = None,
     derived: Optional[Dict[str, DataFrame]] = None,
 ) -> Optional[DataFrame]:
@@ -616,14 +619,21 @@ def _keyed_by_num_if(
         specification = tables.get("ESPECIFICACAO")
         operation = tables.get(OPERACAO_TABLE)
         child_spec = _ci(df, "NUM_ID_ESPECIFICACAO")
-        spec_key = _ci(specification, "NUM_ID_ESPECIFICACAO") \
-            if specification is not None else None
-        spec_operation = _ci(specification, OPERACAO_KEY) \
-            if specification is not None else None
+        spec_key = _ci(specification, "NUM_ID_ESPECIFICACAO") if specification is not None else None
+        spec_operation = _ci(specification, OPERACAO_KEY) if specification is not None else None
         operation_key = _ci(operation, OPERACAO_KEY) if operation is not None else None
         operation_if = _ci(operation, ROOT_KEY) if operation is not None else None
-        if not all((specification is not None, operation is not None, child_spec,
-                    spec_key, spec_operation, operation_key, operation_if)):
+        if not all(
+            (
+                specification is not None,
+                operation is not None,
+                child_spec,
+                spec_key,
+                spec_operation,
+                operation_key,
+                operation_if,
+            )
+        ):
             return None
         specifications = active_rows(specification, [], "ESPECIFICACAO").select(
             F.col(spec_key).cast("long").alias("spec_id"),
@@ -633,11 +643,12 @@ def _keyed_by_num_if(
             F.col(operation_key).cast("long").alias("operation_id"),
             F.col(operation_if).cast("long").alias(ROOT_KEY),
         )
-        return df.select(
-            F.col(child_spec).cast("long").alias("spec_id")
-        ).join(specifications, "spec_id", "inner").join(
-            operations, "operation_id", "inner"
-        ).select(ROOT_KEY)
+        return (
+            df.select(F.col(child_spec).cast("long").alias("spec_id"))
+            .join(specifications, "spec_id", "inner")
+            .join(operations, "operation_id", "inner")
+            .select(ROOT_KEY)
+        )
     elif metric.via == "IF_LCA_ENTITY":
         if_lca = tables.get("IF_LCA")
         representative = tables.get("REPRESENTANTE_IF")
@@ -658,12 +669,16 @@ def _keyed_by_num_if(
                 F.col(entity_key).cast("long").alias("entity_id")
             )
         else:
-            active_representatives = active_rows(representative, [], "REPRESENTANTE_IF").select(
-                F.col(representative_key).cast("long").alias("entity_id")
-            ).dropDuplicates()
-            child = active_rows(df, [], metric.table).select(
-                F.col(entity_key).cast("long").alias("entity_id")
-            ).join(active_representatives, "entity_id", "inner")
+            active_representatives = (
+                active_rows(representative, [], "REPRESENTANTE_IF")
+                .select(F.col(representative_key).cast("long").alias("entity_id"))
+                .dropDuplicates()
+            )
+            child = (
+                active_rows(df, [], metric.table)
+                .select(F.col(entity_key).cast("long").alias("entity_id"))
+                .join(active_representatives, "entity_id", "inner")
+            )
         return child.join(route_entities, "entity_id", "inner").select(ROOT_KEY)
     elif metric.via == "ROOT_COD_IF":
         root = tables.get(ROOT_TABLE)
@@ -678,11 +693,14 @@ def _keyed_by_num_if(
         )
         if universe is not None:
             roots = roots.join(universe, ROOT_KEY, "leftsemi")
-        return df.select(
-            F.trim(F.col(child_code).cast("string")).alias("business_code")
-        ).join(roots, "business_code", "inner").select(ROOT_KEY)
+        return (
+            df.select(F.trim(F.col(child_code).cast("string")).alias("business_code"))
+            .join(roots, "business_code", "inner")
+            .select(ROOT_KEY)
+        )
     elif metric.via in {
-        "GRAVAME_OPERATION_CHAIN", "GRAVAME_LAUNCH_CHAIN",
+        "GRAVAME_OPERATION_CHAIN",
+        "GRAVAME_LAUNCH_CHAIN",
         "GRAVAME_OPERATION_DATA_CHAIN",
     }:
         if universe is None:
@@ -700,15 +718,20 @@ def _keyed_by_num_if(
         child_operation = _ci(df, "NUM_ID_OPERACAO")
         if not child_operation:
             return None
-        return active_rows(df, notes, metric.table).select(
-            _norm_code(F.col(child_operation)).alias("operation_id")
-        ).join(chain.select("operation_id", ROOT_KEY), "operation_id", "inner").select(ROOT_KEY)
+        return (
+            active_rows(df, notes, metric.table)
+            .select(_norm_code(F.col(child_operation)).alias("operation_id"))
+            .join(chain.select("operation_id", ROOT_KEY), "operation_id", "inner")
+            .select(ROOT_KEY)
+        )
     elif metric.via == "GRAVAME_PLEDGE":
         pledge_root = _ci(df, "NUM_IF_GRAVAME")
         return (
-            active_rows(df, notes, metric.table)
-            .select(F.col(pledge_root).cast("long").alias(ROOT_KEY))
-            if pledge_root else None
+            active_rows(df, notes, metric.table).select(
+                F.col(pledge_root).cast("long").alias(ROOT_KEY)
+            )
+            if pledge_root
+            else None
         )
     elif metric.via == "GRAVAME_ENDPOINT_ACCOUNT":
         endpoint = tables.get("PARAMETRO_PONTA")
@@ -717,37 +740,48 @@ def _keyed_by_num_if(
         account_id = _ci(df, "NUM_CONTA")
         if not all((endpoint is not None, endpoint_if, endpoint_account, account_id)):
             return None
-        return active_rows(endpoint, notes, "PARAMETRO_PONTA").select(
-            F.col(endpoint_if).cast("long").alias(ROOT_KEY),
-            _norm_code(F.col(endpoint_account)).alias("account_id"),
-        ).join(
-            active_rows(df, notes, metric.table).select(
-                _norm_code(F.col(account_id)).alias("account_id")
-            ),
-            "account_id", "inner",
-        ).select(ROOT_KEY)
+        return (
+            active_rows(endpoint, notes, "PARAMETRO_PONTA")
+            .select(
+                F.col(endpoint_if).cast("long").alias(ROOT_KEY),
+                _norm_code(F.col(endpoint_account)).alias("account_id"),
+            )
+            .join(
+                active_rows(df, notes, metric.table).select(
+                    _norm_code(F.col(account_id)).alias("account_id")
+                ),
+                "account_id",
+                "inner",
+            )
+            .select(ROOT_KEY)
+        )
     elif metric.via in {"GRAVAME_TRANSFER", "GRAVAME_TRANSFER_CONTENT"}:
         document = tables.get("ARQUIVO_IF")
         document_if = _ci(document, ROOT_KEY) if document is not None else None
-        document_transfer = (
-            _ci(document, "NUM_ID_ARQUIVO_TRANSF") if document is not None else None
-        )
+        document_transfer = _ci(document, "NUM_ID_ARQUIVO_TRANSF") if document is not None else None
         transfer_id = _ci(
             df,
             "NUM_ID_ARQUIVO_TRANSF"
-            if metric.via == "GRAVAME_TRANSFER" else "NUM_ID_ARQUIVO_TRANSF_CONT",
+            if metric.via == "GRAVAME_TRANSFER"
+            else "NUM_ID_ARQUIVO_TRANSF_CONT",
         )
         if not all((document is not None, document_if, document_transfer, transfer_id)):
             return None
-        return active_rows(document, notes, "ARQUIVO_IF").select(
-            F.col(document_if).cast("long").alias(ROOT_KEY),
-            _norm_code(F.col(document_transfer)).alias("transfer_id"),
-        ).join(
-            active_rows(df, notes, metric.table).select(
-                _norm_code(F.col(transfer_id)).alias("transfer_id")
-            ),
-            "transfer_id", "inner",
-        ).select(ROOT_KEY)
+        return (
+            active_rows(document, notes, "ARQUIVO_IF")
+            .select(
+                F.col(document_if).cast("long").alias(ROOT_KEY),
+                _norm_code(F.col(document_transfer)).alias("transfer_id"),
+            )
+            .join(
+                active_rows(df, notes, metric.table).select(
+                    _norm_code(F.col(transfer_id)).alias("transfer_id")
+                ),
+                "transfer_id",
+                "inner",
+            )
+            .select(ROOT_KEY)
+        )
     else:
         raise ValueError(f"Unknown via: {metric.via}")
     if bridge is None:
@@ -767,7 +801,9 @@ def _keyed_by_num_if(
 
 
 def build_counts(
-    universe: DataFrame, tables: Dict[str, DataFrame], notes: List[str],
+    universe: DataFrame,
+    tables: Dict[str, DataFrame],
+    notes: List[str],
     metrics: Optional[List[Metric]] = None,
 ) -> tuple[DataFrame, List[str]]:
     """Left-join per-metric counts onto the universe. Returns (df, skipped)."""
@@ -820,21 +856,15 @@ def add_simplificado_flag(
         )
     )
     out = counts.join(per_if, ROOT_KEY, "left")
-    return out.withColumn(
-        "SIMPLIFICADO", F.coalesce(F.col("SIMPLIFICADO"), F.lit("no_carteira"))
-    )
+    return out.withColumn("SIMPLIFICADO", F.coalesce(F.col("SIMPLIFICADO"), F.lit("no_carteira")))
 
 
 def shape_signature_col(metric_names: List[str]):
-    parts = [
-        F.concat(F.lit(f"{name}="), F.col(name).cast("string")) for name in metric_names
-    ]
+    parts = [F.concat(F.lit(f"{name}="), F.col(name).cast("string")) for name in metric_names]
     return F.concat_ws("|", *parts)
 
 
-def shape_distribution(
-    counts: DataFrame, metric_names: List[str], sample_size: int
-) -> List[dict]:
+def shape_distribution(counts: DataFrame, metric_names: List[str], sample_size: int) -> List[dict]:
     sig = shape_signature_col(metric_names)
     rows = (
         counts.withColumn("shape", sig)
@@ -996,9 +1026,7 @@ def attribute_audits(
     return out
 
 
-def apply_filtros_fonte(
-    tables: Dict[str, DataFrame], notes: List[str]
-) -> Dict[str, DataFrame]:
+def apply_filtros_fonte(tables: Dict[str, DataFrame], notes: List[str]) -> Dict[str, DataFrame]:
     out = dict(tables)
     for table, preds in FILTROS_FONTE.items():
         df = out.get(table)
@@ -1007,9 +1035,7 @@ def apply_filtros_fonte(
         for column, op, value in preds:
             col = _ci(df, column)
             if not col:
-                notes.append(
-                    f"FILTROS_FONTE: {table}.{column} missing; predicate ignored"
-                )
+                notes.append(f"FILTROS_FONTE: {table}.{column} missing; predicate ignored")
                 continue
             c = F.col(col)
             if op == "ieq":
@@ -1046,8 +1072,7 @@ def build_profile(
     if universe_mode == "domain":
         domain = build_domain_keys(tables, notes, simplified)
         universe_keys = (
-            domain if universe_keys is None
-            else universe_keys.join(domain, ROOT_KEY, "leftsemi")
+            domain if universe_keys is None else universe_keys.join(domain, ROOT_KEY, "leftsemi")
         )
     universe = build_universe(tables, notes, universe_keys, num_tipo_if)
     counts, skipped = build_counts(universe, tables, notes, metrics)
@@ -1074,12 +1099,14 @@ def build_profile(
         "by_simplificado": {},
         "evento_path_crosscheck": (
             {"status": "not applicable to Gravame"}
-            if is_gravame else evento_path_crosscheck(universe, tables, sample_size)
+            if is_gravame
+            else evento_path_crosscheck(universe, tables, sample_size)
         ),
         "attribute_audits": {} if is_gravame else attribute_audits(universe, tables, notes),
         "subtype_map": (
             {"status": "not applicable to Gravame"}
-            if is_gravame else build_subtype_map_snapshot(tables, universe)
+            if is_gravame
+            else build_subtype_map_snapshot(tables, universe)
         ),
     }
 
@@ -1121,7 +1148,8 @@ def compare_profiles(current: dict, other: dict, other_label: str) -> dict:
     oth = {s["shape"]: s for s in other.get("shapes", [])}
     only_current = [
         {"shape": k, "n": v["n"], "pct": v["pct"], "sample_num_if": v["sample_num_if"]}
-        for k, v in cur.items() if k not in oth
+        for k, v in cur.items()
+        if k not in oth
     ]
     only_other = [
         {"shape": k, "n": v["n"], "pct": v["pct"]} for k, v in oth.items() if k not in cur
@@ -1151,11 +1179,15 @@ def compare_profiles(current: dict, other: dict, other_label: str) -> dict:
 # ---------------------------------------------------------------------------
 def print_report(profile: dict, label: str, top: int) -> None:
     print("\n" + "=" * 78)
-    print(f"FINANCIAL PRODUCT SHAPE PROFILE — {label} (product={profile.get('product')}, "
-          f"NUM_TIPO_IF={profile.get('num_tipo_if', CDB_TIPO_IF)})")
+    print(
+        f"FINANCIAL PRODUCT SHAPE PROFILE — {label} (product={profile.get('product')}, "
+        f"NUM_TIPO_IF={profile.get('num_tipo_if', CDB_TIPO_IF)})"
+    )
     print("=" * 78)
-    print(f"Universe (NUM_TIPO_IF={profile.get('num_tipo_if', CDB_TIPO_IF)}, active): "
-          f"{profile['universe_size']} IFs")
+    print(
+        f"Universe (NUM_TIPO_IF={profile.get('num_tipo_if', CDB_TIPO_IF)}, active): "
+        f"{profile['universe_size']} IFs"
+    )
     if profile.get("filtros_fonte_applied"):
         print("FILTROS_FONTE row predicates APPLIED — this is the engorda-input image.")
     if profile["metrics_skipped"]:
@@ -1230,16 +1262,25 @@ def _selftest_tables(spark: SparkSession) -> Dict[str, DataFrame]:
     1003 is an empty shell. 1004 (excluded) and 2001 (non-CDB) must not count."""
 
     def df(rows, cols):
-        types = {"DAT_EXCLUSAO": "string", "COD_TIPO_ESCALONAMENTO": "string",
-                 "COD_COND_RESGATE": "string", "COD_TIPO_CONDICAO_IF": "string",
-                 "IND_COMITENTE_SIMPLIFICADO": "string"}
+        types = {
+            "DAT_EXCLUSAO": "string",
+            "COD_TIPO_ESCALONAMENTO": "string",
+            "COD_COND_RESGATE": "string",
+            "COD_TIPO_CONDICAO_IF": "string",
+            "IND_COMITENTE_SIMPLIFICADO": "string",
+        }
         schema = ", ".join(f"{c} {types.get(c, 'long')}" for c in cols)
         return spark.createDataFrame(rows, schema)
 
     return {
         "INSTRUMENTO_FINANCEIRO": df(
-            [(1001, 49, None), (1002, 49, None), (1003, 49, None),
-             (1004, 49, "2024-01-01"), (2001, 50, None)],
+            [
+                (1001, 49, None),
+                (1002, 49, None),
+                (1003, 49, None),
+                (1004, 49, "2024-01-01"),
+                (2001, 50, None),
+            ],
             ["NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO"],
         ),
         "TITULO": df(
@@ -1248,12 +1289,20 @@ def _selftest_tables(spark: SparkSession) -> Dict[str, DataFrame]:
         ),
         "CREDITO": df([(1001,), (2001,)], ["NUM_IF"]),
         "CONDICAO_IF": df(
-            [(11, 1001, "20", None), (12, 1001, "3", None), (13, 1002, "2", None),
-             (14, 1002, "1", None), (15, 1002, "5", None), (16, 1004, "3", None)],
+            [
+                (11, 1001, "20", None),
+                (12, 1001, "3", None),
+                (13, 1002, "2", None),
+                (14, 1002, "1", None),
+                (15, 1002, "5", None),
+                (16, 1004, "3", None),
+            ],
             ["NUM_CONDICAO_IF", "NUM_IF", "COD_TIPO_CONDICAO_IF", "DAT_EXCLUSAO"],
         ),
-        "RESGATE": df([(11, "SEM TABELA", None), (14, "COM TABELA", None)],
-                      ["NUM_CONDICAO_IF", "COD_COND_RESGATE", "DAT_EXCLUSAO"]),
+        "RESGATE": df(
+            [(11, "SEM TABELA", None), (14, "COM TABELA", None)],
+            ["NUM_CONDICAO_IF", "COD_COND_RESGATE", "DAT_EXCLUSAO"],
+        ),
         "JUROS_FLUTUANTE": df(
             [(12, None), (13, "2024-01-01")],
             ["NUM_CONDICAO_IF", "DAT_EXCLUSAO"],
@@ -1265,24 +1314,21 @@ def _selftest_tables(spark: SparkSession) -> Dict[str, DataFrame]:
         # 1001: one tipo-83 + one tipo-85 event (as in the cetip.out registration).
         # 1002's tipo-85 event carries a NUM_CONDICAO_IF belonging to 1001 -> path mismatch.
         "EVENTO": df(
-            [(91, 1001, 11, 83, None), (92, 1001, 12, 85, None),
-             (93, 1002, 11, 85, None)],
-            ["NUM_EVENTO", "NUM_IF", "NUM_CONDICAO_IF",
-             "NUM_TIPO_EVENTO_LEGADO", "DAT_EXCLUSAO"],
+            [(91, 1001, 11, 83, None), (92, 1001, 12, 85, None), (93, 1002, 11, 85, None)],
+            ["NUM_EVENTO", "NUM_IF", "NUM_CONDICAO_IF", "NUM_TIPO_EVENTO_LEGADO", "DAT_EXCLUSAO"],
         ),
         "OPERACAO": df([(501, 1001)], ["NUM_ID_OPERACAO", "NUM_IF"]),
-        "DADO_OPERACAO": df([(1, 501), (2, 501)],
-                            ["NUM_ID_DADO_OPERACAO", "NUM_ID_OPERACAO"]),
+        "DADO_OPERACAO": df([(1, 501), (2, 501)], ["NUM_ID_DADO_OPERACAO", "NUM_ID_OPERACAO"]),
         "LANCAMENTO": df([(1, 501)], ["NUM_ID_LANCAMENTO", "NUM_ID_OPERACAO"]),
         "DEPOSITO_AUTOMATICO_IF": df([(1001,)], ["NUM_IF"]),
         "CARTEIRA_COMITENTE": df(
             [(1, 1001, 900), (2, 1002, 901)],
             ["NUM_CARTEIRA_COMITENTE", "NUM_IF", "NUM_ID_ENTIDADE"],
         ),
-        "CARTEIRA_PARTICIPANTE": df([(1, 1001)],
-                                    ["NUM_CARTEIRA_PARTICIPANTE", "NUM_IF"]),
-        "COMITENTE": df([(900, "S"), (901, "N")],
-                        ["NUM_ID_ENTIDADE", "IND_COMITENTE_SIMPLIFICADO"]),
+        "CARTEIRA_PARTICIPANTE": df([(1, 1001)], ["NUM_CARTEIRA_PARTICIPANTE", "NUM_IF"]),
+        "COMITENTE": df(
+            [(900, "S"), (901, "N")], ["NUM_ID_ENTIDADE", "IND_COMITENTE_SIMPLIFICADO"]
+        ),
     }
 
 
@@ -1342,9 +1388,9 @@ def run_selftest(spark: SparkSession) -> None:
     audit = profile["attribute_audits"]
     assert audit["RESGATE.COD_COND_RESGATE"] == {"SEM TABELA": 1, "COM TABELA": 1}, audit
     assert audit["TITULO.COD_TIPO_ESCALONAMENTO"] == {"<NULL>": 1, "EMISSAO": 1}, audit
-    assert audit["CONDICAO_IF.COD_TIPO_CONDICAO_IF"] == {
-        "20": 1, "3": 1, "2": 1, "1": 1, "5": 1
-    }, audit
+    assert audit["CONDICAO_IF.COD_TIPO_CONDICAO_IF"] == {"20": 1, "3": 1, "2": 1, "1": 1, "5": 1}, (
+        audit
+    )
 
     # --apply-filtros-fonte: 1002's COM TABELA resgate row and EMISSAO titulo row
     # are dropped; 1001 (SEM TABELA, escalonamento NULL) is untouched. The
@@ -1356,9 +1402,7 @@ def run_selftest(spark: SparkSession) -> None:
     f1002 = shape_of(filtered, 1002)["counts"]
     assert f1002["RESGATE"] == 0 and f1002["TITULO"] == 0, f1002
     assert filtered["attribute_audits"]["RESGATE.COD_COND_RESGATE"] == {"SEM TABELA": 1}
-    assert any("QTD_CARTEIRA_COMITENTE missing" in n for n in filtered["notes"]), (
-        filtered["notes"]
-    )
+    assert any("QTD_CARTEIRA_COMITENTE missing" in n for n in filtered["notes"]), filtered["notes"]
 
     assert audit["EVENTO.NUM_TIPO_EVENTO_LEGADO"] == {"83": 1, "85": 2}, audit
 
@@ -1384,35 +1428,61 @@ def run_selftest(spark: SparkSession) -> None:
 # ---------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Profile per-IF financial-product cardinalities.")
-    p.add_argument("--product", required=True, choices=sorted(PRODUCTS),
-                   help="Product profile: selects NUM_TIPO_IF and metric/domain rules. "
-                        "The emitted baseline is tagged so the "
-                        "validator rejects a cross-product baseline.")
-    p.add_argument("--base-uri", default=None,
-                   help="Parquet base URI holding one folder per table (raw or synthetic).")
-    p.add_argument("--self-test", action="store_true",
-                   help="Verify the profiler against a built-in in-memory fixture and exit.")
-    p.add_argument("--apply-filtros-fonte", action="store_true",
-                   help="Pre-filter CDB/RDB source tables with engorda's FILTROS_FONTE row "
-                        "predicates (not supported for CCB/Gravame), so this is the input image "
-                        "(use as the --compare-with baseline for the synthetic run).")
-    p.add_argument("--universe-keys", default=None,
-                   help="Parquet path/URI with the NUM_IFs to restrict the universe to "
-                        "(e.g. a clone run's MAPA_CLONE_NUM_IF) — builds a baseline over "
-                        "exactly the sampled source instruments.")
-    p.add_argument("--universe-keys-column", default="NUM_IF",
-                   help="Column holding the NUM_IF in --universe-keys "
-                        "(e.g. NUM_IF_ORIG for MAPA_CLONE_NUM_IF).")
-    p.add_argument("--universe", default="all", choices=["all", "domain"],
-                   help="'all' = every active root of the selected type. 'domain' = the "
-                        "CDB/RDB IF-level domain: non-escalonado TITULO and >=1 active "
-                        "CONDICAO_IF with an active RESGATE 'SEM TABELA' (team "
-                        "FILTRO_BASE query). Composes with --universe-keys (intersection).")
+    p.add_argument(
+        "--product",
+        required=True,
+        choices=sorted(PRODUCTS),
+        help="Product profile: selects NUM_TIPO_IF and metric/domain rules. "
+        "The emitted baseline is tagged so the "
+        "validator rejects a cross-product baseline.",
+    )
+    p.add_argument(
+        "--base-uri",
+        default=None,
+        help="Parquet base URI holding one folder per table (raw or synthetic).",
+    )
+    p.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Verify the profiler against a built-in in-memory fixture and exit.",
+    )
+    p.add_argument(
+        "--apply-filtros-fonte",
+        action="store_true",
+        help="Pre-filter CDB/RDB source tables with engorda's FILTROS_FONTE row "
+        "predicates (not supported for CCB/Gravame), so this is the input image "
+        "(use as the --compare-with baseline for the synthetic run).",
+    )
+    p.add_argument(
+        "--universe-keys",
+        default=None,
+        help="Parquet path/URI with the NUM_IFs to restrict the universe to "
+        "(e.g. a clone run's MAPA_CLONE_NUM_IF) — builds a baseline over "
+        "exactly the sampled source instruments.",
+    )
+    p.add_argument(
+        "--universe-keys-column",
+        default="NUM_IF",
+        help="Column holding the NUM_IF in --universe-keys "
+        "(e.g. NUM_IF_ORIG for MAPA_CLONE_NUM_IF).",
+    )
+    p.add_argument(
+        "--universe",
+        default="all",
+        choices=["all", "domain"],
+        help="'all' = every active root of the selected type. 'domain' = the "
+        "CDB/RDB IF-level domain: non-escalonado TITULO and >=1 active "
+        "CONDICAO_IF with an active RESGATE 'SEM TABELA' (team "
+        "FILTRO_BASE query). Composes with --universe-keys (intersection).",
+    )
     p.add_argument("--prefix", default="", help="Optional sub-prefix under the base URI.")
     p.add_argument("--label", default="dataset", help="Label for the report (e.g. raw/synthetic).")
     p.add_argument("--report-path", default=None, help="Write the JSON profile here.")
-    p.add_argument("--compare-with", default=None,
-                   help="Path to a JSON profile produced by an earlier run; adds a diff section.")
+    p.add_argument(
+        "--compare-with",
+        default=None,
+        help="Path to a JSON profile produced by an earlier run; adds a diff section.",
+    )
     p.add_argument("--sample-size", type=int, default=10, help="Sample NUM_IFs kept per shape.")
     p.add_argument("--top", type=int, default=20, help="Shapes printed to the console.")
     return p.parse_args()
@@ -1427,8 +1497,7 @@ def main() -> None:
         )
     if args.product in {"ccb", "gravame"} and args.universe == "domain":
         raise SystemExit(
-            f"--universe domain is CDB/RDB-specific for {args.product}; "
-            "use all or --universe-keys."
+            f"--universe domain is CDB/RDB-specific for {args.product}; use all or --universe-keys."
         )
 
     spark = SparkSession.builder.appName("profile_cdb_shapes").getOrCreate()
@@ -1474,24 +1543,28 @@ def main() -> None:
         kcol = _ci(kdf, args.universe_keys_column)
         if not kcol:
             raise SystemExit(
-                f"--universe-keys {args.universe_keys} lacks column "
-                f"{args.universe_keys_column}"
+                f"--universe-keys {args.universe_keys} lacks column {args.universe_keys_column}"
             )
-        universe_keys = (
-            kdf.select(F.col(kcol).cast("long").alias(ROOT_KEY)).dropDuplicates()
-        )
+        universe_keys = kdf.select(F.col(kcol).cast("long").alias(ROOT_KEY)).dropDuplicates()
         # Deterministic provenance of the source key set, so a synthetic run and its
         # baseline can be proven to have been built over exactly the same instruments
         # (map_mode = exact-source-keys).
         source_key_count, source_key_fingerprint = source_key_provenance(universe_keys)
         logger.info(
             "Universe restricted to %d NUM_IF(s) from %s",
-            source_key_count, args.universe_keys,
+            source_key_count,
+            args.universe_keys,
         )
 
     profile = build_profile(
-        tables, args.sample_size, args.apply_filtros_fonte, universe_keys,
-        args.universe, args.product, num_tipo_if, simplified,
+        tables,
+        args.sample_size,
+        args.apply_filtros_fonte,
+        universe_keys,
+        args.universe,
+        args.product,
+        num_tipo_if,
+        simplified,
     )
     profile["label"] = args.label
     profile["universe_mode"] = args.universe
@@ -1507,9 +1580,7 @@ def main() -> None:
 
     if args.compare_with:
         other = json.loads(read_text(spark, args.compare_with))
-        profile["comparison"] = compare_profiles(
-            profile, other, other.get("label", "other")
-        )
+        profile["comparison"] = compare_profiles(profile, other, other.get("label", "other"))
 
     print_report(profile, args.label, args.top)
 

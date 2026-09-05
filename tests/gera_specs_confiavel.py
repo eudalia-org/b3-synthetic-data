@@ -35,13 +35,23 @@ import sys
 from collections import defaultdict
 from typing import Dict, List, Tuple
 
-
 # As 15 tabelas a engordar (static = False). Todo o resto vira static = True.
 TABELAS_NAO_STATIC = {
-    "INSTRUMENTO_FINANCEIRO", "CONDICAO_IF", "CARTEIRA_COMITENTE",
-    "CARTEIRA_PARTICIPANTE", "CREDITO", "DEPOSITO_AUTOMATICO_IF", "TITULO",
-    "JUROS_FLUTUANTE", "RESGATE", "EVENTO", "OPERACAO", "ESPECIFICACAO",
-    "LANCAMENTO", "DADO_OPERACAO", "ESPECIFICACAO_COMITENTE",
+    "INSTRUMENTO_FINANCEIRO",
+    "CONDICAO_IF",
+    "CARTEIRA_COMITENTE",
+    "CARTEIRA_PARTICIPANTE",
+    "CREDITO",
+    "DEPOSITO_AUTOMATICO_IF",
+    "TITULO",
+    "JUROS_FLUTUANTE",
+    "RESGATE",
+    "EVENTO",
+    "OPERACAO",
+    "ESPECIFICACAO",
+    "LANCAMENTO",
+    "DADO_OPERACAO",
+    "ESPECIFICACAO_COMITENTE",
 }
 
 
@@ -84,11 +94,13 @@ def le_fks(caminho: str) -> Dict[str, List[dict]]:
         trips = sorted(colunas[cname])
         ccols = [c for _, c, _ in trips]
         pcols = [p for _, _, p in trips]
-        fks_por_tabela[info["child"]].append({
-            "columns": ccols,
-            "parent_table": info["parent"],
-            "parent_columns": pcols,
-        })
+        fks_por_tabela[info["child"]].append(
+            {
+                "columns": ccols,
+                "parent_table": info["parent"],
+                "parent_columns": pcols,
+            }
+        )
     return fks_por_tabela
 
 
@@ -121,8 +133,10 @@ def monta_specs(pks: Dict[str, List[str]], fks: Dict[str, List[dict]]) -> dict:
         specs[t] = cfg
 
     if sem_pk:
-        print(f"[AVISO] {len(sem_pk)} tabela(s) com FK mas sem PK no export "
-              f"(ignoradas): {sem_pk}", file=sys.stderr)
+        print(
+            f"[AVISO] {len(sem_pk)} tabela(s) com FK mas sem PK no export (ignoradas): {sem_pk}",
+            file=sys.stderr,
+        )
 
     return specs
 
@@ -151,9 +165,7 @@ def relata_fks_para_fora(specs: dict) -> List[Tuple[str, str, str]]:
 
 def main() -> None:
     if len(sys.argv) not in (3, 4):
-        raise SystemExit(
-            "Uso: python gera_specs_do_banco.py pk_real.csv fk_real.csv [saida.json]"
-        )
+        raise SystemExit("Uso: python gera_specs_do_banco.py pk_real.csv fk_real.csv [saida.json]")
     pk_csv, fk_csv = sys.argv[1], sys.argv[2]
     saida = sys.argv[3] if len(sys.argv) == 4 else "spec_config.json"
 
@@ -195,12 +207,13 @@ def main() -> None:
     # Sanidade: as 15 que deviam ser não-static estão presentes e não-static?
     faltando = TABELAS_NAO_STATIC - set(specs)
     if faltando:
-        print(f"  [ATENÇÃO] tabelas não-static esperadas AUSENTES no banco: "
-              f"{sorted(faltando)}", file=sys.stderr)
+        print(
+            f"  [ATENÇÃO] tabelas não-static esperadas AUSENTES no banco: {sorted(faltando)}",
+            file=sys.stderr,
+        )
     erradas = [t for t in TABELAS_NAO_STATIC if t in specs and specs[t]["static"]]
     if erradas:
-        print(f"  [ATENÇÃO] deveriam ser não-static mas vieram static: {erradas}",
-              file=sys.stderr)
+        print(f"  [ATENÇÃO] deveriam ser não-static mas vieram static: {erradas}", file=sys.stderr)
 
     # valida que o JSON relê
     with open(saida, "r", encoding="utf-8") as f:

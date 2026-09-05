@@ -75,9 +75,10 @@ class TestComputeShiftColumns:
     def test_fk_to_nonstatic_parent_shifts(self):
         specs = {
             "INSTRUMENTO_FINANCEIRO": {"pk_cols": ["NUM_IF"]},
-            "OPERACAO": {"pk_cols": ["NUM_OPER"],
-                         "foreign_keys": [{"columns": ["NUM_IF"],
-                                           "parent_table": "INSTRUMENTO_FINANCEIRO"}]},
+            "OPERACAO": {
+                "pk_cols": ["NUM_OPER"],
+                "foreign_keys": [{"columns": ["NUM_IF"], "parent_table": "INSTRUMENTO_FINANCEIRO"}],
+            },
         }
         out = shift_keys.compute_shift_columns(specs)
         assert sorted(out["OPERACAO"]) == ["NUM_IF", "NUM_OPER"]
@@ -86,9 +87,10 @@ class TestComputeShiftColumns:
     def test_fk_to_static_parent_not_shifted(self):
         specs = {
             "TIPO_IF": {"pk_cols": ["NUM_TIPO_IF"], "static": True},
-            "OPERACAO": {"pk_cols": ["NUM_OPER"],
-                         "foreign_keys": [{"columns": ["NUM_TIPO_IF"],
-                                           "parent_table": "TIPO_IF"}]},
+            "OPERACAO": {
+                "pk_cols": ["NUM_OPER"],
+                "foreign_keys": [{"columns": ["NUM_TIPO_IF"], "parent_table": "TIPO_IF"}],
+            },
         }
         # NUM_TIPO_IF references a static parent -> not shifted; only NUM_OPER shifts
         assert shift_keys.compute_shift_columns(specs) == {"OPERACAO": ["NUM_OPER"]}
@@ -97,8 +99,10 @@ class TestComputeShiftColumns:
         # PK == FK to a static parent: FK-to-static wins, PK kept matched
         specs = {
             "CODE": {"pk_cols": ["COD"], "static": True},
-            "EXT": {"pk_cols": ["COD"],
-                    "foreign_keys": [{"columns": ["COD"], "parent_table": "CODE"}]},
+            "EXT": {
+                "pk_cols": ["COD"],
+                "foreign_keys": [{"columns": ["COD"], "parent_table": "CODE"}],
+            },
         }
         assert shift_keys.compute_shift_columns(specs) == {}
 
@@ -106,15 +110,17 @@ class TestComputeShiftColumns:
         # PK == FK to a non-static parent: shifts (deduped to one column)
         specs = {
             "CONDICAO_IF": {"pk_cols": ["NUM_CONDICAO_IF"]},
-            "RESGATE": {"pk_cols": ["NUM_CONDICAO_IF"],
-                        "foreign_keys": [{"columns": ["NUM_CONDICAO_IF"],
-                                          "parent_table": "CONDICAO_IF"}]},
+            "RESGATE": {
+                "pk_cols": ["NUM_CONDICAO_IF"],
+                "foreign_keys": [{"columns": ["NUM_CONDICAO_IF"], "parent_table": "CONDICAO_IF"}],
+            },
         }
         out = shift_keys.compute_shift_columns(specs)
         assert out["RESGATE"] == ["NUM_CONDICAO_IF"]
 
     def test_real_specs_yields_31_columns(self):
         import json
+
         specs = json.load(open(Path(__file__).resolve().parent.parent / "specs.json"))
         out = shift_keys.compute_shift_columns(specs)
         total = sum(len(v) for v in out.values())
@@ -135,6 +141,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'datagen.shift_keys'`.
 Adds a uniform +N to every generated (non-static) key, in place, preserving FK
 integrity. See docs/plans/2026-06-28-shift-synthetic-keys-design.md.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -157,8 +164,7 @@ from datagen.engorda_tables import (
     write_synthetic_table,
 )
 
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -192,7 +198,8 @@ def compute_shift_columns(specs: dict) -> Dict[str, List[str]]:
                     warnings.warn(
                         f"{t}.{pk}: non-static PK that is also an FK to a static "
                         "parent; NOT shifting (kept matched to reference data).",
-                        UserWarning, stacklevel=2,
+                        UserWarning,
+                        stacklevel=2,
                     )
                 else:
                     cols.add(pk)
@@ -231,9 +238,13 @@ import pytest
 @pytest.fixture(scope="module")
 def spark():
     from pyspark.sql import SparkSession
-    session = (SparkSession.builder.appName("shift-keys-test")
-               .master("local[2]").config("spark.sql.shuffle.partitions", "2")
-               .getOrCreate())
+
+    session = (
+        SparkSession.builder.appName("shift-keys-test")
+        .master("local[2]")
+        .config("spark.sql.shuffle.partitions", "2")
+        .getOrCreate()
+    )
     yield session
     session.stop()
 
@@ -241,11 +252,14 @@ def spark():
 class TestShiftTable:
     def test_shifts_listed_columns_and_preserves_others(self, spark):
         from pyspark.sql import types as T
-        schema = T.StructType([
-            T.StructField("NUM_OPER", T.LongType()),
-            T.StructField("NUM_IF", T.LongType()),
-            T.StructField("DESC", T.StringType()),
-        ])
+
+        schema = T.StructType(
+            [
+                T.StructField("NUM_OPER", T.LongType()),
+                T.StructField("NUM_IF", T.LongType()),
+                T.StructField("DESC", T.StringType()),
+            ]
+        )
         df = spark.createDataFrame([(1, 10, "a"), (2, 20, "b")], schema)
         out = shift_keys.shift_table(df, ["NUM_OPER", "NUM_IF"], 1000)
         rows = {r["DESC"]: (r["NUM_OPER"], r["NUM_IF"]) for r in out.collect()}
@@ -253,6 +267,7 @@ class TestShiftTable:
 
     def test_preserves_dtype(self, spark):
         from pyspark.sql import types as T
+
         schema = T.StructType([T.StructField("K", T.DecimalType(38, 9))])
         df = spark.createDataFrame([(1,)], schema)
         out = shift_keys.shift_table(df, ["K"], 5)
@@ -261,6 +276,7 @@ class TestShiftTable:
 
     def test_null_fk_stays_null(self, spark):
         from pyspark.sql import types as T
+
         schema = T.StructType([T.StructField("FK", T.LongType())])
         df = spark.createDataFrame([(5,), (None,)], schema)
         out = shift_keys.shift_table(df, ["FK"], 100)
@@ -316,6 +332,7 @@ class TestCheckOverflow:
 
     def test_no_overflow_returns_empty(self, spark, tmp_path):
         from pyspark.sql import types as T
+
         schema = T.StructType([T.StructField("K", T.DecimalType(38, 0))])
         self._write(spark, tmp_path, "T", schema, [(10,), (20,)])
         shift = {"T": ["K"]}
@@ -323,6 +340,7 @@ class TestCheckOverflow:
 
     def test_overflow_detected_for_tight_domain(self, spark, tmp_path):
         from pyspark.sql import types as T
+
         # Decimal(2,0) capacity = 99; max is 90, +20 = 110 > 99 -> overflow
         schema = T.StructType([T.StructField("K", T.DecimalType(2, 0))])
         self._write(spark, tmp_path, "T", schema, [(90,)])
@@ -334,12 +352,14 @@ class TestCheckOverflow:
 
     def test_capacity_override_wins_over_parquet(self, spark, tmp_path):
         from pyspark.sql import types as T
+
         # Parquet dtype Decimal(38,0) is huge, but the live Oracle capacity is 200;
         # max 150 + 100 = 250 > 200 -> overflow detected only via the override.
         schema = T.StructType([T.StructField("K", T.DecimalType(38, 0))])
         self._write(spark, tmp_path, "T", schema, [(150,)])
-        out = shift_keys.check_overflow(spark, str(tmp_path), {"T": ["K"]}, 100,
-                                        capacity_override={("T", "K"): 200})
+        out = shift_keys.check_overflow(
+            spark, str(tmp_path), {"T": ["K"]}, 100, capacity_override={("T", "K"): 200}
+        )
         assert out == [("T", "K", 150, 250, 200)]
 ```
 
@@ -424,7 +444,7 @@ class TestOraclePreflight:
         # rows mimic ALL_TAB_COLUMNS: (TABLE_NAME, COLUMN_NAME, DATA_PRECISION, DATA_SCALE)
         rows = [
             ("OPERACAO", "NUM_OPER", 12, 0),
-            ("OPERACAO", "IGNORED", 5, 0),      # not in shift set -> dropped
+            ("OPERACAO", "IGNORED", 5, 0),  # not in shift set -> dropped
             ("INSTRUMENTO_FINANCEIRO", "NUM_IF", None, None),  # unconstrained -> skipped
         ]
         shift = {"OPERACAO": ["NUM_OPER"], "INSTRUMENTO_FINANCEIRO": ["NUM_IF"]}
@@ -460,7 +480,7 @@ def capacity_from_precision_scale(precision, scale):
     if precision is None:
         return None
     int_digits = int(precision) - int(scale or 0)
-    return (10 ** int_digits) - 1 if int_digits > 0 else 0
+    return (10**int_digits) - 1 if int_digits > 0 else 0
 
 
 def oracle_column_capacities(rows, shift: Dict[str, List[str]]) -> Dict[Tuple[str, str], int]:
@@ -478,8 +498,9 @@ def oracle_column_capacities(rows, shift: Dict[str, List[str]]) -> Dict[Tuple[st
     return out
 
 
-def find_collisions(prod_max: Dict[str, int], synth_min: Dict[str, int],
-                    offset: int) -> List[Tuple[str, int, int]]:
+def find_collisions(
+    prod_max: Dict[str, int], synth_min: Dict[str, int], offset: int
+) -> List[Tuple[str, int, int]]:
     """Flag (table, prod_max, synth_min+offset) where the shifted synthetic key
     range does NOT clear current production (synth_min + offset <= prod_max)."""
     flagged: List[Tuple[str, int, int]] = []
@@ -499,8 +520,10 @@ def read_oracle_capacities(spark, props: dict, owner: str):
         "SELECT TABLE_NAME, COLUMN_NAME, DATA_PRECISION, DATA_SCALE "
         f"FROM ALL_TAB_COLUMNS WHERE OWNER = '{owner}'"
     )
-    return [(r["TABLE_NAME"], r["COLUMN_NAME"], r["DATA_PRECISION"], r["DATA_SCALE"])
-            for r in read_rows(spark, props, query)]
+    return [
+        (r["TABLE_NAME"], r["COLUMN_NAME"], r["DATA_PRECISION"], r["DATA_SCALE"])
+        for r in read_rows(spark, props, query)
+    ]
 
 
 def read_oracle_max(spark, props: dict, owner: str, table: str, col: str):
@@ -535,37 +558,45 @@ git commit -m "feat(shift_keys): Oracle capacity + collision pre-flight logic"
 class TestApplyShift:
     def test_in_place_shift_preserves_fk_integrity(self, spark, tmp_path):
         from pyspark.sql import types as T
+
         base = str(tmp_path / "syn")
         # CONDICAO_IF (non-static parent), RESGATE (shared-key child),
         # OPERACAO (child with FK to CONDICAO_IF), TIPO_IF (static)
-        spark.createDataFrame([(1,), (2,), (3,)],
-            T.StructType([T.StructField("NUM_CONDICAO_IF", T.LongType())])
+        spark.createDataFrame(
+            [(1,), (2,), (3,)], T.StructType([T.StructField("NUM_CONDICAO_IF", T.LongType())])
         ).write.parquet(f"{base}/CONDICAO_IF")
-        spark.createDataFrame([(1,), (2,)],
-            T.StructType([T.StructField("NUM_CONDICAO_IF", T.LongType())])
+        spark.createDataFrame(
+            [(1,), (2,)], T.StructType([T.StructField("NUM_CONDICAO_IF", T.LongType())])
         ).write.parquet(f"{base}/RESGATE")
-        spark.createDataFrame([(10, 1), (11, 2)],
-            T.StructType([T.StructField("NUM_OPER", T.LongType()),
-                          T.StructField("NUM_CONDICAO_IF", T.LongType())])
+        spark.createDataFrame(
+            [(10, 1), (11, 2)],
+            T.StructType(
+                [
+                    T.StructField("NUM_OPER", T.LongType()),
+                    T.StructField("NUM_CONDICAO_IF", T.LongType()),
+                ]
+            ),
         ).write.parquet(f"{base}/OPERACAO")
-        spark.createDataFrame([(46,)],
-            T.StructType([T.StructField("NUM_TIPO_IF", T.LongType())])
+        spark.createDataFrame(
+            [(46,)], T.StructType([T.StructField("NUM_TIPO_IF", T.LongType())])
         ).write.parquet(f"{base}/TIPO_IF")
 
         specs = {
             "TIPO_IF": {"pk_cols": ["NUM_TIPO_IF"], "static": True},
             "CONDICAO_IF": {"pk_cols": ["NUM_CONDICAO_IF"]},
-            "RESGATE": {"pk_cols": ["NUM_CONDICAO_IF"],
-                        "foreign_keys": [{"columns": ["NUM_CONDICAO_IF"],
-                                          "parent_table": "CONDICAO_IF"}]},
-            "OPERACAO": {"pk_cols": ["NUM_OPER"],
-                         "foreign_keys": [{"columns": ["NUM_CONDICAO_IF"],
-                                           "parent_table": "CONDICAO_IF"}]},
+            "RESGATE": {
+                "pk_cols": ["NUM_CONDICAO_IF"],
+                "foreign_keys": [{"columns": ["NUM_CONDICAO_IF"], "parent_table": "CONDICAO_IF"}],
+            },
+            "OPERACAO": {
+                "pk_cols": ["NUM_OPER"],
+                "foreign_keys": [{"columns": ["NUM_CONDICAO_IF"], "parent_table": "CONDICAO_IF"}],
+            },
         }
         shift = shift_keys.compute_shift_columns(specs)
-        failures = shift_keys.apply_shift(spark, base, shift, 1000,
-                                          continue_on_error=False,
-                                          reliable_checkpoint=False)
+        failures = shift_keys.apply_shift(
+            spark, base, shift, 1000, continue_on_error=False, reliable_checkpoint=False
+        )
         assert failures == []
 
         cond = spark.read.parquet(f"{base}/CONDICAO_IF")
@@ -615,7 +646,9 @@ def apply_shift(
             # Sever lineage: the next step deletes `path`, so a lazy read of the
             # source files would corrupt the output. Checkpoint replaces the plan
             # with a materialized RDD leaf.
-            df = df.checkpoint(eager=True) if reliable_checkpoint else df.localCheckpoint(eager=True)
+            df = (
+                df.checkpoint(eager=True) if reliable_checkpoint else df.localCheckpoint(eager=True)
+            )
             write_synthetic_table(spark, df, path)
             logger.info("[%d/%d] shifted %s (%s)", i, total, table, ",".join(shift[table]))
         except Exception as exc:  # noqa: BLE001
@@ -675,8 +708,11 @@ class TestEnvAndCli:
         assert args.continue_on_error is False
 
     def test_oracle_props_none_without_env(self, monkeypatch):
-        for k in ("DATAGEN_SOURCE_JDBC_URL", "DATAGEN_SOURCE_DB_USER",
-                  "DATAGEN_SOURCE_DB_PASSWORD"):
+        for k in (
+            "DATAGEN_SOURCE_JDBC_URL",
+            "DATAGEN_SOURCE_DB_USER",
+            "DATAGEN_SOURCE_DB_PASSWORD",
+        ):
             monkeypatch.delenv(k, raising=False)
         monkeypatch.setenv("DATAGEN_SYNTHETIC_BASE_URI", "oci://b@n/syn/")
         monkeypatch.setenv("DATAGEN_SPECS_URI", "oci://b@n/specs.json")
@@ -723,45 +759,54 @@ def get_shift_env() -> dict:
         logger.error("Missing required env var(s): %s", ", ".join(missing))
         sys.exit(1)
     # Optional prefix — must match what engorda used so we hit the same paths.
-    config["DATAGEN_SYNTHETIC_PREFIX"] = os.environ.get(
-        "DATAGEN_SYNTHETIC_PREFIX", "").strip("/")
+    config["DATAGEN_SYNTHETIC_PREFIX"] = os.environ.get("DATAGEN_SYNTHETIC_PREFIX", "").strip("/")
     chk = os.environ.get(CHECKPOINT_ENV)
     if chk:
         config[CHECKPOINT_ENV] = chk.rstrip("/")
     # Optional Oracle pre-flight: URL + user + password travel as a set.
-    for name in ("DATAGEN_SOURCE_JDBC_URL", "DATAGEN_SOURCE_DB_USER",
-                 "DATAGEN_SOURCE_DB_PASSWORD"):
+    for name in ("DATAGEN_SOURCE_JDBC_URL", "DATAGEN_SOURCE_DB_USER", "DATAGEN_SOURCE_DB_PASSWORD"):
         val = os.environ.get(name)
         if val:
             config[name] = val
     config["DATAGEN_ORACLE_OWNER"] = os.environ.get("DATAGEN_ORACLE_OWNER", "CETIP")
     # JDBC tuning defaults required by build_connection_properties.
     config.setdefault("DATAGEN_JDBC_FETCH_SIZE", os.environ.get("DATAGEN_JDBC_FETCH_SIZE", "1000"))
-    config.setdefault("DATAGEN_JDBC_READ_TIMEOUT_MS",
-                      os.environ.get("DATAGEN_JDBC_READ_TIMEOUT_MS", "60000"))
-    config.setdefault("DATAGEN_JDBC_LOB_PREFETCH",
-                      os.environ.get("DATAGEN_JDBC_LOB_PREFETCH", "262144"))
+    config.setdefault(
+        "DATAGEN_JDBC_READ_TIMEOUT_MS", os.environ.get("DATAGEN_JDBC_READ_TIMEOUT_MS", "60000")
+    )
+    config.setdefault(
+        "DATAGEN_JDBC_LOB_PREFETCH", os.environ.get("DATAGEN_JDBC_LOB_PREFETCH", "262144")
+    )
     return config
 
 
 def oracle_props_or_none(config: dict):
     """Build JDBC connection properties iff the full Oracle env set is present."""
-    if all(config.get(k) for k in
-           ("DATAGEN_SOURCE_JDBC_URL", "DATAGEN_SOURCE_DB_USER",
-            "DATAGEN_SOURCE_DB_PASSWORD")):
+    if all(
+        config.get(k)
+        for k in ("DATAGEN_SOURCE_JDBC_URL", "DATAGEN_SOURCE_DB_USER", "DATAGEN_SOURCE_DB_PASSWORD")
+    ):
         return build_connection_properties(config)
     return None
 
 
 def parse_arguments(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Add a uniform +N to generated PK/FK values in the synthetic output.")
-    parser.add_argument("--offset", type=int, required=True,
-                        help="Uniform amount added to every shifted key.")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Pre-flight only: report shift columns + overflow, write nothing.")
-    parser.add_argument("--continue-on-error", action="store_true",
-                        help="Continue to remaining tables if one fails (default: stop).")
+        description="Add a uniform +N to generated PK/FK values in the synthetic output."
+    )
+    parser.add_argument(
+        "--offset", type=int, required=True, help="Uniform amount added to every shifted key."
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Pre-flight only: report shift columns + overflow, write nothing.",
+    )
+    parser.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Continue to remaining tables if one fails (default: stop).",
+    )
     return parser.parse_args(argv)
 
 
@@ -803,8 +848,9 @@ def main() -> None:
         base = synthetic_base_path(config)  # base URI + optional prefix
         owner = config["DATAGEN_ORACLE_OWNER"]
         total_cols = sum(len(v) for v in shift.values())
-        logger.info("Shifting %d column(s) across %d table(s) by +%d",
-                    total_cols, len(shift), args.offset)
+        logger.info(
+            "Shifting %d column(s) across %d table(s) by +%d", total_cols, len(shift), args.offset
+        )
 
         # Live Oracle pre-flight when DB env is configured; else Parquet fallback.
         props = oracle_props_or_none(config)
@@ -813,7 +859,8 @@ def main() -> None:
         if props is not None:
             logger.info("Oracle pre-flight against OWNER=%s", owner)
             capacity_override = oracle_column_capacities(
-                read_oracle_capacities(spark, props, owner), shift)
+                read_oracle_capacities(spark, props, owner), shift
+            )
             prod_max: Dict[str, int] = {}
             synth_min: Dict[str, int] = {}
             for table in shift:
@@ -831,18 +878,33 @@ def main() -> None:
                 synth_min[table] = None if row is None or row["m"] is None else int(row["m"])
             collisions = find_collisions(prod_max, synth_min, args.offset)
         else:
-            logger.warning("No Oracle env -> Parquet-schema capacity; production "
-                           "COLLISION was NOT verified for offset %d.", args.offset)
+            logger.warning(
+                "No Oracle env -> Parquet-schema capacity; production "
+                "COLLISION was NOT verified for offset %d.",
+                args.offset,
+            )
 
         overflows = check_overflow(spark, base, shift, args.offset, capacity_override)
         if overflows or collisions:
             logger.error("Pre-flight FAILED — aborting, nothing written.")
             for table, col, mx, shifted, cap in overflows:
-                logger.error("  overflow %s.%s: max=%d +%d=%d > capacity %d",
-                             table, col, mx, args.offset, shifted, cap)
+                logger.error(
+                    "  overflow %s.%s: max=%d +%d=%d > capacity %d",
+                    table,
+                    col,
+                    mx,
+                    args.offset,
+                    shifted,
+                    cap,
+                )
             for table, pmax, shifted_min in collisions:
-                logger.error("  collision %s: synthetic min+%d=%d <= production max %d",
-                             table, args.offset, shifted_min, pmax)
+                logger.error(
+                    "  collision %s: synthetic min+%d=%d <= production max %d",
+                    table,
+                    args.offset,
+                    shifted_min,
+                    pmax,
+                )
             print_deployment_summary(config)
             sys.exit(1)
 
@@ -852,9 +914,14 @@ def main() -> None:
             return
 
         logger.warning("In-place, non-idempotent mutation — re-running double-shifts.")
-        failures = apply_shift(spark, base, shift, args.offset,
-                               continue_on_error=args.continue_on_error,
-                               reliable_checkpoint=reliable)
+        failures = apply_shift(
+            spark,
+            base,
+            shift,
+            args.offset,
+            continue_on_error=args.continue_on_error,
+            reliable_checkpoint=reliable,
+        )
         if failures:
             logger.error("Failed table(s): %s", ", ".join(failures))
             print_deployment_summary(config)

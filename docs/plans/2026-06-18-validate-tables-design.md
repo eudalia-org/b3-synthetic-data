@@ -117,9 +117,9 @@ Notebook usage:
 
 ```python
 from validate_tables import validate, load_manifests, render_summary
+
 specs, schema = load_manifests(specs_uri, schema_uri)
-report = validate(spark, specs, schema, raw_base, synth_base,
-                  tables=["JUROS_FLUTUANTE"])
+report = validate(spark, specs, schema, raw_base, synth_base, tables=["JUROS_FLUTUANTE"])
 print(render_summary(report))
 report.findings  # inspect interactively
 ```
