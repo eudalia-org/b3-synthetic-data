@@ -16,9 +16,10 @@ stage defaults, common CLI flags, product config, then explicit `--set`.
 
 `scripts/run_pipeline.py` is self-contained for operator distribution and includes
 PEP 723 metadata for Python 3.11 and Click. Copy that one Python file to the Windows
-workstation; `uv run` installs Click automatically. `oci_dataflow.py` and
-`pipeline_reservations.py` remain repository compatibility facades and are not needed
-beside the distributed runner.
+workstation; `uv run` installs Click automatically. Reservation, Object Storage,
+lease, and Data Flow orchestration are implemented directly in that script.
+`oci_dataflow.py` remains a repository compatibility facade and is not needed beside
+the distributed runner.
 
 ## Adopt existing inputs
 

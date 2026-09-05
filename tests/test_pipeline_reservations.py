@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-import pipeline_reservations as R  # noqa: E402, I001
+import run_pipeline as R  # noqa: E402, I001
 
 
 REQUEST_A = "oci://bucket@namespace/run/a/plan.json"
@@ -866,7 +866,7 @@ def test_live_storage_uses_oci_argv_temp_files_and_conditional_flags(monkeypatch
             Path(command[command.index("--file") + 1]).write_bytes(payload)
         return {"etag": f"etag-{operation}"}
 
-    monkeypatch.setattr(R.oci_dataflow, "run_json", run_json)
+    monkeypatch.setattr(R, "run_json", run_json)
     storage = R.OciCliStorage({"profile": "QAB"})
     uri = "oci://bucket@namespace/path/object.json"
 
