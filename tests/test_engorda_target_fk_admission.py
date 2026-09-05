@@ -280,6 +280,9 @@ def test_live_oracle_pk_max_raises_reservation_floor(monkeypatch):
 
 def _fixture(spark):
     sources = {
+        "EVENTO": spark.createDataFrame(
+            [], "NUM_IF long, NUM_TIPO_EVENTO_LEGADO string"
+        ),
         eng.TABELA_RAIZ: spark.createDataFrame(
             [(1,), (2,), (3,), (4,)], "NUM_IF long"
         ),
@@ -1302,8 +1305,9 @@ def test_target_fk_admission_refills_direct_and_transitive_orphans(
     assert set(probes) <= {("100",), ("900",), ("901",)}
 
 
-def test_live_admission_applies_schedule_guard_to_refill_and_explicit_roots(
-    spark, monkeypatch
+@pytest.mark.parametrize("defect", ["schedule", "event_family"])
+def test_live_admission_applies_cdb_guards_to_refill_and_explicit_roots(
+    spark, monkeypatch, defect
 ):
     sources, spec, plans, _ = _fixture(spark)
     sources.update({
@@ -1320,13 +1324,18 @@ def test_live_admission_applies_schedule_guard_to_refill_and_explicit_roots(
             [
                 (101, "2026-01-01", "50", None),
                 (102, "2026-01-01", "50", None),
-                (103, "bad", "50", None),
+                (103, "bad" if defect == "schedule" else "2026-01-01", "50", None),
                 (104, "2026-01-01", "150", None),
             ],
             "NUM_CONDICAO_IF long, DAT_RESGATE string, VAL_PERCENTUAL string, "
             "IND_EXCLUIDO string",
         ),
     })
+    if defect == "event_family":
+        sources["EVENTO"] = spark.createDataFrame(
+            [(3, "83"), (4, "85")], "NUM_IF long, NUM_TIPO_EVENTO_LEGADO string"
+        )
+        sources["JUROS_FLUTUANTE"] = spark.createDataFrame([], "NUM_CONDICAO_IF long")
     domain = sources[eng.TABELA_RAIZ].select(eng.COL_NUM_IF)
     profile = dataclasses.replace(
         eng.get_product_profile("cdb_resgate"),

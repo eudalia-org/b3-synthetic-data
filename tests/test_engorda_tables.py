@@ -1614,12 +1614,12 @@ def test_rdb_schedule_guard_requires_exact_com_tabela_variant(spark, monkeypatch
     )
 
 
-def test_simplified_cdb_prunes_event_without_condition_family(spark, monkeypatch):
-    domain = spark.createDataFrame([(1,), (2,)], "NUM_IF long")
-    sources = {
+@pytest.fixture
+def event_family_sources(spark):
+    return {
         engorda_tables.EVENTO_TABELA: spark.createDataFrame(
-            [(1, "83"), (2, "83")],
-            "NUM_IF long, NUM_TIPO_EVENTO_LEGADO string",
+            [(101, 1, "83"), (102, 2, "83")],
+            "NUM_EVENTO long, NUM_IF long, NUM_TIPO_EVENTO_LEGADO string",
         ),
         engorda_tables.CONDICAO_IF_TABLE: spark.createDataFrame(
             [(1, 11, "3"), (2, 22, "20")],
@@ -1632,6 +1632,16 @@ def test_simplified_cdb_prunes_event_without_condition_family(spark, monkeypatch
             [(22,)], "NUM_CONDICAO_IF long"
         ),
     }
+
+
+@pytest.mark.parametrize("product", [
+    "cdb_simplificado", "cdb_resgate", "cdb_escalonamento",
+    "rdb_inclusao", "rdb_resgate",
+])
+def test_product_prunes_event_without_condition_family(
+    spark, monkeypatch, event_family_sources, product
+):
+    domain = spark.createDataFrame([(1,), (2,)], "NUM_IF long")
     monkeypatch.setattr(
         engorda_tables,
         "_dominio_num_if_produto",
@@ -1640,14 +1650,14 @@ def test_simplified_cdb_prunes_event_without_condition_family(spark, monkeypatch
     monkeypatch.setattr(
         engorda_tables,
         "_read_source",
-        lambda _spark, _config, table: sources[table],
+        lambda _spark, _config, table: event_family_sources[table],
     )
 
     _, valid = engorda_tables._dominio_instrumentos_elegiveis(
         spark,
         {},
         {},
-        engorda_tables.get_product_profile("cdb_simplificado"),
+        engorda_tables.get_product_profile(product),
         poda_subtipo=False,
         poda_cronograma_resgate=False,
         poda_conta=False,
@@ -1657,10 +1667,181 @@ def test_simplified_cdb_prunes_event_without_condition_family(spark, monkeypatch
     assert [row.NUM_IF for row in valid.orderBy("NUM_IF").collect()] == [1]
 
 
+@pytest.mark.parametrize("table,column", [
+    ("EVENTO", "NUM_TIPO_EVENTO_LEGADO"),
+    ("CONDICAO_IF", "COD_TIPO_CONDICAO_IF"),
+    ("JUROS_FLUTUANTE", "NUM_CONDICAO_IF"),
+    ("RESGATE", "NUM_CONDICAO_IF"),
+])
+@pytest.mark.parametrize("failure", ["unreadable", "missing_column"])
+def test_event_family_guard_fails_closed(
+    spark, monkeypatch, event_family_sources, table, column, failure
+):
+    sources = event_family_sources
+    sources["EVENTO"] = sources["EVENTO"].unionByName(spark.createDataFrame(
+        [(103, 2, "85")], sources["EVENTO"].schema
+    ))
+
+    def read_source(_spark, _config, name):
+        if name == table:
+            if failure == "unreadable":
+                raise OSError("source unavailable")
+            return sources[name].drop(column)
+        return sources[name]
+
+    monkeypatch.setattr(engorda_tables, "_read_source", read_source)
+    domain = spark.createDataFrame([(1,), (2,)], "NUM_IF long")
+    with pytest.raises(ValueError, match=table):
+        engorda_tables._num_if_evento_sem_familia(spark, {}, domain).collect()
+
+
+@pytest.mark.parametrize("event_type,condition_type,subtype", [
+    ("83", "3", "JUROS_FLUTUANTE"), ("85", "20", "RESGATE"),
+])
+def test_event_family_guard_matches_validator_and_reads_only_needed_family(
+    spark, monkeypatch, event_type, condition_type, subtype
+):
+    from scripts import validate_products as validator
+
+    sources = {
+        "EVENTO": spark.createDataFrame(
+            [(root, str(root), event_type, "2020-01-01" if root == 7 else " ")
+             for root in range(1, 9)],
+            "NUM_EVENTO long, NUM_IF string, NUM_TIPO_EVENTO_LEGADO string, "
+            "DAT_EXCLUSAO string",
+        ),
+        "CONDICAO_IF": spark.createDataFrame(
+            [(str(root) + ".000", str(root + 10), condition_type + ".0",
+              "2020-01-01" if root == 4 else " ")
+             for root in (1, 3, 4, 5, 6)],
+            "NUM_IF string, NUM_CONDICAO_IF string, COD_TIPO_CONDICAO_IF string, "
+            "DAT_EXCLUSAO string",
+        ),
+        subtype: spark.createDataFrame(
+            [(str(root + 10) + ".000", "2020-01-01" if root == 5 else "")
+             for root in (1, 4, 5, 6)],
+            "NUM_CONDICAO_IF string, DAT_EXCLUSAO string",
+        ),
+    }
+    reads = []
+
+    def read_source(_spark, _config, table):
+        reads.append(table)
+        return sources[table]
+
+    monkeypatch.setattr(engorda_tables, "_read_source", read_source)
+    # Root 8 is outside the selected domain; root 6's family cannot serve root 2.
+    domain = spark.createDataFrame([(root,) for root in range(1, 8)], "NUM_IF long")
+    invalid = engorda_tables._num_if_evento_sem_familia(spark, {}, domain)
+    assert {row.NUM_IF for row in invalid.collect()} == {2, 3, 4, 5}
+    assert set(reads) == set(sources)
+
+    sources["EVENTO"] = sources["EVENTO"].where("NUM_IF != '8'")
+    finding, = validator.check_event_condition_families(
+        sources, sample=10, profile=validator.get_validation_profile("cdb")
+    )
+    assert finding.count == 4
+    assert {int(row[1]) for row in finding.sample} == {2, 3, 4, 5}
+
+
+def test_event_family_guard_needs_no_conditions_without_relevant_events(spark, monkeypatch):
+    events = spark.createDataFrame(
+        [(1, "83", "2020-01-01"), (1, "99", None), (2, "85", None)],
+        "NUM_IF long, NUM_TIPO_EVENTO_LEGADO string, DAT_EXCLUSAO string",
+    )
+    reads = []
+
+    def read_source(_spark, _config, table):
+        reads.append(table)
+        assert table == "EVENTO"
+        return events
+
+    monkeypatch.setattr(engorda_tables, "_read_source", read_source)
+    domain = spark.createDataFrame([(1,)], "NUM_IF long")
+    assert engorda_tables._num_if_evento_sem_familia(spark, {}, domain).count() == 0
+    assert reads == ["EVENTO"]
+
+
+def test_cdb_event_family_selection_refills_and_clones_valid_graph(
+    spark, monkeypatch, event_family_sources
+):
+    from scripts import validate_products as validator
+
+    sources = event_family_sources
+    domain = spark.createDataFrame([(1,), (2,)], "NUM_IF long")
+    monkeypatch.setattr(
+        engorda_tables, "_dominio_num_if_produto", lambda *_args, **_kwargs: domain
+    )
+    monkeypatch.setattr(
+        engorda_tables, "_read_source", lambda _spark, _config, table: sources[table]
+    )
+    profile = engorda_tables.get_product_profile("cdb_resgate")
+    options = dict(
+        poda_subtipo=False, poda_cronograma_resgate=False,
+        poda_conta=False, politica_estrita_operacao=False,
+    )
+    selected = engorda_tables.seleciona_instrumentos(
+        spark, {}, {}, None, 1, 42, profile, **options
+    )
+    assert selected == [1]
+    with pytest.raises(ValueError, match=r"PODADOS.*2"):
+        engorda_tables.seleciona_instrumentos(
+            spark, {}, {}, [2], None, 42, profile, **options
+        )
+
+    roots = domain.where(domain.NUM_IF.isin(selected))
+    conditions = sources["CONDICAO_IF"].join(roots, "NUM_IF", "left_semi")
+    lots = {
+        "INSTRUMENTO_FINANCEIRO": roots,
+        "CONDICAO_IF": conditions,
+        "EVENTO": sources["EVENTO"].join(roots, "NUM_IF", "left_semi"),
+        "JUROS_FLUTUANTE": sources["JUROS_FLUTUANTE"].join(
+            conditions, "NUM_CONDICAO_IF", "left_semi"
+        ),
+    }
+    root_fk = engorda_tables.FkRemap(
+        ("NUM_IF",), "INSTRUMENTO_FINANCEIRO", ("NUM_IF",), True
+    )
+    plans = [
+        engorda_tables.PlanoTabela(
+            "INSTRUMENTO_FINANCEIRO", ("NUM_IF",), pk_regra="OFFSET_PROPRIO", pk_start=100
+        ),
+        engorda_tables.PlanoTabela(
+            "CONDICAO_IF", ("NUM_CONDICAO_IF",), [root_fk], "OFFSET_PROPRIO", 200
+        ),
+        engorda_tables.PlanoTabela(
+            "EVENTO", ("NUM_EVENTO",), [root_fk], "OFFSET_PROPRIO", 300
+        ),
+        engorda_tables.PlanoTabela(
+            "JUROS_FLUTUANTE", ("NUM_CONDICAO_IF",),
+            [engorda_tables.FkRemap(
+                ("NUM_CONDICAO_IF",), "CONDICAO_IF", ("NUM_CONDICAO_IF",), True
+            )], "VIA_PAI",
+        ),
+    ]
+    cloned, mappings = {}, {}
+    for plan in plans:
+        cloned[plan.name], mappings[plan.name] = engorda_tables.clona_tabela(
+            spark, plan, lots[plan.name], 2, mappings
+        )
+    events = cloned["EVENTO"].collect()
+    assert len(events) == 2
+    assert len({row.NUM_IF for row in events}) == 2
+    assert all(row.NUM_IF >= 100 and row.NUM_EVENTO >= 300 for row in events)
+    finding, = validator.check_event_condition_families(
+        cloned, sample=5, profile=validator.get_validation_profile("cdb")
+    )
+    assert finding.passed
+    assert finding.count == 0
+
+
 def test_schedule_guard_refills_sampling_but_rejects_explicit_invalid_root(
     spark, monkeypatch
 ):
     sources = _schedule_guard_sources(spark)
+    sources["EVENTO"] = spark.createDataFrame(
+        [], "NUM_IF long, NUM_TIPO_EVENTO_LEGADO string"
+    )
     domain = spark.createDataFrame([(root,) for root in range(1, 17)], "NUM_IF long")
     monkeypatch.setattr(
         engorda_tables,

@@ -418,6 +418,8 @@ TABELAS_SEMEADAS_LATERALMENTE = frozenset(
 # ---------------------------------------------------------------------------
 PRODUTOS_COM_PODA_FAMILIA_EVENTO = frozenset({
     'cdb_simplificado',
+    'cdb_resgate',
+    'cdb_escalonamento',
     'rdb_inclusao',
     'rdb_resgate',
 })
@@ -5021,34 +5023,32 @@ def _num_if_evento_sem_familia(spark, config, dominio: DataFrame) -> DataFrame:
     `bad`, aqui e o conjunto a REMOVER do dominio antes da amostragem — cada
     instrumento podado e reposto por outro valido e a contagem final segue N.
 
-    Tolerante como as demais podas: fonte ilegivel ou coluna ausente vira no-op
-    com WARNING."""
+    Fonte obrigatoria ilegivel ou coluna ausente aborta a selecao. Somente as
+    familias dos eventos ativos presentes no dominio exigem fontes de condicao.
+    """
     vazio = dominio.select(COL_NUM_IF).limit(0)
-    fontes: Dict[str, DataFrame] = {}
-    necessarias = {
-        EVENTO_TABELA: (COL_NUM_IF, COL_NUM_TIPO_EVENTO_LEGADO),
-        CONDICAO_IF_TABLE: (COL_NUM_IF, CONDICAO_IF_PK, CONDICAO_IF_TIPO_COL),
-    }
-    for _tipo_evento, _tipo_cond, tabela in FAMILIA_EVENTO_CONDICAO:
-        necessarias[tabela] = (CONDICAO_IF_PK,)
-    for tabela, colunas in necessarias.items():
+
+    def ler_fonte_obrigatoria(tabela, colunas):
         try:
-            fontes[tabela] = _read_source(spark, config, tabela)
+            fonte = _read_source(spark, config, tabela)
         except Exception as exc:
-            logger.warning("poda de familia de evento: nao li %s (%s); poda "
-                           "IGNORADA.", tabela, exc)
-            return vazio
-        ausentes = [c for c in colunas if c not in fontes[tabela].columns]
+            raise ValueError(
+                f"poda de familia de evento exige a fonte {tabela}"
+            ) from exc
+        ausentes = [f"{tabela}.{c}" for c in colunas if c not in fonte.columns]
         if ausentes:
-            logger.warning("poda de familia de evento: %s sem %s; poda IGNORADA.",
-                           tabela, ausentes)
-            return vazio
+            raise ValueError(
+                f"poda de familia de evento sem coluna(s) obrigatoria(s): {ausentes}"
+            )
+        return fonte
 
     alvo = dominio.select(
         _canon_key_validador(F.col(COL_NUM_IF)).alias("root_id")).dropDuplicates()
     tipos_evento = [t for t, _c, _tab in FAMILIA_EVENTO_CONDICAO]
     eventos = (
-        _ativo_validador(fontes[EVENTO_TABELA])
+        _ativo_validador(ler_fonte_obrigatoria(
+            EVENTO_TABELA, (COL_NUM_IF, COL_NUM_TIPO_EVENTO_LEGADO)
+        ))
         .select(
             _canon_key_validador(F.col(COL_NUM_IF)).alias("root_id"),
             _norm_code_validador(
@@ -5058,8 +5058,16 @@ def _num_if_evento_sem_familia(spark, config, dominio: DataFrame) -> DataFrame:
         .join(alvo, on="root_id", how="left_semi")
         .dropDuplicates()
     )
+    tipos_presentes = {
+        row.event_type
+        for row in eventos.select("event_type").dropDuplicates().collect()
+    }
+    if not tipos_presentes:
+        return vazio
 
-    condicoes = _ativo_validador(fontes[CONDICAO_IF_TABLE]).select(
+    condicoes = _ativo_validador(ler_fonte_obrigatoria(
+        CONDICAO_IF_TABLE, (COL_NUM_IF, CONDICAO_IF_PK, CONDICAO_IF_TIPO_COL)
+    )).select(
         _canon_key_validador(F.col(CONDICAO_IF_PK)).alias("condition_id"),
         _canon_key_validador(F.col(COL_NUM_IF)).alias("root_id"),
         _norm_code_validador(F.col(CONDICAO_IF_TIPO_COL)).alias("condition_type"),
@@ -5067,8 +5075,10 @@ def _num_if_evento_sem_familia(spark, config, dominio: DataFrame) -> DataFrame:
 
     familias: Optional[DataFrame] = None
     for tipo_evento, tipo_cond, tabela in FAMILIA_EVENTO_CONDICAO:
+        if tipo_evento not in tipos_presentes:
+            continue
         parcial = (
-            _ativo_validador(fontes[tabela])
+            _ativo_validador(ler_fonte_obrigatoria(tabela, (CONDICAO_IF_PK,)))
             .select(_canon_key_validador(
                 F.col(CONDICAO_IF_PK)).alias("condition_id"))
             .join(
