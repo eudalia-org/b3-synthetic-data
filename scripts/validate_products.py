@@ -15386,6 +15386,8 @@ def check_osias(
         "ccb",
         "gravame",
         "lci",
+        "rdb",
+        "rdb_inclusao",
         "rdb_resgate",
     }:
         return []
@@ -15429,6 +15431,60 @@ def check_osias(
             message=message,
         )
 
+    def with_pu_curve_history(
+        findings: List[Finding], missing: Optional[List[str]] = None
+    ) -> List[Finding]:
+        requirements = {
+            "INSTRUMENTO_FINANCEIRO": ("NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO"),
+            "HISTORICO_PU_CURVA": ("NUM_IF",),
+        }
+        if profile.name == "ccb":
+            requirements["INSTRUMENTO_FINANCEIRO"] += ("NUM_IF_PERTENCE",)
+        columns, history_missing = _credito_scr_columns(tables, requirements)
+        out = []
+        if not history_missing:
+            root_cols = columns["INSTRUMENTO_FINANCEIRO"]
+            active_root = _oracle_null_equivalent(F.col(root_cols["DAT_EXCLUSAO"])) & (
+                _canon_key_col(F.col(root_cols["NUM_TIPO_IF"])) == str(profile.num_tipo_if)
+            )
+            if profile.name == "ccb":
+                active_root &= _oracle_null_equivalent(F.col(root_cols["NUM_IF_PERTENCE"]))
+            roots = (
+                tables["INSTRUMENTO_FINANCEIRO"]
+                .where(active_root)
+                .select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"))
+                .dropDuplicates()
+            )
+            history_col = columns["HISTORICO_PU_CURVA"]["NUM_IF"]
+            counts = (
+                tables["HISTORICO_PU_CURVA"]
+                .select(_canon_key_col(F.col(history_col)).alias("root_id"))
+                .groupBy("root_id")
+                .agg(F.count(F.lit(1)).alias("history_count"))
+            )
+            bad = (
+                roots.join(counts, "root_id", "left")
+                .fillna(0, subset=["history_count"])
+                .where(F.col("history_count") != 1)
+            )
+            out.append(
+                finding(
+                    f"9.osias.{profile.name}.pu_curve_history",
+                    "HISTORICO_PU_CURVA",
+                    "NUM_IF",
+                    bad,
+                    ["root_id", "history_count"],
+                    "Each active root must have exactly one HISTORICO_PU_CURVA physical row "
+                    "in the Osias registration snapshot.",
+                    "Output exactly one HISTORICO_PU_CURVA row per active instrument.",
+                )
+            )
+        missing = sorted(set(missing or []) | set(history_missing))
+        return out + (unavailable(missing) if missing else []) + findings
+
+    if profile.name in {"rdb", "rdb_inclusao"}:
+        return with_pu_curve_history([])
+
     if profile.name == "rdb_resgate":
         requirements = {
             "INSTRUMENTO_FINANCEIRO": ("NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO"),
@@ -15437,7 +15493,7 @@ def check_osias(
         }
         columns, missing = _credito_scr_columns(tables, requirements)
         if missing:
-            return unavailable(missing)
+            return with_pu_curve_history([], missing)
 
         root_cols = columns["INSTRUMENTO_FINANCEIRO"]
         roots = (
@@ -15466,7 +15522,7 @@ def check_osias(
             F.col(title_cols["QTD_RESGATADA"]).alias("redeemed_quantity"),
         )
         quantity = F.expr("try_cast(`redeemed_quantity` AS DECIMAL(38,18))")
-        return [
+        out = [
             finding(
                 "9.osias.rdb_resgate.route",
                 "OPERACAO",
@@ -15490,6 +15546,7 @@ def check_osias(
                 "Set QTD_RESGATADA to a nonnull numeric zero.",
             ),
         ]
+        return with_pu_curve_history(out)
 
     if profile.name == "cdb":
         requirements = {
@@ -15653,7 +15710,7 @@ def check_osias(
         }
         columns, missing = _credito_scr_columns(tables, requirements)
         if missing:
-            return unavailable(missing)
+            return with_pu_curve_history([], missing)
 
         root_cols = columns["INSTRUMENTO_FINANCEIRO"]
         roots = (
@@ -15752,7 +15809,7 @@ def check_osias(
                 "Set every PPPRE-owned operation status to canonical code 43.",
             )
         )
-        return out
+        return with_pu_curve_history(out)
 
     if profile.name == "gravame":
         requirements = {
@@ -15808,7 +15865,7 @@ def check_osias(
     }
     columns, missing = _credito_scr_columns(tables, requirements)
     if missing:
-        return unavailable(missing)
+        return with_pu_curve_history([], missing)
     root_cols = columns["INSTRUMENTO_FINANCEIRO"]
     root_lots = (
         tables["INSTRUMENTO_FINANCEIRO"]
@@ -15840,7 +15897,7 @@ def check_osias(
         .dropDuplicates()
     )
     bad_credits = selected_credits.join(history_ids, "credit_id", "left_anti")
-    return [
+    out = [
         finding(
             "9.osias.lci.credit_backing",
             CREDITO_SCR_TABLE,
@@ -15860,6 +15917,7 @@ def check_osias(
             "Output at least one linked HISTORICO_CREDITO_SCR row per active master.",
         ),
     ]
+    return with_pu_curve_history(out)
 
 
 # ---------------------------------------------------------------------------

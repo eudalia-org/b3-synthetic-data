@@ -9,6 +9,8 @@ pytest.importorskip("pyspark")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts import validate_products as validator  # noqa: E402
 
+PU_CURVE_PROFILES = ("rdb", "rdb_inclusao", "rdb_resgate", "lci", "ccb")
+
 
 @pytest.fixture(scope="module")
 def spark():
@@ -29,15 +31,15 @@ def by_id(findings):
 
 
 def test_osias_is_opt_in_and_does_not_apply_to_sibling_profiles():
-    assert validator.check_osias({}, 5, validator.VALIDATION_PROFILES["cdb"], False) == []
+    for product in (*PU_CURVE_PROFILES, "cdb"):
+        assert validator.check_osias({}, 5, validator.VALIDATION_PROFILES[product], False) == []
     assert (
         validator.check_osias({}, 5, validator.VALIDATION_PROFILES["cdb_simplificado"], True) == []
     )
     assert validator.check_osias({}, 5, validator.VALIDATION_PROFILES["lca"], True) == []
-    assert validator.check_osias({}, 5, validator.VALIDATION_PROFILES["rdb_inclusao"], True) == []
 
 
-@pytest.mark.parametrize("product", ["cdb", "ccb", "gravame", "lci", "rdb_resgate"])
+@pytest.mark.parametrize("product", ["cdb", "gravame", *PU_CURVE_PROFILES])
 def test_osias_fails_closed_when_required_evidence_is_missing(product):
     finding = validator.check_osias({}, 5, validator.VALIDATION_PROFILES[product], True)[0]
 
@@ -59,6 +61,7 @@ def rdb_resgate_tables(spark):
             [(1, "5177.0"), (2, "7549")],
             "NUM_IF long, NUM_ID_TIPO_OPER_OBJETO_SERV string",
         ),
+        "HISTORICO_PU_CURVA": spark.createDataFrame([(1,)], "NUM_IF long"),
     }
 
 
@@ -113,6 +116,7 @@ def test_osias_cdb_checks_only_resgate_and_escalonamento_roots(spark):
     findings = by_id(validator.check_osias(cdb_tables(spark), 5, profile, True))
 
     assert all(finding.passed for finding in findings.values())
+    assert not any("pu_curve_history" in check_id for check_id in findings)
 
     tables = cdb_tables(spark)
     tables["OPERACAO"] = tables["OPERACAO"].withColumn(
@@ -171,6 +175,7 @@ def ccb_tables(spark):
             [(1, "871.0", 99), (2, "871", 99), (3, "871", 43), (4, "999", 99), (5, "999", 99)],
             "NUM_IF long, NUM_ID_TIPO_OPER_OBJETO_SERV string, COD_SITUACAO_OPERACAO long",
         ),
+        "HISTORICO_PU_CURVA": spark.createDataFrame([(1,), (2,), (3,), (4,), (5,)], "NUM_IF long"),
     }
 
 
@@ -241,6 +246,7 @@ def lci_tables(spark):
         "HISTORICO_CREDITO_SCR": spark.createDataFrame(
             [("10.00",), ("20",)], "NUM_ID_CREDITO_SCR string"
         ),
+        "HISTORICO_PU_CURVA": spark.createDataFrame([(1,)], "NUM_IF long"),
     }
 
 
@@ -308,3 +314,128 @@ def test_osias_cli_and_report_metadata(monkeypatch, tmp_path):
         osias=True,
     )
     assert json.loads(report_path.read_text())["osias"] is True
+
+
+def pu_curve_tables(spark, product, history_ids, root_ids=("1",)):
+    return {
+        "INSTRUMENTO_FINANCEIRO": spark.createDataFrame(
+            [
+                (root_id, f" {validator.VALIDATION_PROFILES[product].num_tipo_if}.00 ", None, None)
+                for root_id in root_ids
+            ],
+            "NUM_IF string, NUM_TIPO_IF string, DAT_EXCLUSAO string, NUM_IF_PERTENCE string",
+        ),
+        "HISTORICO_PU_CURVA": spark.createDataFrame(
+            [(root_id,) for root_id in history_ids], "NUM_IF string"
+        ),
+    }
+
+
+@pytest.mark.parametrize("product", PU_CURVE_PROFILES)
+@pytest.mark.parametrize("row_count", [0, 1, 2])
+def test_osias_pu_curve_history_counts_physical_rows_per_instrument(spark, product, row_count):
+    tables = pu_curve_tables(spark, product, [" 1.00 "] * row_count)
+    findings = by_id(validator.check_osias(tables, 5, validator.VALIDATION_PROFILES[product], True))
+    finding = findings[f"9.osias.{product}.pu_curve_history"]
+
+    assert finding.passed == (row_count == 1)
+    assert finding.count == (0 if row_count == 1 else 1)
+    assert finding.severity == (validator.SEV_INFO if row_count == 1 else validator.SEV_ERROR)
+    assert finding.sample == ([] if row_count == 1 else [["1", row_count]])
+    if product in {"rdb", "rdb_inclusao"}:
+        assert len(findings) == 1
+    else:
+        assert not findings[f"9.osias.{product}.availability"].passed
+
+
+@pytest.mark.parametrize("product", PU_CURVE_PROFILES)
+def test_osias_pu_curve_history_does_not_balance_missing_and_duplicate_rows(spark, product):
+    tables = pu_curve_tables(spark, product, ["2", " 2.00 "], (" 1.0 ", "1", "2.00"))
+    findings = by_id(validator.check_osias(tables, 5, validator.VALIDATION_PROFILES[product], True))
+    finding = findings[f"9.osias.{product}.pu_curve_history"]
+
+    assert not finding.passed
+    assert finding.severity == validator.SEV_ERROR
+    assert finding.count == 2
+    assert dict(finding.sample) == {"1": 0, "2": 2}
+
+
+@pytest.mark.parametrize("product", PU_CURVE_PROFILES)
+def test_osias_pu_curve_history_uses_only_active_product_roots(spark, product):
+    tables = pu_curve_tables(spark, product, ["1", "99", "99", "3", "3", "4", "4"])
+    roots = tables["INSTRUMENTO_FINANCEIRO"]
+    tables["INSTRUMENTO_FINANCEIRO"] = roots.unionByName(
+        spark.createDataFrame(
+            [
+                ("3", str(validator.VALIDATION_PROFILES[product].num_tipo_if), "2026-01-01", None),
+                ("4", "49", None, None),
+            ],
+            roots.schema,
+        )
+    )
+    if product == "ccb":
+        tables["INSTRUMENTO_FINANCEIRO"] = tables["INSTRUMENTO_FINANCEIRO"].unionByName(
+            spark.createDataFrame([("5", "53", None, "1")], roots.schema)
+        )
+    findings = by_id(validator.check_osias(tables, 5, validator.VALIDATION_PROFILES[product], True))
+
+    assert findings[f"9.osias.{product}.pu_curve_history"].passed
+
+
+@pytest.mark.parametrize("product", PU_CURVE_PROFILES)
+@pytest.mark.parametrize("missing", ["table", "column"])
+def test_osias_pu_curve_history_missing_evidence_does_not_hide_other_checks(
+    spark, product, missing
+):
+    factory = {"lci": lci_tables, "ccb": ccb_tables}.get(product, rdb_resgate_tables)
+    tables = factory(spark)
+    if missing == "table":
+        del tables["HISTORICO_PU_CURVA"]
+        expected = "HISTORICO_PU_CURVA"
+    else:
+        tables["HISTORICO_PU_CURVA"] = tables["HISTORICO_PU_CURVA"].withColumnRenamed(
+            "NUM_IF", "OTHER_ID"
+        )
+        expected = "HISTORICO_PU_CURVA.NUM_IF"
+    findings = by_id(validator.check_osias(tables, 5, validator.VALIDATION_PROFILES[product], True))
+    availability = findings.pop(f"9.osias.{product}.availability")
+
+    assert not availability.passed
+    assert availability.severity == validator.SEV_ERROR
+    assert availability.count == 1
+    assert expected in availability.message
+    assert f"9.osias.{product}.pu_curve_history" not in findings
+    assert all(finding.passed for finding in findings.values())
+    assert (
+        len(findings)
+        == {"rdb": 0, "rdb_inclusao": 0, "rdb_resgate": 2, "lci": 2, "ccb": 5}[product]
+    )
+
+
+@pytest.mark.parametrize("product", ["rdb", "rdb_inclusao"])
+def test_osias_rdb_history_does_not_impose_resgate_or_lci_rules(spark, product):
+    tables = rdb_resgate_tables(spark)
+    tables["OPERACAO"] = tables["OPERACAO"].withColumn(
+        "NUM_ID_TIPO_OPER_OBJETO_SERV", validator.F.lit("7549")
+    )
+    tables["TITULO"] = tables["TITULO"].withColumn("QTD_RESGATADA", validator.F.lit("9"))
+    findings = by_id(validator.check_osias(tables, 5, validator.VALIDATION_PROFILES[product], True))
+
+    assert list(findings) == [f"9.osias.{product}.pu_curve_history"]
+    assert next(iter(findings.values())).passed
+
+
+def test_osias_ccb_history_applies_to_all_variants_even_unclassifiable_roots(spark):
+    tables = ccb_tables(spark)
+    tables["HISTORICO_PU_CURVA"] = tables["HISTORICO_PU_CURVA"].limit(0)
+    tables["ACTPCCB_CONDICAO_IF"] = tables["ACTPCCB_CONDICAO_IF"].where(
+        validator.F.col("NUM_IF") != 3
+    )
+    findings = by_id(validator.check_osias(tables, 5, validator.VALIDATION_PROFILES["ccb"], True))
+
+    assert findings["9.osias.ccb.pu_curve_history"].count == 5
+    assert findings["9.osias.ccb.pu_curve_history"].severity == validator.SEV_ERROR
+    assert findings["9.osias.ccb.scenario"].count == 1
+    assert findings["9.osias.ccb.favcp.route"].passed
+    assert findings["9.osias.ccb.pfpre.route"].passed
+    assert findings["9.osias.ccb.pppre.operation_status"].passed

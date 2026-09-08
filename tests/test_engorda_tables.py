@@ -2102,6 +2102,295 @@ def test_post_closure_schedule_parent_matches_validator_case_and_type(spark):
     assert [row.NUM_CONDICAO_IF for row in lotes[engorda_tables.CRONOGRAMA_TABELA].collect()] == [3]
 
 
+@pytest.fixture
+def pu_history_sources(spark):
+    table = "HISTORICO_PU_CURVA"
+    sources = {
+        engorda_tables.TABELA_RAIZ: spark.createDataFrame([(1,), (2,)], "NUM_IF long"),
+        table: spark.createDataFrame(
+            [
+                (10, 1, "2024-01-02 02:00:00", 999.0),
+                (21, 1, "2024-01-02T01:00:00", 123.0),
+                (20, 1, "2024-01-02T01:00:00", -5.0),
+                (1, 1, None, 1.0),
+                (2, 1, "invalid", 2.0),
+                (30, 2, "2023-12-31", None),
+                (29, 2, "2024-01-01", 29.0),
+            ],
+            "NUM_HISTORICO_PU_CURVA long, NUM_IF long, "
+            "DAT_HISTORICO_VALORES string, VAL_PU_CURVA double",
+        ),
+    }
+    plans = {
+        engorda_tables.TABELA_RAIZ: engorda_tables.PlanoTabela(
+            engorda_tables.TABELA_RAIZ, ("NUM_IF",), pk_regra="OFFSET_PROPRIO", pk_start=100
+        ),
+        table: engorda_tables.PlanoTabela(
+            table,
+            ("NUM_HISTORICO_PU_CURVA",),
+            [engorda_tables.FkRemap(("NUM_IF",), engorda_tables.TABELA_RAIZ, ("NUM_IF",), True)],
+            "OFFSET_PROPRIO",
+            200,
+        ),
+    }
+    yield sources, plans
+    for frame in sources.values():
+        frame.unpersist(blocking=False)
+
+
+@pytest.mark.parametrize(
+    "product",
+    [
+        "rdb_inclusao",
+        "rdb_resgate",
+        "lci",
+        "ccb_pppre",
+        "ccb_pfpre",
+        "ccb_pgrpre",
+        "ccb_favcp",
+        "ccb_fapre",
+    ],
+)
+def test_pu_history_pruning_uses_earliest_date_then_pk(pu_history_sources, product):
+    sources, plans = pu_history_sources
+    assert engorda_tables.get_product_profile(product).name == product
+    assert "HISTORICO_PU_CURVA" in engorda_tables.TABELAS_ENGORDA_POR_PRODUTO[product]
+    original = sources["HISTORICO_PU_CURVA"].persist()
+    expected = original.where("NUM_HISTORICO_PU_CURVA IN (20, 30)").orderBy("NUM_IF").collect()
+
+    assert engorda_tables._poda_historico_pu_curva(sources, plans, product) == 5
+
+    kept = sources["HISTORICO_PU_CURVA"]
+    assert kept.schema == original.schema
+    assert kept.orderBy("NUM_IF").collect() == expected
+    assert not original.is_cached
+    assert kept.is_cached
+
+
+@pytest.mark.parametrize(
+    "product", ["cdb_simplificado", "cdb_resgate", "cdb_escalonamento", "lca", "gravame", None]
+)
+def test_pu_history_pruning_is_noop_outside_allowlist(pu_history_sources, product):
+    sources, _ = pu_history_sources
+    original = dict(sources)
+    assert engorda_tables._poda_historico_pu_curva(sources, {}, product) is None
+    assert all(sources[table] is frame for table, frame in original.items())
+    assert engorda_tables._poda_historico_pu_curva({}, {}, product) is None
+
+
+@pytest.mark.parametrize("date_type", ["date", "timestamp"])
+def test_pu_history_pruning_preserves_typed_dates_and_existing_exclusion_semantics(
+    spark, pu_history_sources, date_type
+):
+    sources, plans = pu_history_sources
+    convert = date.fromisoformat if date_type == "date" else datetime.fromisoformat
+    sources["HISTORICO_PU_CURVA"] = spark.createDataFrame(
+        [
+            (11, 1, convert("2024-01-02"), None),
+            (12, 1, convert("2024-01-01"), "2024-01-03"),
+            (20, 2, None, None),
+            (21, 2, convert("2024-01-01"), None),
+        ],
+        f"NUM_HISTORICO_PU_CURVA long, NUM_IF long, DAT_HISTORICO_VALORES {date_type}, "
+        "DAT_EXCLUSAO string",
+    )
+    original = sources["HISTORICO_PU_CURVA"]
+    assert engorda_tables._poda_historico_pu_curva(sources, plans, "rdb_inclusao") == 2
+    kept = sources["HISTORICO_PU_CURVA"]
+    assert kept.schema == original.schema
+    assert (
+        kept.orderBy("NUM_IF").collect()
+        == original.where("NUM_HISTORICO_PU_CURVA IN (12, 21)").orderBy("NUM_IF").collect()
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "missing_plan",
+        "wrong_pk",
+        "missing_fk",
+        "missing_table",
+        "NUM_IF",
+        "NUM_HISTORICO_PU_CURVA",
+        "DAT_HISTORICO_VALORES",
+    ],
+)
+def test_pu_history_pruning_requires_metadata_and_columns(pu_history_sources, failure):
+    sources, plans = pu_history_sources
+    table = "HISTORICO_PU_CURVA"
+    if failure == "missing_plan":
+        plans.pop(table)
+    elif failure == "wrong_pk":
+        plans[table] = dataclasses.replace(plans[table], pk_cols=("NUM_IF",))
+    elif failure == "missing_fk":
+        plans[table] = dataclasses.replace(plans[table], fks_remap=[])
+    elif failure == "missing_table":
+        sources.pop(table)
+    else:
+        sources[table] = sources[table].drop(failure)
+    with pytest.raises(ValueError, match="rdb_inclusao.*HISTORICO_PU_CURVA"):
+        engorda_tables._poda_historico_pu_curva(sources, plans, "rdb_inclusao")
+
+
+@pytest.mark.parametrize("history_date", [None, "invalid", ""])
+def test_pu_history_pruning_fails_for_each_root_without_usable_history(
+    spark, pu_history_sources, history_date
+):
+    sources, plans = pu_history_sources
+    table = "HISTORICO_PU_CURVA"
+    sources[table] = (
+        sources[table]
+        .where("NUM_IF = 1")
+        .unionByName(spark.createDataFrame([(30, 2, history_date, 1.0)], sources[table].schema))
+    )
+    original = dict(sources)
+    with pytest.raises(ValueError, match=r"HISTORICO_PU_CURVA.*utilizavel.*\[2\]"):
+        engorda_tables._poda_historico_pu_curva(sources, plans, "rdb_inclusao")
+    assert all(sources[table] is frame for table, frame in original.items())
+
+
+def test_pu_history_pruning_requires_history_for_nonempty_roots_only(pu_history_sources):
+    sources, plans = pu_history_sources
+    table = "HISTORICO_PU_CURVA"
+    sources[table] = sources[table].where("NUM_IF = 1")
+    with pytest.raises(ValueError, match=r"HISTORICO_PU_CURVA.*\[2\]"):
+        engorda_tables._poda_historico_pu_curva(sources, plans, "rdb_inclusao")
+    sources[table] = sources[table].limit(0)
+    with pytest.raises(ValueError, match=r"HISTORICO_PU_CURVA.*\[1, 2\]"):
+        engorda_tables._poda_historico_pu_curva(sources, plans, "rdb_inclusao")
+    sources[engorda_tables.TABELA_RAIZ] = sources[engorda_tables.TABELA_RAIZ].limit(0)
+    sources.pop(table)
+    assert engorda_tables._poda_historico_pu_curva(sources, {}, "rdb_inclusao") is None
+
+
+@pytest.mark.parametrize("somente_ativos", [True, False])
+def test_pu_history_closure_provenance_clone_and_plan_counts(
+    spark, monkeypatch, pu_history_sources, somente_ativos
+):
+    sources, plans = pu_history_sources
+    table = "HISTORICO_PU_CURVA"
+    monkeypatch.setattr(engorda_tables, "_read_source", lambda _spark, _config, name: sources[name])
+    counts, mappings = {}, {}
+    lots, provenance = engorda_tables._calcula_lotes_com_proveniencia(
+        spark,
+        {},
+        {},
+        plans,
+        list(plans),
+        [1, 2],
+        3,
+        produto="rdb_inclusao",
+        counts_out=counts,
+        somente_ativos=somente_ativos,
+    )
+    try:
+        assert counts == {engorda_tables.TABELA_RAIZ: 2, table: 2}
+        assert {tuple(row) for row in provenance[table].collect()} == {(20, 1), (30, 2)}
+        assert {
+            row.NUM_IF: row["count"] for row in lots[table].groupBy("NUM_IF").count().collect()
+        } == {
+            1: 1,
+            2: 1,
+        }
+        plan = engorda_tables._build_engorda_plan(
+            config={"DATAGEN_RAW_BASE_URI": "raw", "DATAGEN_SYNTHETIC_BASE_URI": "synthetic"},
+            specs_uri="spec.json",
+            spec_sha256="a" * 64,
+            product_profile=engorda_tables.get_product_profile("rdb_inclusao"),
+            valores=[1, 2],
+            fator_k=3,
+            seed=42,
+            engorda_ts=datetime(2026, 9, 8),
+            controle_operacional_date=date(2026, 9, 8),
+            tipo_derivado=51,
+            planos=plans,
+            lotes=lots,
+            lote_counts=counts,
+            faltantes_uri=None,
+            query_num_if_uri="queries.sql",
+            selected_lote={},
+        )
+        assert plan["tables"][table]["source_count"] == 2
+        assert plan["tables"][table]["synthetic_count"] == 6
+        assert plan["tables"][table]["pk"]["count_demand"] == 6
+        for name in plans:
+            cloned, mappings[name] = engorda_tables.clona_tabela(
+                spark, plans[name], lots[name], 3, mappings
+            )
+            assert cloned.count() == plan["tables"][name]["synthetic_count"]
+        rows = cloned.collect()
+        assert len({row.NUM_IF for row in rows}) == 6
+        assert len({row.NUM_HISTORICO_PU_CURVA for row in rows}) == 6
+        assert {(row.DAT_HISTORICO_VALORES, row.VAL_PU_CURVA) for row in rows} == {
+            ("2024-01-02T01:00:00", -5.0),
+            ("2023-12-31", None),
+        }
+    finally:
+        for frame in (*lots.values(), *provenance.values(), *mappings.values()):
+            frame.unpersist(blocking=False)
+
+
+def test_pu_history_pruning_precedes_live_fk_admission(spark, monkeypatch, pu_history_sources):
+    sources, plans = pu_history_sources
+    root, table = engorda_tables.TABELA_RAIZ, "HISTORICO_PU_CURVA"
+    sources[table] = sources[table].withColumn(
+        "LOOKUP_ID",
+        engorda_tables.F.when(
+            engorda_tables.F.col("NUM_HISTORICO_PU_CURVA").isin(20, 30), 10
+        ).otherwise(999),
+    )
+    spec = {
+        root: {"pk_cols": ["NUM_IF"], "foreign_keys": [], "static": False},
+        table: {
+            "pk_cols": ["NUM_HISTORICO_PU_CURVA"],
+            "foreign_keys": [
+                {"columns": ["NUM_IF"], "parent_table": root, "parent_columns": ["NUM_IF"]},
+                {"columns": ["LOOKUP_ID"], "parent_table": "LOOKUP", "parent_columns": ["ID"]},
+            ],
+            "static": False,
+        },
+        "LOOKUP": {"pk_cols": ["ID"], "foreign_keys": [], "static": True},
+    }
+    monkeypatch.setattr(engorda_tables, "_read_source", lambda _spark, _config, name: sources[name])
+    monkeypatch.setattr(
+        engorda_tables,
+        "_dominio_instrumentos_elegiveis",
+        lambda *_args, **_kwargs: (sources[root], sources[root]),
+    )
+    lookups = []
+
+    def lookup(parent, columns, keys, _nulls):
+        assert parent == "LOOKUP"
+        assert columns == ("ID",)
+        lookups.extend(keys)
+        return {("10",)}
+
+    selection = engorda_tables.seleciona_instrumentos_destino(
+        spark,
+        {},
+        spec,
+        num_ifs=[1, 2],
+        n_instrumentos=None,
+        seed=42,
+        profile=engorda_tables.get_product_profile("rdb_inclusao"),
+        planos=plans,
+        ordem=list(plans),
+        max_passadas=3,
+        existing_key_lookup=lookup,
+        produto="rdb_inclusao",
+        retain_provenance=True,
+    )
+    try:
+        assert selection.values == [1, 2]
+        assert lookups == [("10",)]
+        assert selection.lote_counts == {root: 2, table: 2}
+        assert {row.NUM_HISTORICO_PU_CURVA for row in selection.lotes[table].collect()} == {20, 30}
+    finally:
+        for frame in (*selection.lotes.values(), *selection.provenances.values()):
+            frame.unpersist(blocking=False)
+
+
 def test_sampled_domain_deficit_adjusts_k_but_empty_domain_still_fails(spark, monkeypatch):
     profile = engorda_tables.get_product_profile("lci")
     domain = spark.createDataFrame([(1,), (2,)], "NUM_IF long")

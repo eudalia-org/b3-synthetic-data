@@ -648,6 +648,22 @@ CONDICAO_IF_TIPO_RESGATE = "20"
 CONDICAO_RESGATE_DATE_COL = "DAT_RESGATE"
 CONDICAO_RESGATE_PCT_COL = "VAL_PERCENTUAL"
 
+PRODUTOS_COM_HISTORICO_PU_CURVA_UNICO = frozenset(
+    {
+        "rdb_inclusao",
+        "rdb_resgate",
+        "lci",
+        "ccb_pppre",
+        "ccb_pfpre",
+        "ccb_pgrpre",
+        "ccb_favcp",
+        "ccb_fapre",
+    }
+)
+HISTORICO_PU_CURVA_TABELA = "HISTORICO_PU_CURVA"
+HISTORICO_PU_CURVA_PK = "NUM_HISTORICO_PU_CURVA"
+HISTORICO_PU_CURVA_DATA = "DAT_HISTORICO_VALORES"
+
 # Account eligibility mirrors validate_products 6.required.active_account.
 CONTA_PARTICIPANTE_TABELA = "CONTA_PARTICIPANTE"
 V_FAMILIA_CONTAS_TABELA = "V_FAMILIA_CONTAS"
@@ -6725,6 +6741,69 @@ def _poda_cronograma_sem_tabela(lotes: Dict[str, DataFrame]) -> Optional[int]:
     return antes - depois
 
 
+def _poda_historico_pu_curva(
+    lotes: Dict[str, DataFrame],
+    planos: Dict[str, PlanoTabela],
+    produto: Optional[str],
+) -> Optional[int]:
+    """Keep the earliest usable history per selected IF, without rewriting values."""
+    if produto not in PRODUTOS_COM_HISTORICO_PU_CURVA_UNICO:
+        return None
+    tabela = HISTORICO_PU_CURVA_TABELA
+    pk = HISTORICO_PU_CURVA_PK
+    raiz = lotes.get(TABELA_RAIZ)
+    if raiz is None or COL_NUM_IF not in raiz.columns:
+        raise ValueError(f"Produto {produto}: {tabela} exige raiz com {COL_NUM_IF}.")
+    if not raiz.limit(1).count():
+        return None
+    plano = planos.get(tabela)
+    if (
+        plano is None
+        or plano.pk_cols != (pk,)
+        or not any(
+            fk.principal
+            and fk.columns == (COL_NUM_IF,)
+            and fk.parent_table == TABELA_RAIZ
+            and fk.parent_columns == (COL_NUM_IF,)
+            for fk in plano.fks_remap
+        )
+    ):
+        raise ValueError(
+            f"Produto {produto}: {tabela} exige metadados de PK {pk} e FK principal "
+            f"{COL_NUM_IF} -> {TABELA_RAIZ}.{COL_NUM_IF} no plano."
+        )
+    historico = lotes.get(tabela)
+    required = {COL_NUM_IF, pk, HISTORICO_PU_CURVA_DATA}
+    if historico is None or required - set(historico.columns):
+        raise ValueError(f"Produto {produto}: fecho exige {tabela} com colunas {sorted(required)}.")
+
+    # Parse only for selection: preserve the original date type and financial values.
+    data = _try_cast_col(HISTORICO_PU_CURVA_DATA, "timestamp")
+    utilizavel = historico.where(data.isNotNull())
+    sem_historico = raiz.select(COL_NUM_IF).join(
+        utilizavel.select(COL_NUM_IF), COL_NUM_IF, "left_anti"
+    )
+    missing = [row[COL_NUM_IF] for row in sem_historico.orderBy(COL_NUM_IF).limit(10).collect()]
+    if missing:
+        raise ValueError(
+            f"Produto {produto}: {tabela} sem historico utilizavel "
+            f"({HISTORICO_PU_CURVA_DATA} nula/invalida ou linha ausente) "
+            f"para NUM_IF selecionado(s), amostra: {missing}."
+        )
+    janela = Window.partitionBy(COL_NUM_IF).orderBy(data.asc(), F.col(pk).asc())
+    mantido = (
+        utilizavel.withColumn("__historico_rn", F.row_number().over(janela))
+        .where(F.col("__historico_rn") == 1)
+        .select(*historico.columns)
+        .transform(_durable_materialize)
+    )
+    antes = historico.count()
+    depois = mantido.count()
+    lotes[tabela] = mantido
+    historico.unpersist(blocking=False)
+    return antes - depois
+
+
 def _durable_materialize(frame: DataFrame) -> DataFrame:
     """Replicate cached blocks while preserving lineage for recomputation."""
     return frame.persist(StorageLevel.MEMORY_AND_DISK_2)
@@ -7312,6 +7391,24 @@ def _calcula_lotes_com_proveniencia(
                 )
             )
             contagens_proveniencia[t] = 0
+    podadas_historico = _poda_historico_pu_curva(lotes, planos, produto)
+    if podadas_historico is not None:
+        tabela = HISTORICO_PU_CURVA_TABELA
+        contagens[tabela] -= podadas_historico
+        previous_provenance = proveniencias[tabela]
+        proveniencias[tabela] = previous_provenance.join(
+            F.broadcast(lotes[tabela].select(HISTORICO_PU_CURVA_PK)),
+            HISTORICO_PU_CURVA_PK,
+            "left_semi",
+        ).transform(_durable_materialize)
+        contagens_proveniencia[tabela] = proveniencias[tabela].count()
+        previous_provenance.unpersist(blocking=False)
+        logger.info(
+            "poda historico [%s]: %d linha(s) removida(s); restam %d, uma por IF.",
+            produto,
+            podadas_historico,
+            contagens[tabela],
+        )
     if somente_ativos:
         podadas = _poda_cronograma_sem_tabela(lotes)
         if podadas is None:

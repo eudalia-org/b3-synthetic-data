@@ -174,6 +174,10 @@ def test_live_selection_forwards_product_and_lateral_cap(spark, monkeypatch):
 def test_lci_lateral_cap_ignores_incomplete_master_and_keeps_all_histories(spark, monkeypatch):
     sources = {
         eng.TABELA_RAIZ: spark.createDataFrame([(1, 100)], "NUM_IF long, NUM_ID_LOTE long"),
+        "HISTORICO_PU_CURVA": spark.createDataFrame(
+            [(201, 1, "2026-01-01")],
+            "NUM_HISTORICO_PU_CURVA long, NUM_IF long, DAT_HISTORICO_VALORES string",
+        ),
         "CREDITO_SCR": spark.createDataFrame(
             [
                 (10, 100, "INCOMPLETE", None),
@@ -199,6 +203,11 @@ def test_lci_lateral_cap_ignores_incomplete_master_and_keeps_all_histories(spark
     monkeypatch.setattr(eng.F, "broadcast", reject_global_history_broadcast)
     plans = {
         eng.TABELA_RAIZ: eng.PlanoTabela(eng.TABELA_RAIZ, (eng.COL_NUM_IF,)),
+        "HISTORICO_PU_CURVA": eng.PlanoTabela(
+            "HISTORICO_PU_CURVA",
+            ("NUM_HISTORICO_PU_CURVA",),
+            [eng.FkRemap(("NUM_IF",), eng.TABELA_RAIZ, ("NUM_IF",), True)],
+        ),
         "CREDITO_SCR": eng.PlanoTabela("CREDITO_SCR", ("NUM_ID_CREDITO_SCR",)),
         "HISTORICO_CREDITO_SCR": eng.PlanoTabela(
             "HISTORICO_CREDITO_SCR",
