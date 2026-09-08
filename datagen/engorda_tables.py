@@ -8435,11 +8435,14 @@ def _generate_grouped_meu_numeros(
         "__meu_control",
         F.concat(F.lit(prefix), F.lpad(F.col("__meu_ord").cast("string"), 7, "0")),
     )
+    # Fresh PK exprIds keep both maps independent of the operation/union lineage.
     p1_map = allocations.where(F.col("__meu_side") == 1).select(
-        "NUM_ID_OPERACAO", F.col("__meu_control").alias("__meu_p1_control")
+        F.col("NUM_ID_OPERACAO").alias("NUM_ID_OPERACAO"),
+        F.col("__meu_control").alias("__meu_p1_control"),
     )
     p2_map = allocations.where(F.col("__meu_side") == 2).select(
-        "NUM_ID_OPERACAO", F.col("__meu_control").alias("__meu_p2_control")
+        F.col("NUM_ID_OPERACAO").alias("NUM_ID_OPERACAO"),
+        F.col("__meu_control").alias("__meu_p2_control"),
     )
     dat_type = operacoes.schema["DAT_OPERACAO"].dataType
     generated = (

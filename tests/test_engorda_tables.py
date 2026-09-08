@@ -2327,14 +2327,56 @@ def test_grouped_meu_descriptor_rejects_blank_group_fields(spark, column, value)
         )
 
 
-def test_grouped_meu_generation_reuses_ordinals_only_across_complete_tuples(spark):
+@pytest.mark.parametrize("attach_business_codes", [False, True])
+def test_grouped_meu_generation_reuses_ordinals_only_across_complete_tuples(
+    spark, tmp_path, monkeypatch, attach_business_codes
+):
     operations = _grouped_meu_operations(spark)
     descriptor = engorda_tables._grouped_meu_numero_descriptor(
         operations,
         fator_k=1,
         operational_date=date(2026, 8, 18),
     )
+    if attach_business_codes:
+        operations = (
+            operations.withColumn(
+                "NUM_ID_OPERACAO", engorda_tables.F.col("NUM_ID_OPERACAO").cast("decimal(38,10)")
+            )
+            .withColumn("NUM_IF", engorda_tables.F.col("NUM_ID_OPERACAO"))
+            .withColumn("COD_IF", engorda_tables.F.lit("old-if"))
+            .withColumn("COD_OPERACAO", engorda_tables.F.lit("old-operation"))
+            .localCheckpoint(eager=True)
+        )
+        instruments = spark.createDataFrame(
+            [(1, "CDB00000001"), (2, "CDB00000002")], "NUM_IF long, COD_IF string"
+        ).localCheckpoint(eager=True)
+        operations = engorda_tables._propagate_root_cod_if(instruments, operations)
+        mapping_path = str(tmp_path / "operation_codes")
+        spark.createDataFrame(
+            [(1, "000000000001"), (2, "000000000002")],
+            "NUM_ID_OPERACAO_NOVO long, COD_OPERACAO_GERADO string",
+        ).write.parquet(mapping_path)
+        operations = engorda_tables._attach_generated_code(
+            operations,
+            spark.read.parquet(mapping_path),
+            pk_col="NUM_ID_OPERACAO",
+            new_pk_alias="NUM_ID_OPERACAO_NOVO",
+            code_col="COD_OPERACAO",
+            generated_alias="COD_OPERACAO_GERADO",
+        )
+        original_join = engorda_tables.DataFrame.join
 
+        def join_with_independent_keys(left, right, on=None, how=None):
+            # Local Spark can repair this identity clash; the Data Flow analyzer did not.
+            if on == "NUM_ID_OPERACAO" and how == "inner":
+                left_attrs = left._jdf.queryExecution().analyzed().outputSet()
+                right_attrs = right._jdf.queryExecution().analyzed().outputSet()
+                assert left_attrs.intersect(right_attrs).isEmpty(), (
+                    "Meu-number maps must not share operation expression IDs"
+                )
+            return original_join(left, right, on, how)
+
+        monkeypatch.setattr(engorda_tables.DataFrame, "join", join_with_independent_keys)
     generated = engorda_tables._generate_grouped_meu_numeros(
         operations,
         "321",
@@ -2345,6 +2387,13 @@ def test_grouped_meu_generation_reuses_ordinals_only_across_complete_tuples(spar
     )
     rows = {row.NUM_ID_OPERACAO: row for row in generated.collect()}
 
+    assert generated.count() == len(rows) == 2
+    assert generated.columns == operations.columns
+    if attach_business_codes:
+        assert [(rows[i].COD_IF, rows[i].COD_OPERACAO) for i in (1, 2)] == [
+            ("CDB00000001", "000000000001"),
+            ("CDB00000002", "000000000002"),
+        ]
     assert rows[1].NUM_CONTROLE_LANCAMENTO_P1 == "3210000050"
     assert rows[1].NUM_CONTROLE_LANCAMENTO_P2 == "3210000050"
     assert rows[2].NUM_CONTROLE_LANCAMENTO_P1 == "3210000051"
