@@ -2068,6 +2068,80 @@ def test_materialize_rejects_reservation_below_current_oracle_floor():
         eng._validate_reservation_live_pk_floors(planos, reservation)
 
 
+@pytest.mark.parametrize(
+    "selection_fails, close_fails, lookup_started",
+    [(True, True, True), (True, False, True), (False, True, True), (True, True, False)],
+)
+@pytest.mark.parametrize("caller_handles_error", [False, True])
+def test_admission_cleanup_preserves_primary_error(
+    monkeypatch, caplog, selection_fails, close_fails, lookup_started, caller_handles_error
+):
+    selection_error = ValueError("HISTORICO_PU_CURVA sem historico utilizavel")
+    close_error = RuntimeError("No more data to read from socket")
+    opened = []
+    closed = []
+
+    class Connection:
+        def close(self):
+            closed.append(True)
+            if close_fails:
+                raise close_error
+
+    def open_connection(*_args):
+        opened.append(True)
+        return Connection()
+
+    def select(*_args, **kwargs):
+        assert opened == []
+        if lookup_started:
+            for _ in range(2):
+                kwargs["existing_key_lookup"]("USUARIO", ("NUM_ID_ENTIDADE",), [("1",)], (True,))
+        if selection_fails:
+            raise selection_error
+
+    monkeypatch.setitem(eng.TABELAS_ENGORDA_POR_PRODUTO, "rdb_inclusao", (eng.TABELA_RAIZ,))
+    monkeypatch.setattr(eng, "_valida_contrato_nulificacao_seletiva", lambda *_: None)
+    monkeypatch.setattr(eng, "_carrega_faltantes", lambda *_: None)
+    monkeypatch.setattr(eng, "_oracle_credentials", lambda *_: ("url", "user", "pw"))
+    monkeypatch.setattr(eng, "_read_controle_operacional_date", lambda *_: date(2026, 6, 3))
+    monkeypatch.setattr(eng, "_open_oracle_connection", open_connection)
+    monkeypatch.setattr(eng, "_oracle_existing_parent_keys", lambda *_args, **_kwargs: {("1",)})
+    monkeypatch.setattr(
+        eng,
+        "monta_plano",
+        lambda *_args, **_kwargs: {
+            eng.TABELA_RAIZ: eng.PlanoTabela(eng.TABELA_RAIZ, (eng.COL_NUM_IF,))
+        },
+    )
+    monkeypatch.setattr(eng, "seleciona_instrumentos_destino", select)
+    expected = selection_error if selection_fails else close_error
+
+    def execute():
+        eng.executa_clonagem(
+            SimpleNamespace(_sc=SimpleNamespace(_jvm=object())),
+            {},
+            {eng.TABELA_RAIZ: {"pk_cols": [eng.COL_NUM_IF], "foreign_keys": [], "static": False}},
+            product_profile=eng.get_product_profile("rdb_inclusao"),
+            n_instrumentos=200,
+            phase="plan",
+            plan_uri="plan.json",
+        )
+
+    with pytest.raises(type(expected)) as caught:
+        if caller_handles_error:
+            try:
+                raise LookupError("unrelated caller error")
+            except LookupError:
+                execute()
+        else:
+            execute()
+    assert caught.value is expected
+    assert opened == ([True] if lookup_started else [])
+    assert closed == opened
+    if selection_fails and close_fails and lookup_started:
+        assert "No more data to read from socket" in caplog.text
+
+
 def test_phase_plan_freezes_adjusted_k_for_admitted_domain_deficit(spark, monkeypatch):
     class PlanBuildReached(RuntimeError):
         pass

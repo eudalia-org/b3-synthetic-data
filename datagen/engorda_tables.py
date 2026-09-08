@@ -5711,8 +5711,35 @@ def _dominio_instrumentos_elegiveis(
         valido = fonte.join(excluir, on=COL_NUM_IF, how="left_anti")
     else:
         valido = fonte
-    valido = valido.localCheckpoint(eager=True)
+    if profile.name in PRODUTOS_COM_HISTORICO_PU_CURVA_UNICO:
+        tabela = HISTORICO_PU_CURVA_TABELA
+        n_antes_historico = valido.count()
+        try:
+            historico = _read_source(spark, config, tabela)
+            required = {COL_NUM_IF, HISTORICO_PU_CURVA_PK, HISTORICO_PU_CURVA_DATA}
+            if required - set(historico.columns):
+                raise ValueError(f"colunas obrigatorias: {sorted(required)}")
+            # Match closure eligibility without collecting global history keys.
+            utilizavel = historico.where(
+                _try_cast_col(HISTORICO_PU_CURVA_DATA, "timestamp").isNotNull()
+            )
+            valido = valido.join(
+                utilizavel.select(COL_NUM_IF), COL_NUM_IF, "left_semi"
+            ).localCheckpoint(eager=True)
+        except Exception as exc:
+            raise ValueError(
+                f"Produto {profile.name}: poda de dominio exige fonte RAW {tabela} "
+                f"legivel com historico utilizavel: {exc}"
+            ) from exc
+    else:
+        valido = valido.localCheckpoint(eager=True)
     n_valido = valido.count()
+    if profile.name in PRODUTOS_COM_HISTORICO_PU_CURVA_UNICO:
+        logger.info(
+            "Poda de domínio [historico PU curva sem data utilizavel]: "
+            "%d instrumento(s) removido(s).",
+            n_antes_historico - n_valido,
+        )
     logger.info(
         "Domínio VÁLIDO após a poda: %d de %d instrumento(s) (%d podado(s)).",
         n_valido,
@@ -5785,8 +5812,8 @@ def seleciona_instrumentos(
                 partes.append(f"fora do domínio do produto: {fora}")
             if podados:
                 partes.append(
-                    "no domínio mas PODADOS (subtipo dangling e/ou "
-                    f"chave inexistente no destino): {podados}"
+                    "no domínio mas PODADOS pelos requisitos de elegibilidade "
+                    f"(veja os logs de poda de domínio): {podados}"
                 )
             raise ValueError("NUM_IF(s) não sintetizáveis — " + "; ".join(partes))
         valores = sorted(validos)
@@ -10114,7 +10141,24 @@ def executa_clonagem(
                 permitir_lote_menor=ajusta_fator_k,
             )
     else:
-        admission_connection = _open_oracle_connection(spark._sc._jvm, *credentials)
+        admission_connection = None
+
+        def existing_key_lookup(table, columns, keys, numeric_flags):
+            nonlocal admission_connection
+            # Domain scanning and closure can take minutes before the first lookup.
+            if admission_connection is None:
+                admission_connection = _open_oracle_connection(spark._sc._jvm, *credentials)
+            return _oracle_existing_parent_keys(
+                spark._sc._jvm,
+                credentials,
+                table,
+                columns,
+                keys,
+                numeric_flags,
+                connection=admission_connection,
+            )
+
+        admission_completed = False
         try:
             selection = seleciona_instrumentos_destino(
                 spark,
@@ -10127,17 +10171,7 @@ def executa_clonagem(
                 planos,
                 ordem,
                 max_passadas,
-                existing_key_lookup=lambda table, columns, keys, numeric_flags: (
-                    _oracle_existing_parent_keys(
-                        spark._sc._jvm,
-                        credentials,
-                        table,
-                        columns,
-                        keys,
-                        numeric_flags,
-                        connection=admission_connection,
-                    )
-                ),
+                existing_key_lookup=existing_key_lookup,
                 query_num_if_path=query_num_if_path,
                 # Um emit acumulado pode ficar obsoleto quando o pai chega ao destino.
                 # A execução real não pode rejeitar raízes por esse estado histórico.
@@ -10153,8 +10187,18 @@ def executa_clonagem(
                 produto=produto,
                 lastros_por_lote=lastros_por_lote,
             )
+            admission_completed = True
         finally:
-            admission_connection.close()
+            try:
+                if admission_connection is not None:
+                    admission_connection.close()
+            except Exception:
+                if admission_completed:
+                    raise
+                logger.warning(
+                    "Falha ao fechar conexao de admissao; preservando erro original.",
+                    exc_info=True,
+                )
         valores = selection.values
         selected_lotes = selection.lotes
         selected_provenances = selection.provenances

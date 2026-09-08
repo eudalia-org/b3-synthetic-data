@@ -1765,6 +1765,10 @@ def test_rdb_schedule_guard_requires_exact_com_tabela_variant(spark, monkeypatch
 @pytest.fixture
 def event_family_sources(spark):
     return {
+        "HISTORICO_PU_CURVA": spark.createDataFrame(
+            [(1, 1, "2024-01-01"), (2, 2, "2024-01-01")],
+            "NUM_HISTORICO_PU_CURVA long, NUM_IF long, DAT_HISTORICO_VALORES string",
+        ),
         engorda_tables.EVENTO_TABELA: spark.createDataFrame(
             [(101, 1, "83"), (102, 2, "83")],
             "NUM_EVENTO long, NUM_IF long, NUM_TIPO_EVENTO_LEGADO string",
@@ -2138,6 +2142,211 @@ def pu_history_sources(spark):
         frame.unpersist(blocking=False)
 
 
+@pytest.fixture
+def pu_history_domain(spark, monkeypatch, pu_history_sources):
+    sources, plans = pu_history_sources
+    root, table = engorda_tables.TABELA_RAIZ, "HISTORICO_PU_CURVA"
+    sources[root] = spark.createDataFrame([(i,) for i in range(1, 7)], "NUM_IF long")
+    sources[table] = sources[table].unionByName(
+        spark.createDataFrame(
+            [(40, 4, None, 1.0), (50, 5, "invalid", 1.0), (60, 6, "", 1.0)],
+            sources[table].schema,
+        )
+    )
+    reads = []
+
+    def read_source(_spark, _config, name):
+        reads.append(name)
+        return sources[name]
+
+    monkeypatch.setattr(engorda_tables, "_read_source", read_source)
+    monkeypatch.setattr(
+        engorda_tables, "_dominio_num_if_produto", lambda *_args, **_kwargs: sources[root]
+    )
+    # Isolate unrelated domain policies, not the history filter or selection path.
+    for name in ("_num_if_evento_sem_familia", "_num_if_lote_sem_lastro"):
+        monkeypatch.setattr(engorda_tables, name, lambda *_args: sources[root].limit(0))
+    options = dict(
+        poda_subtipo=False,
+        poda_cronograma_resgate=False,
+        poda_conta=False,
+        politica_estrita_operacao=False,
+    )
+    return sources, plans, reads, options
+
+
+@pytest.mark.parametrize(
+    "product",
+    [
+        "rdb_inclusao",
+        "rdb_resgate",
+        "lci",
+        "ccb_pppre",
+        "ccb_pfpre",
+        "ccb_pgrpre",
+        "ccb_favcp",
+        "ccb_fapre",
+    ],
+)
+def test_pu_history_domain_filters_before_sampling(pu_history_domain, spark, product, caplog):
+    _, _, reads, options = pu_history_domain
+    with caplog.at_level("INFO", logger=engorda_tables.logger.name):
+        selected = engorda_tables.seleciona_instrumentos(
+            spark, {}, {}, None, 2, 42, engorda_tables.get_product_profile(product), **options
+        )
+    assert selected == [1, 2]
+    assert reads == ["HISTORICO_PU_CURVA"]
+    assert (
+        "Poda de domínio [historico PU curva sem data utilizavel]: 4 instrumento(s) removido(s)"
+        in caplog.text
+    )
+
+
+@pytest.mark.parametrize(
+    "product", ["cdb_simplificado", "cdb_resgate", "cdb_escalonamento", "lca", "gravame"]
+)
+def test_pu_history_domain_does_not_read_history_outside_allowlist(
+    pu_history_domain, spark, product
+):
+    _, _, reads, options = pu_history_domain
+    selected = engorda_tables.seleciona_instrumentos(
+        spark, {}, {}, None, 6, 42, engorda_tables.get_product_profile(product), **options
+    )
+    assert selected == list(range(1, 7))
+    assert reads == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["missing_table", "unreadable", "NUM_IF", "NUM_HISTORICO_PU_CURVA", "DAT_HISTORICO_VALORES"],
+)
+def test_pu_history_domain_fails_closed(pu_history_domain, spark, monkeypatch, failure):
+    sources, _, _, options = pu_history_domain
+    table = "HISTORICO_PU_CURVA"
+    if failure == "missing_table":
+        sources.pop(table)
+    elif failure == "unreadable":
+
+        def unreadable(*_args):
+            raise OSError("RAW unavailable")
+
+        monkeypatch.setattr(engorda_tables, "_read_source", unreadable)
+    else:
+        sources[table] = sources[table].drop(failure)
+    with pytest.raises(ValueError, match="rdb_inclusao.*HISTORICO_PU_CURVA"):
+        engorda_tables.seleciona_instrumentos(
+            spark,
+            {},
+            {},
+            None,
+            2,
+            42,
+            engorda_tables.get_product_profile("rdb_inclusao"),
+            **options,
+        )
+
+
+@pytest.mark.parametrize("root", [3, 4, 5, 6])
+def test_pu_history_domain_rejects_explicit_ineligible_root(pu_history_domain, spark, root):
+    _, _, _, options = pu_history_domain
+    with pytest.raises(ValueError, match=rf"PODADOS.*{root}"):
+        engorda_tables.seleciona_instrumentos(
+            spark,
+            {},
+            {},
+            [1, root],
+            None,
+            42,
+            engorda_tables.get_product_profile("rdb_inclusao"),
+            permitir_lote_menor=True,
+            **options,
+        )
+
+
+def test_pu_history_domain_preserves_deficit_policy(pu_history_domain, spark):
+    sources, _, _, options = pu_history_domain
+    profile = engorda_tables.get_product_profile("rdb_inclusao")
+    with pytest.raises(ValueError, match="tem só 2 instrumento"):
+        engorda_tables.seleciona_instrumentos(spark, {}, {}, None, 5, 42, profile, **options)
+    selected = engorda_tables.seleciona_instrumentos(
+        spark, {}, {}, None, 5, 42, profile, permitir_lote_menor=True, **options
+    )
+    assert selected == [1, 2]
+    assert engorda_tables._ajusta_fator_k_por_dominio(2, 5, len(selected)) == 5
+    sources["HISTORICO_PU_CURVA"] = sources["HISTORICO_PU_CURVA"].where("NUM_IF > 2")
+    with pytest.raises(ValueError, match="tem só 0 instrumento"):
+        engorda_tables.seleciona_instrumentos(
+            spark, {}, {}, None, 5, 42, profile, permitir_lote_menor=True, **options
+        )
+
+
+@pytest.mark.parametrize("product", ["rdb_inclusao", "rdb_resgate"])
+@pytest.mark.parametrize("key_type", ["long", "decimal(38,10)"])
+def test_pu_history_domain_live_sampling_300_roots_selects_200(
+    pu_history_domain, spark, monkeypatch, product, key_type
+):
+    sources, plans, reads, options = pu_history_domain
+    root, table = engorda_tables.TABELA_RAIZ, "HISTORICO_PU_CURVA"
+    sources[root] = spark.createDataFrame([(i,) for i in range(1, 301)], "NUM_IF long")
+    sources[table] = spark.createDataFrame(
+        [(i, i, "2024-01-01", -5.0) for i in range(1, 291)]
+        + [(i + 1000, i, "2024-01-02", 99.0) for i in range(1, 291)]
+        + [(i, i, [None, "invalid", ""][i % 3], 1.0) for i in range(291, 300)],
+        sources[table].schema,
+    )
+    for name in (root, table):
+        sources[name] = sources[name].withColumn(
+            "NUM_IF", engorda_tables.F.col("NUM_IF").cast(key_type)
+        )
+    spec = {
+        root: {"pk_cols": ["NUM_IF"], "foreign_keys": []},
+        table: {
+            "pk_cols": ["NUM_HISTORICO_PU_CURVA"],
+            "foreign_keys": [
+                {"columns": ["NUM_IF"], "parent_table": root, "parent_columns": ["NUM_IF"]}
+            ],
+        },
+    }
+    candidates = []
+    closure = engorda_tables._calcula_lotes_com_proveniencia
+
+    def capture_closure(*args, **kwargs):
+        candidates.extend(args[5])
+        return closure(*args, **kwargs)
+
+    monkeypatch.setattr(engorda_tables, "_calcula_lotes_com_proveniencia", capture_closure)
+    selection = engorda_tables.seleciona_instrumentos_destino(
+        spark,
+        {},
+        spec,
+        None,
+        200,
+        42,
+        engorda_tables.get_product_profile(product),
+        plans,
+        list(plans),
+        3,
+        existing_key_lookup=lambda *_args: pytest.fail("No external FK expected"),
+        produto=product,
+        retain_provenance=True,
+        **options,
+    )
+    try:
+        assert len(selection.values) == 200
+        assert set(selection.values) <= set(range(1, 291))
+        assert sorted(candidates) == list(range(1, 291))
+        assert selection.lote_counts == {root: 200, table: 200}
+        rows = selection.lotes[table].collect()
+        assert {row.NUM_IF for row in rows} == set(selection.values)
+        assert {(row.DAT_HISTORICO_VALORES, row.VAL_PU_CURVA) for row in rows} == {
+            ("2024-01-01", -5.0)
+        }
+        assert reads.count(table) == 2  # Once for domain filtering, once for closure.
+    finally:
+        for frame in (*selection.lotes.values(), *selection.provenances.values()):
+            frame.unpersist(blocking=False)
+
+
 @pytest.mark.parametrize(
     "product",
     [
@@ -2395,6 +2604,17 @@ def test_sampled_domain_deficit_adjusts_k_but_empty_domain_still_fails(spark, mo
     profile = engorda_tables.get_product_profile("lci")
     domain = spark.createDataFrame([(1,), (2,)], "NUM_IF long")
     monkeypatch.setattr(engorda_tables, "_dominio_num_if_produto", lambda *_args, **_kwargs: domain)
+    history = spark.createDataFrame(
+        [(1, 1, "2024-01-01"), (2, 2, "2024-01-01")],
+        "NUM_HISTORICO_PU_CURVA long, NUM_IF long, DAT_HISTORICO_VALORES string",
+    )
+
+    def read_source(_spark, _config, table):
+        if table == "HISTORICO_PU_CURVA":
+            return history
+        raise OSError(table)
+
+    monkeypatch.setattr(engorda_tables, "_read_source", read_source)
 
     selected = engorda_tables.seleciona_instrumentos(
         spark,
