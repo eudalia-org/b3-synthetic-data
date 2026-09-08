@@ -2468,7 +2468,12 @@ class TestEngordaDateRules:
     ENGORDA_TS = datetime(2026, 8, 8, 10, 19, 6, 340_000)
     OPERATIONAL_DATE = date(2026, 5, 8)
 
-    def test_instrument_uses_operational_date_and_preserves_term(self, spark):
+    @pytest.mark.parametrize(
+        "original_situation",
+        [datetime(2020, 1, 1), datetime(2030, 1, 1), None],
+        ids=["past-situation", "future-situation", "null-situation"],
+    )
+    def test_instrument_uses_operational_date_and_preserves_term(self, spark, original_situation):
         original_emission = datetime(2024, 1, 10)
         original_maturity = datetime(2025, 2, 20)
         original_term = (original_maturity.date() - original_emission.date()).days
@@ -2477,6 +2482,7 @@ class TestEngordaDateRules:
                 (
                     original_emission,
                     original_maturity,
+                    original_situation,
                     datetime(2024, 1, 11),
                     datetime(2024, 1, 12),
                     datetime(2024, 1, 13),
@@ -2488,6 +2494,7 @@ class TestEngordaDateRules:
             ],
             (
                 "DAT_EMISSAO timestamp, DAT_VENCIMENTO timestamp, "
+                "DAT_SITUACAO_IF timestamp, "
                 "DAT_REGISTRO timestamp, DAT_VAL_NOMINAL_EM timestamp, "
                 "DAT_ULTIMA_CORRECAO timestamp, DAT_PU_CURVA timestamp, "
                 "DAT_VAL_NOMINAL_EM_ORIG timestamp, "
@@ -2507,6 +2514,7 @@ class TestEngordaDateRules:
         operational_midnight = datetime.combine(self.OPERATIONAL_DATE, datetime.min.time())
         for column in (
             "DAT_EMISSAO",
+            "DAT_SITUACAO_IF",
             "DAT_REGISTRO",
             "DAT_VAL_NOMINAL_EM",
             "DAT_ULTIMA_CORRECAO",
