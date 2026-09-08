@@ -552,6 +552,7 @@ def test_click_help_exposes_commands_and_polling_default():
     assert "--auth-refresh-seconds" in run.output
     assert "1800" in run.output
     assert "--osias" in run.output
+    assert "--data-controle-operacional YYYY-MM-DD" in run.output
 
 
 def test_click_dry_run_finishes_without_submitting_jobs(tmp_path):
@@ -1158,6 +1159,7 @@ def test_dry_run_is_offline_and_prints_resolved_argv(tmp_path, capsys):
     plan_argv = output["nodes"]["cdb_simplificado.engorda.plan"]["arguments"]
     assert plan_argv[:4] == ["--phase", "plan", "--produto", "cdb_simplificado"]
     assert "--plan-uri" in plan_argv
+    assert "--data-controle-operacional" not in plan_argv
     assert "--raw-uri" in plan_argv
     assert "--output-uri" in plan_argv
     assert plan_argv[plan_argv.index("--query-num-if-sql") + 1] == (
@@ -1390,12 +1392,190 @@ def test_no_oracle_propagates_to_both_engorda_phases_and_marks_artifact(tmp_path
     assert "--no-oracle" in plan["nodes"]["cdb_simplificado.engorda.plan"]["arguments"]
     assert "--no-oracle" in plan["nodes"]["cdb_simplificado.engorda.materialize"]["arguments"]
     assert "--no-oracle" in plan["nodes"]["cdb_simplificado.validate"]["arguments"]
+    assert (
+        "--data-controle-operacional"
+        not in (plan["nodes"]["cdb_simplificado.engorda.plan"]["arguments"])
+    )
     synthetic = plan["artifacts"]["products"]["cdb_simplificado"]["synthetic"]
     assert synthetic["oracle_access"] == "disabled"
     assert synthetic["load_eligible"] is False
     report = plan["artifacts"]["products"]["cdb_simplificado"]["validation_report"]
     assert report["oracle_access"] == "disabled"
     assert report["load_eligible"] is False
+
+
+def test_operational_date_preview_forwards_only_to_plan(tmp_path):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path)
+    result = CliRunner().invoke(
+        P.cli,
+        run_args(
+            tmp_path,
+            config,
+            upstream,
+            "--dry-run",
+            "--no-oracle",
+            "--data-controle-operacional",
+            "2024-02-29",
+        ),
+        obj={"adapter": NoCallsAdapter()},
+    )
+
+    assert result.exit_code == 0, result.output
+    preview = json.loads(result.stdout)
+    assert preview["dry_run"] is True
+    plan = preview["nodes"]["cdb_simplificado.engorda.plan"]["arguments"]
+    materialize = preview["nodes"]["cdb_simplificado.engorda.materialize"]["arguments"]
+    assert plan[plan.index("--data-controle-operacional") + 1] == "2024-02-29"
+    assert "--no-oracle" in plan
+    assert "--no-oracle" in materialize
+    assert materialize[materialize.index("--plan-uri") + 1] == (plan[plan.index("--plan-uri") + 1])
+    assert "--data-controle-operacional" not in materialize
+    assert (
+        "--data-controle-operacional"
+        not in (preview["nodes"]["cdb_simplificado.validate"]["arguments"])
+    )
+    assert not (tmp_path / "local-runs").exists()
+
+
+@pytest.mark.parametrize("common_date", [None, "2026-09-02"])
+def test_operational_date_config_cli_and_set_precedence(tmp_path, common_date):
+    config = write_config(tmp_path)
+    payload = json.loads(config.read_text())
+    payload["stage_defaults"]["engorda"].update(
+        no_oracle=True, controle_operacional_date="2026-09-01"
+    )
+    for product in ("lci", "lca"):
+        payload["products"][product]["engorda"] = {"controle_operacional_date": "2026-09-03"}
+    config.write_text(json.dumps(payload))
+    upstream = write_upstream(tmp_path)
+    extra = ["--data-controle-operacional", common_date] if common_date else []
+    result = CliRunner().invoke(
+        P.cli,
+        run_args(
+            tmp_path,
+            config,
+            upstream,
+            "--dry-run",
+            "--product",
+            "lci,lca",
+            "--set",
+            "lci.engorda.controle_operacional_date=2026-09-04",
+            *extra,
+        ),
+        obj={"adapter": NoCallsAdapter()},
+    )
+
+    assert result.exit_code == 0, result.output
+    preview = json.loads(result.stdout)
+    for product, expected in {
+        "cdb_simplificado": common_date or "2026-09-01",
+        "lca": "2026-09-03",
+        "lci": "2026-09-04",
+    }.items():
+        argv = preview["nodes"][f"{product}.engorda.plan"]["arguments"]
+        assert argv[argv.index("--data-controle-operacional") + 1] == expected
+
+
+@pytest.mark.parametrize("source", ["cli", "config", "set"])
+@pytest.mark.parametrize("value", ["2026-02-29", "2026-13-01", "2026-9-01", "20260901", "bad", ""])
+def test_operational_date_rejects_invalid_dates_before_remote_calls(tmp_path, source, value):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path)
+    extra = []
+    if source == "config":
+        payload = json.loads(config.read_text())
+        payload["products"]["cdb_simplificado"]["engorda"] = {"controle_operacional_date": value}
+        config.write_text(json.dumps(payload))
+    elif source == "set":
+        extra = ["--set", f"cdb_simplificado.engorda.controle_operacional_date={value}"]
+    else:
+        extra = ["--data-controle-operacional", value]
+    result = CliRunner().invoke(
+        P.cli,
+        run_args(tmp_path, config, upstream, "--no-oracle", *extra),
+        obj={"adapter": NoCallsAdapter()},
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "YYYY-MM-DD" in result.output
+    assert not (tmp_path / "local-runs").exists()
+
+
+@pytest.mark.parametrize("source", ["cli", "config", "set"])
+@pytest.mark.parametrize("stage", ["validate", "load"])
+def test_operational_date_requires_engorda_interval(tmp_path, source, stage):
+    config = write_config(tmp_path)
+    payload = json.loads(config.read_text())
+    options = {"no_oracle": True}
+    extra = []
+    if source == "config":
+        options["controle_operacional_date"] = "2026-09-01"
+    elif source == "set":
+        extra = ["--set", "cdb_simplificado.engorda.controle_operacional_date=2026-09-01"]
+    else:
+        extra = ["--data-controle-operacional", "2026-09-01"]
+    payload["products"]["cdb_simplificado"]["engorda"] = options
+    config.write_text(json.dumps(payload))
+    upstream = write_upstream(tmp_path)
+    args = run_args(tmp_path, config, upstream, *extra)
+    args[args.index("--from") + 1] = stage
+    args[args.index("--to") + 1] = stage
+    result = CliRunner().invoke(P.cli, args, obj={"adapter": NoCallsAdapter()})
+
+    assert result.exit_code == 2, result.output
+    assert "requires an interval containing engorda" in result.output
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize(
+    "offline_source", ["live", "validate", "config", "set", "disabled", "global"]
+)
+def test_operational_date_requires_effective_offline_mode_for_every_product(
+    tmp_path, dry_run, offline_source
+):
+    config = write_config(tmp_path)
+    payload = json.loads(config.read_text())
+    payload["products"]["cdb_simplificado"]["engorda"] = {"no_oracle": True}
+    payload["products"]["lci"]["engorda"] = {"no_oracle": offline_source in {"config", "disabled"}}
+    payload["products"]["lci"]["validate"] = {"no_oracle": offline_source == "validate"}
+    config.write_text(json.dumps(payload))
+    upstream = write_upstream(tmp_path)
+    extra = ["--dry-run"] if dry_run else []
+    if offline_source in {"disabled", "set", "global"}:
+        extra += ["--set", f"lci.engorda.no_oracle={str(offline_source == 'set').lower()}"]
+    if offline_source == "global":
+        extra += ["--no-oracle"]
+    accepted = offline_source in {"config", "set", "global"}
+    adapter = FakeAdapter() if accepted and not dry_run else NoCallsAdapter()
+    result = CliRunner().invoke(
+        P.cli,
+        run_args(
+            tmp_path,
+            config,
+            upstream,
+            "--product",
+            "lci",
+            "--data-controle-operacional",
+            "2026-09-01",
+            *extra,
+        ),
+        obj={"adapter": adapter},
+    )
+
+    assert result.exit_code == (0 if accepted else 2), result.output
+    if accepted:
+        nodes = json.loads(result.stdout)["nodes"].values() if dry_run else adapter.created.values()
+        plans = [node["arguments"] for node in nodes if "plan" in node["arguments"]]
+        assert len(plans) == 2
+        for argv in plans:
+            assert "--no-oracle" in argv
+            assert argv[argv.index("--data-controle-operacional") + 1] == "2026-09-01"
+    else:
+        assert "product lci engorda.controle_operacional_date requires engorda.no_oracle=true" in (
+            result.output
+        )
+        assert not (tmp_path / "local-runs").exists()
 
 
 def test_validate_only_no_oracle_propagates_without_engorda(tmp_path, capsys):
@@ -1463,11 +1643,14 @@ def test_validate_only_inherits_no_oracle_from_upstream_synthetic(tmp_path, caps
     assert report["load_eligible"] is False
 
 
-def test_no_oracle_interval_cannot_include_load(tmp_path, capsys):
+@pytest.mark.parametrize("operational_date", [None, "2026-09-01"])
+def test_no_oracle_interval_cannot_include_load(tmp_path, capsys, operational_date):
     config = write_config(tmp_path)
     upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
     args = run_args(tmp_path, config, upstream, "--dry-run", "--no-oracle")
     args[args.index("--to") + 1] = "load"
+    if operational_date is not None:
+        args += ["--data-controle-operacional", operational_date]
 
     assert P.main(args, adapter=NoCallsAdapter()) == 2
     assert "no_oracle and is not eligible for load" in capsys.readouterr().err
@@ -1484,6 +1667,8 @@ def test_per_product_no_oracle_override_only_changes_target_branch(tmp_path, cap
         "lci",
         "--set",
         "cdb_simplificado.engorda.no_oracle=true",
+        "--set",
+        "cdb_simplificado.engorda.controle_operacional_date=2026-09-01",
         "--dry-run",
     )
 
@@ -1491,6 +1676,9 @@ def test_per_product_no_oracle_override_only_changes_target_branch(tmp_path, cap
     plan = json.loads(capsys.readouterr().out)
     assert "--no-oracle" in plan["nodes"]["cdb_simplificado.engorda.plan"]["arguments"]
     assert "--no-oracle" not in plan["nodes"]["lci.engorda.plan"]["arguments"]
+    offline_argv = plan["nodes"]["cdb_simplificado.engorda.plan"]["arguments"]
+    assert offline_argv[offline_argv.index("--data-controle-operacional") + 1] == "2026-09-01"
+    assert "--data-controle-operacional" not in plan["nodes"]["lci.engorda.plan"]["arguments"]
     assert "--no-oracle" in plan["nodes"]["cdb_simplificado.validate"]["arguments"]
     assert "--no-oracle" not in plan["nodes"]["lci.validate"]["arguments"]
     assert plan["artifacts"]["products"]["cdb_simplificado"]["synthetic"]["load_eligible"] is False

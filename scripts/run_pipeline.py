@@ -42,6 +42,7 @@ OVERRIDE_KEYS = {
         "meu_numero_prefix",
         "query_num_if_sql",
         "no_oracle",
+        "controle_operacional_date",
     },
     "validate": {
         "fail_severity",
@@ -2126,6 +2127,16 @@ def _positive(value: Any, name: str) -> int:
     return result
 
 
+def _parse_controle_operacional_date(value: Any) -> str:
+    try:
+        return _canonical_operational_date(value, "engorda.controle_operacional_date")
+    except ReservationError as exc:
+        raise PipelineError(
+            "engorda.controle_operacional_date (--data-controle-operacional) "
+            "must be a valid YYYY-MM-DD date"
+        ) from exc
+
+
 def parse_stage_overrides(values: Sequence[str]) -> dict[str, dict[str, dict[str, Any]]]:
     overrides: dict[str, dict[str, dict[str, Any]]] = {}
     for raw in values:
@@ -2178,6 +2189,7 @@ def build_engorda_plan_argv(
         ("specs", "--specs"),
         ("meu_numero_prefix", "--meu-numero-prefix"),
         ("query_num_if_sql", "--query-num-if-sql"),
+        ("controle_operacional_date", "--data-controle-operacional"),
     ):
         if options.get(key) is not None:
             argv += [flag, str(options[key])]
@@ -2392,7 +2404,7 @@ def build_pipeline_plan(
     base_engorda_options = dict(config.get("stage_defaults", {}).get("engorda", {}))
     base_validate_options = dict(config.get("stage_defaults", {}).get("validate", {}))
     base_load_options = dict(config.get("stage_defaults", {}).get("load", {}))
-    for name in ("n_instrumentos", "fator_k", "seed"):
+    for name in ("n_instrumentos", "fator_k", "seed", "controle_operacional_date"):
         value = getattr(args, name, None)
         if value is not None:
             base_engorda_options[name] = value
@@ -2476,6 +2488,20 @@ def build_pipeline_plan(
         engorda_no_oracle = engorda_options.get("no_oracle", False)
         if type(engorda_no_oracle) is not bool:
             raise PipelineError(f"product {product} engorda.no_oracle must be boolean")
+        if engorda_options.get("controle_operacional_date") is not None:
+            engorda_options["controle_operacional_date"] = _parse_controle_operacional_date(
+                engorda_options["controle_operacional_date"]
+            )
+            if "engorda" not in stages:
+                raise PipelineError(
+                    "engorda.controle_operacional_date (--data-controle-operacional) "
+                    "requires an interval containing engorda"
+                )
+            if not engorda_no_oracle:
+                raise PipelineError(
+                    f"product {product} engorda.controle_operacional_date "
+                    "requires engorda.no_oracle=true (--no-oracle)"
+                )
         if "engorda" in stages and engorda_no_oracle and "validate" in stages:
             validate_options["no_oracle"] = True
         validate_no_oracle = validate_options.get("no_oracle", False)
@@ -3973,6 +3999,13 @@ def cli(context: click.Context) -> None:
     "--no-oracle",
     is_flag=True,
     help="Disable Oracle access in engorda/validate and forbid downstream load.",
+)
+@click.option(
+    "--data-controle-operacional",
+    "controle_operacional_date",
+    type=_parse_controle_operacional_date,
+    metavar="YYYY-MM-DD",
+    help="Operational control date for offline engorda; requires effective no_oracle=true.",
 )
 @click.option(
     "--osias",

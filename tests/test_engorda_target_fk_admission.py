@@ -1571,7 +1571,11 @@ def test_key_canonicalization_is_type_aware():
     assert eng._canon_oracle_key("A.0", numeric=False) == "A.0"
 
 
-def test_materialize_job_consumes_frozen_plan_without_resampling(tmp_path, monkeypatch):
+@pytest.mark.parametrize("no_oracle", [False, True])
+@pytest.mark.parametrize("operational_date", [None, date(2026, 8, 20), date(2026, 8, 21)])
+def test_materialize_job_consumes_frozen_plan_without_resampling(
+    tmp_path, monkeypatch, no_oracle, operational_date
+):
     plan_body = {
         "artifact_type": eng.ENGORDA_PLAN_ARTIFACT,
         "schema_version": eng.ENGORDA_LEGACY_PLAN_SCHEMA_VERSION,
@@ -1581,6 +1585,7 @@ def test_materialize_job_consumes_frozen_plan_without_resampling(tmp_path, monke
         "seed": 7,
         "engorda_timestamp": "2026-08-20T10:11:12",
         "controle_operacional_date": "2026-08-20",
+        "oracle_access": "disabled" if no_oracle else "live",
         "raw_uri": "oci://raw@ns/run/RAW",
         "output_uri": "oci://out@ns/run/synthetic/cdb",
         "specs_uri": "oci://cfg@ns/spec.json",
@@ -1657,11 +1662,13 @@ def test_materialize_job_consumes_frozen_plan_without_resampling(tmp_path, monke
     monkeypatch.setattr(eng, "create_spark_session", lambda *_args: FakeSpark())
     monkeypatch.setattr(eng, "load_specs", lambda *_args: {"SPEC": {}})
     frozen_lotes = {eng.TABELA_RAIZ: object()}
-    monkeypatch.setattr(
-        eng,
-        "_load_selected_lote_snapshot",
-        lambda *_args, **_kwargs: (frozen_lotes, None, {eng.TABELA_RAIZ: 2}),
-    )
+    snapshot_reads = []
+
+    def load_snapshot(*_args, **_kwargs):
+        snapshot_reads.append(True)
+        return frozen_lotes, None, {eng.TABELA_RAIZ: 2}
+
+    monkeypatch.setattr(eng, "_load_selected_lote_snapshot", load_snapshot)
     monkeypatch.setattr(
         eng,
         "get_engorda_env",
@@ -1681,19 +1688,30 @@ def test_materialize_job_consumes_frozen_plan_without_resampling(tmp_path, monke
         lambda *_args, **kwargs: captured.update(kwargs) or {},
     )
 
-    eng.executar_job(
-        eng.EngordaJob(
-            produto="cdb_simplificado",
-            phase="materialize",
-            plan_uri=str(plan_path),
-            reservation_uri=str(reservation_path),
-            raw_uri="oci://raw@ns/run/RAW",
-            output_uri="oci://out@ns/run/synthetic/cdb",
-            specs_uri="oci://cfg@ns/spec.json",
-            faltantes_parquet="oci://cfg@ns/faltantes",
-        )
+    job = eng.EngordaJob(
+        produto="cdb_simplificado",
+        phase="materialize",
+        plan_uri=str(plan_path),
+        reservation_uri=str(reservation_path),
+        raw_uri="oci://raw@ns/run/RAW",
+        output_uri="oci://out@ns/run/synthetic/cdb",
+        specs_uri="oci://cfg@ns/spec.json",
+        faltantes_parquet="oci://cfg@ns/faltantes",
+        no_oracle=no_oracle,
+        controle_operacional_date=operational_date,
     )
+    if operational_date == date(2026, 8, 21):
+        with pytest.raises(ValueError, match="data-controle-operacional.*diverge"):
+            eng.executar_job(job)
+        assert captured == {}
+        assert snapshot_reads == []
+        return
 
+    eng.executar_job(job)
+
+    assert captured["controle_operacional_date"] == date(2026, 8, 20)
+    assert captured["engorda_ts"] == datetime(2026, 8, 20, 10, 11, 12)
+    assert captured["no_oracle"] is no_oracle
     assert captured["num_ifs"] is None
     assert captured["n_instrumentos"] is None
     assert captured["fator_k"] == 3

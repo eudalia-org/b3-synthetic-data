@@ -204,8 +204,20 @@ uv run --no-project .\run_pipeline.py run `
   --from engorda `
   --to engorda `
   --upstream-manifest .\adopted-inputs.json `
-  --no-oracle
+  --no-oracle `
+  --data-controle-operacional 2026-06-03
 ```
+
+`--data-controle-operacional YYYY-MM-DD` supplies the operational business date
+without querying Oracle. Planning freezes this value; materialization reuses it
+even if it runs on a later day. The normal business-date rules still apply,
+including `DAT_EMISSAO = DAT_SITUACAO_IF`; audit timestamps remain separate.
+If omitted, offline planning uses the engorda timestamp's date, as before.
+The option requires offline engorda and an interval containing `engorda`;
+pipeline `--dry-run` alone does not imply `--no-oracle`.
+For a per-product date, use
+`--set cdb_resgate.engorda.controle_operacional_date=2026-06-03` with that
+product's `engorda.no_oracle=true`. Offline output remains ineligible for load.
 
 `--to validate` propagates `--no-oracle` to both applications, so the validator skips
 Oracle metadata/residual checks and emits a PARTIAL report with

@@ -11040,6 +11040,12 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
             planned_no_oracle = planned_artifact.get("oracle_access", "live") == "disabled"
             if job.no_oracle != planned_no_oracle:
                 raise ValueError("materialize --no-oracle diverge do oracle_access do plano")
+            frozen_date = planned_artifact["controle_operacional_date"]
+            if (
+                job.controle_operacional_date is not None
+                and job.controle_operacional_date.isoformat() != frozen_date
+            ):
+                raise ValueError("materialize --data-controle-operacional diverge do plano")
             lineage = {
                 "raw_uri": _area(config["DATAGEN_RAW_BASE_URI"], config.get("DATAGEN_RAW_PREFIX")),
                 "output_uri": clone_base_path(config),
@@ -11067,7 +11073,6 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
             fator_k = int(planned_artifact["fator_k"])
             seed = int(planned_artifact["seed"])
             engorda_ts = datetime.fromisoformat(planned_artifact["engorda_timestamp"])
-            frozen_date = planned_artifact["controle_operacional_date"]
             controle_operacional_date = (
                 date.fromisoformat(frozen_date) if frozen_date is not None else None
             )
@@ -11321,9 +11326,10 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--data-controle-operacional",
         type=_parse_controle_operacional_date,
         default=None,
-        help="Override de CETIP.CONTROLE_OPERACIONAL.DAT_CTL_OPER apenas para "
-        "dry-run (YYYY-MM-DD). Execuções reais sempre consultam NUM_ORDEM=0 "
-        "e NUM_SISTEMA IS NULL; dry-run sem valor usa a data da engorda.",
+        help="Data operacional para --dry-run ou --no-oracle (YYYY-MM-DD). "
+        "Sem valor, usa a data da engorda. Com Oracle, consulta "
+        "CETIP.CONTROLE_OPERACIONAL (NUM_ORDEM=0 e NUM_SISTEMA IS NULL). "
+        "Materialize usa a data congelada no plano e rejeita override divergente.",
     )
     parser.add_argument(
         "--prazo-vencimento-dias",

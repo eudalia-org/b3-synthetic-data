@@ -89,6 +89,7 @@ class TestEngordaPhaseCli:
             "fator_k": 2,
             "seed": 7,
             "no_oracle": True,
+            "controle_operacional_date": "2026-06-03",
         }
 
         planned = engorda_tables.parse_arguments(
@@ -112,9 +113,11 @@ class TestEngordaPhaseCli:
 
         assert planned.phase == "plan"
         assert planned.no_oracle is True
+        assert planned.data_controle_operacional == date(2026, 6, 3)
         assert planned.plan_uri == paths["selection_plan"]
         assert materialized.phase == "materialize"
         assert materialized.no_oracle is True
+        assert materialized.data_controle_operacional is None  # Consumed from the frozen plan.
         assert materialized.reservation_uri == paths["reservations"]
         assert materialized.output_uri == paths["synthetic"]
 
