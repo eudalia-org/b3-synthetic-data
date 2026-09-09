@@ -1279,6 +1279,7 @@ def test_genai_dry_run_resolves_conditional_plan_contract(tmp_path, capsys):
         "endpoint_id": "ocid1.generativeaiendpoint.test",
         "compartment_id": "ocid1.compartment.genai",
         "region": "sa-saopaulo-1",
+        "max_concurrency": 32,
     }
     payload["stage_defaults"]["engorda"]["genai_policy"] = (
         "oci://source@namespace/genai-policy.json"
@@ -1288,7 +1289,15 @@ def test_genai_dry_run_resolves_conditional_plan_contract(tmp_path, capsys):
 
     assert (
         P.main(
-            run_args(tmp_path, config, upstream, "--dry-run", "--enable-genai"),
+            run_args(
+                tmp_path,
+                config,
+                upstream,
+                "--dry-run",
+                "--enable-genai",
+                "--n-instrumentos",
+                "10000",
+            ),
             adapter=NoCallsAdapter(),
         )
         == 0
@@ -1298,7 +1307,10 @@ def test_genai_dry_run_resolves_conditional_plan_contract(tmp_path, capsys):
     plan_node = plan["nodes"]["cdb_simplificado.engorda.plan"]
     materialize_node = plan["nodes"]["cdb_simplificado.engorda.materialize"]
     assert plan_node["max_retries"] == 0
-    assert plan_node["arguments"][-11:] == [
+    assert plan_node["arguments"][
+        plan_node["arguments"].index("--n-instrumentos") + 1
+    ] == "10000"
+    assert plan_node["arguments"][-13:] == [
         "--enable-genai",
         "--genai-policy",
         "oci://source@namespace/genai-policy.json",
@@ -1308,6 +1320,8 @@ def test_genai_dry_run_resolves_conditional_plan_contract(tmp_path, capsys):
         "ocid1.compartment.genai",
         "--genai-region",
         "sa-saopaulo-1",
+        "--genai-concurrency",
+        "32",
         "--genai-artifact-root",
         plan["artifacts"]["products"]["cdb_simplificado"]["genai"]["uri"],
     ]
@@ -1318,11 +1332,41 @@ def test_genai_dry_run_resolves_conditional_plan_contract(tmp_path, capsys):
     )
 
 
+@pytest.mark.parametrize("value", [0, -1, "32"])
+def test_genai_rejects_invalid_concurrency(tmp_path, capsys, value):
+    config = write_config(tmp_path)
+    payload = json.loads(config.read_text())
+    payload["genai"] = {
+        "endpoint_id": "ocid1.generativeaiendpoint.test",
+        "compartment_id": "ocid1.compartment.genai",
+        "region": "sa-saopaulo-1",
+        "max_concurrency": value,
+    }
+    payload["stage_defaults"]["engorda"]["genai_policy"] = (
+        "oci://source@namespace/genai-policy.json"
+    )
+    config.write_text(json.dumps(payload))
+
+    result = P.main(
+        run_args(
+            tmp_path,
+            config,
+            write_upstream(tmp_path),
+            "--dry-run",
+            "--enable-genai",
+        ),
+        adapter=NoCallsAdapter(),
+    )
+
+    assert result == 2
+    assert "max_concurrency must be a positive integer" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     ("configure", "extra_args", "message"),
     [
         (False, (), "config.genai"),
-        (True, ("--n-instrumentos", "101"), "at most 100"),
+        (True, ("--n-instrumentos", "10001"), "at most 10000"),
         (True, ("--fator-k", "6"), "fator_k <= 5"),
         (True, ("--product", "cdb_resgate"), "exactly one"),
     ],

@@ -7,7 +7,8 @@
   "genai": {
     "endpoint_id": "ocid1.generativeaiendpoint.oc1..replace-me",
     "compartment_id": "ocid1.compartment.oc1..replace-genai-compartment",
-    "region": "sa-saopaulo-1"
+    "region": "sa-saopaulo-1",
+    "max_concurrency": 4
   },
   "applications": {
     "engorda_plan": "ocid1.dataflowapplication.oc1..replace-engorda-plan",

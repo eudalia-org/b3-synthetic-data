@@ -106,7 +106,8 @@ The environment configuration adds optional values:
   "genai": {
     "endpoint_id": "ocid1.generativeaiendpoint...",
     "compartment_id": "ocid1.compartment...",
-    "region": "sa-saopaulo-1"
+    "region": "sa-saopaulo-1",
+    "max_concurrency": 4
   },
   "stage_defaults": {
     "engorda": {
@@ -116,10 +117,11 @@ The environment configuration adds optional values:
 }
 ```
 
-These keys remain optional for ordinary runs. They are required and validated before
-submission only when `--enable-genai` is present. The runner passes endpoint,
-compartment, region, and policy URI to engorda planning. Materialization receives the
-enable flag as an acknowledgement but does not need endpoint access.
+These keys remain optional for ordinary runs. Endpoint, compartment, region, and policy
+URI are required and validated before submission only when `--enable-genai` is present.
+Concurrency is optional and defaults to 4. The runner passes the resolved values to
+engorda planning. Materialization receives the enable flag as an acknowledgement but
+does not need endpoint access.
 
 Direct engorda exposes conditional arguments equivalent to:
 
@@ -129,6 +131,7 @@ Direct engorda exposes conditional arguments equivalent to:
 --genai-endpoint-id <ocid>
 --genai-compartment-id <ocid>
 --genai-region <region>
+--genai-concurrency <positive-integer>  # optional; default 4
 --genai-artifact-root <immutable-sibling-uri>  # required only for direct phase all
 ```
 
@@ -140,17 +143,17 @@ Enabled planning enforces these pilot limits before endpoint calls:
 
 | Limit | Value |
 |---|---:|
-| Source instruments | 100 |
+| Source instruments | 10,000 |
 | `fator_k` | 5 |
-| Concurrent requests | 4 |
+| Concurrent requests | 4 by default; positive integer from environment config |
 | Logical generation attempts per source | 3 |
 | Read timeout per attempt | 120 seconds |
 | Context size per source | 50,000 characters |
 
-Exceeding the source-instrument or `fator_k` limit fails before calls. The limits are
-engine hard caps, not advisory policy defaults, and cannot be raised through the policy
-or CLI. Engorda validates the final `fator_k` after any automatic deficit adjustment and
-before constructing requests.
+Exceeding the source-instrument or `fator_k` limit fails before calls. Those two limits
+are engine hard caps, not advisory policy defaults, and cannot be raised through the
+policy or CLI. Concurrency has no fixed upper bound. Engorda validates the final
+`fator_k` after any automatic deficit adjustment and before constructing requests.
 
 ### Modes
 
@@ -223,8 +226,10 @@ Initial shape:
 Sampling settings and field instructions come from the policy. Operators cannot override
 temperature, top-p, token count, target columns, prompts, or character limits per run.
 
-The source-instrument, clone-factor, concurrency, attempt, timeout, and context limits
-are engine constants for the pilot and do not appear in the policy. For version 1,
+The source-instrument, clone-factor, attempt, timeout, and context limits are engine
+constants for the pilot and do not appear in the policy. Concurrency is deployment
+configuration, defaults to 4, has no fixed upper bound, and is frozen into benchmark
+telemetry. For version 1,
 `cdb_simplificado` must contain exactly the three pilot targets and must exclude exactly
 `LANCAMENTO.TXT_XML_LANCAMENTO` from context. A changed target/exclusion set requires a
 new supported policy version and code review. Version 1 also requires the exact reviewed
@@ -355,18 +360,23 @@ The GenAI manifest records:
 
 - endpoint, compartment, region, model family, and policy URI/hash;
 - persisted policy-snapshot URI/hash;
-- source count, clone factor, request/attempt/transport-error counts, and timings;
+- source count, clone factor, configured/effective concurrency, request/attempt counts,
+  sanitized endpoint status counts, successful-call p50/p95/max latency, total duration,
+  endpoint calls per second, and sources per second;
 - generated/fallback/context-too-large cells by table/column;
 - source-change and sibling-uniqueness rates by table/column;
-- `SUCCESS` when every target is generated or `DEGRADED` when any fallback occurs.
+- `SUCCESS` when every target is generated, `DEGRADED` when any fallback occurs, or
+  `FAILED` when no endpoint request succeeds.
 
 It does not contain rendered GenAI prompts, canonical request payloads, or endpoint
 responses outside the accepted replacement values. The selected-lote artifact continues
 to persist source rows under the existing engorda contract.
 
 Planning writes policy and replacement artifacts first, then publishes the immutable
-plan last. Orphaned pre-plan artifacts after a failed write are harmless and remain
-subject to bucket lifecycle retention.
+plan last. If no endpoint request succeeds, it writes `FAILED` replacement/manifest
+artifacts with benchmark telemetry and then fails without publishing a selection plan.
+Orphaned pre-plan artifacts after any failed write are harmless and remain subject to
+bucket lifecycle retention.
 
 ## Materialization
 
@@ -438,7 +448,7 @@ scripted outputs to end-to-end plan/materialize tests.
 ## Acceptance Criteria
 
 - Ordinary runs require no GenAI parameters and do not import or call the OCI SDK.
-- Enabled runs reject more than 100 source instruments or final adjusted `fator_k > 5`
+- Enabled runs reject more than 10,000 source instruments or final adjusted `fator_k > 5`
   before calls, regardless of policy contents.
 - The pilot can generate/fallback values for every row of the three allowlisted columns
   and every clone index without changing other columns.

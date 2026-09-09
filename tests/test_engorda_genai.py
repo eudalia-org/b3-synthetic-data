@@ -1,6 +1,8 @@
 import json
 import os
 import sys
+import threading
+import time
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
@@ -197,6 +199,32 @@ class ScriptedAdapter:
         return response
 
 
+class ConcurrentAdapter:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+
+    def complete(self, attempt):
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            time.sleep(0.03)
+            variants = {}
+            for clone, target_id in attempt.expected:
+                variants.setdefault(clone, {})[target_id] = f"value-{clone}-{target_id}"
+            return json.dumps({
+                "variants": [
+                    {"k": clone, "values": values}
+                    for clone, values in sorted(variants.items())
+                ],
+            })
+        finally:
+            with self.lock:
+                self.active -= 1
+
+
 def resolved_policy():
     return E.resolve_genai_policy(genai_policy_document(), product="cdb_simplificado")
 
@@ -312,15 +340,20 @@ class TestGenAiGeneration:
             clone_factor=1,
             run_seed=42,
         )
-        adapter = ScriptedAdapter([TimeoutError("down")] * 3)
+        adapter = ScriptedAdapter([TimeoutError("down")] * 9)
 
-        with pytest.raises(ValueError, match="no Oracle GenAI request succeeded"):
+        with pytest.raises(
+            E.GenAiNoSuccessfulRequests,
+            match="no Oracle GenAI request succeeded",
+        ) as raised:
             E.generate_genai_replacements([request], adapter=adapter)
         assert len(adapter.calls) == 9
         assert [attempt.retry_token for attempt in adapter.calls[:3]] == [
             adapter.calls[0].retry_token,
         ] * 3
         assert len({attempt.retry_token for attempt in adapter.calls}) == 3
+        assert raised.value.result.metrics.status == "FAILED"
+        assert raised.value.result.metrics.endpoint_status_counts == {"TIMEOUT": 9}
 
     def test_duplicate_json_target_identity_resolves_no_cells(self):
         request = E.build_genai_request(
@@ -363,6 +396,77 @@ class TestGenAiGeneration:
         event_cells = [cell for cell in request.cells if cell.table == "EVENTO"]
         assert [cell.target_id for cell in event_cells] == ["t0001", "t0002"]
         assert len({cell.source_pk_json for cell in event_cells}) == 2
+
+    def test_reports_concurrency_latency_throughput_and_endpoint_statuses(self):
+        request = E.build_genai_request(
+            sample_instrument(),
+            policy=resolved_policy(),
+            clone_factor=1,
+            run_seed=42,
+        )
+        adapter = ScriptedAdapter([
+            TimeoutError("temporary timeout"),
+            json.dumps({
+                "variants": [{
+                    "k": 1,
+                    "values": {"t0001": "Evento", "t0002": "Caracteristica"},
+                }],
+            }),
+        ])
+
+        result = E.generate_genai_replacements(
+            [request], adapter=adapter, max_concurrency=32
+        )
+
+        assert result.metrics.configured_concurrency == 32
+        assert result.metrics.effective_concurrency == 1
+        assert result.metrics.endpoint_call_count == 2
+        assert result.metrics.endpoint_status_counts == {
+            "SUCCESS": 1,
+            "TIMEOUT": 1,
+        }
+        assert set(result.metrics.successful_call_latency_ms) == {"p50", "p95", "max"}
+        assert result.metrics.successful_call_latency_ms["max"] >= 0
+        assert result.metrics.endpoint_calls_per_second > 0
+        assert result.metrics.sources_per_second > 0
+
+    def test_runs_multiple_sources_at_configured_concurrency(self):
+        requests = [
+            E.build_genai_request(
+                sample_instrument(root),
+                policy=resolved_policy(),
+                clone_factor=1,
+                run_seed=42,
+            )
+            for root in range(10, 14)
+        ]
+        adapter = ConcurrentAdapter()
+
+        result = E.generate_genai_replacements(
+            requests, adapter=adapter, max_concurrency=2
+        )
+
+        assert adapter.max_active == 2
+        assert result.metrics.configured_concurrency == 2
+        assert result.metrics.effective_concurrency == 2
+
+    @pytest.mark.parametrize(
+        ("status", "expected"),
+        [(429, "HTTP_429"), (503, "HTTP_5XX"), (403, "HTTP_403")],
+    )
+    def test_classifies_oci_http_statuses_for_benchmarking(self, status, expected):
+        error = RuntimeError("service error")
+        error.status = status
+
+        assert E._genai_endpoint_error_status(error) == expected
+
+    def test_classifies_oci_request_exception_read_timeout(self):
+        RequestException = type("RequestException", (Exception,), {})
+        error = RequestException(
+            "HTTPSConnectionPool: Read timed out. (read timeout=120)"
+        )
+
+        assert E._genai_endpoint_error_status(error) == "TIMEOUT"
 
 
 class FakeOciModel:
@@ -460,6 +564,7 @@ class TestGenAiJobContract:
     def test_runner_and_dataflow_hard_caps_cannot_drift(self):
         assert P.GENAI_MAX_SOURCE_INSTRUMENTS == E.GENAI_MAX_SOURCE_INSTRUMENTS
         assert P.GENAI_MAX_FACTOR_K == E.GENAI_MAX_FACTOR_K
+        assert P.GENAI_DEFAULT_CONCURRENCY == E.GENAI_DEFAULT_CONCURRENCY
 
     def test_direct_plan_derives_sibling_genai_root(self):
         assert (
@@ -493,6 +598,8 @@ class TestGenAiJobContract:
                 "ocid1.compartment.test",
                 "--genai-region",
                 "sa-saopaulo-1",
+                "--genai-concurrency",
+                "32",
                 "--genai-artifact-root",
                 "oci://bucket@ns/genai",
             ]
@@ -500,6 +607,7 @@ class TestGenAiJobContract:
 
         assert args.enable_genai is True
         assert args.genai_policy == "oci://bucket@ns/genai-policy.json"
+        assert args.genai_concurrency == 32
         assert args.genai_artifact_root == "oci://bucket@ns/genai"
 
     def test_enabled_plan_requires_conditional_inputs_and_hard_limits(self):
@@ -521,14 +629,20 @@ class TestGenAiJobContract:
             "genai_endpoint_id": "ocid1.generativeaiendpoint.test",
             "genai_compartment_id": "ocid1.compartment.test",
             "genai_region": "sa-saopaulo-1",
+            "genai_concurrency": 32,
             "genai_artifact_root": "genai",
         }
         E._validate_engorda_job(E.EngordaJob(**configured))
+        E._validate_engorda_job(E.EngordaJob(**{**configured, "n_instrumentos": 10000}))
 
-        with pytest.raises(ValueError, match="at most 100"):
-            E._validate_engorda_job(E.EngordaJob(**{**configured, "n_instrumentos": 101}))
+        with pytest.raises(ValueError, match="at most 10000"):
+            E._validate_engorda_job(E.EngordaJob(**{**configured, "n_instrumentos": 10001}))
         with pytest.raises(ValueError, match="fator_k <= 5"):
             E._validate_engorda_job(E.EngordaJob(**{**configured, "fator_k": 6}))
+        with pytest.raises(ValueError, match="positive integer"):
+            E._validate_engorda_job(
+                E.EngordaJob(**{**configured, "genai_concurrency": 0})
+            )
         with pytest.raises(ValueError, match="endpoint OCID"):
             E._validate_engorda_job(
                 E.EngordaJob(
@@ -848,6 +962,10 @@ class TestGenAiSparkApplication:
         assert descriptor["enabled"] is True
         assert descriptor["status"] == "SUCCESS"
         assert descriptor["replacements"]["content_sha256"] == result.content_sha256
+        manifest = json.loads((tmp_path / "genai" / "manifest.json").read_text())
+        assert manifest["metrics"]["configured_concurrency"] == 4
+        assert manifest["metrics"]["endpoint_status_counts"] == {"SUCCESS": 1}
+        assert manifest["metrics"]["sources_per_second"] > 0
         loaded = E.load_genai_replacements(spark, descriptor)
         assert loaded.count() == len(result.rows)
         cloned_root, _mapping = E.clona_tabela(
@@ -877,6 +995,37 @@ class TestGenAiSparkApplication:
                 compartment_id="ocid1.compartment.test",
                 region="sa-saopaulo-1",
             )
+
+    def test_writes_failed_endpoint_benchmark_telemetry(self, spark, tmp_path):
+        policy = resolved_policy()
+        request = E.build_genai_request(
+            sample_instrument(), policy=policy, clone_factor=1, run_seed=42
+        )
+        with pytest.raises(E.GenAiNoSuccessfulRequests) as raised:
+            E.generate_genai_replacements(
+                [request], adapter=ScriptedAdapter([TimeoutError("down")] * 9)
+            )
+
+        E.write_genai_artifacts(
+            spark,
+            str(tmp_path / "failed-genai"),
+            policy=policy,
+            result=raised.value.result,
+            endpoint_id="ocid1.generativeaiendpoint.test",
+            compartment_id="ocid1.compartment.test",
+            region="sa-saopaulo-1",
+        )
+
+        manifest = json.loads(
+            (tmp_path / "failed-genai" / "manifest.json").read_text()
+        )
+        assert manifest["status"] == "FAILED"
+        assert manifest["metrics"]["endpoint_status_counts"] == {"TIMEOUT": 9}
+        assert manifest["metrics"]["successful_call_latency_ms"] == {
+            "p50": 0.0,
+            "p95": 0.0,
+            "max": 0.0,
+        }
 
     def test_enabled_plan_freezes_generated_replacements(self, spark, tmp_path, monkeypatch):
         root = spark.createDataFrame(

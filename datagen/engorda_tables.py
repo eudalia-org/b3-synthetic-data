@@ -857,9 +857,9 @@ MEU_NUMERO_LEGACY_STRATEGY = "legacy_global_v1"
 MEU_NUMERO_NORMALIZATION = "trim_strip_decimal_zeroes_v1"
 ENGORDA_PHASES = ("all", "plan", "materialize")
 GENAI_POLICY_VERSION = 1
-GENAI_MAX_SOURCE_INSTRUMENTS = 100
+GENAI_MAX_SOURCE_INSTRUMENTS = 10000
 GENAI_MAX_FACTOR_K = 5
-GENAI_MAX_CONCURRENCY = 4
+GENAI_DEFAULT_CONCURRENCY = 4
 GENAI_LOGICAL_ATTEMPTS = 3
 GENAI_TRANSPORT_ATTEMPTS = 3
 GENAI_READ_TIMEOUT_SECONDS = 120
@@ -993,6 +993,7 @@ class GenAiExecutionConfig:
     endpoint_id: str
     compartment_id: str
     region: str
+    max_concurrency: int = GENAI_DEFAULT_CONCURRENCY
 
 
 @dataclass(frozen=True)
@@ -1254,6 +1255,12 @@ class GenAiGenerationMetrics:
     endpoint_call_count: int
     logical_attempts: int
     duration_seconds: float
+    configured_concurrency: int
+    effective_concurrency: int
+    endpoint_status_counts: Mapping[str, int]
+    successful_call_latency_ms: Mapping[str, float]
+    endpoint_calls_per_second: float
+    sources_per_second: float
     generated_cells: int
     fallback_cells: int
     status_counts: Mapping[str, int]
@@ -1266,6 +1273,12 @@ class GenAiGenerationResult:
     rows: Tuple[GenAiReplacementRow, ...]
     metrics: GenAiGenerationMetrics
     content_sha256: str
+
+
+class GenAiNoSuccessfulRequests(ValueError):
+    def __init__(self, result: GenAiGenerationResult) -> None:
+        super().__init__("no Oracle GenAI request succeeded")
+        self.result = result
 
 
 class OracleGenAiChatAdapter:
@@ -1625,9 +1638,48 @@ def _fallback_genai_rows(
     ]
 
 
+def _genai_endpoint_error_status(exc: Exception) -> str:
+    status = getattr(exc, "status", None)
+    if isinstance(status, int):
+        if status == 429:
+            return "HTTP_429"
+        if 500 <= status <= 599:
+            return "HTTP_5XX"
+        return f"HTTP_{status}"
+    chain = [exc]
+    if exc.__cause__ is not None:
+        chain.append(exc.__cause__)
+    if exc.__context__ is not None:
+        chain.append(exc.__context__)
+    timeout_text = " ".join(
+        f"{type(item).__name__} {item}" for item in chain
+    ).lower()
+    if (isinstance(exc, TimeoutError)
+            or "timeout" in timeout_text
+            or "timed out" in timeout_text):
+        return "TIMEOUT"
+    return type(exc).__name__.upper()
+
+
+def _genai_latency_summary(values: Sequence[float]) -> Dict[str, float]:
+    if not values:
+        return {"p50": 0.0, "p95": 0.0, "max": 0.0}
+    ordered = sorted(values)
+
+    def nearest_rank(percentile: float) -> float:
+        index = max(0, math.ceil(percentile * len(ordered)) - 1)
+        return round(ordered[index], 3)
+
+    return {
+        "p50": nearest_rank(0.50),
+        "p95": nearest_rank(0.95),
+        "max": round(ordered[-1], 3),
+    }
+
+
 def _generate_one_instrument(request: GenAiInstrumentRequest, adapter: Any):
     if len(request.context_json) > GENAI_MAX_CONTEXT_CHARS:
-        return _fallback_genai_rows(request, "CONTEXT_TOO_LARGE", 0), 0, 0
+        return _fallback_genai_rows(request, "CONTEXT_TOO_LARGE", 0), 0, 0, []
     worst_case_response = {
         "variants": [
             {
@@ -1639,7 +1691,7 @@ def _generate_one_instrument(request: GenAiInstrumentRequest, adapter: Any):
     }
     output_chars = len(_genai_canonical_json(worst_case_response))
     if output_chars > 2 * request.policy.max_tokens:
-        return _fallback_genai_rows(request, "OUTPUT_BUDGET_EXCEEDED", 0), 0, 0
+        return _fallback_genai_rows(request, "OUTPUT_BUDGET_EXCEEDED", 0), 0, 0, []
 
     cells = {cell.target_id: cell for cell in request.cells}
     unresolved = {
@@ -1650,6 +1702,7 @@ def _generate_one_instrument(request: GenAiInstrumentRequest, adapter: Any):
     generated: Dict[Tuple[int, str], Tuple[str, int]] = {}
     api_successes = 0
     request_errors = 0
+    endpoint_calls: List[Tuple[str, float]] = []
     attempts_used = 0
     for attempt_number in range(1, GENAI_LOGICAL_ATTEMPTS + 1):
         if not unresolved:
@@ -1658,11 +1711,19 @@ def _generate_one_instrument(request: GenAiInstrumentRequest, adapter: Any):
         attempt = _build_genai_attempt(request, attempt_number, unresolved)
         response = None
         for transport_attempt in range(1, GENAI_TRANSPORT_ATTEMPTS + 1):
+            call_started = time.perf_counter()
             try:
                 response = adapter.complete(attempt)
+                endpoint_calls.append((
+                    "SUCCESS", (time.perf_counter() - call_started) * 1000
+                ))
                 break
             except Exception as exc:
                 request_errors += 1
+                endpoint_calls.append((
+                    _genai_endpoint_error_status(exc),
+                    (time.perf_counter() - call_started) * 1000,
+                ))
                 logger.warning(
                     "GenAI request root=%s logical_attempt=%d transport_attempt=%d failed: %s",
                     request.root_num_if,
@@ -1716,32 +1777,38 @@ def _generate_one_instrument(request: GenAiInstrumentRequest, adapter: Any):
                     differs_from_source=value != cell.source_value,
                 )
             )
-    return rows, api_successes, request_errors
+    return rows, api_successes, request_errors, endpoint_calls
 
 
 def generate_genai_replacements(
-    requests: Sequence[GenAiInstrumentRequest], *, adapter: Any
+    requests: Sequence[GenAiInstrumentRequest], *, adapter: Any,
+    max_concurrency: int = GENAI_DEFAULT_CONCURRENCY,
 ) -> GenAiGenerationResult:
     started = time.perf_counter()
     if len(requests) > GENAI_MAX_SOURCE_INSTRUMENTS:
         raise ValueError(
             f"GenAI supports at most {GENAI_MAX_SOURCE_INSTRUMENTS} source instruments"
         )
+    if type(max_concurrency) is not int or max_concurrency < 1:
+        raise ValueError("GenAI max_concurrency must be a positive integer")
     rows: List[GenAiReplacementRow] = []
     api_successes = 0
     request_errors = 0
-    with ThreadPoolExecutor(max_workers=GENAI_MAX_CONCURRENCY) as executor:
+    endpoint_calls: List[Tuple[str, float]] = []
+    effective_concurrency = min(max_concurrency, max(1, len(requests)))
+    with ThreadPoolExecutor(
+        max_workers=effective_concurrency
+    ) as executor:
         futures = {
             executor.submit(_generate_one_instrument, request, adapter): request.root_num_if
             for request in requests
         }
         for future in as_completed(futures):
-            generated_rows, successes, errors = future.result()
+            generated_rows, successes, errors, calls = future.result()
             rows.extend(generated_rows)
             api_successes += successes
             request_errors += errors
-    if requests and api_successes == 0:
-        raise ValueError("no Oracle GenAI request succeeded")
+            endpoint_calls.extend(calls)
     rows.sort(
         key=lambda row: (
             row.root_num_if,
@@ -1794,8 +1861,16 @@ def generate_genai_replacements(
         }
         for label, counts in sorted(diversity_counts.items())
     }
+    duration_seconds = max(time.perf_counter() - started, 1e-9)
+    endpoint_status_counts: Dict[str, int] = {}
+    for status, _latency in endpoint_calls:
+        endpoint_status_counts[status] = endpoint_status_counts.get(status, 0) + 1
     metrics = GenAiGenerationMetrics(
-        status="DEGRADED" if fallback_cells else "SUCCESS",
+        status=(
+            "FAILED" if requests and api_successes == 0
+            else "DEGRADED" if fallback_cells
+            else "SUCCESS"
+        ),
         source_instruments=len(requests),
         clone_factor=(requests[0].clone_factor if requests else 0),
         api_successes=api_successes,
@@ -1808,7 +1883,15 @@ def generate_genai_replacements(
             )
             for request in requests
         ),
-        duration_seconds=time.perf_counter() - started,
+        duration_seconds=duration_seconds,
+        configured_concurrency=max_concurrency,
+        effective_concurrency=effective_concurrency,
+        endpoint_status_counts=dict(sorted(endpoint_status_counts.items())),
+        successful_call_latency_ms=_genai_latency_summary([
+            latency for status, latency in endpoint_calls if status == "SUCCESS"
+        ]),
+        endpoint_calls_per_second=len(endpoint_calls) / duration_seconds,
+        sources_per_second=len(requests) / duration_seconds,
         generated_cells=len(rows) - fallback_cells,
         fallback_cells=fallback_cells,
         status_counts=status_counts,
@@ -1820,7 +1903,10 @@ def generate_genai_replacements(
     )
     content = [row.record() for row in rows]
     content_hash = hashlib.sha256(_genai_canonical_json(content).encode("ascii")).hexdigest()
-    return GenAiGenerationResult(tuple(rows), metrics, content_hash)
+    result = GenAiGenerationResult(tuple(rows), metrics, content_hash)
+    if requests and api_successes == 0:
+        raise GenAiNoSuccessfulRequests(result)
+    return result
 
 
 def collect_genai_instruments(
@@ -1912,6 +1998,7 @@ class EngordaJob:
     genai_endpoint_id: Optional[str] = None
     genai_compartment_id: Optional[str] = None
     genai_region: Optional[str] = None
+    genai_concurrency: int = GENAI_DEFAULT_CONCURRENCY
     genai_artifact_root: Optional[str] = None
     genai_adapter: Any = field(default=None, repr=False, compare=False)
 
@@ -10304,7 +10391,16 @@ def executa_clonagem(
                 )
                 for aggregate in aggregates
             )
-            generation = generate_genai_replacements(requests, adapter=genai_execution.adapter)
+            generation_failure = None
+            try:
+                generation = generate_genai_replacements(
+                    requests,
+                    adapter=genai_execution.adapter,
+                    max_concurrency=genai_execution.max_concurrency,
+                )
+            except GenAiNoSuccessfulRequests as exc:
+                generation = exc.result
+                generation_failure = exc
             active_genai_descriptor = write_genai_artifacts(
                 spark,
                 genai_execution.artifact_root,
@@ -10315,6 +10411,8 @@ def executa_clonagem(
                 region=genai_execution.region,
                 source_policy_uri=genai_execution.policy_uri,
             )
+            if generation_failure is not None:
+                raise generation_failure
             if phase == "all":
                 genai_replacements = load_genai_replacements(spark, active_genai_descriptor)
     if selected_provenances is not None:
@@ -10839,6 +10937,8 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
             )
         if job.fator_k > GENAI_MAX_FACTOR_K:
             raise ValueError(f"GenAI supports fator_k <= {GENAI_MAX_FACTOR_K}")
+        if type(job.genai_concurrency) is not int or job.genai_concurrency < 1:
+            raise ValueError("genai_concurrency must be a positive integer")
         if job.phase in {"all", "plan"}:
             for field_name in (
                 "genai_policy",
@@ -11007,6 +11107,7 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
                 endpoint_id=job.genai_endpoint_id,
                 compartment_id=job.genai_compartment_id,
                 region=job.genai_region,
+                max_concurrency=job.genai_concurrency,
             )
         num_ifs = list(job.num_ifs) if job.num_ifs is not None else None
         n_instrumentos = job.n_instrumentos
@@ -11455,6 +11556,9 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--genai-endpoint-id", default=None)
     parser.add_argument("--genai-compartment-id", default=None)
     parser.add_argument("--genai-region", default=None)
+    parser.add_argument(
+        "--genai-concurrency", type=int, default=GENAI_DEFAULT_CONCURRENCY
+    )
     parser.add_argument("--genai-artifact-root", default=None)
     args = parser.parse_args(argv)
     has_selection = (args.num_ifs is not None) + (args.n_instrumentos is not None)
@@ -11544,6 +11648,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             genai_endpoint_id=args.genai_endpoint_id,
             genai_compartment_id=args.genai_compartment_id,
             genai_region=args.genai_region,
+            genai_concurrency=args.genai_concurrency,
             genai_artifact_root=args.genai_artifact_root,
         )
     )

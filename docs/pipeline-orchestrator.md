@@ -239,3 +239,12 @@ FAILED and CANCELLED products include the problem node, the last Data Flow run I
 a shortened error; complete details remain in the manifest. The final lines print both
 the local and OCI manifest paths plus `upload=SUCCEEDED|FAILED`. A manifest-upload
 failure still renders the product summary and changes the pipeline result to FAILED.
+
+## Benchmark GenAI concurrency
+
+Set `genai.max_concurrency` in the environment config. It defaults to `4` and accepts
+any positive integer. Start with the same 100-source, `K=1` input at `4`, `8`, `16`, and
+`32`; use a new immutable run ID for each measurement. The GenAI manifest reports the
+configured/effective concurrency, endpoint status counts, successful-call p50/p95/max
+latency, endpoint calls per second, and sources per second. Stop increasing when
+throttling appears, p95 latency grows materially, or throughput stops scaling.

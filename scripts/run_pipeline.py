@@ -61,8 +61,9 @@ MANIFEST_REPLACE_ATTEMPTS = 8
 MANIFEST_REPLACE_DELAY_SECONDS = 0.05
 MANIFEST_REPLACE_MAX_DELAY_SECONDS = 0.5
 OFFLINE_ARTIFACT_MARKER = "_DATAGEN_OFFLINE.json"
-GENAI_MAX_SOURCE_INSTRUMENTS = 100
+GENAI_MAX_SOURCE_INSTRUMENTS = 10000
 GENAI_MAX_FACTOR_K = 5
+GENAI_DEFAULT_CONCURRENCY = 4
 
 RUN_ARGS_FLAG = "--arguments"
 PENDING_STATES = {"ACCEPTED", "IN_PROGRESS", "CANCELING", "STOPPING"}
@@ -2045,7 +2046,7 @@ def require_configured_products(config: Mapping[str, Any], products: Sequence[st
         )
 
 
-def resolve_genai_config(config: Mapping[str, Any], *, enabled: bool) -> dict[str, str] | None:
+def resolve_genai_config(config: Mapping[str, Any], *, enabled: bool) -> dict[str, Any] | None:
     if not enabled:
         return None
     genai = config.get("genai")
@@ -2059,6 +2060,10 @@ def resolve_genai_config(config: Mapping[str, Any], *, enabled: bool) -> dict[st
         raise PipelineError("config.genai.endpoint_id must be a Generative AI endpoint OCID")
     if not resolved["compartment_id"].startswith("ocid1.compartment."):
         raise PipelineError("config.genai.compartment_id must be a compartment OCID")
+    max_concurrency = genai.get("max_concurrency", GENAI_DEFAULT_CONCURRENCY)
+    if type(max_concurrency) is not int or max_concurrency < 1:
+        raise PipelineError("config.genai.max_concurrency must be a positive integer")
+    resolved["max_concurrency"] = max_concurrency
     defaults = config.get("stage_defaults", {}).get("engorda", {})
     policy = _need_string(defaults, "genai_policy", "config.stage_defaults.engorda")
     if not policy.startswith("oci://"):
@@ -2209,6 +2214,8 @@ def build_engorda_plan_argv(
             str(options["genai_compartment_id"]),
             "--genai-region",
             str(options["genai_region"]),
+            "--genai-concurrency",
+            str(options["genai_concurrency"]),
             "--genai-artifact-root",
             paths["genai"],
         ]
@@ -2457,6 +2464,7 @@ def build_pipeline_plan(
                     "genai_endpoint_id": genai_config["endpoint_id"],
                     "genai_compartment_id": genai_config["compartment_id"],
                     "genai_region": genai_config["region"],
+                    "genai_concurrency": genai_config["max_concurrency"],
                 }
             )
         validate_options = {
