@@ -372,6 +372,46 @@ class TestGenAiGeneration:
         assert result.metrics.fallback_cells == 2
         assert {row.status for row in result.rows} == {"FALLBACK_INVALID"}
 
+    def test_retries_text_not_representable_in_oracle_charset(self):
+        request = E.build_genai_request(
+            sample_instrument(),
+            policy=resolved_policy(),
+            clone_factor=1,
+            run_seed=42,
+        )
+        adapter = ScriptedAdapter(
+            [
+                json.dumps(
+                    {
+                        "variants": [
+                            {
+                                "k": 1,
+                                "values": {
+                                    "t0001": "Observação — teste",
+                                    "t0002": "Característica válida",
+                                },
+                            }
+                        ]
+                    }
+                ),
+                json.dumps(
+                    {
+                        "variants": [
+                            {"k": 1, "values": {"t0001": "Observação - teste"}}
+                        ]
+                    }
+                ),
+            ]
+        )
+
+        result = E.generate_genai_replacements([request], adapter=adapter)
+
+        rows = {row.target_id: row for row in result.rows}
+        assert rows["t0001"].generated_value == "Observação - teste"
+        assert rows["t0001"].attempt_count == 2
+        assert rows["t0002"].generated_value == "Característica válida"
+        assert len(adapter.calls) == 2
+
     def test_repeated_event_rows_receive_distinct_target_identities(self):
         base = sample_instrument()
         second_event = E.GenAiSourceRow(

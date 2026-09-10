@@ -864,6 +864,7 @@ GENAI_LOGICAL_ATTEMPTS = 3
 GENAI_TRANSPORT_ATTEMPTS = 3
 GENAI_READ_TIMEOUT_SECONDS = 120
 GENAI_MAX_CONTEXT_CHARS = 50_000
+GENAI_ORACLE_ENCODING = "iso-8859-1"
 GENAI_REVIEWED_TARGETS = (
     ("INSTRUMENTO_FINANCEIRO", "TXT_CARACT_COMPLEMENTARES", 772),
     ("EVENTO", "TXT_OBSERVACAO", 60),
@@ -1564,7 +1565,10 @@ def _build_genai_attempt(
         attempt_number=attempt_number,
         expected=expected_sorted,
         payload_json=_genai_canonical_json(payload),
-        system_instruction=request.policy.system_instruction,
+        system_instruction=(
+            request.policy.system_instruction
+            + " Use somente caracteres ISO-8859-1 e respeite max_chars em bytes."
+        ),
         seed=_genai_attempt_seed(request, attempt_number),
         retry_token=retry_token,
         temperature=request.policy.temperature,
@@ -1609,8 +1613,13 @@ def _parse_genai_response(
             identity = (clone, target_id)
             if identity not in expected:
                 return {}
-            if isinstance(value, str) and len(value) <= cells[target_id].max_chars:
-                resolved[identity] = value
+            if isinstance(value, str):
+                try:
+                    encoded = value.encode(GENAI_ORACLE_ENCODING)
+                except UnicodeEncodeError:
+                    continue
+                if len(encoded) <= cells[target_id].max_chars:
+                    resolved[identity] = value
     return resolved
 
 

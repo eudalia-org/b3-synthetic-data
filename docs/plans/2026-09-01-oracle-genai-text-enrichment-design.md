@@ -32,13 +32,14 @@ context small enough for one request per source instrument in the pilot.
 
 Observed target-column evidence:
 
-| Column | Observed role | Generation maximum |
+| Column | Observed role | Generation maximum bytes |
 |---|---|---:|
-| `INSTRUMENTO_FINANCEIRO.TXT_CARACT_COMPLEMENTARES` | Mostly opaque identifiers, with occasional capacity-test labels | 772 characters |
-| `EVENTO.TXT_OBSERVACAO` | Prose/templates mixed with numeric identifiers and multiline values | 60 characters |
-| `OPERACAO.TXT_HISTORICO` | Prose mixed with UUIDs, hashes, timestamps, and protocol strings | 138 characters |
+| `INSTRUMENTO_FINANCEIRO.TXT_CARACT_COMPLEMENTARES` | Mostly opaque identifiers, with occasional capacity-test labels | 772 bytes |
+| `EVENTO.TXT_OBSERVACAO` | Prose/templates mixed with numeric identifiers and multiline values | 60 bytes |
+| `OPERACAO.TXT_HISTORICO` | Prose mixed with UUIDs, hashes, timestamps, and protocol strings | 138 bytes |
 
-The maxima are observed Parquet maxima, not verified Oracle column domains. The
+The maxima are observed Parquet maxima, not verified Oracle column domains. Generated
+values must encode strictly as ISO-8859-1 and fit these maxima in encoded bytes. The
 current orchestrated validator is `scripts/validate_products.py`; it does not consume
 the older `schema.json` contract used by `datagen/validate_tables.py`. Oracle-domain
 length validation is therefore explicitly deferred.
@@ -224,7 +225,7 @@ Initial shape:
 ```
 
 Sampling settings and field instructions come from the policy. Operators cannot override
-temperature, top-p, token count, target columns, prompts, or character limits per run.
+temperature, top-p, token count, target columns, prompts, or encoded-byte limits per run.
 
 The source-instrument, clone-factor, attempt, timeout, and context limits are engine
 constants for the pilot and do not appear in the policy. Concurrency is deployment
@@ -233,7 +234,9 @@ telemetry. For version 1,
 `cdb_simplificado` must contain exactly the three pilot targets and must exclude exactly
 `LANCAMENTO.TXT_XML_LANCAMENTO` from context. A changed target/exclusion set requires a
 new supported policy version and code review. Version 1 also requires the exact reviewed
-character maxima of 772, 60, and 138 respectively; unknown unrelated keys remain ignored.
+encoded-byte maxima of 772, 60, and 138 respectively; unknown unrelated keys remain
+ignored. The version-1 JSON field remains named `max_chars` for compatibility, but its
+normative unit is encoded ISO-8859-1 bytes.
 
 The resolved product policy is persisted beside every enabled plan/output and hashed
 into lineage. Persisting the policy and the pre-existing selected-lote source snapshot is
@@ -295,10 +298,12 @@ clone indices `1..K`:
 ```
 
 The response schema requires exactly the expected clone indices and target IDs, string
-values, and no duplicate identities. Character limits come from the external policy.
+values, and no duplicate identities. Byte limits come from the external policy. Local
+acceptance additionally requires strict ISO-8859-1 encoding so output is representable
+in the target Oracle `WE8ISO8859P1` database charset.
 Before a call, the planner computes an unescaped decoded-value character budget from the
-eligible row count, clone factor, target character limits, and exact JSON envelope using
-one safe ASCII placeholder per allowed value character. As an admission heuristic, it
+eligible row count, clone factor, target byte limits, and exact JSON envelope using one
+safe single-byte ASCII placeholder per allowed output byte. As an admission heuristic, it
 sends the request only when that budget is at most `2 * max_tokens` characters. This is
 not a maximum wire size: JSON escaping can expand values, and character count cannot
 guarantee the Meta Llama token count without the endpoint model's tokenizer. Endpoint
@@ -307,8 +312,9 @@ the heuristic output budget is not sent; its cells keep source values and are re
 as `OUTPUT_BUDGET_EXCEEDED`.
 
 "Brazilian Portuguese prose" is a prompt objective, not a local acceptance rule. Local
-validation checks identities, JSON/string shape, and configured character lengths only;
-identifier-shaped, English, repeated, or source-equal output remains valid by design.
+validation checks identities, JSON/string shape, strict ISO-8859-1 representability, and
+configured encoded-byte lengths; identifier-shaped, English, repeated, or source-equal
+output remains valid by design.
 
 ### Attempts and partial fallback
 
