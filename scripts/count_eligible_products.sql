@@ -1,6 +1,7 @@
 -- Spark SQL: contagens elegiveis segundo datagen/queries_produtos.sql.
 -- Snapshot do catalogo local em 2026-09-10. Atualize junto com o catalogo.
 -- Execute o setup uma vez; depois execute cada SELECT separadamente na mesma sessao.
+-- OCI Data Science: use count_eligible_products.ipynb para executar via spark.sql().
 -- Requer conector OCI e permissao de leitura no bucket.
 -- Cada resultado conta NUM_IF distintos da query completa, sem LIMIT/amostragem.
 -- Elegibilidade RAW nao substitui admissao no destino nem validacao do sintetico.
