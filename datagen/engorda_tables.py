@@ -807,6 +807,20 @@ MAPA_NUM_IF_TABLE = "MAPA_CLONE_NUM_IF"
 MAPA_COD_IF_TABLE = "MAPA_CLONE_COD_IF"
 MAPA_COD_OPERACAO_TABLE = "MAPA_CLONE_COD_OPERACAO"
 OFFLINE_ARTIFACT_MARKER = "_DATAGEN_OFFLINE.json"
+CCB_CLASSIFICATION_PRODUCTS = frozenset(
+    {"ccb_pppre", "ccb_pfpre", "ccb_pgrpre", "ccb_favcp", "ccb_fapre"}
+)
+CCB_CLASSIFICATION_COLUMNS = ("NUM_IF", "RENT_INDEXADOR_TAXA_FLU", "FORMA_PAGAMENTO")
+CCB_CLASSIFICATION_OUTPUT_COLUMNS = (
+    "NUM_IF_ORIG",
+    "K",
+    "NUM_IF",
+    "RENT_INDEXADOR_TAXA_FLU",
+    "FORMA_PAGAMENTO",
+)
+CCB_CLASSIFICATION_TABLE = "_CCB_CLASSIFICATION"
+CCB_CLASSIFICATION_MANIFEST = "_CCB_CLASSIFICATION.json"
+CCB_CLASSIFICATION_HASH_ALGORITHM = "sha256-bucket-sums-v1"
 DEFAULT_ORACLE_CODE_BATCH_SIZE = 50_000
 MAX_MEU_NUMERO_ORDINAL = 9_999_999
 MEU_PREFIX_PATTERN = re.compile(r"^[1-9][0-9]{2}$")
@@ -3447,6 +3461,272 @@ def load_genai_replacements(spark: SparkSession, descriptor: Mapping[str, Any]) 
     if _genai_replacement_hash(frame) != replacements.get("content_sha256"):
         raise ValueError("GenAI replacement content hash differs from plan descriptor")
     return frame
+
+
+def _ccb_classification_fingerprint(frame: DataFrame, columns: Sequence[str]) -> dict[str, Any]:
+    row_hash = F.sha2(
+        F.to_json(
+            F.struct(*[F.col(column).cast("string").alias(column) for column in columns]),
+            options={"ignoreNullFields": "false"},
+        ),
+        256,
+    )
+    hashed = frame.select(row_hash.alias("__hash"))
+    summaries = (
+        hashed.withColumn(
+            "bucket", (F.conv(F.substring("__hash", 1, 8), 16, 10).cast("long") % 256)
+        )
+        .groupBy("bucket")
+        .agg(
+            F.count(F.lit(1)).alias("count"),
+            *[
+                F.sum(
+                    F.conv(F.substring("__hash", 1 + index * 16, 16), 16, 10).cast("decimal(38,0)")
+                ).alias(f"s{index}")
+                for index in range(4)
+            ],
+        )
+        .collect()
+    )
+    # Apenas os 256 resumos chegam ao driver, nunca as classificacoes ou chaves.
+    records = [
+        {
+            "bucket": int(row["bucket"]),
+            "count": int(row["count"]),
+            **{f"s{index}": str(row[f"s{index}"]) for index in range(4)},
+        }
+        for row in sorted(summaries, key=lambda row: row["bucket"])
+    ]
+    serialized = json.dumps(records, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return {
+        "row_count": sum(row["count"] for row in records),
+        "sha256": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+    }
+
+
+def _validate_ccb_classification_descriptor(descriptor: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(descriptor, Mapping) or set(descriptor) != {
+        "artifact_type",
+        "schema_version",
+        "hash_algorithm",
+        "uri",
+        "row_count",
+        "sha256",
+    }:
+        raise ValueError("CCB ccb_classification descriptor invalido")
+    if (
+        descriptor["artifact_type"] != "ccb_classification_source"
+        or type(descriptor["schema_version"]) is not int
+        or descriptor["schema_version"] != 1
+        or descriptor["hash_algorithm"] != CCB_CLASSIFICATION_HASH_ALGORITHM
+    ):
+        raise ValueError("CCB descriptor artifact/schema/hash_algorithm invalido")
+    if not isinstance(descriptor["uri"], str) or not descriptor["uri"].strip():
+        raise ValueError("CCB plano exige uri de snapshot imutavel")
+    if type(descriptor["row_count"]) is not int or descriptor["row_count"] < 1:
+        raise ValueError("CCB descriptor row_count deve ser positivo")
+    if not isinstance(descriptor["sha256"], str) or not re.fullmatch(
+        r"[0-9a-f]{64}", descriptor["sha256"]
+    ):
+        raise ValueError("CCB descriptor sha256 invalido")
+    return dict(descriptor)
+
+
+def _validate_ccb_classification_schema(frame: DataFrame, columns: Sequence[str]) -> None:
+    expected = [(column, "bigint" if column == "K" else "string") for column in columns]
+    if frame.dtypes != expected:
+        raise ValueError(f"CCB schema invalido: esperado {expected}, recebido {frame.dtypes}")
+
+
+@contextmanager
+def _load_ccb_classification_source(
+    spark: SparkSession,
+    config: Mapping[str, str],
+    product: str,
+    roots: DataFrame,
+    *,
+    descriptor: Optional[Mapping[str, Any]] = None,
+):
+    if product not in CCB_CLASSIFICATION_PRODUCTS:
+        yield None, None
+        return
+    frozen = _validate_ccb_classification_descriptor(descriptor) if descriptor is not None else None
+    uri = frozen["uri"] if frozen is not None else raw_path(dict(config), "ACTPCCB_CONDICAO_IF")
+    try:
+        source = spark.read.parquet(uri)
+    except Exception as exc:
+        raise ValueError(f"CCB classificacao ausente/ilegivel em {uri}: {exc}") from exc
+    root_keys = roots.select(_norm_key_col(F.col("NUM_IF")).alias("NUM_IF")).distinct()
+    if frozen is not None:
+        _validate_ccb_classification_schema(source, CCB_CLASSIFICATION_COLUMNS)
+    else:
+        if not set(CCB_CLASSIFICATION_COLUMNS).issubset(source.columns):
+            raise ValueError("CCB classificacao sem colunas obrigatorias em ACTPCCB_CONDICAO_IF")
+        source = (
+            source.select(
+                _norm_key_col(F.col("NUM_IF")).alias("NUM_IF"),
+                *[
+                    F.col(column).cast("string").alias(column)
+                    for column in CCB_CLASSIFICATION_COLUMNS[1:]
+                ],
+            )
+            .hint("merge")
+            .join(root_keys.hint("merge"), "NUM_IF", "left_semi")
+            .distinct()
+        )
+    # Cache somente a projecao selecionada; todas as validacoes/escritas reutilizam a leitura RAW.
+    source = source.persist(StorageLevel.MEMORY_AND_DISK)
+    try:
+        invalid = reduce(
+            lambda left, right: left | right,
+            [
+                F.col(column).isNull() | (F.trim(F.col(column)) == "")
+                for column in CCB_CLASSIFICATION_COLUMNS
+            ],
+        ) | (F.col("NUM_IF") != _norm_key_col(F.col("NUM_IF")))
+        if source.where(invalid).limit(1).count():
+            raise ValueError("CCB classificacao null/vazia ou NUM_IF nao canonico")
+        if source.groupBy("NUM_IF").count().where(F.col("count") > 1).limit(1).count():
+            raise ValueError("CCB classificacao conflitante/duplicada por NUM_IF")
+        keys = source.select("NUM_IF").hint("merge")
+        missing = root_keys.hint("merge").join(keys, "NUM_IF", "left_anti")
+        extra = keys.join(root_keys.hint("merge"), "NUM_IF", "left_anti")
+        if missing.unionByName(extra).limit(1).count():
+            raise ValueError("CCB classificacao: cobertura diverge das raizes congeladas")
+        fingerprint = _ccb_classification_fingerprint(source, CCB_CLASSIFICATION_COLUMNS)
+        if fingerprint["row_count"] < 1:
+            raise ValueError("CCB classificacao vazia")
+        if frozen is not None and any(fingerprint[key] != frozen[key] for key in fingerprint):
+            raise ValueError("CCB snapshot count/hash fingerprint diverge do plano")
+        yield (
+            source,
+            frozen
+            or {
+                "artifact_type": "ccb_classification_source",
+                "schema_version": 1,
+                "hash_algorithm": CCB_CLASSIFICATION_HASH_ALGORITHM,
+                "uri": None,
+                **fingerprint,
+            },
+        )
+    finally:
+        source.unpersist(blocking=False)
+
+
+def _verify_ccb_classification_parquet(
+    spark: SparkSession,
+    uri: str,
+    columns: Sequence[str],
+    expected: Mapping[str, Any],
+) -> None:
+    persisted = spark.read.parquet(uri).persist(StorageLevel.MEMORY_AND_DISK)
+    try:
+        _validate_ccb_classification_schema(persisted, columns)
+        fingerprint = _ccb_classification_fingerprint(persisted, columns)
+        if any(fingerprint[key] != expected[key] for key in fingerprint):
+            raise ValueError(f"CCB readback count/hash fingerprint diverge em {uri}")
+    finally:
+        persisted.unpersist(blocking=False)
+
+
+def _freeze_ccb_classification_source(
+    spark: SparkSession,
+    config: Mapping[str, str],
+    product: str,
+    roots: DataFrame,
+    plan_uri: str,
+) -> Optional[dict[str, Any]]:
+    with _load_ccb_classification_source(spark, config, product, roots) as (source, descriptor):
+        if source is None:
+            return None
+        uri = f"{plan_uri.rstrip('/')}.ccb-classification/{uuid.uuid4()}"
+        _assert_exact_output_absent(spark, uri)
+        escreve_tabela(spark, source, uri, expected_rows=descriptor["row_count"])
+        _verify_ccb_classification_parquet(spark, uri, CCB_CLASSIFICATION_COLUMNS, descriptor)
+        return {**descriptor, "uri": uri}
+
+
+def _write_ccb_classification_evidence(
+    spark: SparkSession,
+    config: Mapping[str, str],
+    product: str,
+    roots: DataFrame,
+    root_mapping: DataFrame,
+    *,
+    fator_k: int,
+    output_base: Optional[str],
+    output_uri: str,
+    plan: Optional[Mapping[str, Any]] = None,
+) -> None:
+    if product not in CCB_CLASSIFICATION_PRODUCTS:
+        return
+    if type(fator_k) is not int or fator_k < 1:
+        raise ValueError("CCB fator_k deve ser inteiro positivo")
+    if plan is not None and plan.get("ccb_classification") is None:
+        raise ValueError("CCB sem evidencia congelada: replan com phase plan antes de materializar")
+    with _load_ccb_classification_source(
+        spark,
+        config,
+        product,
+        roots,
+        descriptor=plan["ccb_classification"] if plan is not None else None,
+    ) as (source, descriptor):
+        mapping = root_mapping.select(
+            _norm_key_col(F.col("old_NUM_IF")).alias("NUM_IF_ORIG"),
+            F.col(K_COL).cast("long").alias("K"),
+            _norm_key_col(F.col("new_NUM_IF")).alias("NUM_IF"),
+        )
+        generated = (
+            mapping.hint("merge")
+            .join(
+                source.withColumnRenamed("NUM_IF", "NUM_IF_ORIG").hint("merge"),
+                "NUM_IF_ORIG",
+                "left",
+            )
+            .select(*CCB_CLASSIFICATION_OUTPUT_COLUMNS)
+            .persist(StorageLevel.MEMORY_AND_DISK)
+        )
+        try:
+            invalid = reduce(
+                lambda left, right: left | right,
+                [
+                    F.col(column).isNull() | (F.trim(F.col(column).cast("string")) == "")
+                    for column in CCB_CLASSIFICATION_OUTPUT_COLUMNS
+                ],
+            ) | ~F.col("K").between(1, fator_k)
+            if generated.where(invalid).limit(1).count():
+                raise ValueError("CCB evidencia: cobertura/chaves/K invalidos")
+            for keys in (("NUM_IF",), ("NUM_IF_ORIG", "K")):
+                if generated.groupBy(*keys).count().where(F.col("count") > 1).limit(1).count():
+                    raise ValueError(f"CCB evidencia: chaves duplicadas {keys}")
+            fingerprint = _ccb_classification_fingerprint(
+                generated, CCB_CLASSIFICATION_OUTPUT_COLUMNS
+            )
+            if fingerprint["row_count"] != descriptor["row_count"] * fator_k:
+                raise ValueError("CCB evidencia: cobertura incompleta de raizes/K")
+            if output_base is None:
+                return  # dry-run valida sem gravar nem criar snapshot.
+            uri = f"{output_base}/{CCB_CLASSIFICATION_TABLE}"
+            escreve_tabela(spark, generated, uri, expected_rows=fingerprint["row_count"])
+            _verify_ccb_classification_parquet(
+                spark, uri, CCB_CLASSIFICATION_OUTPUT_COLUMNS, fingerprint
+            )
+            manifest = {
+                "artifact_type": "ccb_classification_evidence",
+                "schema_version": 1,
+                "product": product,
+                "output_uri": output_uri,
+                "plan_id": plan["plan_id"] if plan is not None else None,
+                "fator_k": fator_k,
+                "source": descriptor,
+                "generated": fingerprint,
+            }
+            manifest_uri = f"{output_base}/{CCB_CLASSIFICATION_MANIFEST}"
+            _write_json_artifact(spark, manifest_uri, manifest)
+            if _read_json_artifact(spark, manifest_uri) != manifest:
+                raise ValueError("CCB manifest readback diverge")
+        finally:
+            generated.unpersist(blocking=False)
 
 
 def _plan_id(plan_without_id: Mapping[str, Any]) -> str:
@@ -9519,8 +9799,11 @@ def _build_engorda_plan(
     meu_numero_prefix: Optional[str] = None,
     no_oracle: bool = False,
     genai_descriptor: Optional[Mapping[str, Any]] = None,
+    ccb_classification: Optional[Mapping[str, Any]] = None,
     schema_version: int = ENGORDA_PLAN_SCHEMA_VERSION,
 ) -> dict[str, Any]:
+    if product_profile.name in CCB_CLASSIFICATION_PRODUCTS and ccb_classification is None:
+        raise ValueError("CCB novo plano exige ccb_classification congelada")
     if schema_version not in {
         ENGORDA_LEGACY_PLAN_SCHEMA_VERSION,
         ENGORDA_PLAN_SCHEMA_VERSION,
@@ -9633,6 +9916,8 @@ def _build_engorda_plan(
         body["oracle_access"] = "disabled"
     if genai_descriptor is not None:
         body["genai"] = dict(genai_descriptor)
+    if ccb_classification is not None:
+        body["ccb_classification"] = _validate_ccb_classification_descriptor(ccb_classification)
     return {**body, "plan_id": _plan_id(body)}
 
 
@@ -9763,6 +10048,8 @@ def _validate_plan_artifact(plan: Mapping[str, Any]) -> dict[str, Any]:
     if plan.get("oracle_access", "live") not in {"live", "disabled"}:
         raise ValueError("artefato de plano possui oracle_access inválido")
     _validate_meu_numero_plan_descriptor(plan)
+    if "ccb_classification" in plan:
+        _validate_ccb_classification_descriptor(plan["ccb_classification"])
     genai = plan.get("genai")
     if genai is not None:
         if not isinstance(genai, Mapping) or genai.get("enabled") is not True:
@@ -10018,6 +10305,13 @@ def executa_clonagem(
     if phase == "materialize":
         if planned_artifact is None or reservation is None:
             raise ValueError("materialize exige plano e reserva validados")
+        if (
+            product_profile.name in CCB_CLASSIFICATION_PRODUCTS
+            and planned_artifact.get("ccb_classification") is None
+        ):
+            raise ValueError(
+                "CCB sem evidencia congelada: replan com phase plan antes de materializar"
+            )
         planned_no_oracle = planned_artifact.get("oracle_access", "live") == "disabled"
         if no_oracle != planned_no_oracle:
             raise ValueError("materialize --no-oracle diverge do oracle_access congelado no plano")
@@ -10429,9 +10723,15 @@ def executa_clonagem(
             provenance.unpersist(blocking=False)
 
     current_plan: Optional[dict[str, Any]] = None
+    ccb_classification = (
+        planned_artifact.get("ccb_classification") if phase == "materialize" else None
+    )
     if phase == "plan":
         if not plan_uri:
             raise ValueError("phase plan exige plan_uri")
+        ccb_classification = _freeze_ccb_classification_source(
+            spark, config, produto, lotes[TABELA_RAIZ], plan_uri
+        )
         snapshot_faltantes_seletivos = _faltantes_seletivos_para_snapshot(
             faltantes, product_profile.integrity.selective_missing_keys
         )
@@ -10471,6 +10771,7 @@ def executa_clonagem(
             meu_numero_prefix=requested_meu_numero_prefix,
             no_oracle=no_oracle,
             genai_descriptor=active_genai_descriptor,
+            ccb_classification=ccb_classification,
             schema_version=(
                 int(planned_artifact["schema_version"])
                 if phase == "materialize"
@@ -10629,6 +10930,17 @@ def executa_clonagem(
         )
 
     def _prepare_outputs(output_base: Optional[str], is_dry_run: bool) -> None:
+        _write_ccb_classification_evidence(
+            spark,
+            config,
+            produto,
+            lotes[TABELA_RAIZ],
+            mapeamentos[TABELA_RAIZ],
+            fator_k=fator_k,
+            output_base=output_base,
+            output_uri=save_base,
+            plan=current_plan,
+        )
         code_allocation_date = controle_operacional_date or engorda_ts.date()
         instrumentos, n_raiz = resultados[TABELA_RAIZ]
         slots_if = _code_slots(
@@ -11129,6 +11441,13 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
         anular_cols = job.anular_cols
         if job.phase == "materialize":
             planned_artifact = _validate_plan_artifact(_read_json_artifact(spark, job.plan_uri))
+            if (
+                profile.name in CCB_CLASSIFICATION_PRODUCTS
+                and planned_artifact.get("ccb_classification") is None
+            ):
+                raise ValueError(
+                    "CCB sem evidencia congelada: replan com phase plan antes de materializar"
+                )
             reservation = _validate_reservation_artifact(
                 planned_artifact,
                 _read_json_artifact(spark, job.reservation_uri),

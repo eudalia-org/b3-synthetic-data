@@ -64,9 +64,11 @@ Usage
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
+import re
 import sys
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
@@ -964,7 +966,11 @@ def list_table_dirs(spark: SparkSession, base: str) -> List[str]:
         fs = p.getFileSystem(hconf)
         if not fs.exists(p):
             return []
-        return sorted(st.getPath().getName() for st in fs.listStatus(p) if st.isDirectory())
+        return sorted(
+            st.getPath().getName()
+            for st in fs.listStatus(p)
+            if st.isDirectory() and st.getPath().getName() != "_CCB_CLASSIFICATION"
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not auto-list tables under %s: %s", base, exc)
         return []
@@ -974,6 +980,7 @@ def read_synthetic_tables(
     spark: SparkSession, base: str, only: Optional[List[str]]
 ) -> Dict[str, DataFrame]:
     names = only if only else list_table_dirs(spark, base)
+    names = [name for name in names if name != "_CCB_CLASSIFICATION"]
     if not names:
         raise SystemExit(f"No synthetic tables found under {base}. Pass --tables to be explicit.")
     tables: Dict[str, DataFrame] = {}
@@ -15377,8 +15384,253 @@ def check_log_invariants(
 # ---------------------------------------------------------------------------
 # Opt-in Osias ERROR profile
 # ---------------------------------------------------------------------------
+CCB_CLASSIFICATION_SOURCE_COLUMNS = ("NUM_IF", "RENT_INDEXADOR_TAXA_FLU", "FORMA_PAGAMENTO")
+CCB_CLASSIFICATION_OUTPUT_COLUMNS = (
+    "NUM_IF_ORIG",
+    "K",
+    "NUM_IF",
+    "RENT_INDEXADOR_TAXA_FLU",
+    "FORMA_PAGAMENTO",
+)
+
+
+def _ccb_classification_fingerprint(frame: DataFrame, columns: Sequence[str]) -> dict:
+    """Versioned content checksum; only the 256 bucket summaries reach the driver."""
+    hashed = frame.select(
+        F.sha2(
+            F.to_json(
+                F.struct(*[F.col(name).cast("string").alias(name) for name in columns]),
+                options={"ignoreNullFields": "false"},
+            ),
+            256,
+        ).alias("row_hash")
+    ).withColumn("bucket", F.conv(F.substring("row_hash", 1, 8), 16, 10).cast("long") % 256)
+    rows = (
+        hashed.groupBy("bucket")
+        .agg(
+            F.count(F.lit(1)).alias("count"),
+            *[
+                F.sum(
+                    F.conv(F.substring("row_hash", 1 + index * 16, 16), 16, 10).cast(
+                        "decimal(38,0)"
+                    )
+                ).alias(f"s{index}")
+                for index in range(4)
+            ],
+        )
+        .collect()
+    )
+    summaries = [
+        {
+            "bucket": int(row["bucket"]),
+            "count": int(row["count"]),
+            **{f"s{index}": str(row[f"s{index}"]) for index in range(4)},
+        }
+        for row in sorted(rows, key=lambda row: row["bucket"])
+    ]
+    payload = json.dumps(summaries, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return {
+        "row_count": sum(row["count"] for row in summaries),
+        "sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+    }
+
+
+def load_ccb_classification_evidence(
+    spark: SparkSession, base: str, tables: Dict[str, DataFrame]
+) -> Optional[DataFrame]:
+    """Validate published evidence without reading RAW or the frozen source URI.
+
+    None means both sidecar parts are absent. Any present invalid part raises;
+    callers must not fall back to an actual ACTPCCB table in that case.
+    """
+    path = spark._jvm.org.apache.hadoop.fs.Path(base)
+    fs = path.getFileSystem(spark._jsc.hadoopConfiguration())
+    parquet_path = spark._jvm.org.apache.hadoop.fs.Path(path, "_CCB_CLASSIFICATION")
+    manifest_path = spark._jvm.org.apache.hadoop.fs.Path(path, "_CCB_CLASSIFICATION.json")
+    parts = (fs.exists(parquet_path), fs.exists(manifest_path))
+    if not any(parts):
+        return None
+    if not all(parts):
+        raise ValueError("Incomplete CCB classification sidecar: Parquet and JSON are required.")
+    manifest = json.loads(read_text(spark, f"{base.rstrip('/')}/_CCB_CLASSIFICATION.json"))
+    if not isinstance(manifest, dict):
+        raise ValueError("CCB classification manifest must be an object.")
+    for descriptor, artifact in (
+        (manifest, "ccb_classification_evidence"),
+        (manifest.get("source"), "ccb_classification_source"),
+    ):
+        if (
+            not isinstance(descriptor, dict)
+            or descriptor.get("artifact_type") != artifact
+            or type(descriptor.get("schema_version")) is not int
+            or descriptor["schema_version"] != 1
+        ):
+            raise ValueError(f"Invalid {artifact} artifact_type/schema_version.")
+    source = manifest["source"]
+    if source.get("hash_algorithm") != "sha256-bucket-sums-v1":
+        raise ValueError("Unsupported CCB source hash_algorithm.")
+    if manifest.get("product") not in (
+        "ccb_pppre",
+        "ccb_pfpre",
+        "ccb_pgrpre",
+        "ccb_favcp",
+        "ccb_fapre",
+    ):
+        raise ValueError("Unknown CCB classification product.")
+    output_uri = manifest.get("output_uri")
+    if not isinstance(output_uri, str) or not output_uri.strip():
+        raise ValueError("CCB classification output_uri is required.")
+    declared_path = spark._jvm.org.apache.hadoop.fs.Path(output_uri)
+    declared_fs = declared_path.getFileSystem(spark._jsc.hadoopConfiguration())
+    if declared_fs.makeQualified(declared_path).toString().rstrip("/") != fs.makeQualified(
+        path
+    ).toString().rstrip("/"):
+        raise ValueError("CCB classification output_uri does not match this output.")
+    plan_id = manifest.get("plan_id")
+    if "plan_id" not in manifest or (
+        plan_id is not None
+        and (not isinstance(plan_id, str) or not re.fullmatch(r"[0-9a-f]{64}", plan_id))
+    ):
+        raise ValueError("Invalid CCB classification plan_id.")
+    uri = source.get("uri")
+    if "uri" not in source or not (
+        (uri is None and plan_id is None) or (isinstance(uri, str) and bool(uri.strip()))
+    ):
+        raise ValueError("CCB source uri may be null only for direct-all evidence.")
+    factor = manifest.get("fator_k")
+    if type(factor) is not int or factor <= 0:
+        raise ValueError("CCB fator_k must be a positive integer.")
+    generated = manifest.get("generated")
+    for label, descriptor in (("source", source), ("generated", generated)):
+        if (
+            not isinstance(descriptor, dict)
+            or type(descriptor.get("row_count")) is not int
+            or descriptor["row_count"] <= 0
+            or not isinstance(descriptor.get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", descriptor["sha256"])
+        ):
+            raise ValueError(f"Invalid CCB {label} row_count/sha256.")
+    if generated["row_count"] != source["row_count"] * factor:
+        raise ValueError("CCB generated count must equal source count * fator_k.")
+    marker_path = spark._jvm.org.apache.hadoop.fs.Path(path, "_DATAGEN_OFFLINE.json")
+    if fs.exists(marker_path):
+        marker = json.loads(read_text(spark, f"{base.rstrip('/')}/_DATAGEN_OFFLINE.json"))
+        if (
+            not isinstance(marker, dict)
+            or marker.get("product") != manifest["product"]
+            or "plan_id" not in marker
+            or marker["plan_id"] != plan_id
+        ):
+            raise ValueError("CCB classification disagrees with offline marker product/plan_id.")
+    evidence = spark.read.parquet(parquet_path.toString())
+    if evidence.dtypes != list(
+        zip(CCB_CLASSIFICATION_OUTPUT_COLUMNS, ("string", "bigint", "string", "string", "string"))
+    ):
+        raise ValueError(
+            "CCB classification Parquet must have the five ordered contract columns/types."
+        )
+    evidence = evidence.cache()
+    try:
+        invalid = reduce(
+            lambda left, right: left | right,
+            [_oracle_null_equivalent(F.col(name)) for name in CCB_CLASSIFICATION_OUTPUT_COLUMNS],
+        ) | ~F.col("K").between(1, factor)
+        for name in ("NUM_IF_ORIG", "NUM_IF"):
+            invalid |= F.col(name) != F.regexp_replace(F.trim(F.col(name)), r"\.0+$", "")
+        if evidence.where(invalid).limit(1).count():
+            raise ValueError(
+                "CCB classification contains blank/null values, "
+                "noncanonical keys or K out of bounds."
+            )
+        if _ccb_classification_fingerprint(evidence, CCB_CLASSIFICATION_OUTPUT_COLUMNS) != {
+            key: generated[key] for key in ("row_count", "sha256")
+        }:
+            raise ValueError("CCB generated fingerprint mismatch.")
+        projection = evidence.select(
+            F.col("NUM_IF_ORIG").alias("NUM_IF"),
+            "RENT_INDEXADOR_TAXA_FLU",
+            "FORMA_PAGAMENTO",
+        ).distinct()
+        if projection.groupBy("NUM_IF").count().where("count != 1").limit(1).count():
+            raise ValueError("CCB source has conflicting classifications for one original root.")
+        if _ccb_classification_fingerprint(projection, CCB_CLASSIFICATION_SOURCE_COLUMNS) != {
+            key: source[key] for key in ("row_count", "sha256")
+        }:
+            raise ValueError("CCB source projection fingerprint mismatch.")
+        for keys in (("NUM_IF",), ("NUM_IF_ORIG", "K")):
+            if evidence.groupBy(*keys).count().where("count != 1").limit(1).count():
+                raise ValueError(f"CCB classification duplicate key: {keys}.")
+        if evidence.groupBy("NUM_IF_ORIG").count().where(F.col("count") != factor).limit(1).count():
+            raise ValueError("CCB classification lacks full fator_k coverage per original root.")
+        columns, missing = _credito_scr_columns(
+            tables,
+            {
+                "INSTRUMENTO_FINANCEIRO": ("NUM_IF",),
+                "MAPA_CLONE_NUM_IF": ("NUM_IF_ORIG", "K", "NUM_IF_NOVO"),
+            },
+        )
+        if missing:
+            raise ValueError(f"CCB classification requires output root/map columns: {missing}.")
+        roots = (
+            tables["INSTRUMENTO_FINANCEIRO"]
+            .select(
+                F.regexp_replace(
+                    F.trim(F.col(columns["INSTRUMENTO_FINANCEIRO"]["NUM_IF"]).cast("string")),
+                    r"\.0+$",
+                    "",
+                ).alias("NUM_IF")
+            )
+            .distinct()
+        )
+        ids = evidence.select("NUM_IF")
+        if roots.exceptAll(ids).unionByName(ids.exceptAll(roots)).limit(1).count():
+            raise ValueError("CCB classification does not exactly cover output roots.")
+        mapa = tables["MAPA_CLONE_NUM_IF"].select(
+            *[
+                F.regexp_replace(
+                    F.trim(F.col(columns["MAPA_CLONE_NUM_IF"][name]).cast("string")), r"\.0+$", ""
+                ).alias(alias)
+                for name, alias in (
+                    ("NUM_IF_ORIG", "NUM_IF_ORIG"),
+                    ("K", "K"),
+                    ("NUM_IF_NOVO", "NUM_IF"),
+                )
+            ]
+        )
+        expected_map = evidence.select("NUM_IF_ORIG", F.col("K").cast("string"), "NUM_IF")
+        if mapa.exceptAll(expected_map).unionByName(expected_map.exceptAll(mapa)).limit(1).count():
+            raise ValueError("CCB classification does not exactly match MAPA_CLONE_NUM_IF.")
+        return evidence.select(*CCB_CLASSIFICATION_SOURCE_COLUMNS)
+    finally:
+        evidence.unpersist()
+
+
+def check_osias_with_ccb_evidence(
+    spark: SparkSession,
+    base: str,
+    tables: Dict[str, DataFrame],
+    sample: int,
+    profile: ValidationProfile,
+    enabled: bool,
+) -> List[Finding]:
+    """Keep sidecar IO and classifications outside the physical table inventory."""
+    if not enabled or profile.name != "ccb":
+        return check_osias(tables, sample, profile, enabled)
+    try:
+        classification = load_ccb_classification_evidence(spark, base, tables)
+    except Exception as exc:  # noqa: BLE001
+        return check_osias(tables, sample, profile, enabled, ccb_evidence_error=str(exc))
+    return check_osias(tables, sample, profile, enabled, ccb_classification=classification)
+
+
 def check_osias(
-    tables: Dict[str, DataFrame], sample: int, profile: ValidationProfile, enabled: bool
+    tables: Dict[str, DataFrame],
+    sample: int,
+    profile: ValidationProfile,
+    enabled: bool,
+    *,
+    ccb_classification: Optional[DataFrame] = None,
+    ccb_evidence_error: Optional[str] = None,
 ) -> List[Finding]:
     """Enforce the narrow product/scenario rules requested by the Osias profile."""
     if not enabled or profile.name not in {
@@ -15690,6 +15942,22 @@ def check_osias(
         return out
 
     if profile.name == "ccb":
+        if ccb_evidence_error is not None:
+            return with_pu_curve_history(
+                [
+                    Finding(
+                        "9.osias.ccb.classification_evidence",
+                        category,
+                        SEV_ERROR,
+                        "_CCB_CLASSIFICATION",
+                        False,
+                        count=1,
+                        hint="Regenerate CCB output with complete classification evidence; "
+                        "replan old plans.",
+                        message=ccb_evidence_error,
+                    )
+                ]
+            )
         requirements = {
             "INSTRUMENTO_FINANCEIRO": (
                 "NUM_IF",
@@ -15708,9 +15976,17 @@ def check_osias(
                 "COD_SITUACAO_OPERACAO",
             ),
         }
+        if ccb_classification is not None:
+            del requirements["ACTPCCB_CONDICAO_IF"]
         columns, missing = _credito_scr_columns(tables, requirements)
         if missing:
-            return with_pu_curve_history([], missing)
+            findings = with_pu_curve_history([], missing)
+            for item in findings:
+                if item.check_id.endswith(".availability"):
+                    item.hint += (
+                        " Regenerate CCB output with classification evidence; replan old plans."
+                    )
+            return findings
 
         root_cols = columns["INSTRUMENTO_FINANCEIRO"]
         roots = (
@@ -15723,19 +15999,24 @@ def check_osias(
             .select(_canon_key_col(F.col(root_cols["NUM_IF"])).alias("root_id"))
             .dropDuplicates()
         )
-        actp_cols = columns["ACTPCCB_CONDICAO_IF"]
-        variants = (
-            tables["ACTPCCB_CONDICAO_IF"]
-            .select(
+        actp = (
+            ccb_classification if ccb_classification is not None else tables["ACTPCCB_CONDICAO_IF"]
+        )
+        actp_cols = {name: resolve(actp, name) for name in CCB_CLASSIFICATION_SOURCE_COLUMNS}
+        raw_variants = (
+            actp.select(
                 _canon_key_col(F.col(actp_cols["NUM_IF"])).alias("root_id"),
-                F.upper(F.trim(F.col(actp_cols["RENT_INDEXADOR_TAXA_FLU"]).cast("string"))).alias(
-                    "indexer"
-                ),
-                F.upper(F.trim(F.col(actp_cols["FORMA_PAGAMENTO"]).cast("string"))).alias(
-                    "payment"
-                ),
+                F.col(actp_cols["RENT_INDEXADOR_TAXA_FLU"]).cast("string").alias("indexer"),
+                F.col(actp_cols["FORMA_PAGAMENTO"]).cast("string").alias("payment"),
             )
             .join(roots, "root_id", "inner")
+            .distinct()
+        )
+        conflicts = raw_variants.groupBy("root_id").count().where("count > 1").select("root_id")
+        variants = raw_variants.join(conflicts, "root_id", "left_anti").select(
+            "root_id",
+            F.upper(F.trim("indexer")).alias("indexer"),
+            F.upper(F.trim("payment")).alias("payment"),
         )
         discriminators = {
             "favcp": ("VCP", "LIQUIDAÇÃO FORA DO ÂMBITO B3"),
@@ -15774,7 +16055,8 @@ def check_osias(
                 "RENT_INDEXADOR_TAXA_FLU,FORMA_PAGAMENTO",
                 roots.join(classified_roots, "root_id", "left_anti"),
                 ["root_id"],
-                "Every active CCB root must resolve to a known generator scenario.",
+                "Every active CCB root must have one nonconflicting classification "
+                "resolving to a known generator scenario.",
                 "Include the ACTPCCB condition row and exact scenario discriminators.",
             )
         ]
@@ -16407,9 +16689,11 @@ def main() -> None:
         logger.warning("--max-parent-keys is deprecated and ignored; see --max-residual-keys.")
     findings += _run_check_group(
         "category 9 Osias ERROR profile",
-        ("9.osias.",),
+        (f"9.osias.{profile.name}.",),
         skip_prefixes,
-        lambda: check_osias(tables, args.sample_size, profile, args.osias),
+        lambda: check_osias_with_ccb_evidence(
+            spark, cfg.synthetic_base, tables, args.sample_size, profile, args.osias
+        ),
     )
     referential_prefixes = ("3.fk_", "3.shared_key")
     if _check_group_is_skipped(referential_prefixes, skip_prefixes):

@@ -227,6 +227,40 @@ rejected. For one product in a multi-product run, use
 For validate-only runs, use `--no-oracle` or
 `--set cdb_resgate.validate.no_oracle=true`.
 
+## CCB classification evidence
+
+CCB planning freezes the selected instruments' `RENT_INDEXADOR_TAXA_FLU` and
+`FORMA_PAGAMENTO` from RAW `ACTPCCB_CONDICAO_IF`. Identical classification rows
+collapse; missing or conflicting classifications fail. This is a three-column
+evidence projection, not a declaration that the physical table has a primary key.
+
+Materialization remaps the frozen evidence to synthetic instrument IDs and publishes
+`_CCB_CLASSIFICATION/` plus `_CCB_CLASSIFICATION.json` inside the staged output.
+The Parquet includes original ID, clone index, synthetic ID, and both classification
+fields. It is excluded from physical-table discovery and the validation report's
+table inventory; do not add it to the Oracle spec or load list.
+
+CCB `--osias` validation checks content checksums, source-classification consistency,
+output URI, instrument/clone-map coverage, and clone-factor coverage before using the
+evidence. Validation does not reread RAW or the planning snapshot. A present but
+corrupt sidecar is an ERROR, even when an actual ACTPCCB table is available. Existing
+complete ACTPCCB exports remain supported when no sidecar is present.
+
+Use a fresh CCB plan and reservations after deploying this change. Old CCB plans
+without frozen classification evidence cannot be materialized by the new generator.
+The evidence works in live and `--no-oracle` generation; offline load restrictions
+remain unchanged. It records source classification and does not independently
+recalculate financial classifications from the generated condition rows.
+
+The evidence path uses distributed joins and a versioned bucketed content checksum;
+at most 256 aggregate summaries reach the driver, regardless of instrument count.
+No classification rows are embedded in JSON. Run the opt-in million-row regression
+with `DATAGEN_SCALE_TESTS=1` and `tests/test_ccb_evidence_scale.py`.
+The local Spark 3.5 regression completed a 1,000,000-source/1,000,000-synthetic
+roundtrip, including Osias checks, in 267 seconds with two workers, a 1 MiB driver
+result limit, and broadcast joins disabled. This measures the evidence path, not
+the complete Data Flow generation job or its OCI transfer time.
+
 ## Final terminal summary
 
 Every real run that reaches the scheduler ends with a summary on stderr. Dry-run and
