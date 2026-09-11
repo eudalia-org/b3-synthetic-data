@@ -1,0 +1,5 @@
+# Freeze partition layout before allocating synthetic keys
+
+Synthetic PK allocation must reproduce the same source-record/clone identity across retries and partition layouts while occupying exactly its reserved numeric slots. We keep numeric source-key/clone-index ordering and distributed per-partition numbering, but freeze partition identity and row order before collecting partition sizes, then freeze the final mapping before releasing that temporary snapshot: independent Spark range-exchange executions can resample boundaries and otherwise overlap allocated intervals.
+
+This accepts an extra local materialization boundary instead of random or sparse final IDs, collecting all keys on the driver, or a global single-task window. Full PK maps are not forcibly broadcast; only bounded partition offsets and clone-factor rows are. Plan and reservation schemas remain unchanged, pre-write checks remain mandatory, and executor loss that invalidates a local checkpoint must fail the run rather than silently change allocation; a fresh execution from the frozen plan must reproduce the same keys.

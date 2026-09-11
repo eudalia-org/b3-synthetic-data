@@ -107,3 +107,11 @@ _Avoid_: Guaranteed behavior-preserving enrichment, functional scenario generati
 **Instrument text enrichment**:
 The optional generation of allowlisted observational text values using one selected source financial-instrument aggregate as semantic context.
 _Avoid_: Independent cell generation, business-rule generation
+
+**Synthetic clone identity**:
+The identity of one source record's numbered copy within a frozen generation plan and its reservation. Repeating that generation preserves the copy's synthetic primary key, independently of execution parallelism or partition layout.
+_Avoid_: Execution-local row number, source identity alone
+
+**Synthetic key reservation**:
+The exact set of numeric primary-key slots allocated to one table in a planned synthetic batch. Generated records occupy those slots once each, respecting the reserved spacing without additional gaps or expansion of the interval.
+_Avoid_: Random identifier pool, sparse execution IDs

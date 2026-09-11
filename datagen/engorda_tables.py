@@ -4085,10 +4085,13 @@ def _pk_capacity_of(dt: T.DataType) -> Optional[int]:
     return None
 
 
-def _with_contiguous_row_id(df: DataFrame, id_col: str) -> DataFrame:
-    """Cópia de engorda_tables._with_contiguous_row_id: id contíguo 0..N-1 sem
-    Window.orderBy global (single-task sort). row_number só DENTRO de cada
-    partição + prefix-sum dos tamanhos no driver."""
+@contextmanager
+def _with_contiguous_row_id(df: DataFrame, id_col: str):
+    """Id contiguo 0..N-1 por particao + prefix-sum dos tamanhos no driver.
+
+    O consumidor deve materializar sua saida antes de sair do contexto, que
+    libera o snapshot temporario de particoes e ordem das linhas.
+    """
     part_col, prow_col, off_col, mid_col = (
         f"__{id_col}_part",
         f"__{id_col}_prow",
@@ -4099,30 +4102,38 @@ def _with_contiguous_row_id(df: DataFrame, id_col: str) -> DataFrame:
     if colisao:
         raise ValueError(f"colisão de coluna temporária: {colisao}")
 
-    df = df.withColumn(mid_col, F.monotonically_increasing_id()).withColumn(
-        part_col, F.spark_partition_id()
+    # Capturar o snapshot antes de materializar, para liberar tambem em caso de falha.
+    snapshot = (
+        df.withColumn(mid_col, F.monotonically_increasing_id())
+        .withColumn(part_col, F.spark_partition_id())
+        .localCheckpoint(eager=False)
     )
-    w_part = Window.partitionBy(part_col).orderBy(F.col(mid_col))
-    df = df.withColumn(prow_col, F.row_number().over(w_part))
+    try:
+        w_part = Window.partitionBy(part_col).orderBy(F.col(mid_col))
+        df = snapshot.withColumn(prow_col, F.row_number().over(w_part))
 
-    sizes = df.groupBy(part_col).agg(F.count(F.lit(1)).cast("long").alias("__sz"))
-    spark = df.sparkSession
-    ordered = sorted(((r[part_col], r["__sz"]) for r in sizes.collect()), key=lambda p: p[0])
-    running = 0
-    offsets: List[Tuple[int, int]] = []
-    for pid, size in ordered:
-        offsets.append((pid, running))
-        running += size
-    schema = T.StructType(
-        [
-            T.StructField(part_col, T.IntegerType(), False),
-            T.StructField(off_col, T.LongType(), False),
-        ]
-    )
-    off_df = spark.createDataFrame(offsets, schema=schema)
-    df = df.join(F.broadcast(off_df), on=part_col, how="left")
-    df = df.withColumn(id_col, (F.col(off_col) + F.col(prow_col) - F.lit(1)).cast("long"))
-    return df.drop(mid_col, part_col, prow_col, off_col)
+        sizes = snapshot.groupBy(part_col).agg(F.count(F.lit(1)).cast("long").alias("__sz"))
+        spark = df.sparkSession
+        # Primeira materializacao completa do snapshot, antes da acao da janela.
+        ordered = sorted(((r[part_col], r["__sz"]) for r in sizes.collect()), key=lambda p: p[0])
+        running = 0
+        offsets: List[Tuple[int, int]] = []
+        for pid, size in ordered:
+            offsets.append((pid, running))
+            running += size
+        schema = T.StructType(
+            [
+                T.StructField(part_col, T.IntegerType(), False),
+                T.StructField(off_col, T.LongType(), False),
+            ]
+        )
+        off_df = spark.createDataFrame(offsets, schema=schema)
+        df = df.join(F.broadcast(off_df), on=part_col, how="left")
+        df = df.withColumn(id_col, (F.col(off_col) + F.col(prow_col) - F.lit(1)).cast("long"))
+        yield df.drop(mid_col, part_col, prow_col, off_col)
+    finally:
+        # DataFrame.unpersist so remove cache SQL, nao o RDD do localCheckpoint.
+        snapshot._jdf.logicalPlan().rdd().unpersist(False)
 
 
 def _toposort_break_cycles(deps: Mapping[str, set]) -> List[str]:
@@ -7953,8 +7964,8 @@ def _monta_mapeamento_pk(
     componentes não cobertos por FK remapeada ficam com o valor original
     (new == old).
 
-    A saída passa por _copia_independente: os exprIds não podem coincidir com
-    os de `clones`, senão os joins seguintes viram self-join ambíguo."""
+    A saida e um localCheckpoint eager, de propriedade do chamador, com
+    exprIds independentes de `clones` para evitar self-join ambiguo."""
     pk = list(plano.pk_cols)
 
     if plano.pk_regra == "OFFSET_PROPRIO":
@@ -7962,21 +7973,21 @@ def _monta_mapeamento_pk(
         pk_col = pk[0]
         dt = clones.schema[pk_col].dataType
         # Stable source-key order keeps reserved IDs unchanged after repartitioning.
-        com_id = _with_contiguous_row_id(base.orderBy(*pk, K_COL), "__pk_rid")
-        passo = max(1, int(plano.pk_passo))
-        mapa = (
-            com_id.withColumn(
-                f"new_{pk_col}",
-                (F.lit(int(plano.pk_start)) + F.col("__pk_rid") * F.lit(passo)).cast(dt),
+        with _with_contiguous_row_id(base.orderBy(*pk, K_COL), "__pk_rid") as com_id:
+            passo = max(1, int(plano.pk_passo))
+            mapa = (
+                com_id.withColumn(
+                    f"new_{pk_col}",
+                    (F.lit(int(plano.pk_start)) + F.col("__pk_rid") * F.lit(passo)).cast(dt),
+                )
+                .drop("__pk_rid")
+                .select(
+                    *[F.col(c).alias(f"old_{c}") for c in pk],
+                    F.col(K_COL).alias(K_COL),
+                    F.col(f"new_{pk_col}").alias(f"new_{pk_col}"),
+                )
             )
-            .drop("__pk_rid")
-            .select(
-                *[F.col(c).alias(f"old_{c}") for c in pk],
-                F.col(K_COL).alias(K_COL),
-                F.col(f"new_{pk_col}").alias(f"new_{pk_col}"),
-            )
-        )
-        return _copia_independente(mapa)
+            return _copia_independente(mapa).localCheckpoint(eager=True)
 
     # VIA_PAI: aplica cada FK remapeável que cobre componentes da PK. A base
     # carrega TAMBÉM as colunas dessas FKs que ficam FORA da PK: uma FK
@@ -8001,7 +8012,7 @@ def _monta_mapeamento_pk(
             for cc, pc in zip(fk.columns, fk.parent_columns)
         ]
         cond.append(out[K_COL] == mapa_pai[K_COL])
-        joined = out.join(F.broadcast(mapa_pai), on=cond, how="left")
+        joined = out.join(mapa_pai, on=cond, how="left")
         proj = []
         for c in pk:
             if c in fk.columns:
@@ -8019,7 +8030,7 @@ def _monta_mapeamento_pk(
         F.col(K_COL).alias(K_COL),
         *[F.col(f"new_{c}").alias(f"new_{c}") for c in pk],
     )
-    return _copia_independente(mapa)
+    return _copia_independente(mapa).localCheckpoint(eager=True)
 
 
 def _aplica_remap_fk(
@@ -8036,7 +8047,7 @@ def _aplica_remap_fk(
         clones[orig[cc]] == mapa_pai[f"old_{pc}"] for cc, pc in zip(fk.columns, fk.parent_columns)
     ]
     cond.append(clones[K_COL] == mapa_pai[K_COL])
-    joined = clones.join(F.broadcast(mapa_pai), on=cond, how="left")
+    joined = clones.join(mapa_pai, on=cond, how="left")
     proj = []
     for c in clones.columns:
         if c in fk.columns:
@@ -8152,7 +8163,6 @@ def clona_tabela(
     # originais) e congelado: os joins seguintes (inclusive self-FK) tratam o
     # mapa como fonte independente, sem linhagem comum com `clones`.
     mapa_pk = _monta_mapeamento_pk(clones, plano, mapeamentos)
-    mapa_pk = mapa_pk.localCheckpoint(eager=True)
 
     # 1) PK própria: inner join pelos valores ORIGINAIS (toda linha mapeia,
     #    porque o mapa foi construído das próprias linhas do lote × K).
@@ -8160,7 +8170,7 @@ def clona_tabela(
     mapa_p1 = _copia_independente(mapa_pk)
     cond = [clones[orig[c]] == mapa_p1[f"old_{c}"] for c in plano.pk_cols]
     cond.append(clones[K_COL] == mapa_p1[K_COL])
-    joined = clones.join(F.broadcast(mapa_p1), on=cond, how="inner")
+    joined = clones.join(mapa_p1, on=cond, how="inner")
     proj = []
     for c in clones.columns:
         if c in plano.pk_cols:
@@ -8233,7 +8243,7 @@ def loga_chaves_amostra(
         chaves = restrito.select(*[F.col(c).alias(f"old_{c}") for c in pk]).dropDuplicates()
         cols_old = [f"old_{c}" for c in pk]
         amostra = (
-            chaves.join(F.broadcast(_copia_independente(mapa)), on=cols_old, how="inner")
+            chaves.join(_copia_independente(mapa), on=cols_old, how="inner")
             .orderBy(*cols_old, K_COL)
             .limit(limite_por_tabela + 1)
             .collect()

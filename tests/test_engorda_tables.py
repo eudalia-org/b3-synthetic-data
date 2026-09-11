@@ -3159,24 +3159,28 @@ class TestContiguousRowId:
 
         def mapped(partitions):
             frame = spark.createDataFrame(rows, schema).repartition(partitions)
-            return {
-                (row.old_ID, row[engorda_tables.K_COL]): row.new_ID
-                for row in engorda_tables._monta_mapeamento_pk(frame, plan, {}).collect()
-            }
+            mapping = engorda_tables._monta_mapeamento_pk(frame, plan, {})
+            try:
+                return {
+                    (row.old_ID, row[engorda_tables.K_COL]): row.new_ID for row in mapping.collect()
+                }
+            finally:
+                mapping._jdf.logicalPlan().rdd().unpersist(False)
 
         assert mapped(2) == mapped(5)
 
     def test_ids_are_contiguous_and_unique_across_partitions(self, spark):
         df = spark.range(0, 1000).repartition(7).withColumnRenamed("id", "val")
-        out = engorda_tables._with_contiguous_row_id(df, "rid")
-        rids = sorted(r["rid"] for r in out.select("rid").collect())
+        with engorda_tables._with_contiguous_row_id(df, "rid") as out:
+            rids = sorted(r["rid"] for r in out.select("rid").collect())
         assert rids == list(range(1000))  # 0..N-1, no gaps, no duplicates
 
     def test_id_matches_within_partition_order(self, spark):
         # Within each source partition, rid order must follow row order; offsets
         # must make the global set contiguous regardless of partition sizes.
         df = spark.range(0, 50).repartition(4).withColumnRenamed("id", "val")
-        rows = engorda_tables._with_contiguous_row_id(df, "rid").select("val", "rid").collect()
+        with engorda_tables._with_contiguous_row_id(df, "rid") as out:
+            rows = out.select("val", "rid").collect()
         rid_by_val = {r["val"]: r["rid"] for r in rows}
         assert len(rid_by_val) == 50
         assert sorted(rid_by_val.values()) == list(range(50))
@@ -3185,14 +3189,14 @@ class TestContiguousRowId:
         # Guards the fix: the offset prefix-sum must not use a no-partitionBy
         # Window, which Spark executes as SinglePartition (serial, stalls at scale).
         df = spark.range(0, 100).repartition(5).withColumnRenamed("id", "val")
-        out = engorda_tables._with_contiguous_row_id(df, "rid")
-        plan = out._jdf.queryExecution().executedPlan().toString()
+        with engorda_tables._with_contiguous_row_id(df, "rid") as out:
+            plan = out._jdf.queryExecution().executedPlan().toString()
         assert "SinglePartition" not in plan
 
     def test_empty_input(self, spark):
         df = spark.range(0, 0).withColumnRenamed("id", "val")
-        out = engorda_tables._with_contiguous_row_id(df, "rid")
-        assert out.select("rid").collect() == []
+        with engorda_tables._with_contiguous_row_id(df, "rid") as out:
+            assert out.select("rid").collect() == []
 
 
 class TestEngordaIntegration:

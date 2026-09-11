@@ -227,6 +227,35 @@ rejected. For one product in a multi-product run, use
 For validate-only runs, use `--no-oracle` or
 `--set cdb_resgate.validate.no_oracle=true`.
 
+## Stable synthetic key allocation
+
+Allocation freezes sorted source-key/clone-index rows, partition IDs, and row order
+before measuring partition sizes. Independent Spark range-exchange executions can
+otherwise resample partition boundaries, making prefix offsets overlap and exceed
+reserved intervals. The final PK map is materialized before the temporary snapshot
+is released. Keys remain stable across retries and partition layouts, with the same
+reserved start, count, and spacing; plan/reservation schemas are unchanged.
+
+Cloning and FK remapping no longer force full PK maps into broadcast joins. Only
+bounded partition-offset and clone-factor tables are explicitly broadcast. Local
+checkpoints are not durable executor-loss recovery: a lost checkpoint must fail
+the run, and a retry from the frozen inputs must reproduce the same keys. Keep all
+pre-write validation enabled.
+
+The opt-in `tests/test_engorda_pk_scale.py` suite exercises actual `clona_tabela`
+and Parquet readback for the five reported CDB/RDB workload shapes, including
+K=176 and a 6,396,672-row condition table. All five passed locally on Spark 3.5
+with four workers, 2 GiB driver memory, 16 shuffle partitions, a 1 MiB driver-result
+limit, and automatic broadcasts disabled. The separate 512-partition reproducer
+also passed; it allows 8 MiB for Spark's bounded internal range samples, while
+Python still collects at most 512 partition summaries. Enable these tests with
+`DATAGEN_SCALE_TESTS=1`; they are not the full business pipeline or an OCI canary.
+
+For deployment, use the updated engorda script and fresh planning as agreed with
+the operator, then verify CDB escalonamento and RDB resgate on OCI. Local success
+does not substitute for the operator's production confirmation. See
+`docs/adr/0003-freeze-partition-layout-before-pk-allocation.md` for the trade-off.
+
 ## CCB classification evidence
 
 CCB planning freezes the selected instruments' `RENT_INDEXADOR_TAXA_FLU` and
