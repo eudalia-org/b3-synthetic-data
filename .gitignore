@@ -34,6 +34,7 @@ jvm/build/
 
 # Notebooks and images
 *.ipynb
+!scripts/compare_if_account_distribution.ipynb
 *.jpeg
 *.png
 
