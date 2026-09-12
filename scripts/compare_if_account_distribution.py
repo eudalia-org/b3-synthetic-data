@@ -1,16 +1,30 @@
 """Distributed IF-account comparisons; requires only PySpark and the standard library.
 
-The notebook owns reads, caching and output actions. Source baselines describe the
+Callers own reads, caching and output actions. Source baselines describe the
 provided export, NOT the exact SQL eligibility pool: full_export includes every
 type/status, same_type includes every status, and active_same_type requires a null
 DAT_EXCLUSAO. Synthetic rows are never date-filtered or reclassified. With a map,
 selected_sources counts distinct original IFs and clone_weighted counts each copy
 under its new IF identity, exposing selection bias separately from clone weighting.
+
+Usage (standalone OCI Data Flow application; only this file is required)::
+
+    compare_if_account_distribution.py --source-base-uri oci://bucket@namespace/export \
+        --synthetic-run-base-uri oci://bucket@namespace/runs/run-id \
+        --product cdb_simplificado --baseline all --top-n 30
+
+The source base contains INSTRUMENTO_FINANCEIRO; the run base contains
+products/<product>/synthetic/{INSTRUMENTO_FINANCEIRO,MAPA_CLONE_NUM_IF}.
+Omit --product for all five products; repeat it to select several. --no-clone-map
+disables map-dependent checks/baselines. Output is bounded stdout only, no reports.
+Data Flow supplies Spark configuration and the OCI connector/authentication.
 """
 
+import argparse
 from functools import reduce
 
-from pyspark.sql import DataFrame
+from pyspark import StorageLevel
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 
@@ -224,3 +238,121 @@ def compare_if_accounts(
         )
     )
     return {"distribution": distribution, "summary": summary, "account_changes": account_changes}
+
+
+def main(argv=None):
+    product_types = {
+        "cdb_simplificado": 49,
+        "cdb_resgate": 49,
+        "cdb_escalonamento": 49,
+        "rdb_resgate": 50,
+        "rdb_inclusao": 50,
+    }
+    baselines = ["full_export", "same_type", "active_same_type"]
+    map_baselines = ["selected_sources", "clone_weighted"]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source-base-uri", required=True)
+    parser.add_argument("--synthetic-run-base-uri", required=True)
+    parser.add_argument("--product", action="append", choices=product_types)
+    parser.add_argument(
+        "--baseline", choices=baselines + map_baselines + ["all"], default="full_export"
+    )
+    parser.add_argument("--top-n", type=int, default=30)
+    parser.add_argument("--no-clone-map", action="store_true")
+    args = parser.parse_args(argv)
+    for name in ("source_base_uri", "synthetic_run_base_uri"):
+        value = getattr(args, name).strip()
+        if not value:
+            parser.error(f"--{name.replace('_', '-')} must be nonempty")
+        setattr(args, name, value)
+    products = args.product or list(product_types)
+    if len(products) != len(set(products)):
+        parser.error("duplicate --product values are not allowed")
+    if not 1 <= args.top_n <= 1000:
+        parser.error("--top-n must be an integer in 1..1000")
+    if args.no_clone_map and args.baseline in map_baselines:
+        parser.error(f"--baseline {args.baseline} requires a clone map; remove --no-clone-map")
+    if not args.no_clone_map:
+        baselines += map_baselines
+    chosen = baselines if args.baseline == "all" else [args.baseline]
+    source_path = args.source_base_uri.rstrip("/") + "/INSTRUMENTO_FINANCEIRO"
+    print(f"Source: {source_path}\nRun: {args.synthetic_run_base_uri}", flush=True)
+    print(
+        "Caveat: full_export includes all source types/statuses, not the SQL eligibility "
+        "pool. Differences are analytics, not job failures.",
+        flush=True,
+    )
+    spark = SparkSession.builder.appName("compare-if-account-distribution").getOrCreate()
+    source = None
+    context = f"products={','.join(products)} source={source_path}"
+    try:
+        columns = ["NUM_IF", "NUM_CONTA_PARTICIPANTE", "NUM_TIPO_IF"]
+        source = spark.read.parquet(source_path).select(*columns, "DAT_EXCLUSAO")
+        source.persist(StorageLevel.MEMORY_AND_DISK)
+        for product in products:
+            base = f"{args.synthetic_run_base_uri.rstrip('/')}/products/{product}/synthetic"
+            synthetic_path, map_path = base + "/INSTRUMENTO_FINANCEIRO", base + "/MAPA_CLONE_NUM_IF"
+            context = f"product={product} source={source_path} synthetic={synthetic_path}"
+            if not args.no_clone_map:
+                context += f" clone_map={map_path}"
+            print(
+                f"Product: {product} (expected NUM_TIPO_IF={product_types[product]})\n"
+                f"Synthetic: {synthetic_path}",
+                flush=True,
+            )
+            caches = []
+            try:
+                synthetic = spark.read.parquet(synthetic_path).select(*columns)
+                caches.append(synthetic)
+                synthetic.persist(StorageLevel.MEMORY_AND_DISK)
+                clone_map = None
+                if not args.no_clone_map:
+                    print(f"Clone map: {map_path}", flush=True)
+                    clone_map = spark.read.parquet(map_path).select(
+                        "NUM_IF_ORIG", "K", "NUM_IF_NOVO"
+                    )
+                    caches.append(clone_map)
+                    clone_map.persist(StorageLevel.MEMORY_AND_DISK)
+                result = compare_if_accounts(source, synthetic, clone_map, product_types[product])
+                distribution = result["distribution"]
+                caches.append(distribution)
+                distribution.persist(StorageLevel.MEMORY_AND_DISK)
+                print("Summary: all available baselines", flush=True)
+                result["summary"].withColumn(
+                    "TOTAL_VARIATION_PCT", F.round("TOTAL_VARIATION_PCT", 6)
+                ).orderBy("BASELINE").show(n=len(baselines), truncate=False)
+                for baseline in chosen:
+                    print(
+                        f"Baseline: {baseline} (top {args.top_n} by absolute DELTA_PP)", flush=True
+                    )
+                    preview = distribution.where(F.col("BASELINE") == baseline).orderBy(
+                        F.abs(F.col("DELTA_PP")).desc_nulls_last(), "NUM_CONTA_PARTICIPANTE"
+                    )
+                    preview.select(
+                        *[
+                            F.round(c, 6).alias(c)
+                            if c in {"SOURCE_PCT", "SYNTHETIC_PCT", "DELTA_PP"}
+                            else F.col(c)
+                            for c in preview.columns
+                        ]
+                    ).show(n=args.top_n, truncate=False)
+                if result["account_changes"] is None:
+                    print("account_changes: clone map disabled; check unavailable", flush=True)
+                else:
+                    print(f"account_changes: top {args.top_n} preview", flush=True)
+                    result["account_changes"].orderBy("NUM_IF").show(n=args.top_n, truncate=False)
+            finally:
+                for frame in reversed(caches):
+                    frame.unpersist(blocking=True)
+    except Exception as exc:
+        raise RuntimeError(f"IF account comparison failed ({context}): {exc}") from exc
+    finally:
+        try:
+            if source is not None:
+                source.unpersist(blocking=True)
+        finally:
+            spark.stop()
+
+
+if __name__ == "__main__":
+    main()

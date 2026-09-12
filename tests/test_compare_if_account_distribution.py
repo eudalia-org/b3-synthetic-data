@@ -474,16 +474,23 @@ def test_standalone_import_and_no_driver_materialization():
     tree = ast.parse(path.read_text())
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
-            assert node.module in {"functools", "pyspark.sql"}
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            assert node.func.attr not in {
-                "collect",
-                "toPandas",
-                "toLocalIterator",
-                "broadcast",
-                "cache",
-                "persist",
-            }
-            if node.func.attr == "first":
-                assert isinstance(node.func.value, ast.Call)
-                assert node.func.value.func.attr == "agg"
+            assert node.module in {"functools", "pyspark", "pyspark.sql"}
+        if isinstance(node, ast.Import):
+            assert all(alias.name == "argparse" for alias in node.names)
+    helpers = [
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name != "main"
+    ]
+    for helper in helpers:
+        for node in ast.walk(helper):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                assert node.func.attr not in {
+                    "collect",
+                    "toPandas",
+                    "toLocalIterator",
+                    "broadcast",
+                    "cache",
+                    "persist",
+                }
+                if node.func.attr == "first":
+                    assert isinstance(node.func.value, ast.Call)
+                    assert node.func.value.func.attr == "agg"
