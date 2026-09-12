@@ -1,6 +1,7 @@
 import ast
 import importlib.util
 import os
+import re
 import runpy
 import sys
 from pathlib import Path
@@ -17,16 +18,17 @@ from scripts import compare_if_account_distribution as cli
 
 SCRIPT = Path(cli.__file__)
 PRODUCTS = ["cdb_simplificado", "cdb_resgate", "cdb_escalonamento", "rdb_resgate", "rdb_inclusao"]
-BASELINES = ["full_export", "same_type", "active_same_type", "selected_sources", "clone_weighted"]
+BASELINES = ["full_export", "same_type", "active_same_type"]
 REQUIRED = [
     "--source-base-uri",
     "oci://bucket@ns/export",
     "--synthetic-run-base-uri",
     "oci://bucket@ns/run",
 ]
-SOURCE_SCHEMA = (
-    "NUM_IF string, NUM_CONTA_PARTICIPANTE string, NUM_TIPO_IF string, DAT_EXCLUSAO string"
-)
+OP_COLUMNS = ["NUM_ID_OPERACAO", "NUM_IF", "NUM_CONTA_PARTICIPANTE_P1", "NUM_CONTA_PARTICIPANTE_P2"]
+IF_COLUMNS = ["NUM_IF", "NUM_TIPO_IF", "DAT_EXCLUSAO"]
+OP_SCHEMA = ", ".join(f"{c} string" for c in OP_COLUMNS)
+IF_SCHEMA = ", ".join(f"{c} string" for c in IF_COLUMNS)
 
 
 @pytest.mark.parametrize(
@@ -37,11 +39,11 @@ SOURCE_SCHEMA = (
         REQUIRED[2:],
         ["--source-base-uri", "  ", *REQUIRED[2:]],
         [*REQUIRED[:2], "--synthetic-run-base-uri", "\t"],
-        *[REQUIRED + ["--top-n", value] for value in ["0", "-1", "1001", "1.5", "abc"]],
+        *[REQUIRED + ["--top-n", v] for v in ["0", "-1", "1001", "1.5", "abc"]],
         REQUIRED + ["--product", "lci"],
         REQUIRED + ["--product", "cdb_resgate", "--product", "cdb_resgate"],
-        REQUIRED + ["--baseline", "unknown"],
-        *[REQUIRED + ["--no-clone-map", "--baseline", baseline] for baseline in BASELINES[3:]],
+        *[REQUIRED + ["--baseline", b] for b in ["unknown", "selected_sources", "clone_weighted"]],
+        REQUIRED + ["--no-clone-map"],
         *[
             REQUIRED + [flag, "/tmp/report"]
             for flag in ["--output", "--output-uri", "--report-uri"]
@@ -60,18 +62,19 @@ def test_invalid_arguments_fail_before_spark(monkeypatch, capsys, argv):
     assert "error:" in capsys.readouterr().err
 
 
-def test_import_and_notebook_runpy_do_not_execute_main(monkeypatch, capsys):
+def test_import_and_runpy_do_not_execute_main(monkeypatch, capsys):
     def forbidden(*args, **kwargs):
         pytest.fail("loading the helper must not start Spark")
 
     monkeypatch.setattr(SparkSession.Builder, "getOrCreate", forbidden)
-    monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--invalid-notebook-argument"])
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--invalid-argument"])
     spec = importlib.util.spec_from_file_location("standalone_cli", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    assert callable(module.compare_if_accounts)
+    assert callable(module.compare_operation_accounts)
     namespace = runpy.run_path(str(SCRIPT))
-    assert callable(namespace["compare_if_accounts"])
+    assert callable(namespace["compare_operation_accounts"])
+    assert "compare_if_accounts" not in namespace
     assert capsys.readouterr().out == ""
     monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--help"])
     with pytest.raises(SystemExit) as exc:
@@ -108,6 +111,7 @@ def test_cli_ast_is_read_only_bounded_and_uses_managed_spark():
         "hadoopConfiguration",
         "SparkContext",
         "clearCache",
+        "broadcast",
     }
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute):
@@ -120,9 +124,13 @@ def test_cli_ast_is_read_only_bounded_and_uses_managed_spark():
                 assert node.func.value.attr == "read"
             if node.func.attr == "show":
                 assert any(kw.arg == "n" for kw in node.keywords)
-    main = next(
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main"
-    )
+                assert any(
+                    kw.arg == "truncate"
+                    and isinstance(kw.value, ast.Constant)
+                    and 1 <= kw.value.value <= 1000
+                    for kw in node.keywords
+                )
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
     for node in ast.walk(main):
         if (
             isinstance(node, ast.Call)
@@ -133,9 +141,7 @@ def test_cli_ast_is_read_only_bounded_and_uses_managed_spark():
                 kw.arg == "flush" and isinstance(kw.value, ast.Constant) and kw.value.value is True
                 for kw in node.keywords
             )
-    assert not any(
-        isinstance(node, ast.Expr) and isinstance(node.value, ast.Call) for node in tree.body
-    )
+    assert not any(isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) for n in tree.body)
     assert isinstance(tree.body[-1], ast.If)
     assert ast.unparse(tree.body[-1].test) == "__name__ == '__main__'"
 
@@ -144,7 +150,7 @@ def test_cli_ast_is_read_only_bounded_and_uses_managed_spark():
 def spark():
     session = (
         SparkSession.builder.master("local[2]")
-        .appName("if-account-cli-test")
+        .appName("operation-account-cli-test")
         .config("spark.sql.shuffle.partitions", "2")
         .config("spark.default.parallelism", "2")
         .config("spark.sql.ansi.enabled", "true")
@@ -157,82 +163,94 @@ def spark():
 
 @pytest.fixture(scope="module")
 def parquet_inputs(spark, tmp_path_factory):
-    root = tmp_path_factory.mktemp("if-account-cli")
+    root = tmp_path_factory.mktemp("operation-account-cli")
+    metadata = spark.createDataFrame(
+        [
+            ("10", "49", None),
+            ("20", "49", "deleted"),
+            ("30", "50", None),
+            ("40", "50", "deleted"),
+        ],
+        IF_SCHEMA,
+    ).withColumn("NUM_CONTA_PARTICIPANTE", F.lit("NEVER_READ"))
     source = spark.createDataFrame(
         [
-            ("1", "A", "49", None),
-            ("2", "B", "49", None),
-            ("3", None, "49", "deleted"),
-            ("4", "other_type", "99", None),
-            ("5", "A", "50", None),
-            ("6", "B", "50", None),
-            ("7", None, "50", "deleted"),
+            ("1", "10", "A", "X"),
+            ("2", "10", "A", "Y"),
+            ("3", "20", "B", "Y"),
+            ("4", "30", "A", "X"),
+            ("5", "30", "A", "Y"),
+            ("6", "40", "B", "Y"),
+            ("7", None, None, "X"),
+            ("8", "missing", "U", None),
         ],
-        SOURCE_SCHEMA,
-    )
-    source.withColumn("UNUSED", F.lit("discard")).write.parquet(
-        str(root / "export/INSTRUMENTO_FINANCEIRO")
-    )
-    source.unionByName(source.where("NUM_IF = '1'")).write.parquet(
-        str(root / "duplicate/INSTRUMENTO_FINANCEIRO")
-    )
-    source.drop("DAT_EXCLUSAO").write.parquet(str(root / "invalid/INSTRUMENTO_FINANCEIRO"))
+        OP_SCHEMA,
+    ).withColumn("UNUSED", F.lit("discard"))
+    source.write.parquet(str(root / "export/OPERACAO"))
+    metadata.write.parquet(str(root / "export/INSTRUMENTO_FINANCEIRO"))
+    for variant in ("duplicate-ops", "duplicate-if", "invalid-if", "missing-if"):
+        frame = (
+            source.unionByName(source.where("NUM_ID_OPERACAO = '1'"))
+            if variant == "duplicate-ops"
+            else source
+        )
+        frame.write.parquet(str(root / variant / "OPERACAO"))
+        if variant != "missing-if":
+            frame = metadata.unionByName(metadata) if variant == "duplicate-if" else metadata
+            if variant == "invalid-if":
+                frame = frame.drop("DAT_EXCLUSAO")
+            frame.write.parquet(str(root / variant / "INSTRUMENTO_FINANCEIRO"))
+    synthetic = spark.createDataFrame(
+        [
+            ("101", "new-root", "A", "Y"),
+            ("102", None, "Z", "Y"),
+            ("103", "", None, "X"),
+        ],
+        OP_SCHEMA,
+    ).withColumn("UNUSED", F.lit("discard"))
     for product in PRODUCTS:
-        if_type = "49" if product.startswith("cdb") else "50"
-        base = root / "run/products" / product / "synthetic"
-        synthetic = spark.createDataFrame(
-            [
-                ("101", "A", if_type),
-                ("102", "Z", if_type),
-                ("103", None, if_type),
-            ],
-            "NUM_IF string, NUM_CONTA_PARTICIPANTE string, NUM_TIPO_IF string",
-        )
-        synthetic.withColumn("UNUSED", F.lit("discard")).write.parquet(
-            str(base / "INSTRUMENTO_FINANCEIRO")
-        )
-        originals = ["1", "2", "3"] if if_type == "49" else ["5", "6", "7"]
-        mapping = spark.createDataFrame(
-            [(original, "1", str(101 + i)) for i, original in enumerate(originals)],
-            "NUM_IF_ORIG string, K string, NUM_IF_NOVO string",
-        )
-        mapping.withColumn("UNUSED", F.lit("discard")).write.parquet(
-            str(base / "MAPA_CLONE_NUM_IF")
-        )
-        if product == PRODUCTS[0]:
-            for variant in ["missing-map", "bad-map", "wrong-type"]:
-                target = root / variant / "products" / product / "synthetic"
-                frame = (
-                    synthetic.withColumn("NUM_TIPO_IF", F.lit("50"))
-                    if variant == "wrong-type"
-                    else synthetic
-                )
-                frame.write.parquet(str(target / "INSTRUMENTO_FINANCEIRO"))
-                if variant != "missing-map":
-                    frame = mapping.unionByName(mapping) if variant == "bad-map" else mapping
-                    frame.write.parquet(str(target / "MAPA_CLONE_NUM_IF"))
+        synthetic.write.parquet(str(root / "run/products" / product / "synthetic/OPERACAO"))
+    synthetic.unionByName(synthetic).write.parquet(
+        str(root / "duplicate-synthetic/products" / PRODUCTS[0] / "synthetic/OPERACAO")
+    )
     return root
 
 
 @pytest.fixture
 def guarded_main(spark, parquet_inputs, monkeypatch):
-    # All fixtures are written before the guard. main must never access a writer.
+    # Guard the runtime class, including Spark 4.2's classic DataFrame subclass.
     unrelated = spark.range(1).cache()
     frame_type = type(unrelated)
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("CLI attempted a write/checkpoint")
-
-    monkeypatch.setattr(frame_type, "write", property(forbidden))
-    for name in ["writeTo", "checkpoint", "localCheckpoint"]:
-        monkeypatch.setattr(frame_type, name, forbidden)
-    owned, active, stops, calls, previews = [], [], [], [], []
-    persist, unpersist, compare, show = (
+    persist, unpersist, compare, show, collect = (
         frame_type.persist,
         frame_type.unpersist,
-        cli.compare_if_accounts,
+        cli.compare_operation_accounts,
         frame_type.show,
+        frame_type.collect,
     )
+    owned, active, stops, calls, previews, reads = [], [], [], [], [], []
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("CLI attempted a write/checkpoint/driver materialization")
+
+    for name in ("write", "writeStream"):
+        monkeypatch.setattr(frame_type, name, property(forbidden))
+    for name in (
+        "writeTo",
+        "checkpoint",
+        "localCheckpoint",
+        "collect",
+        "toPandas",
+        "toLocalIterator",
+    ):
+        monkeypatch.setattr(frame_type, name, forbidden)
+
+    def scalar_first(frame):
+        assert frame.columns == ["n"]
+        assert "Aggregate" in frame._jdf.queryExecution().analyzed().toString()
+        rows = collect(frame)
+        assert len(rows) == 1
+        return rows[0]
 
     def tracked_persist(frame, storageLevel):
         assert storageLevel == StorageLevel.MEMORY_AND_DISK
@@ -245,44 +263,55 @@ def guarded_main(spark, parquet_inputs, monkeypatch):
         active[:] = [cached for cached in active if cached is not frame]
         return unpersist(frame, blocking=blocking)
 
-    def tracked_compare(source, synthetic, clone_map, if_type):
-        assert source.columns == ["NUM_IF", "NUM_CONTA_PARTICIPANTE", "NUM_TIPO_IF", "DAT_EXCLUSAO"]
-        assert synthetic.columns == source.columns[:3]
-        assert len(active) == (2 if clone_map is None else 3)
-        if clone_map is not None:
-            assert clone_map.columns == ["NUM_IF_ORIG", "K", "NUM_IF_NOVO"]
+    def tracked_compare(source, synthetic, source_if, if_type):
+        assert source.columns == synthetic.columns == OP_COLUMNS
+        assert source_if.columns == IF_COLUMNS
+        assert len(active) == 3
         assert all(frame.is_cached for frame in active)
         if calls:
-            assert calls[0][0] is source  # One source cache survives the whole loop.
-        calls.append((source, if_type, clone_map is not None))
-        return compare(source, synthetic, clone_map, if_type)
+            assert calls[0][0] is source and calls[0][1] is source_if
+        plan = source_if._jdf.queryExecution().executedPlan().toString()
+        read_schemas = re.findall(r"ReadSchema: ([^\n]+)", plan)
+        assert read_schemas and all("NUM_CONTA_PARTICIPANTE" not in s for s in read_schemas)
+        calls.append((source, source_if, if_type))
+        return compare(source, synthetic, source_if, if_type)
 
     def tracked_show(frame, n, truncate):
-        assert 1 <= n <= 1000 and truncate is False
-        assert len(active) == (4 if calls[-1][2] else 3)
-        previews.append((frame.columns, n, frame.limit(n).collect()))
+        assert 1 <= n <= 1000 and 1 <= truncate <= 1000
+        assert len(active) == 4
+        previews.append((frame.columns, n, collect(frame.limit(n))))
         return show(frame, n=n, truncate=truncate)
 
     def stop_spy(session):
-        assert session is spark
-        assert active == []
+        assert session is spark and active == []
         stops.append(session)
 
+    reader_type = type(spark.read)
+    parquet = reader_type.parquet
+
+    def tracked_read(reader, path, *args, **kwargs):
+        assert not path.startswith("oci:")
+        assert path.endswith("/OPERACAO") or path.endswith("/INSTRUMENTO_FINANCEIRO")
+        assert "/synthetic/INSTRUMENTO_FINANCEIRO" not in path
+        reads.append(path)
+        return parquet(reader, path, *args, **kwargs)
+
+    monkeypatch.setattr(reader_type, "parquet", tracked_read)
+    monkeypatch.setattr(frame_type, "first", scalar_first)
     monkeypatch.setattr(frame_type, "persist", tracked_persist)
     monkeypatch.setattr(frame_type, "unpersist", tracked_unpersist)
     monkeypatch.setattr(frame_type, "show", tracked_show)
-    monkeypatch.setattr(cli, "compare_if_accounts", tracked_compare)
+    monkeypatch.setattr(cli, "compare_operation_accounts", tracked_compare)
     monkeypatch.setattr(SparkSession, "stop", stop_spy)
     yield {
         "owned": owned,
         "calls": calls,
         "previews": previews,
-        "stops": stops,
+        "reads": reads,
         "frame_type": frame_type,
     }
     assert stops == [spark]
-    assert active == []
-    assert all(not frame.is_cached for frame in owned)
+    assert active == [] and all(not frame.is_cached for frame in owned)
     assert spark.conf.get("spark.sql.shuffle.partitions") == "2"
     assert spark.sparkContext.master == "local[2]"
     assert unrelated.is_cached
@@ -290,9 +319,9 @@ def guarded_main(spark, parquet_inputs, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "extra,products,baselines,top_n,mapped",
+    "extra,products,baselines,top_n",
     [
-        (["--product", PRODUCTS[0]], PRODUCTS[:1], BASELINES[:1], 30, True),
+        (["--product", PRODUCTS[0]], PRODUCTS[:1], BASELINES[:1], 30),
         (
             [
                 "--product",
@@ -307,114 +336,113 @@ def guarded_main(spark, parquet_inputs, monkeypatch):
             [PRODUCTS[3], PRODUCTS[1]],
             BASELINES,
             2,
-            True,
         ),
-        (["--top-n", "1"], PRODUCTS, BASELINES[:1], 1, True),
+        (["--top-n", "1"], PRODUCTS, BASELINES[:1], 1),
         (
-            ["--product", PRODUCTS[0], "--baseline", "all", "--no-clone-map", "--top-n", "1000"],
+            ["--product", PRODUCTS[0], "--baseline", "active_same_type", "--top-n", "1000"],
             PRODUCTS[:1],
-            BASELINES[:3],
+            ["active_same_type"],
             1000,
-            False,
         ),
+        (["--product", PRODUCTS[0], "--baseline", "same_type"], PRODUCTS[:1], ["same_type"], 30),
     ],
 )
 def test_main_local_parquet_stdout_and_cache_lifetime(
-    parquet_inputs, guarded_main, capfd, extra, products, baselines, top_n, mapped
+    parquet_inputs, guarded_main, capfd, extra, products, baselines, top_n
 ):
     root = parquet_inputs
-    # Padding/trailing slashes are accepted without changing the resolved paths.
-    args = [
-        "--source-base-uri",
-        f" {root}/export/ ",
-        "--synthetic-run-base-uri",
-        f" {root}/run/ ",
-        *extra,
-    ]
-    assert cli.main(args) is None
+    assert (
+        cli.main(
+            [
+                "--source-base-uri",
+                f" {root}/export/ ",
+                "--synthetic-run-base-uri",
+                f" {root}/run/ ",
+                *extra,
+            ]
+        )
+        is None
+    )
     out = capfd.readouterr().out
-    assert f"Source: {root}/export/INSTRUMENTO_FINANCEIRO" in out
-    assert f"Run: {root}/run/" in out
+    assert "Operation account distribution" in out
+    assert f"Source: {root}/export/OPERACAO" in out
+    assert f"IF metadata: {root}/export/INSTRUMENTO_FINANCEIRO" in out
     assert out.count("Caveat:") == 1
-    assert "all source types/statuses" in out
+    assert "not the exact SQL eligibility pool" in out
+    assert "not per-operation mutation proof" in out
     assert "Differences are analytics, not job failures" in out
     assert [line.split()[1] for line in out.splitlines() if line.startswith("Product:")] == products
     assert [
         line.split()[1] for line in out.splitlines() if line.startswith("Baseline:")
-    ] == baselines * len(products)
-    assert out.count("Summary: all available baselines") == len(products)
-    assert "CHANGED_ACCOUNT_IFS" in out
-    if top_n >= 5:
-        assert "NULL" in out
-        assert any(
-            "DELTA_PP" in columns and any(r.NUM_CONTA_PARTICIPANTE is None for r in rows)
-            for columns, _, rows in guarded_main["previews"]
-        )
-    calls = guarded_main["calls"]
-    assert [call[1] for call in calls] == [49 if p.startswith("cdb") else 50 for p in products]
-    assert all(call[2] == mapped for call in calls)
-    assert len(guarded_main["owned"]) == 1 + len(products) * (3 if mapped else 2)
+    ] == baselines * (2 * len(products))
+    for role in ("P1", "P2"):
+        assert out.count(f"Role: {role} (OPERACAO.NUM_CONTA_PARTICIPANTE_{role})") == len(products)
+    assert out.count("Summary: all three baselines") == 2 * len(products)
+    assert all(
+        term not in out
+        for term in ["account_changes", "CHANGED_ACCOUNT_IFS", "clone_weighted", "selected_sources"]
+    )
+    assert [call[2] for call in guarded_main["calls"]] == [
+        49 if p.startswith("cdb") else 50 for p in products
+    ]
+    assert len(guarded_main["owned"]) == 2 + 2 * len(products)
+    assert guarded_main["reads"] == [
+        str(root / "export/OPERACAO"),
+        str(root / "export/INSTRUMENTO_FINANCEIRO"),
+        *[str(root / "run/products" / p / "synthetic/OPERACAO") for p in products],
+    ]
     for columns, n, rows in guarded_main["previews"]:
-        if "CHANGED_ACCOUNT_IFS" in columns:
-            assert {r.BASELINE for r in rows} == set(BASELINES if mapped else BASELINES[:3])
-            assert {r.CHANGED_ACCOUNT_IFS for r in rows} == ({1} if mapped else {None})
-            assert {r.SYNTHETIC_TOTAL for r in rows} == {3}
-            assert next(r.SOURCE_TOTAL for r in rows if r.BASELINE == "full_export") == 7
-        elif "DELTA_PP" in columns:
-            assert n == top_n
-            assert len(rows) <= top_n
+        assert len({r.ROLE for r in rows}) == 1
+        assert {r.SYNTHETIC_TOTAL for r in rows} == {3}
+        if "TOTAL_VARIATION_PCT" in columns:
+            assert n == 3 and {r.BASELINE for r in rows} == set(BASELINES)
+            assert {r.BASELINE: r.SOURCE_TOTAL for r in rows} == dict(zip(BASELINES, [8, 3, 2]))
+        else:
+            assert n == top_n and len(rows) <= top_n
+            # Ranking precedes display rounding; rounded ties need not be raw ties.
             assert rows == sorted(
                 rows,
                 key=lambda r: (
                     r.DELTA_PP is None,
-                    -abs(r.DELTA_PP or 0),
+                    -abs(
+                        r.SYNTHETIC_OPERATION_COUNT * 100.0 / r.SYNTHETIC_TOTAL
+                        - r.SOURCE_OPERATION_COUNT * 100.0 / r.SOURCE_TOTAL
+                    ),
                     r.NUM_CONTA_PARTICIPANTE is not None,
                     r.NUM_CONTA_PARTICIPANTE or "",
                 ),
             )
             for row in rows:
-                for field in ["SOURCE_PCT", "SYNTHETIC_PCT", "DELTA_PP"]:
-                    value = row[field]
-                    assert value is None or value == round(value, 6)
-        else:
-            assert n == top_n
-            assert [r.NUM_IF for r in rows] == ["102"]
-    if mapped:
-        assert out.count(f"account_changes: top {top_n} preview") == len(products)
-        assert "check unavailable" not in out
-    else:
-        assert "account_changes: clone map disabled; check unavailable" in out
-        assert "selected_sources" not in out and "clone_weighted" not in out
+                for field in ("SOURCE_PCT", "SYNTHETIC_PCT", "DELTA_PP"):
+                    assert row[field] is None or row[field] == round(row[field], 6)
 
 
 @pytest.mark.parametrize(
     "source,run,message",
     [
-        ("export", "missing-map", "MAPA_CLONE_NUM_IF"),
-        ("export", "bad-map", "clone_map NUM_IF_NOVO"),
-        ("export", "wrong-type", "synthetic NUM_TIPO_IF"),
-        ("duplicate", "run", "source NUM_IF"),
-        ("invalid", "run", "DAT_EXCLUSAO"),
-        ("missing-source", "run", "INSTRUMENTO_FINANCEIRO"),
+        ("duplicate-ops", "run", "source NUM_ID_OPERACAO"),
+        ("duplicate-if", "run", "source_if NUM_IF"),
+        ("invalid-if", "run", "DAT_EXCLUSAO"),
+        ("missing-source", "run", "OPERACAO"),
+        ("missing-if", "run", "INSTRUMENTO_FINANCEIRO"),
+        ("export", "missing-run", "OPERACAO"),
+        ("export", "duplicate-synthetic", "synthetic NUM_ID_OPERACAO"),
     ],
 )
 def test_input_errors_have_context_and_cleanup(parquet_inputs, guarded_main, source, run, message):
-    root = parquet_inputs
     with pytest.raises(RuntimeError, match=message) as exc:
         cli.main(
             [
                 "--source-base-uri",
-                str(root / source),
+                str(parquet_inputs / source),
                 "--synthetic-run-base-uri",
-                str(root / run),
+                str(parquet_inputs / run),
                 "--product",
                 PRODUCTS[0],
             ]
         )
     assert PRODUCTS[0] in str(exc.value)
-    assert str(root / source / "INSTRUMENTO_FINANCEIRO") in str(exc.value)
-    if source == "export":
-        assert str(root / run / "products" / PRODUCTS[0] / "synthetic") in str(exc.value)
+    assert str(parquet_inputs / source / "OPERACAO") in str(exc.value)
     assert exc.value.__cause__ is not None
 
 
@@ -425,7 +453,7 @@ def test_display_failure_releases_distribution_and_inputs(
         raise ValueError("display failed")
 
     monkeypatch.setattr(guarded_main["frame_type"], "show", broken_show)
-    with pytest.raises(RuntimeError, match="display failed") as exc:
+    with pytest.raises(RuntimeError, match="display failed"):
         cli.main(
             [
                 "--source-base-uri",
@@ -436,39 +464,20 @@ def test_display_failure_releases_distribution_and_inputs(
                 PRODUCTS[0],
             ]
         )
-    assert f"product={PRODUCTS[0]}" in str(exc.value)
     assert len(guarded_main["owned"]) == 4
-
-
-def test_no_map_does_not_read_a_missing_map(parquet_inputs, guarded_main, capfd):
-    cli.main(
-        [
-            "--source-base-uri",
-            str(parquet_inputs / "export"),
-            "--synthetic-run-base-uri",
-            str(parquet_inputs / "missing-map"),
-            "--product",
-            PRODUCTS[0],
-            "--baseline",
-            "all",
-            "--no-clone-map",
-        ]
-    )
-    assert "check unavailable" in capfd.readouterr().out
-    assert len(guarded_main["owned"]) == 3
 
 
 def test_later_product_failure_cleans_up_and_stops_processing(
     parquet_inputs, guarded_main, monkeypatch
 ):
-    compare = cli.compare_if_accounts
+    compare = cli.compare_operation_accounts
 
-    def fail_second(source, synthetic, clone_map, if_type):
+    def fail_second(source, synthetic, source_if, if_type):
         if if_type == 50:
             raise ValueError("second product failed")
-        return compare(source, synthetic, clone_map, if_type)
+        return compare(source, synthetic, source_if, if_type)
 
-    monkeypatch.setattr(cli, "compare_if_accounts", fail_second)
+    monkeypatch.setattr(cli, "compare_operation_accounts", fail_second)
     with pytest.raises(RuntimeError, match="second product failed") as exc:
         cli.main(
             [
@@ -485,5 +494,4 @@ def test_later_product_failure_cleans_up_and_stops_processing(
             ]
         )
     assert f"product={PRODUCTS[3]}" in str(exc.value)
-    assert len(guarded_main["calls"]) == 1
-    assert len(guarded_main["owned"]) == 6
+    assert len(guarded_main["calls"]) == 1 and len(guarded_main["owned"]) == 5
