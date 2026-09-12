@@ -458,7 +458,7 @@ def test_render_run_summary_reports_mixed_products_retries_and_failure():
         for line in lines
     )
     assert any(
-        "failure product=bad node=bad.reserve run_id=df-9 error=reservation CAS failed" in line
+        "failure product=bad node=bad.reserve run_id=- error=reservation CAS failed" in line
         for line in lines
     )
     assert any("product=cancelled status=CANCELLED" in line for line in lines)

@@ -139,6 +139,46 @@ engorda because the generic generator does not provide their root/domain contrac
 `COM TABELA` plus an active `CONDICAO_RESGATE` schedule. The generic `rdb` validator name
 remains only as a compatibility alias for direct invocations.
 
+## Quota-aware submissions
+
+When OCI explicitly rejects `data-flow run create` with a complete `LimitExceeded`
+service error, the runner waits and retries that submission rather than failing
+the product immediately. This covers transient Data Flow capacity exhaustion such
+as `vm-total` while other runs are still using or releasing resources.
+
+`--quota-wait-seconds` defaults to `1800` (30 minutes) per remote execution attempt;
+set `0` to disable it or choose up to `86400`. Base delays are 30, 60, 120, 240,
+then 300 seconds, with +/-20% jitter, capped at 300 seconds and the remaining
+budget. The deadline starts at the first quota rejection and includes subsequent
+submission-call time. It prevents new waits and adapter submissions after expiry;
+it does not kill an in-flight submission or override interactive authentication
+and existing OCI command timeouts. An accepted response is tracked even if it
+arrives after expiry, avoiding an orphaned run or duplicate submission.
+
+This budget is separate from `--max-retries`, which governs failed remote
+executions. A quota rejection has not started a remote job, so it does not consume
+that replay budget. Global `--max-retries 0` still permits quota waiting; Oracle
+load and explicitly no-retry nodes, including GenAI planning, remain excluded.
+
+`[quota-wait]` logs identify the node, service code, retry number, delay, and
+remaining budget. Attempt metadata records quota rejections, waits, retries, and
+the latest 20 events; no run OCID is assigned until OCI accepts the submission.
+Waits are interruptible, and other active branches continue to be polled. A waiting
+submission occupies one scheduler worker. `--max-concurrency` limits workers, not
+tenant VM consumption: waiting cannot fix a job whose resource request never fits
+the tenant quota, so budget exhaustion remains an explicit failure.
+
+Only positively identified quota rejections are retried. Timeouts, missing run IDs,
+malformed or conflicting responses, authentication failures, other service errors,
+and polling failures do not cause blind resubmission. Existing load claims and
+ambiguous-load quarantine rules are unchanged.
+
+For a longer queue allowance, add `--quota-wait-seconds 3600` to the existing run
+command. This recovery applies to the running scheduler, not retrospectively to a
+finished FAILED manifest. If engorda already succeeded and only validation was
+rejected, adopt that product's existing synthetic URI and run `--from validate
+--to validate` under a new run ID; do not rerun engorda merely to recover validation.
+
 ## Load validated output
 
 Load is APPEND-only and requires explicit approval. It consumes the exact synthetic
@@ -295,11 +335,13 @@ the complete Data Flow generation job or its OCI transfer time.
 Every real run that reaches the scheduler ends with a summary on stderr. Dry-run and
 config/auth/preflight failures before manifest creation keep their existing output.
 The summary contains global product counts and elapsed time, followed by one line per
-product with wall-clock duration, extra retries, and compact states for
+product with wall-clock duration, accepted-run retries, quota waits/retries, and compact states for
 `plan/reserve/materialize/validate/load`.
 
-FAILED and CANCELLED products include the problem node, the last Data Flow run ID, and
-a shortened error; complete details remain in the manifest. The final lines print both
+FAILED and CANCELLED products include the problem node, that node's latest attempt
+run ID (or `-` if none was created), and a shortened error; complete details remain
+in the manifest. A rejected validation submission never borrows its materialization
+run ID. The final lines print both
 the local and OCI manifest paths plus `upload=SUCCEEDED|FAILED`. A manifest-upload
 failure still renders the product summary and changes the pipeline result to FAILED.
 

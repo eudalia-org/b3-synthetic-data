@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
+import re
 import secrets
 import subprocess
 import sys
@@ -2705,6 +2707,7 @@ def build_pipeline_plan(
         "manifest_uri": manifest_uri,
         "artifacts": artifacts,
         "nodes": nodes,
+        "quota_wait_seconds": args.quota_wait_seconds,
         "data_flow_options": {
             key: getattr(args, key)
             for key in (
@@ -2752,7 +2755,7 @@ def _run_id_from_response(response: Any) -> str:
         return response
     if isinstance(response, dict):
         data = response.get("data", response)
-        if isinstance(data.get("id"), str):
+        if isinstance(data, dict) and isinstance(data.get("id"), str) and data["id"]:
             return data["id"]
     raise PipelineError(f"OCI adapter returned an invalid create response: {response!r}")
 
@@ -3032,6 +3035,78 @@ def _prepare_load_attempt(
     }
 
 
+def _create_quota_rejection(error: Exception) -> dict[str, Any] | None:
+    """Recognize only a complete OCI ServiceError, never the shortened exception text."""
+    if not isinstance(error, (OciExecutionError, subprocess.CalledProcessError)):
+        return None
+    if not isinstance(error.returncode, int) or error.returncode <= 0:
+        return None
+    command_error = error if isinstance(error, subprocess.CalledProcessError) else error.__cause__
+    if isinstance(command_error, subprocess.CalledProcessError) and (
+        not isinstance(command_error.cmd, (list, tuple))
+        or list(command_error.cmd[:4]) != ["oci", "data-flow", "run", "create"]
+    ):
+        return None
+    envelopes = []
+    decoder = json.JSONDecoder()
+    run_ocid = re.compile(r"\bocid1\.dataflowrun\.")
+    for output in (error.stderr, error.stdout):
+        if output is not None and len(output) > 1_048_576:
+            return None
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        output = output or ""
+        if run_ocid.search(output):
+            return None
+        matches = list(re.finditer(r"(?m)^ServiceError:\s*", output))
+        leftovers = (output,)
+        if matches:
+            if len(matches) != 1 or envelopes:
+                return None
+            start = matches[0].end()
+            try:
+                payload, end = decoder.raw_decode(output, start)
+            except (ValueError, RecursionError):
+                return None
+            envelopes.append(payload)
+            leftovers = (output[:start], output[end:])
+        # Only the error object is exempt: other structured output makes CREATE ambiguous.
+        for leftover in leftovers:
+            for index, opening in enumerate(re.finditer(r"[\[{]", leftover)):
+                if index >= 128:
+                    return None
+                try:
+                    decoder.raw_decode(leftover, opening.start())
+                except ValueError:
+                    continue
+                except RecursionError:
+                    return None
+                return None
+    if len(envelopes) != 1 or not isinstance(envelopes[0], dict):
+        return None
+    payload = envelopes[0]
+    pending = [payload]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            if {"data", "id", "run_id", "run-id"}.intersection(value):
+                return None
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+        elif isinstance(value, str) and run_ocid.search(value):
+            return None
+    if payload.get("code") != "LimitExceeded":
+        return None
+    if "operation_name" in payload and payload["operation_name"] != "create_run":
+        return None
+    if "status" in payload and (
+        type(payload["status"]) is not int or payload["status"] not in {400, 403, 409, 429}
+    ):
+        return None
+    return {key: payload[key] for key in ("code", "status") if key in payload}
+
+
 def _execute_remote_node(
     node: dict[str, Any],
     config: dict[str, Any],
@@ -3046,8 +3121,11 @@ def _execute_remote_node(
     stop: threading.Event,
     on_attempt: Callable[[str, dict[str, Any]], None],
     progress: ProgressReporter,
+    quota_wait_seconds: int = 1800,
 ) -> NodeResult:
     attempts: list[dict[str, Any]] = []
+    if node["operation"] == "load" or node.get("max_retries") == 0:
+        quota_wait_seconds = 0
     for attempt_number in range(1, max_retries + 2):
         if stop.is_set():
             return NodeResult("CANCELLED", attempts, {})
@@ -3062,22 +3140,84 @@ def _execute_remote_node(
             **auth,
         }
         progress.emit(f"[launch] {node['id']} attempt={attempt_number}")
-        response = adapter.create_run(
-            list(node["arguments"]),
-            display_name,
-            data_flow_options,
-        )
-        data_flow_run_id = _run_id_from_response(response)
-        progress.emit(f"[submit] {node['id']} attempt={attempt_number} run_id={data_flow_run_id}")
+        # Rejected submissions belong to this attempt, never to a previous run's OCID.
         attempt = {
             "attempt": attempt_number,
-            "run_id": data_flow_run_id,
             "application_id": node["application_id"],
             "display_name": display_name,
             "arguments": list(node["arguments"]),
-            "state": "RUNNING",
+            "state": "SUBMITTING",
+            "quota_rejections": 0,
+            "quota_waits": 0,
+            "quota_retries": 0,
+            "quota_events": [],
         }
         attempts.append(attempt)
+        deadline = None
+        while True:
+            if stop.is_set():
+                attempt.update(state="CANCELLED", quota_state="CANCELLED")
+                on_attempt(node["id"], attempt)
+                return NodeResult("CANCELLED", attempts, {})
+            if deadline is not None and time.monotonic() >= deadline:
+                attempt.update(state="FAILED", quota_state="EXHAUSTED")
+                on_attempt(node["id"], attempt)
+                raise OciExecutionError(
+                    f"Data Flow LimitExceeded: quota wait exhausted/disabled after "
+                    f"{quota_wait_seconds}s; no run created for this attempt. Check requested "
+                    "capacity and vm-total quota; the quota may be too small for this job."
+                )
+            attempt["state"] = "SUBMITTING"
+            on_attempt(node["id"], attempt)
+            if stop.is_set() or (deadline is not None and time.monotonic() >= deadline):
+                continue
+            if deadline is not None:
+                attempt["quota_retries"] += 1
+            try:
+                response = adapter.create_run(
+                    list(node["arguments"]), display_name, data_flow_options
+                )
+                data_flow_run_id = _run_id_from_response(response)
+                break
+            except Exception as error:
+                rejected_at = time.monotonic()
+                rejection = _create_quota_rejection(error)
+                if rejection is None:
+                    attempt["state"] = "FAILED"
+                    if attempt["quota_rejections"]:
+                        attempt["quota_state"] = "ABORTED"
+                    on_attempt(node["id"], attempt)
+                    if isinstance(error, subprocess.CalledProcessError):
+                        raise OciExecutionError(
+                            f"OCI Data Flow run create failed with exit code {error.returncode}"
+                        ) from None
+                    raise
+                if deadline is None:
+                    deadline = rejected_at + quota_wait_seconds
+                attempt["quota_rejections"] += 1
+                remaining = max(0.0, deadline - time.monotonic())
+                base = min(30 * 2 ** min(attempt["quota_waits"], 4), 300)
+                delay = min(base * random.uniform(0.8, 1.2), 300, remaining)
+                event = {**rejection, "delay_seconds": delay, "remaining_seconds": remaining}
+                attempt["quota_events"] = (attempt["quota_events"] + [event])[-20:]
+                if delay > 0 and not stop.is_set():
+                    attempt["quota_waits"] += 1
+                    attempt.update(state="QUOTA_WAIT", quota_state="WAITING")
+                    progress.emit(
+                        f"[quota-wait] {node['id']} code=LimitExceeded "
+                        f"retry={attempt['quota_retries'] + 1} "
+                        f"delay={delay:g}s budget={remaining:g}s"
+                    )
+                    on_attempt(node["id"], attempt)
+                    delay = min(delay, max(0.0, deadline - time.monotonic()))
+                    if delay > 0 and not stop.is_set():
+                        stop.wait(delay)
+                    else:
+                        attempt["quota_waits"] -= 1
+        attempt.update(run_id=data_flow_run_id, state="RUNNING")
+        if attempt["quota_rejections"]:
+            attempt["quota_state"] = "ACCEPTED"
+        progress.emit(f"[submit] {node['id']} attempt={attempt_number} run_id={data_flow_run_id}")
         with active_lock:
             cancel_after_create = stop.is_set()
             if not cancel_after_create:
@@ -3382,6 +3522,7 @@ def execute_plan(
                         stop,
                         record_attempt,
                         progress,
+                        quota_wait_seconds=plan["quota_wait_seconds"],
                     )
                 futures[future] = node_id
 
@@ -3498,6 +3639,7 @@ def _initial_manifest(plan: dict[str, Any], upstream_path: str) -> dict[str, Any
         "artifacts": plan["artifacts"],
         "reservation_contract": plan["reservation_contract"],
         "load_contract": plan["load_contract"],
+        "quota_wait_seconds": plan["quota_wait_seconds"],
         "nodes": {
             node_id: {**node, "state": "PENDING", "attempts": []}
             for node_id, node in plan["nodes"].items()
@@ -3617,7 +3759,7 @@ def render_run_summary(
             max(0.0, (max(finishes) - min(starts)).total_seconds()) if starts and finishes else None
         )
         retries = sum(
-            max(0, len(node.get("attempts", [])) - 1)
+            max(0, sum(bool(attempt.get("run_id")) for attempt in node.get("attempts", [])) - 1)
             for node in product_nodes
             if isinstance(node.get("attempts"), list)
         )
@@ -3631,9 +3773,18 @@ def render_run_summary(
                 f"{operation}={_SUMMARY_STATE_LABELS.get(operation_state, operation_state)}"
             )
         stages = " ".join(stage_parts)
+        quota_counts = {
+            key: sum(
+                attempt.get(key, 0)
+                for node in product_nodes
+                for attempt in node.get("attempts", [])
+            )
+            for key in ("quota_waits", "quota_retries")
+        }
         lines.append(
             f"[summary] product={product} status={state} "
-            f"elapsed={_format_summary_duration(elapsed)} retries={retries} {stages}"
+            f"elapsed={_format_summary_duration(elapsed)} retries={retries} {stages} "
+            + " ".join(f"{key}={count}" for key, count in quota_counts.items())
         )
         if state in {"FAILED", "CANCELLED"}:
             problem_nodes = [
@@ -3646,19 +3797,8 @@ def render_run_summary(
                         str(node.get("operation")), len(operation_index)
                     ),
                 )
-                attempted_nodes = sorted(
-                    product_nodes,
-                    key=lambda node: operation_index.get(
-                        str(node.get("operation")), len(operation_index)
-                    ),
-                    reverse=True,
-                )
-                run_id = "-"
-                for attempted_node in attempted_nodes:
-                    attempts = attempted_node.get("attempts")
-                    if isinstance(attempts, list) and attempts:
-                        run_id = attempts[-1].get("run_id", "-")
-                        break
+                attempts = problem.get("attempts")
+                run_id = attempts[-1].get("run_id") or "-" if attempts else "-"
                 lines.append(
                     f"[summary] failure product={product} node={problem.get('id', '-')} "
                     f"run_id={run_id} error={_summary_error(problem)}"
@@ -3988,7 +4128,21 @@ def cli(context: click.Context) -> None:
 @click.option("--run-id")
 @click.option("--local-run-root", default=".pipeline-runs", show_default=True)
 @click.option("--max-concurrency", type=click.IntRange(min=1), default=4, show_default=True)
-@click.option("--max-retries", type=click.IntRange(min=0), default=1, show_default=True)
+@click.option(
+    "--max-retries",
+    type=click.IntRange(min=0),
+    default=1,
+    show_default=True,
+    help="Retries of failed remote executions, independent of quota waiting (even at 0).",
+)
+@click.option(
+    "--quota-wait-seconds",
+    type=click.IntRange(0, 86400),
+    default=1800,
+    show_default=True,
+    help="Create-only LimitExceeded wait budget per remote attempt; 0 disables. "
+    "No quota retries for load or GenAI planning. Includes waits and later create calls.",
+)
 @click.option("--poll-seconds", type=click.FloatRange(min=0), default=30.0, show_default=True)
 @click.option("--num-executors", type=click.IntRange(min=1))
 @click.option("--driver-shape")
