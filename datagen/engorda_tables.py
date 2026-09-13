@@ -4517,6 +4517,129 @@ def ajusta_datas_condicao_if(
     return joined.select(*projecao), cols_alvo
 
 
+def ajusta_inicio_escalonamento_emissao(
+    clones: DataFrame,
+    raiz_sintetica: DataFrame,
+    lote_titulos: DataFrame,
+    lote_juros_flutuante: DataFrame,
+    mapa_num_if: DataFrame,
+    mapa_condicao_if: DataFrame,
+) -> DataFrame:
+    """Normaliza somente o primeiro segmento flutuante unico de CDB EMISSAO.
+
+    TITULO e JUROS ainda sao lotes originais neste ponto da ordem de clonagem.
+    Inicios invalidos ou empatados na menor data ficam para o validador rejeitar.
+    """
+    inicio = "DAT_INICIO_CONDICAO_IF"
+    required = (
+        ("CONDICAO_IF", clones, {COL_NUM_IF, CONDICAO_IF_PK, CONDICAO_IF_TIPO_COL, inicio}),
+        (TABELA_RAIZ, raiz_sintetica, {COL_NUM_IF, COL_NUM_TIPO_IF, ENGORDA_COL_DAT_EMISSAO}),
+        ("TITULO", lote_titulos, {COL_NUM_IF, "COD_TIPO_ESCALONAMENTO"}),
+        ("JUROS_FLUTUANTE", lote_juros_flutuante, {CONDICAO_IF_PK}),
+        ("mapa_num_if", mapa_num_if, {"old_NUM_IF", "new_NUM_IF"}),
+        ("mapa_condicao_if", mapa_condicao_if, {"old_NUM_CONDICAO_IF", "new_NUM_CONDICAO_IF"}),
+    )
+    for name, frame, columns in required:
+        missing = columns if frame is None else columns - set(frame.columns)
+        if missing:
+            raise ValueError(
+                f"CDB EMISSAO: {name} ausente ou sem colunas obrigatorias: {sorted(missing)}"
+            )
+
+    def ativo(frame):
+        if COL_DAT_EXCLUSAO not in frame.columns:
+            return F.lit(True)
+        return F.col(COL_DAT_EXCLUSAO).isNull() | (
+            F.trim(F.col(COL_DAT_EXCLUSAO).cast("string")) == ""
+        )
+
+    titles = (
+        lote_titulos.where(
+            ativo(lote_titulos)
+            & (_norm_code_validador(F.col("COD_TIPO_ESCALONAMENTO")) == "EMISSAO")
+        )
+        .select(_norm_key_col(F.col(COL_NUM_IF)).alias("__old_if"))
+        .distinct()
+    )
+    title_keys = (
+        mapa_num_if.select(
+            _norm_key_col(F.col("old_NUM_IF")).alias("__old_if"),
+            _norm_key_col(F.col("new_NUM_IF")).alias("__if"),
+        )
+        .join(titles, "__old_if", "left_semi")
+        .select("__if")
+        .distinct()
+    )
+    # O validador exige presenca do subtipo, sem filtrar sua DAT_EXCLUSAO.
+    floats = lote_juros_flutuante.select(
+        _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__old_cond")
+    ).distinct()
+    float_keys = (
+        mapa_condicao_if.select(
+            _norm_key_col(F.col("old_NUM_CONDICAO_IF")).alias("__old_cond"),
+            _norm_key_col(F.col("new_NUM_CONDICAO_IF")).alias("__cond"),
+        )
+        .join(floats, "__old_cond", "left_semi")
+        .select("__cond")
+        .distinct()
+    )
+    roots = (
+        raiz_sintetica.where(
+            ativo(raiz_sintetica) & (_norm_key_col(F.col(COL_NUM_TIPO_IF)) == "49")
+        )
+        .select(
+            _norm_key_col(F.col(COL_NUM_IF)).alias("__if"),
+            _try_cast_col(ENGORDA_COL_DAT_EMISSAO, "date").alias("__emission"),
+        )
+        .join(title_keys, "__if", "left_semi")
+        .where(F.col("__emission").isNotNull())
+    )
+    roots = (
+        roots.groupBy("__if")
+        .agg(
+            F.min("__emission").alias("__emission"),
+            F.countDistinct("__emission").alias("__emissions"),
+        )
+        .where(F.col("__emissions") == 1)
+        .drop("__emissions")
+    )
+
+    # Projecao isolada: nenhuma coluna temporaria sobrescreve campos da origem.
+    source = clones.select(
+        F.struct(*[F.col(f"`{c.replace('`', '``')}`") for c in clones.columns]).alias("__row"),
+        _norm_key_col(F.col(COL_NUM_IF)).alias("__if"),
+        _norm_key_col(F.col(CONDICAO_IF_PK)).alias("__cond"),
+        _try_cast_col(inicio, "date").alias("__start"),
+        (ativo(clones) & (_norm_code_validador(F.col(CONDICAO_IF_TIPO_COL)) == "3")).alias(
+            "__eligible"
+        ),
+    )
+    per_root = Window.partitionBy("__if")
+    first = (
+        source.where(F.col("__eligible") & F.col("__start").isNotNull())
+        .select("__if", "__cond", "__start")
+        .join(float_keys, "__cond", "left_semi")
+        .join(roots, "__if", "inner")
+        .withColumn("__minimum", F.min("__start").over(per_root))
+        .where(F.col("__start") == F.col("__minimum"))
+        .withColumn("__ties", F.count(F.lit(1)).over(per_root))
+        .where(F.col("__ties") == 1)
+        .select("__if", "__cond", "__start", "__emission")
+    )
+    joined = source.join(first, ["__if", "__cond", "__start"], "left")
+    projection = []
+    for column in clones.columns:
+        value = F.col(f"__row.`{column.replace('`', '``')}`")
+        if column == inicio:
+            value = F.when(
+                F.col("__eligible") & F.col("__emission").isNotNull(),
+                _date_expression_for_type(F.col("__emission"), clones.schema[inicio].dataType),
+            ).otherwise(value)
+        projection.append(value.alias(column))
+    logger.info("CONDICAO_IF: regra CDB EMISSAO aplicada ao primeiro inicio unico elegivel.")
+    return joined.select(*projection)
+
+
 # ---------------------------------------------------------------------------
 # Plano de sintetização: classificação de tabelas/PKs/FKs a partir do spec + dos
 # schemas Parquet. Nenhuma decisão implícita: o que não tem regra ABORTA.
@@ -10859,6 +10982,17 @@ def executa_clonagem(
                     mapeamentos[TABELA_RAIZ],
                 )
                 cols_data.extend(cols_shift)
+                if product_profile.name == "cdb_escalonamento":
+                    clones = ajusta_inicio_escalonamento_emissao(
+                        clones,
+                        resultados[TABELA_RAIZ][0],
+                        lotes.get("TITULO"),
+                        lotes.get("JUROS_FLUTUANTE"),
+                        mapeamentos[TABELA_RAIZ],
+                        mapeamentos[CONDICAO_IF_TABLE],
+                    )
+                    if "DAT_INICIO_CONDICAO_IF" not in cols_data:
+                        cols_data.append("DAT_INICIO_CONDICAO_IF")
             if t in {"RESGATE", "CONDICAO_RESGATE"}:
                 date_context = dict(resultados)
                 date_context[t] = (clones, n_lote)

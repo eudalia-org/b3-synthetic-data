@@ -190,6 +190,26 @@ Cross-schema mode runs `COUNT(*)`, so it can be expensive on very large tables. 
 read segment size without additional catalog grants; `--compressed-bytes-per-row` lets you
 estimate output size from a measured limited extract.
 
+## Escalonamento Start Dates
+
+For `cdb_escalonamento` with standard date rules, generation aligns the unique
+earliest parseable active floating-interest segment of an active `EMISSAO` CDB to
+the rewritten `DAT_EMISSAO`. This runs after the ordinary relative condition-date
+shift and before checkpointing and validation. Source title/subtype membership is
+resolved through the clone maps; the validator's code-normalization semantics are
+preserved.
+
+Only that segment's `DAT_INICIO_CONDICAO_IF` is changed. Later starts, condition end
+dates, maturity, financial values, and other condition families retain their values
+from the normal generation rules. NULL/unparseable starts and ambiguous tied minima
+are not repaired. Missing structural evidence fails clearly rather than guessing.
+All existing date and uniqueness checks remain enabled, so this does not guarantee
+that a schedule with other invalid dates will pass. It also applies in offline
+generation using the chosen operational date.
+
+The rule affects newly generated outputs, not existing Parquet or Oracle rows.
+Use a fresh run/output to apply it; rerunning validation alone does not change dates.
+
 ## Fast Parallel Load
 
 `load_tables.py` loads per-table Parquet into the target Oracle database through
