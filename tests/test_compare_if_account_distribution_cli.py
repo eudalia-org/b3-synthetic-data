@@ -35,6 +35,9 @@ IF_SCHEMA = ", ".join(f"{c} string" for c in IF_COLUMNS)
     "argv",
     [
         [],
+        REQUIRED,
+        REQUIRED + ["--baseline", "all"],
+        REQUIRED + ["--queries-uri", "  "],
         REQUIRED[:2],
         REQUIRED[2:],
         ["--source-base-uri", "  ", *REQUIRED[2:]],
@@ -98,7 +101,6 @@ def test_cli_ast_is_read_only_bounded_and_uses_managed_spark():
         "localCheckpoint",
         "setCheckpointDir",
         "export",
-        "open",
         "write_text",
         "write_bytes",
         "collect",
@@ -108,7 +110,6 @@ def test_cli_ast_is_read_only_bounded_and_uses_managed_spark():
         "config",
         "set",
         "getConf",
-        "hadoopConfiguration",
         "SparkContext",
         "clearCache",
         "broadcast",
@@ -321,7 +322,7 @@ def guarded_main(spark, parquet_inputs, monkeypatch):
 @pytest.mark.parametrize(
     "extra,products,baselines,top_n",
     [
-        (["--product", PRODUCTS[0]], PRODUCTS[:1], BASELINES[:1], 30),
+        (["--product", PRODUCTS[0], "--baseline", "full_export"], PRODUCTS[:1], BASELINES[:1], 30),
         (
             [
                 "--product",
@@ -329,15 +330,15 @@ def guarded_main(spark, parquet_inputs, monkeypatch):
                 "--product",
                 PRODUCTS[1],
                 "--baseline",
-                "all",
+                "full_export",
                 "--top-n",
                 "2",
             ],
             [PRODUCTS[3], PRODUCTS[1]],
-            BASELINES,
+            BASELINES[:1],
             2,
         ),
-        (["--top-n", "1"], PRODUCTS, BASELINES[:1], 1),
+        (["--top-n", "1", "--baseline", "full_export"], PRODUCTS, BASELINES[:1], 1),
         (
             ["--product", PRODUCTS[0], "--baseline", "active_same_type", "--top-n", "1000"],
             PRODUCTS[:1],
@@ -437,6 +438,8 @@ def test_input_errors_have_context_and_cleanup(parquet_inputs, guarded_main, sou
                 str(parquet_inputs / source),
                 "--synthetic-run-base-uri",
                 str(parquet_inputs / run),
+                "--baseline",
+                "full_export",
                 "--product",
                 PRODUCTS[0],
             ]
@@ -460,6 +463,8 @@ def test_display_failure_releases_distribution_and_inputs(
                 str(parquet_inputs / "export"),
                 "--synthetic-run-base-uri",
                 str(parquet_inputs / "run"),
+                "--baseline",
+                "full_export",
                 "--product",
                 PRODUCTS[0],
             ]
@@ -485,6 +490,8 @@ def test_later_product_failure_cleans_up_and_stops_processing(
                 str(parquet_inputs / "export"),
                 "--synthetic-run-base-uri",
                 str(parquet_inputs / "run"),
+                "--baseline",
+                "full_export",
                 "--product",
                 PRODUCTS[0],
                 "--product",

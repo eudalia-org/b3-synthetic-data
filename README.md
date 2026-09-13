@@ -50,6 +50,36 @@ Example config:
 
 The config path is read through Spark, so local paths and Spark-readable Object Storage URIs are supported when configured in the runtime environment.
 
+## Operation Account Distributions
+
+`scripts/compare_if_account_distribution.py` is a standalone Spark/Data Flow job
+that compares `OPERACAO.NUM_CONTA_PARTICIPANTE_P1` and `_P2` separately. Despite its
+historical filename, it does not compare IF accounts. Results are printed to driver
+logs only. The matching notebook uses the same helper and SQL catalog.
+
+```text
+--source-base-uri oci://bucket@namespace/onprem-export-full
+--synthetic-run-base-uri oci://bucket@namespace/pipeline-runs/environment/run-id
+--queries-uri oci://bucket@namespace/scripts/queries_produtos.sql
+--baseline product_query_matched
+--top-n 30
+```
+
+The new default, `product_query_matched`, executes that product's block from the
+supplied canonical `datagen/queries_produtos.sql` catalog and includes all source
+operations under matching IF roots. P1/P2 denominators remain separate operation
+counts. This is the SQL domain, **not** subsequent Python pruning, Oracle admission,
+or the exact selected producing-run snapshot. Catalog and query SHA256 values are
+logged; using a mutable catalog URI does not establish historical version identity.
+Only read-only SELECT/WITH queries in the supported catalog form are accepted.
+
+Omit `--product` for all five CDB/RDB profiles, or repeat it for a subset. Use
+`--baseline all` for all four references; this also requires `--queries-uri`.
+Explicit `full_export`, `same_type`, or `active_same_type` still work without a
+catalog. RAW must contain the query dependencies, not just IF and operation tables.
+Missing dependencies, malformed queries, or invalid roots fail rather than silently
+falling back to a broader population. No report files or source data are written.
+
 ## Fast Raw Table Extract
 
 `save_tables.py` extracts source Oracle tables directly to raw Parquet. It avoids a

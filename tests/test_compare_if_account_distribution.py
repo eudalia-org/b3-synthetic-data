@@ -268,7 +268,7 @@ def test_standalone_import_and_no_driver_materialization():
         if isinstance(node, ast.ImportFrom):
             assert node.module in {"functools", "pyspark", "pyspark.sql"}
         if isinstance(node, ast.Import):
-            assert all(alias.name == "argparse" for alias in node.names)
+            assert all(alias.name in {"argparse", "hashlib", "re"} for alias in node.names)
     for helper in (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name != "main"):
         for node in ast.walk(helper):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
@@ -278,8 +278,9 @@ def test_standalone_import_and_no_driver_materialization():
                     "toLocalIterator",
                     "broadcast",
                     "cache",
-                    "persist",
                 }
+                if node.func.attr == "persist":
+                    assert helper.name == "product_query_if_ids"
                 if node.func.attr == "first":
                     assert isinstance(node.func.value, ast.Call)
                     assert node.func.value.func.attr == "agg"
@@ -297,8 +298,9 @@ def test_notebook_code_is_valid_and_contains_no_saved_results():
 
 
 @pytest.mark.parametrize("metadata_valid", [True, False])
+@pytest.mark.parametrize("with_catalog", [True, False])
 def test_notebook_runs_against_local_operations_without_reports(
-    spark, known_inputs, tmp_path, monkeypatch, metadata_valid
+    spark, known_inputs, tmp_path, monkeypatch, metadata_valid, with_catalog
 ):
     scripts = Path(__file__).resolve().parents[1] / "scripts"
     notebook = json.loads((scripts / "compare_if_account_distribution.ipynb").read_text())
@@ -308,6 +310,13 @@ def test_notebook_runs_against_local_operations_without_reports(
     source.write.parquet(str(tmp_path / "export/OPERACAO"))
     metadata.write.parquet(str(tmp_path / "export/INSTRUMENTO_FINANCEIRO"))
     synthetic.write.parquet(str(tmp_path / "synthetic/OPERACAO"))
+    queries = tmp_path / "queries.sql"
+    queries.write_text(
+        "-- BEGIN QUERY: cdb_simplificado\n"
+        "WITH roots AS (SELECT NUM_IF FROM {{RAW_INSTRUMENTO_FINANCEIRO}} "
+        "WHERE NUM_TIPO_IF IN ('49', '49.00')) SELECT NUM_IF FROM roots;\n"
+        "-- END QUERY: cdb_simplificado\n"
+    )
     namespace = {
         "spark": spark,
         "RUN_ID": "local-fixture",
@@ -316,6 +325,7 @@ def test_notebook_runs_against_local_operations_without_reports(
         "PRODUCTS": ["cdb_simplificado"],
         "SYNTHETIC_BASES": {"cdb_simplificado": str(tmp_path / "synthetic")},
         "HELPER_FILE": str(scripts / "compare_if_account_distribution.py"),
+        "QUERIES_URI": str(queries) if with_catalog else None,
         "BASELINE_TO_VIEW": "active_same_type",
         "TOP_N": 5,
     }
@@ -360,8 +370,9 @@ def test_notebook_runs_against_local_operations_without_reports(
 
     run_notebook()
     summaries = [r for r in previews if "TOTAL_VARIATION_PCT" in r.asDict()]
+    baselines = BASELINES | ({"product_query_matched"} if with_catalog else set())
     assert {(r.BASELINE, r.ROLE) for r in summaries} == {
-        (b, p) for b in BASELINES for p in ("P1", "P2")
+        (b, p) for b in baselines for p in ("P1", "P2")
     }
     assert {r.SYNTHETIC_TOTAL for r in summaries} == {5}
     assert {r.SOURCE_TOTAL for r in summaries if r.BASELINE == "full_export"} == {8}
