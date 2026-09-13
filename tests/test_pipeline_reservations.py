@@ -849,6 +849,100 @@ def test_existing_create_once_reservation_is_idempotent():
     assert store.objects[LEDGER] == ledger_before
 
 
+def synthetic_cdb_plan(uri, label, *, product="cdb_simplificado", count=3):
+    request = grouped_plan(uri, label, [], operational_date="2026-06-03")
+    request["product"] = product
+    request["cod_if"] = {
+        "strategy": "synthetic_cdb",
+        "oracle_type": 49,
+        "prefix": "CDB626",
+        "count": count,
+        "minimum_start": int("A0000", 36),
+    }
+    root = "INSTRUMENTO_FINANCEIRO"
+    request["tables"][root] = {
+        "source_count": count,
+        "synthetic_count": count,
+        "pk": {"rule": "OFFSET_PROPRIO", "count_demand": count, "step": 1, "minimum_start": 500},
+    }
+    snapshot = request["selected_lote"]
+    snapshot["table_set"] = sorted(request["tables"])
+    snapshot["tables"][root] = {
+        **snapshot["tables"]["OPERACAO"],
+        "path": f"{snapshot['snapshot_uri']}/tables/{root}",
+        "row_count": count,
+    }
+    return with_plan_id(request)
+
+
+def test_synthetic_cdb_cas_burns_codes_and_reuses_immutable_reservation():
+    store = FakeStorage()
+    store.seed(REQUEST_A, synthetic_cdb_plan(REQUEST_A, "a"))
+    store.seed(REQUEST_B, synthetic_cdb_plan(REQUEST_B, "b"))
+    store.fail_puts[LEDGER] = 1
+    store.fail_puts[RESERVATION_A] = 1
+    with pytest.raises(R.ReservationError, match="concurrently populated"):
+        reserve(store, REQUEST_A, RESERVATION_A, "a")
+    reserve(store, REQUEST_B, RESERVATION_B, "b")
+    assert store.json(RESERVATION_B)["cod_if"]["start"] == int("A0000", 36) + 3
+    before = store.objects[LEDGER]
+    reserve(store, REQUEST_B, RESERVATION_B, "b")
+    assert store.objects[LEDGER] == before
+
+
+def test_synthetic_cdb_concurrent_cas_ranges_do_not_overlap_across_products():
+    store = FakeStorage()
+    requests = [
+        synthetic_cdb_plan(REQUEST_A, "a"),
+        synthetic_cdb_plan(REQUEST_B, "b", product="cdb_resgate"),
+    ]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        artifacts = list(
+            pool.map(
+                lambda p: R._reserve_in_ledger(
+                    store, LEDGER, "qab", p["plan_id"], p["product"], p["plan_id"], p
+                ),
+                requests,
+            )
+        )
+    ranges = sorted((a["cod_if"]["start"], a["cod_if"]["end"]) for a in artifacts)
+    assert ranges[0][1] + 1 == ranges[1][0]
+    assert store.json(LEDGER)["revision"] == 2
+
+
+def test_synthetic_cdb_exhaustion_does_not_persist_partial_reservation():
+    store = FakeStorage()
+    first = synthetic_cdb_plan(REQUEST_A, "a", count=1)
+    first["cod_if"]["minimum_start"] = 36**5 - 1
+    store.seed(REQUEST_A, with_plan_id(first))
+    reserve(store, REQUEST_A, RESERVATION_A, "a")
+    store.seed(REQUEST_B, synthetic_cdb_plan(REQUEST_B, "b"))
+    before = store.objects[LEDGER]
+    with pytest.raises(R.ReservationError, match="exhausted"):
+        reserve(store, REQUEST_B, RESERVATION_B, "b")
+    assert store.objects[LEDGER] == before
+    assert RESERVATION_B not in store.objects
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("prefix", "CDB727"),
+        ("minimum_start", True),
+        ("count", 4),
+        ("oracle_type", 50),
+    ],
+)
+def test_synthetic_cdb_plan_tampering_fails_before_reservation(field, value):
+    store = FakeStorage()
+    request = synthetic_cdb_plan(REQUEST_A, "bad")
+    request["cod_if"][field] = value
+    store.seed(REQUEST_A, with_plan_id(request))
+    with pytest.raises(R.ReservationError):
+        reserve(store, REQUEST_A, RESERVATION_A, "bad")
+    assert LEDGER not in store.objects
+
+
 def test_live_storage_uses_oci_argv_temp_files_and_conditional_flags(monkeypatch):
     calls = []
     payload = b'{"value": 1}\n'

@@ -139,6 +139,14 @@ engorda because the generic generator does not provide their root/domain contrac
 `COM TABELA` plus an active `CONDICAO_RESGATE` schedule. The generic `rdb` validator name
 remains only as a compatibility alias for direct invocations.
 
+## Synthetic CDB codes
+
+For CDB runs affected by the official COD_IF allocator's `ORA-06502` response,
+the explicit `engorda.cod_if_allocator=synthetic_cdb` override reserves locally
+generated, format-compatible codes above a live Oracle floor. See
+[Synthetic CDB codes](synthetic-cdb-codes.md) for deployment, new-plan requirements,
+range guarantees, and per-product `--set` examples.
+
 ## Quota-aware submissions
 
 When OCI explicitly rejects `data-flow run create` with a complete `LimitExceeded`

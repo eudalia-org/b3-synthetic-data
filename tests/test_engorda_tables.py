@@ -428,7 +428,8 @@ class TestEngordaArtifacts:
         with pytest.raises(ValueError, match="tuple_count_demand diverge dos grupos"):
             engorda_tables._validate_plan_artifact(plan)
 
-    def test_plan_builder_freezes_exact_public_demands(self):
+    @pytest.mark.parametrize("synthetic_cdb", [False, True])
+    def test_plan_builder_freezes_exact_public_demands(self, synthetic_cdb):
         class CountFrame:
             def __init__(self, count):
                 self._count = count
@@ -440,6 +441,13 @@ class TestEngordaArtifacts:
         profile = dataclasses.replace(
             profile,
             business_keys=dataclasses.replace(profile.business_keys, operation=None),
+        )
+        cod_if = (
+            engorda_tables._synthetic_cdb_descriptor(
+                date(2026, 8, 18), 6, "CDB926B0000", code_month=9
+            )
+            if synthetic_cdb
+            else None
         )
         plan = engorda_tables._build_engorda_plan(
             config={
@@ -470,6 +478,7 @@ class TestEngordaArtifacts:
             faltantes_uri="oci://cfg@ns/faltantes",
             query_num_if_uri="oci://cfg@ns/queries_produtos.sql",
             selected_lote=self._selected_lote({"INSTRUMENTO_FINANCEIRO": 2}),
+            cod_if_descriptor=cod_if,
         )
 
         assert plan["selected_num_ifs"] == [10, 20]
@@ -485,7 +494,7 @@ class TestEngordaArtifacts:
                 "minimum_start": 1000,
             },
         }
-        assert plan["cod_if"] == {"count": 6, "oracle_type": 49}
+        assert plan["cod_if"] == (cod_if or {"count": 6, "oracle_type": 49})
         assert plan["cod_operacao"] == {"count": 0}
         assert plan["meu_numero"] == {
             "strategy": "date_account_tos_shared_interval_v1",
@@ -1526,6 +1535,56 @@ class TestEngordaJobLifecycle:
             engorda_tables.clone_base_path(seen["config"])
             == "synthetic/sintetizacao_multiproduto/cdb_simplificado"
         )
+
+    @pytest.mark.parametrize("explicit_allocator", [None, "synthetic_cdb", "oracle_if21"])
+    def test_materialize_restores_frozen_cdb_allocator(
+        self, runtime, monkeypatch, explicit_allocator
+    ):
+        job, _events, seen = runtime
+        plan = TestEngordaArtifacts._plan()
+        plan.update(
+            raw_uri="raw",
+            output_uri="synthetic/sintetizacao_multiproduto/cdb_simplificado",
+            specs_uri="spec.json",
+            faltantes_uri=None,
+            query_num_if_uri=engorda_tables.get_product_profile(job.produto).query_filename,
+            cod_if=engorda_tables._synthetic_cdb_descriptor(
+                date(2026, 8, 18), 2, None, code_month=9
+            ),
+        )
+        body = {k: v for k, v in plan.items() if k != "plan_id"}
+        plan = {**body, "plan_id": engorda_tables._plan_id(body)}
+        reservation = run_pipeline._allocate_artifact(
+            run_pipeline._new_ledger("qab"), plan, "run", job.produto, "reservation"
+        )
+        engorda_tables._validate_plan_artifact(plan)
+        engorda_tables._validate_reservation_artifact(plan, reservation)
+        monkeypatch.setattr(
+            engorda_tables,
+            "_read_json_artifact",
+            lambda _spark, uri: plan if uri == "plan" else reservation,
+        )
+        monkeypatch.setattr(
+            engorda_tables, "_load_selected_lote_snapshot", lambda *_args, **_kwargs: ({}, None, {})
+        )
+        job = dataclasses.replace(
+            job,
+            num_ifs=None,
+            no_oracle=False,
+            phase="materialize",
+            raw_uri="raw",
+            output_uri=plan["output_uri"],
+            plan_uri="plan",
+            reservation_uri="reservation",
+            cod_if_allocator=explicit_allocator,
+        )
+        if explicit_allocator == "oracle_if21":
+            with pytest.raises(ValueError, match="cod-if-allocator diverge"):
+                engorda_tables.executar_job(job)
+        else:
+            engorda_tables.executar_job(job)
+            assert seen["product_profile"].business_keys.cod_if_allocator == "synthetic_cdb"
+            assert seen["planned_artifact"]["cod_if"] == plan["cod_if"]
 
     def test_failure_propagates_and_stops_session_without_retry(self, runtime, monkeypatch):
         job, events, _seen = runtime

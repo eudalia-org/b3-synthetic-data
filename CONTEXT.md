@@ -115,3 +115,7 @@ _Avoid_: Execution-local row number, source identity alone
 **Synthetic key reservation**:
 The exact set of numeric primary-key slots allocated to one table in a planned synthetic batch. Generated records occupy those slots once each, respecting the reserved spacing without additional gaps or expansion of the interval.
 _Avoid_: Random identifier pool, sparse execution IDs
+
+**Synthetic CDB code range**:
+A reserved, ordered set of CDB business codes for test instruments, shared across CDB scenarios within the same month/year namespace. These codes retain the observed CDB format but are not issued by the official CETIP allocator; their use does not imply an offline synthetic artifact.
+_Avoid_: Official CETIP code, random CDB identifier, numeric primary-key range

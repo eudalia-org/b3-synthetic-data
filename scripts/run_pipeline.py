@@ -45,6 +45,7 @@ OVERRIDE_KEYS = {
         "query_num_if_sql",
         "no_oracle",
         "controle_operacional_date",
+        "cod_if_allocator",
     },
     "validate": {
         "fail_severity",
@@ -66,6 +67,10 @@ OFFLINE_ARTIFACT_MARKER = "_DATAGEN_OFFLINE.json"
 GENAI_MAX_SOURCE_INSTRUMENTS = 10000
 GENAI_MAX_FACTOR_K = 5
 GENAI_DEFAULT_CONCURRENCY = 4
+SYNTHETIC_CDB_ALLOCATOR = "synthetic_cdb"
+CDB_MIN_SUFFIX = int("A0000", 36)
+CDB_MAX_SUFFIX = 36**5 - 1
+CDB_PRODUCTS = frozenset({"cdb", "cdb_simplificado", "cdb_resgate", "cdb_escalonamento"})
 
 RUN_ARGS_FLAG = "--arguments"
 PENDING_STATES = {"ACCEPTED", "IN_PROGRESS", "CANCELING", "STOPPING"}
@@ -1438,6 +1443,96 @@ def _validate_selected_lote(
         raise ReservationError("plan.selected_lote.selective_missing absent contract is invalid")
 
 
+def _synthetic_cdb_request(plan: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    descriptor = plan.get("cod_if", {})
+    if not isinstance(descriptor, Mapping):
+        raise ReservationError("plan.cod_if must be an object")
+    strategy = descriptor.get("strategy", "oracle_if21")
+    if strategy == "oracle_if21":
+        return None
+    if strategy != SYNTHETIC_CDB_ALLOCATOR:
+        raise ReservationError("plan.cod_if.strategy is invalid")
+    if (
+        plan.get("product") not in CDB_PRODUCTS
+        or plan.get("oracle_access") == "disabled"
+        or descriptor.get("oracle_type") != 49
+        or set(descriptor) != {"strategy", "oracle_type", "prefix", "count", "minimum_start"}
+    ):
+        raise ReservationError("synthetic COD_IF requires a live CDB type-49 plan")
+    operational_date = datetime.fromisoformat(
+        _canonical_operational_date(
+            plan.get("controle_operacional_date"), "plan.controle_operacional_date"
+        )
+    )
+    # O mês veio de CETIP.GET_DATAHOJE no plan; pode divergir da data operacional.
+    prefix_pattern = f"CDB[1-9A-C]{operational_date.year % 100:02d}"
+    count = _positive_or_zero(descriptor["count"], "plan.cod_if.count")
+    minimum = descriptor["minimum_start"]
+    root = plan.get("tables", {}).get("INSTRUMENTO_FINANCEIRO", {})
+    if (
+        not isinstance(descriptor["prefix"], str)
+        or not re.fullmatch(prefix_pattern, descriptor["prefix"])
+        or count != root.get("synthetic_count")
+        or type(minimum) is not int
+        or minimum < CDB_MIN_SUFFIX
+        or minimum > CDB_MAX_SUFFIX + 1
+        or minimum + count - 1 > CDB_MAX_SUFFIX
+    ):
+        raise ReservationError("plan.cod_if prefix, count or capacity is invalid")
+    return descriptor
+
+
+def _validate_cdb_reservation(section: Any, request: Mapping[str, Any]) -> None:
+    if (
+        not isinstance(section, Mapping)
+        or set(section) != {"strategy", "prefix", "count", "start", "end"}
+        or section.get("strategy") != SYNTHETIC_CDB_ALLOCATOR
+        or section.get("prefix") != request["prefix"]
+        or type(section.get("count")) is not int
+        or section["count"] != request["count"]
+        or type(section.get("start")) is not int
+        or type(section.get("end")) is not int
+        or section["start"] < request["minimum_start"]
+        or section["start"] > CDB_MAX_SUFFIX + 1
+        or section["end"] != section["start"] + section["count"] - 1
+        or section["end"] > CDB_MAX_SUFFIX
+    ):
+        raise ReservationError("synthetic cod_if reservation does not match the plan")
+
+
+def _reserve_cdb_codes(ledger: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str, Any]:
+    # O histórico já é persistido pelo mesmo CAS antes de publicar a reserva.
+    # Ele inclui ranges queimados por falha de publicação e todos os produtos CDB.
+    minimum = request["minimum_start"]
+    for entry in ledger["reservations"]:
+        if not isinstance(entry, Mapping) or not isinstance(entry.get("reservation"), Mapping):
+            raise ReservationError("ledger has an invalid reservation history entry")
+        previous = entry.get("reservation", {}).get("cod_if")
+        if previous is None:
+            continue
+        if not isinstance(previous, Mapping) or not re.fullmatch(
+            r"CDB[1-9A-C][0-9]{2}", str(previous.get("prefix", ""))
+        ):
+            raise ReservationError("ledger has an invalid cod_if reservation")
+        count = _positive_or_zero(previous.get("count"), "ledger.cod_if.count")
+        _validate_cdb_reservation(
+            previous,
+            {"prefix": previous["prefix"], "count": count, "minimum_start": CDB_MIN_SUFFIX},
+        )
+        if count and previous["prefix"] == request["prefix"]:
+            minimum = max(minimum, previous["end"] + 1)
+    end = minimum + request["count"] - 1
+    if end > CDB_MAX_SUFFIX:
+        raise ReservationError(f"synthetic COD_IF namespace {request['prefix']} is exhausted")
+    return {
+        "strategy": SYNTHETIC_CDB_ALLOCATOR,
+        "prefix": request["prefix"],
+        "count": request["count"],
+        "start": minimum,
+        "end": end,
+    }
+
+
 def _validate_plan(plan: dict[str, Any], product: str, request_uri: str) -> None:
     if plan.get("artifact_type") != "engorda_plan":
         raise ReservationError("reservation request is not an engorda plan")
@@ -1484,6 +1579,7 @@ def _validate_plan(plan: dict[str, Any], product: str, request_uri: str) -> None
         raise ReservationError("plan.cod_operacao must be an object")
     _positive_or_zero(cod_operacao.get("count"), "plan.cod_operacao.count")
     _validate_meu_numero_plan(plan)
+    _synthetic_cdb_request(plan)
 
 
 def _new_ledger(environment: str) -> dict[str, Any]:
@@ -1723,6 +1819,9 @@ def _allocate_artifact(
         },
         "meu_numero": meu_numero,
     }
+    cod_if = plan.get("cod_if", {})
+    if cod_if.get("strategy") == SYNTHETIC_CDB_ALLOCATOR:
+        artifact["cod_if"] = _reserve_cdb_codes(ledger, cod_if)
     ledger["revision"] = _positive_or_zero(ledger.get("revision"), "ledger.revision") + 1
     ledger["reservations"].append(
         {
@@ -1779,6 +1878,11 @@ def _existing_reservation(
     }
     if any(payload.get(key) != value for key, value in expected.items()):
         raise ReservationError(f"immutable reservation URI contains a different artifact: {uri}")
+    cod_if = _synthetic_cdb_request(plan)
+    if cod_if is not None:
+        _validate_cdb_reservation(payload.get("cod_if"), cod_if)
+    elif "cod_if" in payload:
+        raise ReservationError("immutable reservation has unexpected synthetic cod_if")
     schema_version = payload.get("schema_version")
     allowed_versions = (
         {1, RESERVATION_SCHEMA_VERSION}
@@ -2197,6 +2301,7 @@ def build_engorda_plan_argv(
         ("meu_numero_prefix", "--meu-numero-prefix"),
         ("query_num_if_sql", "--query-num-if-sql"),
         ("controle_operacional_date", "--data-controle-operacional"),
+        ("cod_if_allocator", "--cod-if-allocator"),
     ):
         if options.get(key) is not None:
             argv += [flag, str(options[key])]
@@ -2252,6 +2357,8 @@ def build_engorda_materialize_argv(
         argv += ["--specs", str(options["specs"])]
     if options.get("query_num_if_sql") is not None:
         argv += ["--query-num-if-sql", str(options["query_num_if_sql"])]
+    if options.get("cod_if_allocator") is not None:
+        argv += ["--cod-if-allocator", str(options["cod_if_allocator"])]
     if options.get("no_oracle") is not None:
         if type(options["no_oracle"]) is not bool:
             raise PipelineError("engorda.no_oracle must be boolean")
@@ -2498,6 +2605,13 @@ def build_pipeline_plan(
         engorda_no_oracle = engorda_options.get("no_oracle", False)
         if type(engorda_no_oracle) is not bool:
             raise PipelineError(f"product {product} engorda.no_oracle must be boolean")
+        cod_if_allocator = engorda_options.get("cod_if_allocator", "oracle_if21")
+        if cod_if_allocator not in {"oracle_if21", SYNTHETIC_CDB_ALLOCATOR}:
+            raise PipelineError(f"product {product} engorda.cod_if_allocator is invalid")
+        if cod_if_allocator == SYNTHETIC_CDB_ALLOCATOR and (
+            product not in CDB_PRODUCTS or engorda_no_oracle
+        ):
+            raise PipelineError("engorda.cod_if_allocator synthetic_cdb requires live CDB")
         if engorda_options.get("controle_operacional_date") is not None:
             engorda_options["controle_operacional_date"] = _parse_controle_operacional_date(
                 engorda_options["controle_operacional_date"]

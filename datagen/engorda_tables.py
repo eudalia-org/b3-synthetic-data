@@ -49,9 +49,10 @@ o que torna IMPOSSÍVEL alocar código de um produto para instrumento de outro.
     divergir. Num lote legitimamente multi-tipo, é a saída manual explícita.
 
 DIRIGIDO por REGRAS_SCHEMA_CETIP (perfil ÚNICO do schema, comum a todos os
-produtos), query SQL e spec_config.json. Todo run gera COD_IF pelo alocador
-oficial do Oracle; a geração de COD_OPERACAO, meu-número e o preflight de
-OPERACAO são etapas da política de chaves de negócio do schema.
+produtos), query SQL e spec_config.json. Por padrão COD_IF usa o alocador
+oficial Oracle; --cod-if-allocator synthetic_cdb habilita uma faixa CDB reservada.
+A geração de COD_OPERACAO, meu-número e o preflight de OPERACAO são etapas da
+política de chaves de negócio do schema.
 
 POLÍTICAS COMUNS (as demais pertencem explicitamente ao perfil do schema):
 
@@ -69,9 +70,10 @@ POLÍTICAS COMUNS (as demais pertencem explicitamente ao perfil do schema):
     próprio acima do max real (com --pk-safety-band). PK com componente de FK
     para pai sintetizado -> segue o pai. PK sem regra possível -> ABORTA listando
     as tabelas (use --tratar-como-static para excluí-las da sintetização).
-  * COD_IF e COD_OPERACAO são alocados pelas funções oficiais do Oracle para
-    TODO sintético (inclusive K=1). Controles P1/P2 são gerados localmente com
-    prefixo obrigatório e preflight no destino.
+  * COD_IF e COD_OPERACAO são regenerados para TODO sintético (inclusive K=1).
+    COD_OPERACAO permanece oficial; CDB pode optar por COD_IF base36 reservado,
+    com consulta ao máximo e preflight de colisão no destino. Controles P1/P2
+    são gerados localmente com prefixo obrigatório e preflight no destino.
   * Tabelas static do spec: não são sintetizadas nem escritas; FKs para elas
     mantêm o valor original depois de confirmar o pai no Oracle receptor.
 
@@ -853,6 +855,11 @@ SQL_PLACEHOLDER_RE = re.compile(r"\{\{[^{}]+\}\}")
 # ---------------------------------------------------------------------------
 DEFAULT_COD_IF_PATTERN = r"^[0-9A-Z]{6,20}$"
 DEFAULT_COD_IF_DRY_PREFIX = "SYN100"
+SYNTHETIC_CDB_ALLOCATOR = "synthetic_cdb"
+CDB_CODE_PATTERN = r"^CDB[1-9A-C][0-9]{2}[0-9A-Z]{5}$"
+CDB_MIN_SUFFIX = int("A0000", 36)
+CDB_MAX_SUFFIX = 36**5 - 1
+CDB_PRODUCTS = frozenset({"cdb", "cdb_simplificado", "cdb_resgate", "cdb_escalonamento"})
 DEFAULT_COD_OPERACAO_PATTERN = r"^[0-9]{16}$"
 ENGORDA_PLAN_SCHEMA_VERSION = 3
 ENGORDA_LEGACY_PLAN_SCHEMA_VERSION = 2
@@ -2011,6 +2018,7 @@ class EngordaJob:
     # Overrides estruturais do COD_IF; None = defaults agnósticos de produto.
     cod_if_pattern: Optional[str] = None
     cod_if_dry_prefix: Optional[str] = None
+    cod_if_allocator: Optional[str] = None
     phase: str = "all"
     plan_uri: Optional[str] = None
     reservation_uri: Optional[str] = None
@@ -2819,7 +2827,7 @@ def _validate_product_profile(profile: ProductProfile) -> None:
     policy = profile.business_keys
     if not isinstance(policy, BusinessKeyPolicy):
         raise ValueError(f"{profile.name}: política de COD_IF é obrigatória para evitar colisões")
-    if policy.cod_if_allocator != "oracle_if21":
+    if policy.cod_if_allocator not in {"oracle_if21", SYNTHETIC_CDB_ALLOCATOR}:
         raise ValueError(
             f"{profile.name}: alocador COD_IF desconhecido {policy.cod_if_allocator!r}"
         )
@@ -8578,6 +8586,156 @@ def _read_controle_operacional_date(jvm, jdbc_url: str, user: str, password: str
         connection.close()
 
 
+def _cdb_code_prefix(operational_date: date, code_month: int) -> str:
+    if type(code_month) is not int or not 1 <= code_month <= 12:
+        raise ValueError("COD_IF: mês de CETIP.GET_DATAHOJE inválido")
+    return f"CDB{'123456789ABC'[code_month - 1]}{operational_date.year % 100:02d}"
+
+
+def _read_cdb_code_month(jvm, credentials: Tuple[str, str, str]) -> int:
+    """O pacote usa GET_DATAHOJE para o mês e V_DATA para o ano; congele ambos."""
+    connection = _open_oracle_connection(jvm, *credentials)
+    statement = result_set = None
+    try:
+        statement = connection.prepareStatement(
+            "SELECT TO_CHAR(CETIP.GET_DATAHOJE, 'MM') FROM dual"
+        )
+        result_set = statement.executeQuery()
+        raw = result_set.getString(1) if result_set.next() else None
+        if raw is None or not re.fullmatch(r"0[1-9]|1[0-2]", str(raw)):
+            raise ValueError(f"COD_IF: mês de CETIP.GET_DATAHOJE inválido: {raw!r}")
+        return int(raw)
+    finally:
+        if result_set is not None:
+            result_set.close()
+        if statement is not None:
+            statement.close()
+        connection.close()
+
+
+def _synthetic_cdb_descriptor(
+    operational_date: date, count: int, maximum_code: Optional[str], *, code_month: int
+) -> dict[str, Any]:
+    prefix = _cdb_code_prefix(operational_date, code_month)
+    if maximum_code is not None and not re.fullmatch(prefix + r"[0-9A-Z]{5}", maximum_code):
+        raise ValueError(f"COD_IF: máximo Oracle inválido para {prefix}: {maximum_code!r}")
+    minimum = max(CDB_MIN_SUFFIX, int(maximum_code[6:], 36) + 1 if maximum_code else 0)
+    if type(count) is not int or count < 0 or minimum + count - 1 > CDB_MAX_SUFFIX:
+        raise ValueError(f"COD_IF: capacidade de {prefix} insuficiente para {count} códigos")
+    return {
+        "strategy": SYNTHETIC_CDB_ALLOCATOR,
+        "oracle_type": 49,
+        "prefix": prefix,
+        "count": count,
+        "minimum_start": minimum,
+    }
+
+
+def _read_cdb_max_code(jvm, credentials: Tuple[str, str, str], prefix: str) -> Optional[str]:
+    """Máximo binário do namespace inteiro, inclusive instrumentos excluídos."""
+    connection = _open_oracle_connection(jvm, *credentials)
+    statement = result_set = None
+    try:
+        statement = connection.prepareStatement(
+            "SELECT COD_IF FROM (SELECT COD_IF FROM CETIP.INSTRUMENTO_FINANCEIRO "
+            "WHERE COD_IF LIKE ? AND REGEXP_LIKE(COD_IF, ?, 'c') "
+            "ORDER BY NLSSORT(COD_IF, 'NLS_SORT=BINARY') DESC) WHERE ROWNUM = 1"
+        )
+        statement.setString(1, prefix + "%")
+        statement.setString(2, "^" + prefix + "[0-9A-Z]{5}$")
+        result_set = statement.executeQuery()
+        return result_set.getString(1) if result_set.next() else None
+    finally:
+        if result_set is not None:
+            result_set.close()
+        if statement is not None:
+            statement.close()
+        connection.close()
+
+
+def _validate_cod_if_plan(plan: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    descriptor = plan.get("cod_if") or {}
+    if not isinstance(descriptor, Mapping):
+        raise ValueError("plano cod_if precisa ser um objeto")
+    strategy = descriptor.get("strategy", "oracle_if21")
+    if strategy == "oracle_if21":
+        return None
+    if strategy != SYNTHETIC_CDB_ALLOCATOR:
+        raise ValueError(f"plano cod_if.strategy inválida: {strategy!r}")
+    if (
+        plan.get("product") not in CDB_PRODUCTS
+        or plan.get("oracle_access") == "disabled"
+        or descriptor.get("oracle_type") != 49
+        or set(descriptor) != {"strategy", "oracle_type", "prefix", "count", "minimum_start"}
+    ):
+        raise ValueError("plano cod_if sintético exige CDB tipo 49 e Oracle live")
+    try:
+        operational_date = date.fromisoformat(plan["controle_operacional_date"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("plano cod_if exige data operacional ISO") from None
+    count, minimum = descriptor["count"], descriptor["minimum_start"]
+    if (
+        not isinstance(descriptor["prefix"], str)
+        or not re.fullmatch(f"CDB[1-9A-C]{operational_date.year % 100:02d}", descriptor["prefix"])
+        or type(count) is not int
+        or count < 0
+        or count != plan.get("tables", {}).get(TABELA_RAIZ, {}).get("synthetic_count")
+        or type(minimum) is not int
+        or minimum < CDB_MIN_SUFFIX
+        or minimum > CDB_MAX_SUFFIX + 1
+        or minimum + count - 1 > CDB_MAX_SUFFIX
+    ):
+        raise ValueError("plano cod_if: prefixo, contagem ou capacidade inválidos")
+    return descriptor
+
+
+def _assert_cdb_range_available(jvm, credentials, section: Mapping[str, Any]) -> None:
+    if not section["count"]:
+        return
+    prefix = section["prefix"]
+    first = prefix + _base36(section["start"], 5)
+    last = prefix + _base36(section["end"], 5)
+    connection = _open_oracle_connection(jvm, *credentials)
+    statement = result_set = None
+    try:
+        statement = connection.prepareStatement(
+            "SELECT COD_IF FROM CETIP.INSTRUMENTO_FINANCEIRO WHERE COD_IF LIKE ? "
+            "AND NLSSORT(COD_IF, 'NLS_SORT=BINARY') BETWEEN "
+            "NLSSORT(?, 'NLS_SORT=BINARY') AND NLSSORT(?, 'NLS_SORT=BINARY') "
+            "AND ROWNUM = 1"
+        )
+        for index, value in enumerate((prefix + "%", first, last), 1):
+            statement.setString(index, value)
+        result_set = statement.executeQuery()
+        if result_set.next():
+            raise ValueError(
+                f"preflight Oracle: colisão COD_IF {result_set.getString(1)!r} "
+                f"no range reservado {first}..{last}; gere novo plano e reserva"
+            )
+    finally:
+        if result_set is not None:
+            result_set.close()
+        if statement is not None:
+            statement.close()
+        connection.close()
+
+
+def _validate_cdb_code_range(
+    section: Mapping[str, Any], *, prefix: str, count: int, minimum: int = CDB_MIN_SUFFIX
+) -> None:
+    if (
+        not isinstance(section, Mapping)
+        or set(section) != {"strategy", "prefix", "count", "start", "end"}
+        or section.get("strategy") != SYNTHETIC_CDB_ALLOCATOR
+        or section.get("prefix") != prefix
+        or type(section.get("count")) is not int
+    ):
+        raise ValueError("reserva cod_if sintético inválida")
+    start, end = _reservation_range(section, "cod_if", count)
+    if start < minimum or start > CDB_MAX_SUFFIX + 1 or end > CDB_MAX_SUFFIX:
+        raise ValueError("reserva cod_if: range abaixo do piso ou excede capacidade")
+
+
 def _allocation_sql(code_kind: str, batch_count: int, policy: BusinessKeyPolicy) -> str:
     if batch_count < 1:
         raise ValueError("batch_count deve ser >= 1")
@@ -8665,7 +8823,11 @@ def _iter_oracle_code_batches(
                 raise ValueError(f"{code_kind}: pattern não configurado no perfil")
             invalid = [code for code in codes if not re.fullmatch(pattern, code)]
             if invalid:
-                raise ValueError(f"{code_kind}: Oracle retornou código vazio/malformado")
+                raise ValueError(
+                    f"{code_kind}: Oracle retornou código vazio/malformado; "
+                    f"tipo={policy.cod_if_oracle_type} data={engorda_date} "
+                    f"offset={offset} pattern={pattern!r} amostra={invalid[0][:200]!r}"
+                )
             if len(set(codes)) != expected:
                 raise ValueError(f"{code_kind}: Oracle retornou código duplicado no lote")
             yield batch
@@ -8734,9 +8896,22 @@ def _materialize_code_map(
     engorda_date: date,
     policy: BusinessKeyPolicy,
     offline: bool = False,
+    synthetic_reservation: Optional[Mapping[str, Any]] = None,
 ) -> DataFrame:
     """Anexa códigos por ordinal, mantendo no driver somente o lote corrente."""
     total = slots.count()
+    synthetic_cdb = code_kind == "COD_IF" and policy.cod_if_allocator == SYNTHETIC_CDB_ALLOCATOR
+    if synthetic_cdb:
+        if dry_run or offline or policy.cod_if_oracle_type != 49:
+            raise ValueError("COD_IF sintético exige CDB tipo 49 e Oracle live")
+        prefix = (synthetic_reservation or {}).get("prefix")
+        if not isinstance(prefix, str) or not re.fullmatch(
+            f"CDB[1-9A-C]{engorda_date.year % 100:02d}", prefix
+        ):
+            raise ValueError("COD_IF: prefixo reservado inválido para o ano operacional")
+        _validate_cdb_code_range(
+            synthetic_reservation, prefix=prefix, count=total
+        )
     if dry_run or offline:
         mapping = slots.withColumn(generated_alias, _dry_placeholder(code_kind, policy))
         if offline:
@@ -8750,38 +8925,60 @@ def _materialize_code_map(
     if out_path is None or credentials is None:
         raise ValueError("destino e credenciais são obrigatórios fora do dry-run")
     jdbc_url, user, password = credentials
+    if synthetic_cdb:
+        _assert_cdb_range_available(spark.sparkContext._jvm, credentials, synthetic_reservation)
     if total == 0:
         empty = slots.withColumn(generated_alias, F.lit(None).cast("string"))
         empty.write.mode("overwrite").parquet(out_path)
         return spark.read.parquet(out_path)
 
     chunk_path = f"{out_path}.__code_chunks"
-    for batch in _iter_oracle_code_batches(
-        spark.sparkContext._jvm,
-        jdbc_url,
-        user,
-        password,
-        code_kind=code_kind,
-        total=total,
-        batch_size=batch_size,
-        engorda_date=engorda_date,
-        policy=policy,
-    ):
-        schema = T.StructType(
-            [
-                T.StructField("ORDINAL", T.LongType(), False),
-                T.StructField(generated_alias, T.StringType(), False),
-            ]
+    if synthetic_cdb:
+        mapping = slots.withColumn(
+            generated_alias,
+            F.concat(
+                F.lit(synthetic_reservation["prefix"]),
+                F.lpad(
+                    F.upper(
+                        F.conv(F.col("ORDINAL") + F.lit(synthetic_reservation["start"] - 1), 10, 36)
+                    ),
+                    5,
+                    "0",
+                ),
+            ),
         )
-        spark.createDataFrame(batch, schema).write.mode("append").parquet(chunk_path)
-    code_chunks = spark.read.parquet(chunk_path)
-    mapping = _join_code_chunks(slots, code_chunks, generated_alias)
+        logger.info(
+            "COD_IF sintético: prefixo=%s range=%s..%s count=%s",
+            *[synthetic_reservation[key] for key in ("prefix", "start", "end", "count")],
+        )
+    else:
+        for batch in _iter_oracle_code_batches(
+            spark.sparkContext._jvm,
+            jdbc_url,
+            user,
+            password,
+            code_kind=code_kind,
+            total=total,
+            batch_size=batch_size,
+            engorda_date=engorda_date,
+            policy=policy,
+        ):
+            schema = T.StructType(
+                [
+                    T.StructField("ORDINAL", T.LongType(), False),
+                    T.StructField(generated_alias, T.StringType(), False),
+                ]
+            )
+            spark.createDataFrame(batch, schema).write.mode("append").parquet(chunk_path)
+        code_chunks = spark.read.parquet(chunk_path)
+        mapping = _join_code_chunks(slots, code_chunks, generated_alias)
     mapping.write.mode("overwrite").parquet(out_path)
-    _delete_path(spark, chunk_path)
+    if not synthetic_cdb:
+        _delete_path(spark, chunk_path)
     mapping = spark.read.parquet(out_path)
     pk_column = slots.columns[1]
     pattern = (
-        policy.cod_if_pattern
+        (CDB_CODE_PATTERN if synthetic_cdb else policy.cod_if_pattern)
         if code_kind == "COD_IF"
         else (policy.operation.code_pattern if policy.operation is not None else None)
     )
@@ -9933,6 +10130,7 @@ def _build_engorda_plan(
     no_oracle: bool = False,
     genai_descriptor: Optional[Mapping[str, Any]] = None,
     ccb_classification: Optional[Mapping[str, Any]] = None,
+    cod_if_descriptor: Optional[Mapping[str, Any]] = None,
     schema_version: int = ENGORDA_PLAN_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     if product_profile.name in CCB_CLASSIFICATION_PRODUCTS and ccb_classification is None:
@@ -10047,6 +10245,9 @@ def _build_engorda_plan(
     }
     if no_oracle:
         body["oracle_access"] = "disabled"
+    if cod_if_descriptor is not None:
+        body["cod_if"] = dict(cod_if_descriptor)
+        _validate_cod_if_plan(body)
     if genai_descriptor is not None:
         body["genai"] = dict(genai_descriptor)
     if ccb_classification is not None:
@@ -10181,6 +10382,7 @@ def _validate_plan_artifact(plan: Mapping[str, Any]) -> dict[str, Any]:
     if plan.get("oracle_access", "live") not in {"live", "disabled"}:
         raise ValueError("artefato de plano possui oracle_access inválido")
     _validate_meu_numero_plan_descriptor(plan)
+    _validate_cod_if_plan(plan)
     if "ccb_classification" in plan:
         _validate_ccb_classification_descriptor(plan["ccb_classification"])
     genai = plan.get("genai")
@@ -10238,6 +10440,17 @@ def _validate_reservation_artifact(
         raise ValueError("reserva não está vinculada ao plan_id consumido")
     if reservation.get("product") != plan["product"]:
         raise ValueError("produto da reserva diverge do plano")
+
+    cod_if_plan = _validate_cod_if_plan(plan)
+    if cod_if_plan is not None:
+        _validate_cdb_code_range(
+            reservation.get("cod_if"),
+            prefix=cod_if_plan["prefix"],
+            count=cod_if_plan["count"],
+            minimum=cod_if_plan["minimum_start"],
+        )
+    elif "cod_if" in reservation:
+        raise ValueError("reserva cod_if sintético diverge do allocator Oracle do plano")
 
     table_pks = reservation.get("table_pks")
     if not isinstance(table_pks, dict):
@@ -10423,6 +10636,13 @@ def executa_clonagem(
         raise ValueError("--oracle-code-batch-size deve ser >= 1")
     business_policy = product_profile.business_keys
     operation_policy = business_policy.operation
+    if business_policy.cod_if_allocator == SYNTHETIC_CDB_ALLOCATOR and (
+        product_profile.name not in CDB_PRODUCTS
+        or phase not in {"plan", "materialize"}
+        or dry_run
+        or no_oracle
+    ):
+        raise ValueError("COD_IF sintético exige CDB live, phase plan -> reserve -> materialize")
     if (
         phase == "all"
         and operation_policy is not None
@@ -10739,7 +10959,12 @@ def executa_clonagem(
     # Tipo do instrumento DERIVADO do lote — antes de qualquer round-trip Oracle.
     # É isto que substitui o antigo literal por produto e o que impede alocar
     # COD_IF de um produto para instrumento de outro.
-    if phase == "materialize":
+    if business_policy.cod_if_allocator == SYNTHETIC_CDB_ALLOCATOR:
+        if selected_lotes is None:
+            raise ValueError("COD_IF sintético exige lote CDB admitido")
+        # Sem override: mixed-type nunca pode receber códigos CDB, mesmo com --tipo-oracle 49.
+        tipo_derivado = _deriva_tipo_oracle_do_lote(selected_lotes[TABELA_RAIZ])
+    elif phase == "materialize":
         tipo_derivado = _deriva_tipo_oracle_do_lote(
             selected_lotes[TABELA_RAIZ],
             int(planned_artifact["cod_if"]["oracle_type"]),
@@ -10749,6 +10974,8 @@ def executa_clonagem(
     else:
         tipo_derivado = _deriva_tipo_oracle(spark, config, valores, tipo_oracle)
     business_policy = _resolve_business_policy(business_policy, tipo_derivado)
+    if business_policy.cod_if_allocator == SYNTHETIC_CDB_ALLOCATOR and tipo_derivado != 49:
+        raise ValueError("COD_IF sintético exige CDB NUM_TIPO_IF=49")
     operation_policy = business_policy.operation
 
     if selected_lotes is not None:
@@ -10856,6 +11083,24 @@ def executa_clonagem(
             provenance.unpersist(blocking=False)
 
     current_plan: Optional[dict[str, Any]] = None
+    cod_if_descriptor = None
+    if business_policy.cod_if_allocator == SYNTHETIC_CDB_ALLOCATOR:
+        if phase == "materialize":
+            cod_if_descriptor = _validate_cod_if_plan(planned_artifact)
+            if cod_if_descriptor is None:
+                raise ValueError("allocator COD_IF sintético diverge do plano Oracle")
+        else:
+            code_date = controle_operacional_date or engorda_ts.date()
+            code_month = _read_cdb_code_month(spark._sc._jvm, credentials)
+            maximum = _read_cdb_max_code(
+                spark._sc._jvm, credentials, _cdb_code_prefix(code_date, code_month)
+            )
+            cod_if_descriptor = _synthetic_cdb_descriptor(
+                code_date, final_lote_counts[TABELA_RAIZ] * fator_k, maximum, code_month=code_month
+            )
+            logger.info(
+                "Plano COD_IF sintético: máximo Oracle=%r descriptor=%s", maximum, cod_if_descriptor
+            )
     ccb_classification = (
         planned_artifact.get("ccb_classification") if phase == "materialize" else None
     )
@@ -10905,6 +11150,7 @@ def executa_clonagem(
             no_oracle=no_oracle,
             genai_descriptor=active_genai_descriptor,
             ccb_classification=ccb_classification,
+            cod_if_descriptor=cod_if_descriptor,
             schema_version=(
                 int(planned_artifact["schema_version"])
                 if phase == "materialize"
@@ -11102,6 +11348,9 @@ def executa_clonagem(
             batch_size=oracle_code_batch_size,
             engorda_date=code_allocation_date,
             policy=business_policy,
+            synthetic_reservation=(
+                reservation.get("cod_if") if cod_if_descriptor is not None else None
+            ),
         )
         instrumentos = _attach_generated_code(
             instrumentos,
@@ -11367,6 +11616,21 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
         cod_if_dry_prefix=job.cod_if_dry_prefix,
         tipo_oracle=job.tipo_oracle,
     )
+    if job.cod_if_allocator not in {None, "oracle_if21", SYNTHETIC_CDB_ALLOCATOR}:
+        raise ValueError("cod_if_allocator inválido")
+    if job.cod_if_allocator == SYNTHETIC_CDB_ALLOCATOR:
+        if profile.name not in CDB_PRODUCTS:
+            raise ValueError("cod_if_allocator synthetic_cdb é exclusivo de CDB")
+        if job.phase not in {"plan", "materialize"} or job.dry_run or job.no_oracle:
+            raise ValueError(
+                "COD_IF sintético exige Oracle live, phase plan -> reserve -> materialize"
+            )
+        profile = dataclasses.replace(
+            profile,
+            business_keys=dataclasses.replace(
+                profile.business_keys, cod_if_allocator=SYNTHETIC_CDB_ALLOCATOR
+            ),
+        )
     if job.phase not in ENGORDA_PHASES:
         raise ValueError(f"phase inválida: {job.phase!r}")
     if job.phase in {"all", "plan"} and (job.num_ifs is None) == (job.n_instrumentos is None):
@@ -11585,6 +11849,15 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
         anular_cols = job.anular_cols
         if job.phase == "materialize":
             planned_artifact = _validate_plan_artifact(_read_json_artifact(spark, job.plan_uri))
+            planned_allocator = planned_artifact["cod_if"].get("strategy", "oracle_if21")
+            if job.cod_if_allocator is not None and job.cod_if_allocator != planned_allocator:
+                raise ValueError("materialize --cod-if-allocator diverge do plano")
+            profile = dataclasses.replace(
+                profile,
+                business_keys=dataclasses.replace(
+                    profile.business_keys, cod_if_allocator=planned_allocator
+                ),
+            )
             if (
                 profile.name in CCB_CLASSIFICATION_PRODUCTS
                 and planned_artifact.get("ccb_classification") is None
@@ -11833,6 +12106,13 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "do lote; informe apenas para CONFERIR (diverge -> "
         "aborta) ou para escolher o tipo da alocação num lote "
         "legitimamente multi-tipo.",
+    )
+    parser.add_argument(
+        "--cod-if-allocator",
+        choices=("oracle_if21", SYNTHETIC_CDB_ALLOCATOR),
+        default=None,
+        help="Alocador COD_IF (default oracle_if21; materialize herda o plano). "
+        "synthetic_cdb usa faixa base36 reservada acima do máximo Oracle e A0000.",
     )
     parser.add_argument(
         "--cod-if-padrao",
@@ -12105,6 +12385,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             oracle_code_batch_size=args.oracle_code_batch_size,
             tipo_oracle=args.tipo_oracle,
             cod_if_pattern=args.cod_if_pattern,
+            cod_if_allocator=args.cod_if_allocator,
             cod_if_dry_prefix=args.cod_if_dry_prefix,
             dry_run=args.dry_run,
             no_oracle=args.no_oracle,

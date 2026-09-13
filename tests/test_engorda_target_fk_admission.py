@@ -2262,8 +2262,9 @@ def test_phase_plan_freezes_adjusted_k_for_admitted_domain_deficit(spark, monkey
         )
 
 
+@pytest.mark.parametrize("synthetic_cdb", [False, True])
 def test_materialize_uses_frozen_lotes_and_rejects_spec_hash_divergence_before_side_effects(
-    spark, monkeypatch
+    spark, monkeypatch, synthetic_cdb
 ):
     class AllocatorReached(RuntimeError):
         pass
@@ -2272,7 +2273,11 @@ def test_materialize_uses_frozen_lotes_and_rejects_spec_hash_divergence_before_s
     profile = eng.get_product_profile("cdb_simplificado")
     profile = dataclasses.replace(
         profile,
-        business_keys=dataclasses.replace(profile.business_keys, operation=None),
+        business_keys=dataclasses.replace(
+            profile.business_keys,
+            operation=None,
+            cod_if_allocator="synthetic_cdb" if synthetic_cdb else "oracle_if21",
+        ),
     )
     config = {
         "DATAGEN_RAW_BASE_URI": "oci://raw@ns/run/RAW",
@@ -2340,6 +2345,11 @@ def test_materialize_uses_frozen_lotes_and_rejects_spec_hash_divergence_before_s
         query_num_if_uri=profile.query_filename,
         selected_lote=descriptor,
         anular_cols=profile.integrity.nullify_mapping(),
+        cod_if_descriptor=(
+            eng._synthetic_cdb_descriptor(date(2026, 8, 20), 1, None, code_month=9)
+            if synthetic_cdb
+            else None
+        ),
     )
     reservation = {
         "artifact_type": eng.ENGORDA_RESERVATION_ARTIFACT,
@@ -2358,7 +2368,17 @@ def test_materialize_uses_frozen_lotes_and_rejects_spec_hash_divergence_before_s
             "end": None,
         },
     }
+    if synthetic_cdb:
+        reservation["cod_if"] = {
+            "strategy": "synthetic_cdb",
+            "prefix": "CDB926",
+            "count": 1,
+            "start": eng.CDB_MIN_SUFFIX,
+            "end": eng.CDB_MIN_SUFFIX,
+        }
     forbidden = (
+        "_read_cdb_code_month",
+        "_read_cdb_max_code",
         "_carrega_faltantes",
         "_dominio_num_if_produto",
         "_num_if_inconsistentes_subtipo",
@@ -2410,6 +2430,9 @@ def test_materialize_uses_frozen_lotes_and_rejects_spec_hash_divergence_before_s
         prepare("staging")
 
     def allocator(*_args, **_kwargs):
+        if synthetic_cdb:
+            assert _kwargs["policy"].cod_if_allocator == "synthetic_cdb"
+            assert _kwargs["synthetic_reservation"] == reservation["cod_if"]
         events.append("allocator")
         raise AllocatorReached()
 
@@ -2476,6 +2499,30 @@ def test_materialize_uses_frozen_lotes_and_rejects_spec_hash_divergence_before_s
         )
 
     assert events == ["pk_floor"]
+
+    if synthetic_cdb:
+        events.clear()
+        mixed = root.unionByName(root.withColumn("NUM_TIPO_IF", F.lit(50).cast("long")))
+        with pytest.raises(ValueError, match="Lote heterogêneo"):
+            eng.executa_clonagem(
+                spark,
+                config,
+                spec,
+                product_profile=profile,
+                fator_k=1,
+                seed=42,
+                engorda_ts=engorda_ts,
+                phase="materialize",
+                planned_artifact=plan,
+                reservation=reservation,
+                tipo_oracle=49,
+                snapshot_lotes={eng.TABELA_RAIZ: mixed},
+                snapshot_faltantes=None,
+                snapshot_lote_counts={eng.TABELA_RAIZ: 2},
+                controle_operacional_date=date(2026, 8, 20),
+                specs_uri=config["DATAGEN_SPECS_URI"],
+            )
+        assert events == []
 
 
 def test_phase_all_performs_no_snapshot_io(spark, monkeypatch):
