@@ -19,6 +19,28 @@ blocked, and the original PK/FK metadata is preserved.
 The loader is distributed as one file, so its CDB/RDB table sets are kept local;
 regression tests compare each set against the generator's canonical definition.
 
+### Clone maps in existing validation inventories
+
+An additional old-report failure is `Inventory table 'MAPA_CLONE_COD_IF' is absent
+from specs`. The validator formerly put every readable output directory in
+`table_inventory`, including all three clone maps. Those maps have no Oracle
+table specification because they are provenance artifacts.
+
+Deploy the updated `datagen/load_tables.py` to consume existing accepted reports:
+it excludes exactly `MAPA_CLONE_NUM_IF`, `MAPA_CLONE_COD_IF`, and
+`MAPA_CLONE_COD_OPERACAO` before table resolution, PK capture, and insert. It retains
+the original report and all regular table checks. Deploy updated
+`scripts/validate_products.py` for future reports to put these names in a separate
+`auxiliary_artifacts` list; the validator still reads and uses their Parquet data.
+The updated standalone runner rejects an inventory containing only maps before
+creating a claim. The deployed files remain self-contained.
+
+The missing-map-spec failure is also before inserts and before load-manifest
+creation. If it occurred on a retry, inspect that **latest** failed pipeline
+manifest: its load claims have new ETags even if the synthetic input URI and claim
+path are unchanged. The earlier run's claim-release script is bound to the earlier
+ETags and is not the recovery record for the new attempts.
+
 ## What the reported failure means
 
 The traceback ends in `resolve_load_tables`, before `capture_manifest_entries`,

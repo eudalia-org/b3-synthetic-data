@@ -2358,6 +2358,31 @@ def test_load_rejects_noncanonical_report_before_creating_claim(tmp_path):
     assert not adapter.created
 
 
+@pytest.mark.parametrize("has_oracle_table", [False, True])
+def test_load_gate_handles_old_report_clone_maps_before_claiming_input(tmp_path, has_oracle_table):
+    config = write_config(tmp_path)
+    upstream = write_upstream(tmp_path, products=("cdb_simplificado",))
+    args = run_args(tmp_path, config, upstream, "--approve-load")
+    args[args.index("--from") + 1] = "load"
+    args[args.index("--to") + 1] = "load"
+    inventory = ["MAPA_CLONE_COD_IF", "MAPA_CLONE_COD_OPERACAO", "MAPA_CLONE_NUM_IF"]
+    if has_oracle_table:
+        inventory.append("INSTRUMENTO_FINANCEIRO")
+    adapter = FakeAdapter(
+        reports={
+            "cdb_simplificado": {
+                "verdict": "PARTIAL",
+                "counts": {"error": 0},
+                "table_inventory": inventory,
+            }
+        }
+    )
+    assert P.main(args, adapter=adapter) == (0 if has_oracle_table else 1)
+    claims = [p for p in adapter.objects.values() if p.get("kind") == "load-claim"]
+    assert len(claims) == int(has_oracle_table)
+    assert len(adapter.created) == int(has_oracle_table)
+
+
 def test_load_rejects_no_oracle_report_before_creating_claim(tmp_path):
     config = write_config(tmp_path)
     upstream = write_upstream(tmp_path, products=("cdb_simplificado",))

@@ -56,6 +56,10 @@ _Avoid_: Import, merge, synchronization
 A table included in a particular generated product aggregate, even when the general generation defaults classify it as static. This role is scoped to that product output; shared reference tables outside the aggregate remain static.
 _Avoid_: Globally non-static table, reference-table copy
 
+**Clone-mapping artifact**:
+Provenance linking original instrument identifiers or business codes to their synthetic replacements. It accompanies generated tables for reconciliation and validation, but is not an Oracle table to insert.
+_Avoid_: Load table, reference table
+
 **Load attempt manifest**:
 The immutable recovery record created before an Oracle load starts. It identifies the validated input, ordered tables, write transformations, and each synthetic numeric primary-key range.
 _Avoid_: Pipeline manifest, validation report

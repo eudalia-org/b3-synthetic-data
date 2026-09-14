@@ -67,6 +67,9 @@ ORACLE_AUDIT_COLUMNS_BY_TABLE = {
 }
 ORACLE_AUDIT_FORMATTED_COLUMNS = {"VAL_TIME_STAMP_ATUALIZACAO"}
 ORACLE_AUDIT_WRITER_CLASS = "com.eudalia.datagen.OracleAuditJdbcWriter"
+CLONE_MAP_ARTIFACTS = frozenset(
+    {"MAPA_CLONE_NUM_IF", "MAPA_CLONE_COD_IF", "MAPA_CLONE_COD_OPERACAO"}
+)
 
 # Engorda overrides these products' original static defaults in memory. The
 # standalone loader mirrors that contract only for tables in the accepted report.
@@ -582,7 +585,8 @@ def parse_arguments() -> argparse.Namespace:
     source = parser.add_mutually_exclusive_group(required=False)
     source.add_argument(
         "--tables",
-        help="Optional comma-separated list; must exactly match the validated table inventory.",
+        help="Optional comma-separated list; must match the validated Oracle-table inventory "
+        "after known clone-mapping artifacts are excluded.",
     )
     source.add_argument(
         "--tables-file",
@@ -837,7 +841,20 @@ def validation_table_inventory(report: dict, expected_product: str, input_base: 
     normalized = [table_path_name(table.strip()).upper() for table in inventory]
     if len(set(normalized)) != len(normalized):
         raise ValueError("validation report table_inventory must contain unique tables")
-    return [table.strip() for table in inventory]
+    # Legacy schema-v2 reports mixed these diagnostic Parquet artifacts into the
+    # table list. Keep accepted reports reusable without treating arbitrary unknown
+    # names as artifacts or weakening the missing/static-table checks downstream.
+    load_inventory = [
+        table.strip()
+        for table, name in zip(inventory, normalized)
+        if name not in CLONE_MAP_ARTIFACTS
+    ]
+    excluded = [name for name in normalized if name in CLONE_MAP_ARTIFACTS]
+    if excluded:
+        logger.info("Excluding clone-mapping artifacts from Oracle load inventory: %s", excluded)
+    if not load_inventory:
+        raise ValueError("validation report table_inventory contains no Oracle tables")
+    return load_inventory
 
 
 def table_path_name(table: str) -> str:
@@ -1582,7 +1599,8 @@ def main() -> None:
             inventory_names = [table_path_name(table).upper() for table in inventory]
             if selected_names != inventory_names:
                 raise ValueError(
-                    "--tables/--tables-file must exactly match validation table_inventory"
+                    "--tables/--tables-file must exactly match validation table_inventory "
+                    "after known clone-mapping artifacts are excluded"
                 )
         target_schema = config["DATAGEN_TARGET_SCHEMA"]
         require_expected_target_schema(target_schema, args.expected_target_schema)

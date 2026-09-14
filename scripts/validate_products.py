@@ -10636,6 +10636,9 @@ def check_lci_registration_profile(
 # Category 3b - Primary-key integrity (all synthetic Oracle tables)
 # ---------------------------------------------------------------------------
 MAPA_CLONE_NUM_IF_TABLE = "MAPA_CLONE_NUM_IF"
+CLONE_MAP_ARTIFACTS = frozenset(
+    {MAPA_CLONE_NUM_IF_TABLE, "MAPA_CLONE_COD_IF", "MAPA_CLONE_COD_OPERACAO"}
+)
 PK_METADATA_WARN_TABLES = {"HISTORICO_PU_CURVA"}
 
 
@@ -16300,7 +16303,18 @@ def emit_report(
             "oracle_access": "disabled" if no_oracle else "live",
             "osias": osias,
             "load_eligible": not no_oracle,
-            "table_inventory": sorted(table_inventory),
+            # Clone maps remain in `tables` for validation and provenance checks,
+            # but they are not Oracle target tables. Keep the distinction in JSON.
+            "table_inventory": sorted(
+                table
+                for table in table_inventory
+                if table.strip().rsplit(".", 1)[-1].upper() not in CLONE_MAP_ARTIFACTS
+            ),
+            "auxiliary_artifacts": sorted(
+                table
+                for table in table_inventory
+                if table.strip().rsplit(".", 1)[-1].upper() in CLONE_MAP_ARTIFACTS
+            ),
             "baseline_identity": baseline_identity,
             "spark_version": (runtime_identity or {}).get("spark_version"),
             "aqe_enabled": (runtime_identity or {}).get("aqe_enabled"),

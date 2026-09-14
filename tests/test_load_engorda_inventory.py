@@ -52,8 +52,16 @@ def test_unknown_product_does_not_override_static_flags():
 
 @pytest.fixture
 def runtime(tmp_path, monkeypatch):
-    def configure(product, *, extra_table=None, skip_validation=False, report_errors=0):
+    def configure(
+        product, *, extra_table=None, skip_validation=False, report_errors=0, clone_maps=False
+    ):
         inventory = sorted(engorda.TABELAS_ENGORDA_POR_PRODUTO[product])
+        if clone_maps:
+            inventory += [
+                engorda.MAPA_COD_IF_TABLE,
+                engorda.MAPA_COD_OPERACAO_TABLE,
+                engorda.MAPA_NUM_IF_TABLE,
+            ]
         if extra_table:
             inventory.append(extra_table)
         all_tables = set().union(*(engorda.TABELAS_ENGORDA_POR_PRODUTO[p] for p in PRODUCTS))
@@ -213,3 +221,25 @@ def test_main_still_rejects_failed_validation_before_inventory_override(runtime)
         loader.main()
     state.inserted.assert_not_called()
     assert state.specs == state.original
+
+
+@pytest.mark.parametrize("product", PRODUCTS)
+def test_main_loads_old_report_without_inserting_any_clone_maps(runtime, product):
+    state = runtime(product, clone_maps=True, skip_validation=True)
+    loader.main()
+    tables = state.inserted.call_args.args[3]
+    assert set(tables) == set(engorda.TABELAS_ENGORDA_POR_PRODUTO[product])
+    manifest = json.loads(state.manifest_path.read_text())
+    assert manifest["ordered_tables"] == tables
+    assert {entry["table"] for entry in manifest["tables"]} == set(tables)
+    assert all(not table.startswith("MAPA_CLONE_") for table in tables)
+
+
+@pytest.mark.parametrize("table", ["MAPA_CLONE_UNKNOWN", "MISSING_ORACLE_TABLE"])
+def test_main_still_rejects_unrecognized_inventory_names(runtime, table):
+    state = runtime("cdb_simplificado", extra_table=table, clone_maps=True)
+    with pytest.raises(ValueError, match="absent from specs"):
+        loader.main()
+    state.captured.assert_not_called()
+    state.inserted.assert_not_called()
+    assert not state.manifest_path.exists()

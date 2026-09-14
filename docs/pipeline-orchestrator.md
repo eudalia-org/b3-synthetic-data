@@ -214,6 +214,12 @@ in both sets to inherit a runtime non-static override; reference tables remain
 protected. See [load inventory recovery](load-static-inventory-recovery.md) for
 the `AMORTIZACAO is marked static` failure and reuse of already validated outputs.
 
+Clone-mapping Parquet artifacts (`MAPA_CLONE_NUM_IF`, `MAPA_CLONE_COD_IF`,
+`MAPA_CLONE_COD_OPERACAO`) are validation evidence, not Oracle load tables. New
+schema-v2 reports separate them into `auxiliary_artifacts`; the updated loader
+also excludes those exact names from older accepted reports. Unknown inventory
+names still fail, and artifact-only inventories cannot create a load claim.
+
 Loads run one product at a time in `--product` order under the environment's renewable
 `load.lease_uri`. A failed product does not block later products, but no load receives
 an automatic whole-job retry. The runner never rolls back automatically.

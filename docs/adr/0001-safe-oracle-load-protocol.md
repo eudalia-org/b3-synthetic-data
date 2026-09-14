@@ -1,5 +1,7 @@
 # Use explicit claims and manifests for Oracle load attempts
 
+The report's Oracle-table inventory excludes the three known clone-mapping artifacts: `MAPA_CLONE_NUM_IF`, `MAPA_CLONE_COD_IF`, and `MAPA_CLONE_COD_OPERACAO`. New reports list them separately under `auxiliary_artifacts`; the loader excludes those exact names from older schema-v2 inventories for compatibility. Maps remain available to validator checks, and arbitrary unknown names are still rejected. An inventory containing only maps is rejected by the runner before a load claim is created.
+
 Oracle load is an explicitly approved, APPEND-only stage that consumes the exact synthetic URI and an accepted product-validation report. Loads are serialized in CLI product order under a renewable environment lease, never retried or rolled back automatically, and a failed product does not block later products. A create-once claim prevents an unnoticed second attempt; a resume must name the previous immutable load attempt manifest. The manifest is written before the first INSERT and records the synthetic numeric PK ranges so a manual rollback cannot delete rows loaded by later products.
 
 An OCI submission or polling error leaves the load state ambiguous. In that case the input claim remains, the environment lease is persistently quarantined without automatic expiry, and later loads are blocked until an operator verifies the remote run and manually removes the quarantine; only a known terminal failure permits the next product to load.

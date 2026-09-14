@@ -71,6 +71,9 @@ SYNTHETIC_CDB_ALLOCATOR = "synthetic_cdb"
 CDB_MIN_SUFFIX = int("A0000", 36)
 CDB_MAX_SUFFIX = 36**5 - 1
 CDB_PRODUCTS = frozenset({"cdb", "cdb_simplificado", "cdb_resgate", "cdb_escalonamento"})
+CLONE_MAP_ARTIFACTS = frozenset(
+    {"MAPA_CLONE_NUM_IF", "MAPA_CLONE_COD_IF", "MAPA_CLONE_COD_OPERACAO"}
+)
 
 RUN_ARGS_FLAG = "--arguments"
 PENDING_STATES = {"ACCEPTED", "IN_PROGRESS", "CANCELING", "STOPPING"}
@@ -3099,8 +3102,14 @@ def _prepare_load_attempt(
         and bool(inventory)
         and all(isinstance(table, str) and table.strip() for table in inventory)
         and len(normalized_inventory) == len(set(normalized_inventory))
+        and any(table not in CLONE_MAP_ARTIFACTS for table in normalized_inventory)
         and inventory_owners_match
     )
+    excluded_artifacts = sorted(
+        table for table in normalized_inventory if table in CLONE_MAP_ARTIFACTS
+    )
+    if excluded_artifacts:
+        validation["excluded_auxiliary_artifacts"] = excluded_artifacts
     validation["accepted"] = (
         validation["accepted"] and validation["load_report_valid"] and validation["inventory_valid"]
     )
