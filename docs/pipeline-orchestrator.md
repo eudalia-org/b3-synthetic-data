@@ -208,6 +208,12 @@ Use `--from load --to load` with the manifest from a prior successful validation
 load later. Validation reports do not expire. `--dry-run` never requires approval and
 prints `approval_required=true` without making remote calls.
 
+For CDB/RDB output, the loader reconciles the original spec's static defaults with
+engorda's product table set and the accepted validation inventory. A table must be
+in both sets to inherit a runtime non-static override; reference tables remain
+protected. See [load inventory recovery](load-static-inventory-recovery.md) for
+the `AMORTIZACAO is marked static` failure and reuse of already validated outputs.
+
 Loads run one product at a time in `--product` order under the environment's renewable
 `load.lease_uri`. A failed product does not block later products, but no load receives
 an automatic whole-job retry. The runner never rolls back automatically.

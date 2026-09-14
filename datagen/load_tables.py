@@ -68,6 +68,47 @@ ORACLE_AUDIT_COLUMNS_BY_TABLE = {
 ORACLE_AUDIT_FORMATTED_COLUMNS = {"VAL_TIME_STAMP_ATUALIZACAO"}
 ORACLE_AUDIT_WRITER_CLASS = "com.eudalia.datagen.OracleAuditJdbcWriter"
 
+# Engorda overrides these products' original static defaults in memory. The
+# standalone loader mirrors that contract only for tables in the accepted report.
+# Keep parity with engorda_tables.TABELAS_ENGORDA_POR_PRODUTO (covered by tests);
+# importing the Spark generator here would break single-file Data Flow deployment.
+_CDB_BASE_TABLES = frozenset(
+    {
+        "AMORTIZACAO",
+        "ATUALIZACAO_POS",
+        "ATUALIZACAO_PRE",
+        "CARTEIRA_COMITENTE",
+        "CARTEIRA_PARTICIPANTE",
+        "CONDICAO_IF",
+        "CREDITO",
+        "DADO_OPERACAO",
+        "DEPOSITO_AUTOMATICO_IF",
+        "DESDOBRAMENTO",
+        "ESPECIFICACAO",
+        "ESPECIFICACAO_COMITENTE",
+        "EVENTO",
+        "INSTRUMENTO_FINANCEIRO",
+        "JUROS_FIXO",
+        "JUROS_FLUTUANTE",
+        "LANCAMENTO",
+        "OPERACAO",
+        "PARTICIPACAO_LUCROS",
+        "RESET",
+        "RESGATE",
+        "SPREAD",
+        "TITULO",
+    }
+)
+_CDB_SCHEDULE_TABLES = _CDB_BASE_TABLES | {"CONDICAO_RESGATE", "PENDENCIA_IF"}
+_RDB_TABLES = _CDB_SCHEDULE_TABLES | {"HISTORICO_PU_CURVA"}
+ENGORDA_LOAD_TABLES = {
+    "cdb_simplificado": _CDB_BASE_TABLES,
+    "cdb_resgate": _CDB_SCHEDULE_TABLES,
+    "cdb_escalonamento": _CDB_SCHEDULE_TABLES,
+    "rdb_inclusao": _RDB_TABLES,
+    "rdb_resgate": _RDB_TABLES,
+}
+
 Violation = namedtuple("Violation", ["table", "check", "columns", "detail"])
 
 
@@ -541,7 +582,7 @@ def parse_arguments() -> argparse.Namespace:
     source = parser.add_mutually_exclusive_group(required=False)
     source.add_argument(
         "--tables",
-        help="Comma-separated table list. If omitted, all non-static tables in --specs load.",
+        help="Optional comma-separated list; must exactly match the validated table inventory.",
     )
     source.add_argument(
         "--tables-file",
@@ -550,7 +591,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--specs",
         default="specs.json",
-        help="Path to specs JSON (static tables are skipped; pk_cols drive the dup guard).",
+        help="Path to specs JSON. Validated CDB/RDB engorda tables inherit their runtime "
+        "non-static status; other static inventory is rejected. pk_cols drive the dup guard.",
     )
     parser.add_argument(
         "--limit",
@@ -953,6 +995,30 @@ def topo_sort_for_load(specs: dict, tables: list[str]) -> list[str]:
             cycle = ", ".join(table_path_name(table).upper() for table in remaining)
             raise ValueError(f"Inter-table foreign-key cycle in load inventory: {cycle}")
     return result
+
+
+def specs_for_engorda_inventory(specs: dict, inventory: list[str], product: str) -> dict:
+    """Reconcile an accepted report with the generator's product-scoped overrides.
+
+    Only the intersection of the validated inventory and the product's engorda
+    table set can override static=True. Reference tables and product tables absent
+    from this particular output retain their original flags and FK metadata.
+    """
+    allowed = ENGORDA_LOAD_TABLES.get(product, frozenset())
+    effective = dict(specs)
+    overridden = []
+    for table in inventory:
+        name = table_path_name(table).upper()
+        if name in allowed and name in specs and is_static(specs, table):
+            effective[name] = {**specs[name], "static": False}
+            overridden.append(name)
+    if overridden:
+        logger.info(
+            "Product %s: applying engorda non-static overrides to validated inventory: %s",
+            product,
+            sorted(overridden),
+        )
+    return effective
 
 
 def resolve_load_tables(specs: dict, requested: list[str] | None) -> list[str]:
@@ -1521,6 +1587,7 @@ def main() -> None:
         target_schema = config["DATAGEN_TARGET_SCHEMA"]
         require_expected_target_schema(target_schema, args.expected_target_schema)
         require_inventory_target_schema(inventory, target_schema)
+        specs = specs_for_engorda_inventory(specs, inventory, args.product)
         tables = resolve_load_tables(specs, inventory)
         properties = build_connection_properties(config)
 

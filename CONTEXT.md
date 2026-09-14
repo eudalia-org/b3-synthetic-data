@@ -52,6 +52,10 @@ _Avoid_: Load preflight, schema check
 One explicitly approved APPEND attempt that writes a validated synthetic product aggregate to the target database.
 _Avoid_: Import, merge, synchronization
 
+**Runtime synthetic table**:
+A table included in a particular generated product aggregate, even when the general generation defaults classify it as static. This role is scoped to that product output; shared reference tables outside the aggregate remain static.
+_Avoid_: Globally non-static table, reference-table copy
+
 **Load attempt manifest**:
 The immutable recovery record created before an Oracle load starts. It identifies the validated input, ordered tables, write transformations, and each synthetic numeric primary-key range.
 _Avoid_: Pipeline manifest, validation report
