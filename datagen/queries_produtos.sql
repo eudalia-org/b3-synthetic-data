@@ -34,9 +34,14 @@
 -- (ambas static no spec). Confirme com um spark.read.parquet nos dois paths
 -- antes de rodar valendo.
 --
--- NÃO aplicado aos blocos rdb_*: o objeto de serviço do RDB é 45 (não 44) e o
--- validador marca CAP_LOOKUP_TOS como NÃO SUPORTADA para RDB, então esse check
--- sai como WARN e não como ERROR. Aplicar 44 ali seria ativamente errado.
+-- ATUALIZAÇÃO 2026-09-15: os blocos rdb_* também ganharam uma CTE
+-- OPER_REGISTRO, a pedido da B3, mas com critério mais simples que o do CDB:
+-- filtra só TRIM(TOP.COD_TIPO_OPERACAO) = '1', SEM restringir por
+-- NUM_ID_OBJETO_SERVICO (o objeto de serviço do RDB é 45, não 44 — NÃO usar
+-- 44 no RDB) nem por IND_DISPONIVEL_IDENTIFICACAO. O validador continua
+-- marcando CAP_LOOKUP_TOS como NÃO SUPORTADA para RDB (WARN, não ERROR); este
+-- filtro não corrige um ERROR, é alinhamento de domínio pedido pela B3 e
+-- medido em produção (ver comentário do bloco rdb_inclusao).
 -- ===========================================================================
 
 -- BEGIN QUERY: cdb_simplificado
@@ -281,8 +286,16 @@ FROM FLAGS_IF F
 -- Contrato: retornar somente uma coluna chamada NUM_IF, sem valores nulos.
 -- Use RAW_<TABELA> entre chaves duplas para referenciar uma fonte RAW.
 -- filtros num_tipo_if 50 e cod_cond_resgate sem tabela e tipo escalonamento nulo
--- NB: sem OPER_REGISTRO — objeto de serviço do RDB é 45, e o validador não
--- suporta a checagem de rota para RDB (CAP_LOOKUP_TOS não suportada -> WARN).
+-- ALTERAÇÃO 2026-09-15: CTE OPER_REGISTRO adicionada a pedido da B3.
+-- Filtra apenas por TRIM(TOP.COD_TIPO_OPERACAO) = '1', sem restringir por
+-- NUM_ID_OBJETO_SERVICO nem IND_DISPONIVEL_IDENTIFICACAO — igual ao critério
+-- que a B3 mediu (join OPERACAO + TIPO_OPER_OBJETO_SERV + TIPO_OPERACAO).
+-- MEDIDO pela B3 (cetip.OPERACAO, 2026-09-01 a 2026-09-15): RDB com
+-- COD_TIPO_OPERACAO='1' = 525.309, contra ~14.474 dispersos em outros
+-- códigos — mesma proporção observada no CDB (3.950.244 vs. minoria dispersa).
+-- O validador ainda marca CAP_LOOKUP_TOS como NÃO SUPORTADA para RDB
+-- (WARN, não ERROR); este filtro não corrige erro de validação, é alinhamento
+-- de domínio pedido pela B3.
 WITH FILTRO_BASE AS (
     SELECT DISTINCT IFE.NUM_IF
     FROM {{RAW_INSTRUMENTO_FINANCEIRO}} IFE
@@ -320,11 +333,24 @@ DEP_IF AS (
         INNER JOIN FILTRO_BASE FB
             ON FB.NUM_IF = DP.NUM_IF
     WHERE DP.NUM_IF IS NOT NULL
+),
+OPER_REGISTRO AS (
+    -- Instrumentos com operação cujo TIPO_OPERACAO é '1' (rota exigida pela B3).
+    -- Ver cabeçalho do bloco antes de alterar/remover.
+    SELECT DISTINCT O.NUM_IF
+    FROM {{RAW_OPERACAO}} O
+        INNER JOIN {{RAW_TIPO_OPER_OBJETO_SERV}} TOS
+            ON TOS.NUM_ID_TIPO_OPER_OBJETO_SERV = O.NUM_ID_TIPO_OPER_OBJETO_SERV
+        INNER JOIN {{RAW_TIPO_OPERACAO}} TOP
+            ON TOP.NUM_ID_TIPO_OPERACAO = TOS.NUM_ID_TIPO_OPERACAO
+    WHERE TRIM(TOP.COD_TIPO_OPERACAO) = '1'
 )
 SELECT DISTINCT F.NUM_IF
 FROM FLAGS_IF F
     INNER JOIN DEP_IF DEP
         ON DEP.NUM_IF = F.NUM_IF
+    INNER JOIN OPER_REGISTRO ORG
+        ON ORG.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_OPERACAO}} O
         ON O.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_DADO_OPERACAO}} DOP
@@ -342,7 +368,8 @@ FROM FLAGS_IF F
 -- Contrato: retornar somente uma coluna chamada NUM_IF, sem valores nulos.
 -- Use RAW_<TABELA> entre chaves duplas para referenciar uma fonte RAW.
 -- filtros num_tipo_if 50 e cod_cond_resgate  mercado,com tabela e especifica e tipo escalonamento nulo
--- NB: sem OPER_REGISTRO — ver bloco rdb_inclusao.
+-- ALTERAÇÃO 2026-09-15: CTE OPER_REGISTRO adicionada — ver bloco rdb_inclusao
+-- para motivo e medição.
 WITH FILTRO_BASE AS (
     SELECT DISTINCT IFE.NUM_IF
     FROM {{RAW_INSTRUMENTO_FINANCEIRO}} IFE
@@ -390,11 +417,24 @@ DEP_IF AS (
         INNER JOIN FILTRO_BASE FB
             ON FB.NUM_IF = DP.NUM_IF
     WHERE DP.NUM_IF IS NOT NULL
+),
+OPER_REGISTRO AS (
+    -- Instrumentos com operação cujo TIPO_OPERACAO é '1' (rota exigida pela B3).
+    -- Ver cabeçalho do bloco rdb_inclusao antes de alterar/remover.
+    SELECT DISTINCT O.NUM_IF
+    FROM {{RAW_OPERACAO}} O
+        INNER JOIN {{RAW_TIPO_OPER_OBJETO_SERV}} TOS
+            ON TOS.NUM_ID_TIPO_OPER_OBJETO_SERV = O.NUM_ID_TIPO_OPER_OBJETO_SERV
+        INNER JOIN {{RAW_TIPO_OPERACAO}} TOP
+            ON TOP.NUM_ID_TIPO_OPERACAO = TOS.NUM_ID_TIPO_OPERACAO
+    WHERE TRIM(TOP.COD_TIPO_OPERACAO) = '1'
 )
 SELECT DISTINCT F.NUM_IF
 FROM FLAGS_IF F
     INNER JOIN DEP_IF DEP
         ON DEP.NUM_IF = F.NUM_IF
+    INNER JOIN OPER_REGISTRO ORG
+        ON ORG.NUM_IF = F.NUM_IF
     LEFT ANTI JOIN OPERACAO_FORA_ROTA OFR
         ON OFR.NUM_IF = F.NUM_IF
     INNER JOIN {{RAW_OPERACAO}} O
