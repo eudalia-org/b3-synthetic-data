@@ -843,6 +843,7 @@ def test_genai_planning_quota_rejection_is_not_retried(tmp_path):
         "region": "sa-saopaulo-1",
     }
     payload["stage_defaults"]["engorda"]["genai_policy"] = "oci://source@namespace/policy.json"
+    payload["stage_defaults"]["engorda"]["genai_rows"] = 10000
     config.write_text(json.dumps(payload))
 
     class Rejected(FakeAdapter):
@@ -852,10 +853,12 @@ def test_genai_planning_quota_rejection_is_not_retried(tmp_path):
             self.submissions += 1
             raise quota_error()
 
-    adapter = Rejected()
+    adapter = Rejected(objects={
+        "oci://source@namespace/policy.json": {"products": {"cdb_simplificado": {}}},
+    })
     result = CliRunner().invoke(
         P.cli,
-        run_args(tmp_path, config, write_upstream(tmp_path), "--enable-genai"),
+        run_args(tmp_path, config, write_upstream(tmp_path)),
         obj={"adapter": adapter},
     )
     assert result.exit_code == 1, result.output

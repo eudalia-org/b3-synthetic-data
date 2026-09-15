@@ -3,6 +3,7 @@ import os
 import sys
 import threading
 import time
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
@@ -225,6 +226,25 @@ class ConcurrentAdapter:
                 self.active -= 1
 
 
+class EchoAdapter:
+    def __init__(self, *, fail_after_clone=None):
+        self.calls = []
+        self.fail_after_clone = fail_after_clone
+
+    def complete(self, attempt):
+        self.calls.append(attempt)
+        if self.fail_after_clone is not None and min(k for k, _ in attempt.expected) > (
+            self.fail_after_clone
+        ):
+            raise TimeoutError("endpoint down for later batches")
+        variants = {}
+        for clone, target_id in attempt.expected:
+            variants.setdefault(clone, {})[target_id] = f"value-{clone}-{target_id}"
+        return json.dumps({"variants": [
+            {"k": clone, "values": values} for clone, values in variants.items()
+        ]})
+
+
 def resolved_policy():
     return E.resolve_genai_policy(genai_policy_document(), product="cdb_simplificado")
 
@@ -264,6 +284,61 @@ def sample_instrument(root=10):
 
 
 class TestGenAiGeneration:
+    @pytest.mark.parametrize("max_tokens", [500, 4096])
+    def test_large_clone_factor_batches_with_global_identity_and_budget(self, max_tokens):
+        request = E.build_genai_request(
+            sample_instrument(), policy=replace(resolved_policy(), max_tokens=max_tokens),
+            clone_factor=20, run_seed=42,
+        )
+        adapter = EchoAdapter()
+        result = E.generate_genai_replacements([request], adapter=adapter)
+
+        assert len(adapter.calls) > 1
+        assert len({call.retry_token for call in adapter.calls}) == len(adapter.calls)
+        assert len({call.seed for call in adapter.calls}) == len(adapter.calls)
+        assert result.metrics.source_instruments == 1
+        assert result.metrics.clone_factor == 20
+        assert result.metrics.logical_attempts == len(adapter.calls)
+        assert result.metrics.generated_cells == 40
+        identities = [identity for call in adapter.calls for identity in call.expected]
+        assert len(identities) == len(set(identities)) == 40
+        assert {k for k, _ in identities} == set(range(1, 21))
+        for call in adapter.calls:
+            values = {cell.target_id: "X" * cell.max_chars for cell in request.cells}
+            response = {"variants": [
+                {"k": clone, "values": values} for clone in sorted({k for k, _ in call.expected})
+            ]}
+            assert len(E._genai_canonical_json(response)) <= 2 * max_tokens
+        repeated = E.generate_genai_replacements([request], adapter=EchoAdapter())
+        assert repeated.content_sha256 == result.content_sha256
+
+    def test_later_batch_failure_preserves_earlier_success_and_does_not_backfill(self):
+        request = E.build_genai_request(
+            sample_instrument(), policy=replace(resolved_policy(), max_tokens=500),
+            clone_factor=7, run_seed=42,
+        )
+        adapter = EchoAdapter(fail_after_clone=2)
+        result = E.generate_genai_replacements([request], adapter=adapter)
+        assert {row.clone_index for row in result.rows if row.action == "REPLACE"} == {1, 2}
+        assert {row.clone_index for row in result.rows if row.action == "KEEP_SOURCE"} == {
+            3, 4, 5, 6, 7,
+        }
+        assert result.metrics.source_instruments == 1
+        assert result.metrics.logical_attempts == 2 + 5 * E.GENAI_LOGICAL_ATTEMPTS
+        assert result.metrics.status == "DEGRADED"
+
+    def test_single_clone_over_budget_keeps_source_without_endpoint_calls(self):
+        request = E.build_genai_request(
+            sample_instrument(), policy=replace(resolved_policy(), max_tokens=1),
+            clone_factor=20, run_seed=42,
+        )
+        adapter = EchoAdapter()
+        result = E.generate_genai_replacements([request], adapter=adapter)
+        assert not adapter.calls
+        assert len(result.rows) == 40
+        assert {row.status for row in result.rows} == {"OUTPUT_BUDGET_EXCEEDED"}
+        assert result.metrics.logical_attempts == 0
+
     def test_builds_canonical_request_with_opaque_targets_and_excludes_xml(self):
         request = E.build_genai_request(
             sample_instrument(),
@@ -333,7 +408,7 @@ class TestGenAiGeneration:
         }
         assert len(result.content_sha256) == 64
 
-    def test_fails_when_no_endpoint_request_succeeds(self):
+    def test_preserves_source_and_logs_when_no_endpoint_request_succeeds(self, caplog):
         request = E.build_genai_request(
             sample_instrument(),
             policy=resolved_policy(),
@@ -342,18 +417,16 @@ class TestGenAiGeneration:
         )
         adapter = ScriptedAdapter([TimeoutError("down")] * 9)
 
-        with pytest.raises(
-            E.GenAiNoSuccessfulRequests,
-            match="no Oracle GenAI request succeeded",
-        ) as raised:
-            E.generate_genai_replacements([request], adapter=adapter)
+        result = E.generate_genai_replacements([request], adapter=adapter)
         assert len(adapter.calls) == 9
         assert [attempt.retry_token for attempt in adapter.calls[:3]] == [
             adapter.calls[0].retry_token,
         ] * 3
         assert len({attempt.retry_token for attempt in adapter.calls}) == 3
-        assert raised.value.result.metrics.status == "FAILED"
-        assert raised.value.result.metrics.endpoint_status_counts == {"TIMEOUT": 9}
+        assert result.metrics.status == "DEGRADED"
+        assert result.metrics.endpoint_status_counts == {"TIMEOUT": 9}
+        assert {row.action for row in result.rows} == {"KEEP_SOURCE"}
+        assert "not executed successfully; keeping original texts" in caplog.text
 
     def test_duplicate_json_target_identity_resolves_no_cells(self):
         request = E.build_genai_request(
@@ -601,9 +674,38 @@ class TestOracleGenAiAdapter:
 
 
 class TestGenAiJobContract:
-    def test_runner_and_dataflow_hard_caps_cannot_drift(self):
-        assert P.GENAI_MAX_SOURCE_INSTRUMENTS == E.GENAI_MAX_SOURCE_INSTRUMENTS
-        assert P.GENAI_MAX_FACTOR_K == E.GENAI_MAX_FACTOR_K
+    @pytest.mark.parametrize("limit", [-1, 1.5, True, "10", None])
+    def test_invalid_source_limits_are_rejected(self, limit):
+        with pytest.raises(ValueError, match="genai_rows must be a non-negative integer"):
+            E._validate_engorda_job(E.EngordaJob(
+                produto="cdb_simplificado", n_instrumentos=10, phase="plan",
+                plan_uri="plan.json", raw_uri="raw", output_uri="synthetic", genai_rows=limit,
+            ))
+
+    def test_zero_source_limit_skips_sdk_and_policy_initialization(self, monkeypatch, caplog):
+        class FakeSpark:
+            def stop(self):
+                pass
+
+        monkeypatch.setattr(E, "create_spark_session", lambda *_: FakeSpark())
+        monkeypatch.setattr(E, "get_engorda_env", lambda *_, **_kw: {
+            "DATAGEN_OUTPUT_URI": "synthetic", "DATAGEN_SPECS_URI": "spec.json",
+        })
+        monkeypatch.setattr(E, "load_specs", lambda *_: {})
+        monkeypatch.setattr(E, "_read_json_artifact", lambda *_: pytest.fail("policy read"))
+        monkeypatch.setattr(E, "OracleGenAiChatAdapter", lambda **_kw: pytest.fail("SDK created"))
+        captured = {}
+        monkeypatch.setattr(E, "executa_clonagem", lambda *_, **kw: captured.update(kw) or {})
+        with caplog.at_level("INFO"):
+            E.executar_job(E.EngordaJob(
+                produto="cdb_simplificado", n_instrumentos=1000000, phase="plan",
+                plan_uri="plan.json", raw_uri="raw", output_uri="synthetic",
+            ))
+        assert captured["genai_rows"] == 0
+        assert captured["genai_execution"] is None
+        assert "GenAI skipped" in caplog.text
+
+    def test_runner_and_dataflow_default_concurrency_cannot_drift(self):
         assert P.GENAI_DEFAULT_CONCURRENCY == E.GENAI_DEFAULT_CONCURRENCY
 
     def test_direct_plan_derives_sibling_genai_root(self):
@@ -629,7 +731,8 @@ class TestGenAiJobContract:
                 "oci://bucket@ns/synthetic",
                 "--plan-uri",
                 "oci://bucket@ns/selection-plan.json",
-                "--enable-genai",
+                "--genai-rows",
+                "10",
                 "--genai-policy",
                 "oci://bucket@ns/genai-policy.json",
                 "--genai-endpoint-id",
@@ -645,12 +748,12 @@ class TestGenAiJobContract:
             ]
         )
 
-        assert args.enable_genai is True
+        assert args.genai_rows == 10
         assert args.genai_policy == "oci://bucket@ns/genai-policy.json"
         assert args.genai_concurrency == 32
         assert args.genai_artifact_root == "oci://bucket@ns/genai"
 
-    def test_enabled_plan_requires_conditional_inputs_and_hard_limits(self):
+    def test_enabled_plan_requires_inputs_but_allows_large_selection_and_clone_factor(self):
         base = dict(
             produto="cdb_simplificado",
             n_instrumentos=10,
@@ -658,7 +761,7 @@ class TestGenAiJobContract:
             plan_uri="plan.json",
             raw_uri="raw",
             output_uri="synthetic",
-            enable_genai=True,
+            genai_rows=10000,
         )
         with pytest.raises(ValueError, match="genai_policy"):
             E._validate_engorda_job(E.EngordaJob(**base))
@@ -675,10 +778,9 @@ class TestGenAiJobContract:
         E._validate_engorda_job(E.EngordaJob(**configured))
         E._validate_engorda_job(E.EngordaJob(**{**configured, "n_instrumentos": 10000}))
 
-        with pytest.raises(ValueError, match="at most 10000"):
-            E._validate_engorda_job(E.EngordaJob(**{**configured, "n_instrumentos": 10001}))
-        with pytest.raises(ValueError, match="fator_k <= 5"):
-            E._validate_engorda_job(E.EngordaJob(**{**configured, "fator_k": 6}))
+        E._validate_engorda_job(E.EngordaJob(**{
+            **configured, "n_instrumentos": 1000000, "genai_rows": 25000, "fator_k": 20,
+        }))
         with pytest.raises(ValueError, match="positive integer"):
             E._validate_engorda_job(
                 E.EngordaJob(**{**configured, "genai_concurrency": 0})
@@ -693,7 +795,7 @@ class TestGenAiJobContract:
                 )
             )
 
-    def test_materialize_needs_only_enabled_acknowledgement(self):
+    def test_materialize_does_not_require_genai_configuration(self):
         E._validate_engorda_job(
             E.EngordaJob(
                 produto="cdb_simplificado",
@@ -702,9 +804,56 @@ class TestGenAiJobContract:
                 reservation_uri="reservation.json",
                 raw_uri="raw",
                 output_uri="synthetic",
-                enable_genai=True,
             )
         )
+
+    def test_materialize_uses_frozen_plan_without_sdk_or_activation(self, monkeypatch):
+        class FakeSpark:
+            def stop(self):
+                pass
+
+        profile = E.get_product_profile("cdb_simplificado")
+        descriptor = {"enabled": True, "source_limit": 10, "status": "DEGRADED"}
+        plan = {
+            "product": profile.name,
+            "cod_if": {"oracle_type": 49},
+            "genai": descriptor,
+            "controle_operacional_date": None,
+            "raw_uri": "raw", "output_uri": "synthetic", "specs_uri": "spec.json",
+            "faltantes_uri": None, "query_num_if_uri": profile.query_filename,
+            "selected_lote": {}, "tables": {}, "selected_num_ifs": [10],
+            "fator_k": 20, "seed": 42, "engorda_timestamp": "2026-09-15T12:00:00",
+        }
+        monkeypatch.setattr(E, "create_spark_session", lambda *_: FakeSpark())
+        monkeypatch.setattr(E, "get_engorda_env", lambda *_, **_kw: {
+            "DATAGEN_OUTPUT_URI": "synthetic", "DATAGEN_SPECS_URI": "spec.json",
+            "DATAGEN_RAW_BASE_URI": "raw", "DATAGEN_RAW_PREFIX": "",
+        })
+        monkeypatch.setattr(E, "_read_json_artifact", lambda _s, uri: plan if uri == "plan" else {})
+        monkeypatch.setattr(E, "_validate_plan_artifact", lambda value: value)
+        monkeypatch.setattr(E, "_validate_reservation_artifact", lambda *_: {})
+        monkeypatch.setattr(E, "_load_selected_lote_snapshot", lambda *_, **_kw: ({}, None, {}))
+        monkeypatch.setattr(E, "load_specs", lambda *_: {})
+        monkeypatch.setattr(E, "OracleGenAiChatAdapter", lambda **_kw: pytest.fail("SDK created"))
+        monkeypatch.setattr(E, "resolve_genai_policy", lambda *_, **_kw: pytest.fail("policy read"))
+        replacements = object()
+        loaded = []
+
+        def load(_spark, frozen):
+            loaded.append(frozen)
+            return replacements
+
+        monkeypatch.setattr(E, "load_genai_replacements", load)
+        captured = {}
+        monkeypatch.setattr(E, "executa_clonagem", lambda *_, **kw: captured.update(kw) or {})
+        E.executar_job(E.EngordaJob(
+            produto=profile.name, phase="materialize", plan_uri="plan", reservation_uri="reserve",
+            raw_uri="raw", output_uri="synthetic",
+        ))
+        assert loaded == [descriptor]
+        assert captured["genai_frozen"].replacements is replacements
+        assert captured["genai_execution"] is None
+        assert captured["fator_k"] == 20
 
     def test_direct_all_checks_artifact_absence_before_policy_read(self, monkeypatch):
         class ArtifactExists(RuntimeError):
@@ -746,7 +895,7 @@ class TestGenAiJobContract:
                     num_ifs=(10,),
                     meu_numero_prefix="321",
                     no_oracle=True,
-                    enable_genai=True,
+                    genai_rows=10,
                     genai_policy="policy.json",
                     genai_endpoint_id="ocid1.generativeaiendpoint.test",
                     genai_compartment_id="ocid1.compartment.test",
@@ -757,6 +906,39 @@ class TestGenAiJobContract:
 
 
 class TestGenAiSparkApplication:
+    def test_sample_is_exact_seeded_and_filters_related_rows_before_collection(self, spark):
+        root = spark.createDataFrame([(i, f"root-{i}") for i in range(1, 51)],
+                                     "NUM_IF long, TXT_CARACT_COMPLEMENTARES string")
+        event = spark.createDataFrame([(i + 100, i, f"event-{i}") for i in range(1, 51)],
+                                      "NUM_ID_EVENTO long, NUM_IF long, TXT_OBSERVACAO string")
+        provenances = {
+            E.TABELA_RAIZ: root.select("NUM_IF", E.F.col("NUM_IF").alias(E.ROOT_PROVENANCE_COL)),
+            "EVENTO": event.select("NUM_ID_EVENTO", E.F.col("NUM_IF").alias(E.ROOT_PROVENANCE_COL)),
+        }
+        plans = {
+            table: E.PlanoTabela(table, (pk,), pk_regra="OFFSET_PROPRIO", pk_start=1)
+            for table, pk in ((E.TABELA_RAIZ, "NUM_IF"), ("EVENTO", "NUM_ID_EVENTO"))
+        }
+
+        def sample(seed, limit=7, partitions=1):
+            return E.collect_genai_instruments(
+                {E.TABELA_RAIZ: root.orderBy(E.F.desc("NUM_IF")).repartition(partitions),
+                 "EVENTO": event.repartition(partitions)},
+                provenances, plans, genai_rows=limit, seed=seed,
+            )
+
+        first = sample(42)
+        repeated = sample(42, partitions=3)
+        assert first == repeated
+        assert len(first) == 7
+        assert {a.root_num_if for a in first} != {a.root_num_if for a in sample(43)}
+        for aggregate in first:
+            assert len(aggregate.rows) == 2
+            assert {str(row.values["NUM_IF"]) for row in aggregate.rows} == {aggregate.root_num_if}
+        assert len(sample(42, limit=100)) == 50
+        assert len(sample(42, limit=2**63)) == 50
+        assert E.collect_genai_instruments({}, {}, {}, genai_rows=0, seed=42) == ()
+
     def test_collects_decimal_root_identity_without_integer_string_parsing(self, spark):
         root = spark.createDataFrame(
             [(Decimal("2253875817.0000000000"), "text")],
@@ -777,13 +959,15 @@ class TestGenAiSparkApplication:
                     pk_start=1,
                 ),
             },
+            genai_rows=1,
+            seed=42,
         )
 
         assert aggregates[0].root_num_if == "2253875817.0000000000"
         assert aggregates[0].rows[0].source_pk == {"NUM_IF": Decimal("2253875817.0000000000")}
 
-    def test_materialize_rejects_enablement_mismatch_before_loading_tables(self, spark):
-        with pytest.raises(ValueError, match="--enable-genai diverge"):
+    def test_materialize_requires_frozen_replacements_when_plan_enables_genai(self, spark):
+        with pytest.raises(ValueError, match="descriptor e replacements validados"):
             E.executa_clonagem(
                 spark,
                 {},
@@ -798,7 +982,6 @@ class TestGenAiSparkApplication:
                 snapshot_lotes={},
                 snapshot_lote_counts={},
                 no_oracle=True,
-                enable_genai=False,
             )
 
     def test_clone_matches_decimal_source_pk_using_canonical_string(self, spark):
@@ -1041,16 +1224,15 @@ class TestGenAiSparkApplication:
         request = E.build_genai_request(
             sample_instrument(), policy=policy, clone_factor=1, run_seed=42
         )
-        with pytest.raises(E.GenAiNoSuccessfulRequests) as raised:
-            E.generate_genai_replacements(
-                [request], adapter=ScriptedAdapter([TimeoutError("down")] * 9)
-            )
+        result = E.generate_genai_replacements(
+            [request], adapter=ScriptedAdapter([TimeoutError("down")] * 9)
+        )
 
         E.write_genai_artifacts(
             spark,
             str(tmp_path / "failed-genai"),
             policy=policy,
-            result=raised.value.result,
+            result=result,
             endpoint_id="ocid1.generativeaiendpoint.test",
             compartment_id="ocid1.compartment.test",
             region="sa-saopaulo-1",
@@ -1059,7 +1241,7 @@ class TestGenAiSparkApplication:
         manifest = json.loads(
             (tmp_path / "failed-genai" / "manifest.json").read_text()
         )
-        assert manifest["status"] == "FAILED"
+        assert manifest["status"] == "DEGRADED"
         assert manifest["metrics"]["endpoint_status_counts"] == {"TIMEOUT": 9}
         assert manifest["metrics"]["successful_call_latency_ms"] == {
             "p50": 0.0,
@@ -1067,7 +1249,10 @@ class TestGenAiSparkApplication:
             "max": 0.0,
         }
 
-    def test_enabled_plan_freezes_generated_replacements(self, spark, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("endpoint_fails", [False, True])
+    def test_enabled_plan_freezes_replacements_even_on_total_endpoint_failure(
+        self, spark, tmp_path, monkeypatch, endpoint_fails,
+    ):
         root = spark.createDataFrame(
             [(10, 49, "original")],
             "NUM_IF long, NUM_TIPO_IF long, TXT_CARACT_COMPLEMENTARES string",
@@ -1168,6 +1353,8 @@ class TestGenAiSparkApplication:
         )
         plan_uri = str(tmp_path / "selection-plan.json")
         artifact_root = str(tmp_path / "genai")
+        if endpoint_fails:
+            adapter = ScriptedAdapter([TimeoutError("down")] * 9)
         config = {
             "DATAGEN_RAW_BASE_URI": str(tmp_path / "raw"),
             "DATAGEN_RAW_PREFIX": "",
@@ -1188,7 +1375,7 @@ class TestGenAiSparkApplication:
             phase="plan",
             plan_uri=plan_uri,
             specs_uri="spec.json",
-            enable_genai=True,
+            genai_rows=10,
             genai_execution=E.GenAiExecutionConfig(
                 policy=resolved_policy(),
                 policy_uri="policy.json",
@@ -1201,12 +1388,17 @@ class TestGenAiSparkApplication:
         )
 
         assert result["plan"]["genai"]["enabled"] is True
+        assert result["plan"]["genai"]["source_limit"] == 10
+        assert result["plan"]["genai"]["status"] == ("DEGRADED" if endpoint_fails else "SUCCESS")
         assert result["plan"]["genai"]["replacements"]["row_count"] == 3
         assert (
             json.loads((tmp_path / "selection-plan.json").read_text())["plan_id"]
             == (result["plan"]["plan_id"])
         )
-        assert len(adapter.calls) == 1
+        assert len(adapter.calls) == (9 if endpoint_fails else 1)
+        frozen = E.load_genai_replacements(spark, result["plan"]["genai"])
+        actions = {row["ACTION"] for row in frozen.select("ACTION").collect()}
+        assert actions == ({"KEEP_SOURCE"} if endpoint_fails else {"REPLACE"})
 
     def test_direct_all_publishes_audit_artifacts_before_clone_output(
         self, spark, tmp_path, monkeypatch
@@ -1247,7 +1439,7 @@ class TestGenAiSparkApplication:
             return {E.TABELA_RAIZ: root}
 
         monkeypatch.setattr(E, "calcula_lotes", calculate)
-        monkeypatch.setattr(E, "collect_genai_instruments", lambda *_: ("aggregate",))
+        monkeypatch.setattr(E, "collect_genai_instruments", lambda *_, **_kw: ("aggregate",))
         monkeypatch.setattr(E, "build_genai_request", lambda *_args, **_kwargs: "request")
         generation = object()
         monkeypatch.setattr(E, "generate_genai_replacements", lambda *_args, **_kwargs: generation)
@@ -1289,7 +1481,7 @@ class TestGenAiSparkApplication:
                 meu_numero_prefix="321",
                 no_oracle=True,
                 phase="all",
-                enable_genai=True,
+                genai_rows=10,
                 genai_execution=E.GenAiExecutionConfig(
                     policy=resolved_policy(),
                     policy_uri="policy.json",

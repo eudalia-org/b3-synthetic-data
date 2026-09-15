@@ -1,5 +1,11 @@
 # Oracle GenAI instrument text enrichment - Design
 
+> Historical pilot design. The activation flag, source and clone-factor ceilings,
+> single-product restriction, and total-endpoint-failure rule below are superseded by
+> [Per-product GenAI source limits](../pipeline-orchestrator.md#per-product-genai-source-limits).
+> [ADR 0002](../adr/0002-freeze-genai-replacements-during-planning.md) describes the
+> current plan-frozen materialization contract.
+
 Status: agreed
 Date: 2026-09-01
 

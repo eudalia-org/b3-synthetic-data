@@ -46,6 +46,8 @@ OVERRIDE_KEYS = {
         "no_oracle",
         "controle_operacional_date",
         "cod_if_allocator",
+        "genai_rows",
+        "genai_policy",
     },
     "validate": {
         "fail_severity",
@@ -64,8 +66,6 @@ MANIFEST_REPLACE_ATTEMPTS = 8
 MANIFEST_REPLACE_DELAY_SECONDS = 0.05
 MANIFEST_REPLACE_MAX_DELAY_SECONDS = 0.5
 OFFLINE_ARTIFACT_MARKER = "_DATAGEN_OFFLINE.json"
-GENAI_MAX_SOURCE_INSTRUMENTS = 10000
-GENAI_MAX_FACTOR_K = 5
 GENAI_DEFAULT_CONCURRENCY = 4
 SYNTHETIC_CDB_ALLOCATOR = "synthetic_cdb"
 CDB_MIN_SUFFIX = int("A0000", 36)
@@ -2160,7 +2160,7 @@ def resolve_genai_config(config: Mapping[str, Any], *, enabled: bool) -> dict[st
         return None
     genai = config.get("genai")
     if not isinstance(genai, dict):
-        raise PipelineError("config.genai must be an object when --enable-genai is used")
+        raise PipelineError("config.genai must be an object when genai_rows is positive")
     resolved = {
         key: _need_string(genai, key, "config.genai")
         for key in ("endpoint_id", "compartment_id", "region")
@@ -2173,11 +2173,6 @@ def resolve_genai_config(config: Mapping[str, Any], *, enabled: bool) -> dict[st
     if type(max_concurrency) is not int or max_concurrency < 1:
         raise PipelineError("config.genai.max_concurrency must be a positive integer")
     resolved["max_concurrency"] = max_concurrency
-    defaults = config.get("stage_defaults", {}).get("engorda", {})
-    policy = _need_string(defaults, "genai_policy", "config.stage_defaults.engorda")
-    if not policy.startswith("oci://"):
-        raise PipelineError("config.stage_defaults.engorda.genai_policy must be an oci:// URI")
-    resolved["policy"] = policy
     return resolved
 
 
@@ -2239,6 +2234,12 @@ def _positive(value: Any, name: str) -> int:
     if result < 1:
         raise PipelineError(f"{name} must be a positive integer")
     return result
+
+
+def _genai_source_limit(value: Any) -> int:
+    if type(value) is not int or value < 0:
+        raise PipelineError("engorda.genai_rows must be a non-negative integer")
+    return value
 
 
 def _parse_controle_operacional_date(value: Any) -> str:
@@ -2313,9 +2314,11 @@ def build_engorda_plan_argv(
             raise PipelineError("engorda.no_oracle must be boolean")
         if options["no_oracle"]:
             argv.append("--no-oracle")
-    if options.get("enable_genai"):
+    genai_rows = _genai_source_limit(options.get("genai_rows", 0))
+    if genai_rows > 0:
         argv += [
-            "--enable-genai",
+            "--genai-rows",
+            str(genai_rows),
             "--genai-policy",
             str(options["genai_policy"]),
             "--genai-endpoint-id",
@@ -2367,8 +2370,6 @@ def build_engorda_materialize_argv(
             raise PipelineError("engorda.no_oracle must be boolean")
         if options["no_oracle"]:
             argv.append("--no-oracle")
-    if options.get("enable_genai"):
-        argv.append("--enable-genai")
     return argv
 
 
@@ -2500,12 +2501,6 @@ def build_pipeline_plan(
             "upstream manifest does not cover product(s): " + ", ".join(unavailable_inputs)
         )
     stages = selected_stages(args.from_stage, args.to_stage)
-    genai_enabled = bool(getattr(args, "enable_genai", False))
-    if genai_enabled and len(products) != 1:
-        raise PipelineError("--enable-genai requires exactly one selected product")
-    if genai_enabled and "engorda" not in stages:
-        raise PipelineError("--enable-genai requires an interval containing engorda")
-    genai_config = resolve_genai_config(config, enabled=genai_enabled)
     if getattr(args, "no_oracle", False) and not {"engorda", "validate"}.intersection(stages):
         raise PipelineError("--no-oracle requires an interval containing engorda or validate")
     for product in products:
@@ -2558,21 +2553,17 @@ def build_pipeline_plan(
             **config["products"][product].get("engorda", {}),
             **overrides.get(product, {}).get("engorda", {}),
         }
-        if genai_config is not None:
-            n_instrumentos = _positive(
-                engorda_options.get("n_instrumentos"), "engorda.n_instrumentos"
-            )
-            fator_k = _positive(engorda_options.get("fator_k", 1), "engorda.fator_k")
-            if n_instrumentos > GENAI_MAX_SOURCE_INSTRUMENTS:
-                raise PipelineError(
-                    f"GenAI supports at most {GENAI_MAX_SOURCE_INSTRUMENTS} source instruments"
-                )
-            if fator_k > GENAI_MAX_FACTOR_K:
-                raise PipelineError(f"GenAI supports fator_k <= {GENAI_MAX_FACTOR_K}")
+        genai_enabled = (
+            "engorda" in stages
+            and _genai_source_limit(engorda_options.get("genai_rows", 0)) > 0
+        )
+        if genai_enabled:
+            genai_config = resolve_genai_config(config, enabled=True)
+            policy = _need_string(engorda_options, "genai_policy", f"product {product}.engorda")
+            if not policy.startswith("oci://"):
+                raise PipelineError(f"product {product} engorda.genai_policy must be an oci:// URI")
             engorda_options.update(
                 {
-                    "enable_genai": True,
-                    "genai_policy": genai_config["policy"],
                     "genai_endpoint_id": genai_config["endpoint_id"],
                     "genai_compartment_id": genai_config["compartment_id"],
                     "genai_region": genai_config["region"],
@@ -2689,6 +2680,7 @@ def build_pipeline_plan(
             }
             if genai_enabled:
                 nodes[plan_id]["max_retries"] = 0
+                nodes[plan_id]["genai_policy_uri"] = engorda_options["genai_policy"]
             nodes[reserve_id] = {
                 "id": reserve_id,
                 "product": product,
@@ -3979,6 +3971,27 @@ def _ensure_adapter_auth(
     )
 
 
+def preflight_genai_policies(
+    plan: Mapping[str, Any], adapter: Any, auth: dict[str, str],
+) -> None:
+    """Check every enabled product before submitting any Data Flow node."""
+    policies: dict[str, Any] = {}
+    for node in plan["nodes"].values():
+        uri = node.get("genai_policy_uri")
+        if uri is None:
+            continue
+        product = node["product"]
+        if uri not in policies:
+            try:
+                policies[uri] = adapter.read_json(uri, auth=auth)
+            except Exception as exc:
+                raise PipelineError(f"product {product}: cannot read GenAI policy {uri}") from exc
+        document = policies[uri]
+        products = document.get("products") if isinstance(document, dict) else None
+        if not isinstance(products, dict) or not isinstance(products.get(product), dict):
+            raise PipelineError(f"product {product}: missing matching GenAI policy in {uri}")
+
+
 def run_command(
     args: SimpleNamespace,
     adapter: Any | None,
@@ -4023,6 +4036,7 @@ def run_command(
         application_id=auth_application,
         force_refresh=args.auth_refresh_seconds > 0,
     )
+    preflight_genai_policies(plan, adapter, auth)
     immutable_outputs = [
         (f"materialize output for {node['product']}", node["output_uri"])
         for node in plan["nodes"].values()
@@ -4275,11 +4289,6 @@ def cli(context: click.Context) -> None:
 @click.option("--n-instrumentos", type=int)
 @click.option("--fator-k", type=int)
 @click.option("--seed", type=int)
-@click.option(
-    "--enable-genai",
-    is_flag=True,
-    help="Enable bounded Oracle GenAI text enrichment for one engorda product.",
-)
 @click.option(
     "--no-oracle",
     is_flag=True,

@@ -365,6 +365,63 @@ run ID. The final lines print both
 the local and OCI manifest paths plus `upload=SUCCEEDED|FAILED`. A manifest-upload
 failure still renders the product summary and changes the pipeline result to FAILED.
 
+## Per-product GenAI source limits
+
+Set `engorda.genai_rows` to the maximum number of **source instruments before cloning**
+to enrich for each product. Any non-negative integer is accepted; omitted settings
+resolve to zero. `--enable-genai` has been removed.
+
+Precedence is `--set product.engorda.genai_rows=N`, product configuration,
+`stage_defaults.engorda.genai_rows`, then `0`. A product value of `0` overrides a
+positive stage default and runs normal cloning without policy or endpoint access.
+
+```json
+{
+  "stage_defaults": {
+    "engorda": {"genai_rows": 10000}
+  },
+  "products": {
+    "cdb_simplificado": {
+      "engorda": {"n_instrumentos": 1000000}
+    },
+    "rdb_inclusao": {
+      "engorda": {"n_instrumentos": 500000, "genai_rows": 0}
+    }
+  }
+}
+```
+
+This fragment selects one million CDB Simplificado sources, enriches at most 10,000,
+and runs RDB Inclusao normally in the same pipeline. Endpoint settings remain under
+the shared `genai` object; the policy URI resolves from `engorda.genai_policy`.
+Every enabled product must have an entry in that policy. Real runs check all enabled
+products before any Data Flow submission; `--dry-run` resolves settings without remote
+policy reads. Validate/load-only runs consume existing artifacts without activating GenAI.
+
+For an individual run, use `--set cdb_simplificado.engorda.genai_rows=10000`.
+Direct engorda planning or `phase all` uses `--genai-rows 10000` with its existing
+endpoint, policy, and artifact arguments. Materialization reads the frozen plan's
+enrichment descriptor and needs no GenAI activation or endpoint arguments.
+
+The sample contains `min(genai_rows, selected source count)` sources. It is selected
+in Spark using a seeded hash of the source identity before collecting aggregate text
+on the driver. The same source set and seed select the same subset independently of
+partitioning. Unselected sources follow normal cloning. Failed enrichments consume
+their sample slots; no new sources are selected to replace them.
+
+There is no GenAI-specific clone-factor ceiling. Clone-specific text is generated in
+automatic batches sized against the existing output-budget estimate (`2 * max_tokens`
+serialized characters). Global clone indices remain stable across batches. If even
+one clone cannot fit, its source text is retained. The source cap limits distinct
+sources, not clones, text cells, retries, or API calls.
+
+Failures retain original text, including total endpoint failure. A `DEGRADED` GenAI
+manifest records fallback counts and endpoint telemetry while product planning
+continues. Logs distinguish `genai_rows=0` skips from attempted enrichment with no
+successful text generation. Successful and fallback replacements are frozen during
+planning; materialization never calls the endpoint or redraws the sample. Policy,
+artifact-integrity, and ordinary generation errors still report their existing failures.
+
 ## Benchmark GenAI concurrency
 
 Set `genai.max_concurrency` in the environment config. It defaults to `4` and accepts

@@ -54,6 +54,7 @@
       "n_instrumentos": 100,
       "fator_k": 1,
       "seed": 42,
+      "genai_rows": 0,
       "no_oracle": false,
       "genai_policy": "oci://synthetic-data@namespace/contracts/genai-policy.json",
       "specs": "oci://synthetic-data@namespace/contracts/specs.json",

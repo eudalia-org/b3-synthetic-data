@@ -1294,9 +1294,12 @@ def test_genai_dry_run_resolves_conditional_plan_contract(tmp_path, capsys):
                 config,
                 upstream,
                 "--dry-run",
-                "--enable-genai",
+                "--set",
+                "cdb_simplificado.engorda.genai_rows=25000",
                 "--n-instrumentos",
-                "10000",
+                "1000000",
+                "--fator-k",
+                "20",
             ),
             adapter=NoCallsAdapter(),
         )
@@ -1309,9 +1312,10 @@ def test_genai_dry_run_resolves_conditional_plan_contract(tmp_path, capsys):
     assert plan_node["max_retries"] == 0
     assert plan_node["arguments"][
         plan_node["arguments"].index("--n-instrumentos") + 1
-    ] == "10000"
-    assert plan_node["arguments"][-13:] == [
-        "--enable-genai",
+    ] == "1000000"
+    assert plan_node["arguments"][-14:] == [
+        "--genai-rows",
+        "25000",
         "--genai-policy",
         "oci://source@namespace/genai-policy.json",
         "--genai-endpoint-id",
@@ -1325,7 +1329,8 @@ def test_genai_dry_run_resolves_conditional_plan_contract(tmp_path, capsys):
         "--genai-artifact-root",
         plan["artifacts"]["products"]["cdb_simplificado"]["genai"]["uri"],
     ]
-    assert materialize_node["arguments"][-1] == "--enable-genai"
+    assert "--genai-rows" not in materialize_node["arguments"]
+    assert "--enable-genai" not in materialize_node["arguments"]
     assert "--genai-policy" not in materialize_node["arguments"]
     assert plan["artifacts"]["products"]["cdb_simplificado"]["genai"]["uri"].endswith(
         "/products/cdb_simplificado/genai"
@@ -1353,7 +1358,8 @@ def test_genai_rejects_invalid_concurrency(tmp_path, capsys, value):
             config,
             write_upstream(tmp_path),
             "--dry-run",
-            "--enable-genai",
+            "--set",
+            "cdb_simplificado.engorda.genai_rows=10",
         ),
         adapter=NoCallsAdapter(),
     )
@@ -1366,12 +1372,13 @@ def test_genai_rejects_invalid_concurrency(tmp_path, capsys, value):
     ("configure", "extra_args", "message"),
     [
         (False, (), "config.genai"),
-        (True, ("--n-instrumentos", "10001"), "at most 10000"),
-        (True, ("--fator-k", "6"), "fator_k <= 5"),
-        (True, ("--product", "cdb_resgate"), "exactly one"),
+        (True, ("--set", "cdb_simplificado.engorda.genai_rows=-1"), "non-negative integer"),
+        (True, ("--set", "cdb_simplificado.engorda.genai_rows=1.5"), "non-negative integer"),
+        (True, ("--set", "cdb_simplificado.engorda.genai_rows=true"), "non-negative integer"),
+        (True, ("--set", 'cdb_simplificado.engorda.genai_rows="10"'), "non-negative integer"),
     ],
 )
-def test_genai_rejects_missing_config_scope_and_hard_limits(
+def test_genai_rejects_missing_config_and_invalid_limits(
     tmp_path, capsys, configure, extra_args, message
 ):
     config = write_config(tmp_path)
@@ -1394,7 +1401,8 @@ def test_genai_rejects_missing_config_scope_and_hard_limits(
             config,
             upstream,
             "--dry-run",
-            "--enable-genai",
+            "--set",
+            "cdb_simplificado.engorda.genai_rows=10",
             *extra_args,
         ),
         adapter=NoCallsAdapter(),
@@ -1402,6 +1410,95 @@ def test_genai_rejects_missing_config_scope_and_hard_limits(
 
     assert result == 2
     assert message in capsys.readouterr().err
+
+
+def configure_genai(tmp_path, *, default_rows=10000):
+    path = write_config(tmp_path)
+    payload = json.loads(path.read_text())
+    payload["genai"] = {
+        "endpoint_id": "ocid1.generativeaiendpoint.test",
+        "compartment_id": "ocid1.compartment.genai",
+        "region": "sa-saopaulo-1",
+    }
+    payload["stage_defaults"]["engorda"].update(
+        genai_rows=default_rows, genai_policy="oci://source@namespace/genai-policy.json",
+    )
+    payload["products"]["rdb_inclusao"]["engorda"] = {"genai_rows": 0}
+    payload["products"]["cdb_resgate"]["engorda"] = {"genai_rows": 25}
+    path.write_text(json.dumps(payload))
+    return path
+
+
+def test_genai_mixed_products_inherit_override_and_opt_out(tmp_path, capsys):
+    config = configure_genai(tmp_path)
+    assert P.main(run_args(
+        tmp_path, config, write_upstream(tmp_path), "--dry-run",
+        "--product", "cdb_resgate,rdb_inclusao",
+        "--set", "cdb_resgate.engorda.genai_rows=30",
+    ), adapter=NoCallsAdapter()) == 0
+    plan = json.loads(capsys.readouterr().out)
+    for product, count in (("cdb_simplificado", 10000), ("cdb_resgate", 30)):
+        node = plan["nodes"][f"{product}.engorda.plan"]
+        assert node["arguments"][node["arguments"].index("--genai-rows") + 1] == str(count)
+        assert node["max_retries"] == 0
+        assert "genai" in plan["artifacts"]["products"][product]
+    disabled = plan["nodes"]["rdb_inclusao.engorda.plan"]
+    assert "--genai-rows" not in disabled["arguments"]
+    assert "max_retries" not in disabled
+    assert "genai" not in plan["artifacts"]["products"]["rdb_inclusao"]
+
+
+def test_genai_zero_override_requires_no_endpoint_or_policy(tmp_path, capsys):
+    config = configure_genai(tmp_path)
+    payload = json.loads(config.read_text())
+    del payload["genai"]
+    del payload["stage_defaults"]["engorda"]["genai_policy"]
+    config.write_text(json.dumps(payload))
+    assert P.main(run_args(
+        tmp_path, config, write_upstream(tmp_path), "--dry-run",
+        "--set", "cdb_simplificado.engorda.genai_rows=0",
+    ), adapter=NoCallsAdapter()) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert "genai" not in plan["artifacts"]["products"]["cdb_simplificado"]
+
+
+@pytest.mark.parametrize("missing", [True, False])
+def test_genai_policy_preflight_precedes_all_submissions(tmp_path, capsys, monkeypatch, missing):
+    config = configure_genai(tmp_path)
+    policy = {"products": {"cdb_simplificado": {}}}
+    if not missing:
+        policy["products"]["cdb_resgate"] = {}
+    adapter = FakeAdapter(objects={"oci://source@namespace/genai-policy.json": policy})
+    reads = []
+    read_json = adapter.read_json
+
+    def read(uri, *, auth):
+        reads.append(uri)
+        return read_json(uri, auth=auth)
+
+    monkeypatch.setattr(adapter, "read_json", read)
+    result = P.main(run_args(
+        tmp_path, config, write_upstream(tmp_path),
+        "--product", "cdb_resgate,rdb_inclusao",
+    ), adapter=adapter)
+    if missing:
+        assert result == 2
+        assert "cdb_resgate: missing matching GenAI policy" in capsys.readouterr().err
+        assert not adapter.created
+        assert not adapter.reservations
+    else:
+        assert result == 0
+        assert len(adapter.created) == 9
+    assert reads.count("oci://source@namespace/genai-policy.json") == 1
+
+
+def test_genai_removed_enable_flag_is_rejected(tmp_path, capsys):
+    result = P.main(run_args(
+        tmp_path, write_config(tmp_path), write_upstream(tmp_path),
+        "--dry-run", "--enable-genai",
+    ), adapter=NoCallsAdapter())
+    assert result == 2
+    assert "No such option '--enable-genai'" in capsys.readouterr().err
 
 
 def test_load_dry_run_needs_no_approval_and_uses_exact_artifacts(tmp_path, capsys):

@@ -116,6 +116,10 @@ _Avoid_: Guaranteed behavior-preserving enrichment, functional scenario generati
 The optional generation of allowlisted observational text values using one selected source financial-instrument aggregate as semantic context.
 _Avoid_: Independent cell generation, business-rule generation
 
+**Enrichment source limit**:
+The maximum number of source financial instruments selected for instrument text enrichment per product within a run. It counts source instruments before cloning, independently of the total instrument selection, related table rows, or number of synthetic copies; each product has its own allowance.
+_Avoid_: Synthetic row limit, text-cell limit, clone limit
+
 **Synthetic clone identity**:
 The identity of one source record's numbered copy within a frozen generation plan and its reservation. Repeating that generation preserves the copy's synthetic primary key, independently of execution parallelism or partition layout.
 _Avoid_: Execution-local row number, source identity alone

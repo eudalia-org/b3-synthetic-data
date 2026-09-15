@@ -878,8 +878,6 @@ MEU_NUMERO_LEGACY_STRATEGY = "legacy_global_v1"
 MEU_NUMERO_NORMALIZATION = "trim_strip_decimal_zeroes_v1"
 ENGORDA_PHASES = ("all", "plan", "materialize")
 GENAI_POLICY_VERSION = 1
-GENAI_MAX_SOURCE_INSTRUMENTS = 10000
-GENAI_MAX_FACTOR_K = 5
 GENAI_DEFAULT_CONCURRENCY = 4
 GENAI_LOGICAL_ATTEMPTS = 3
 GENAI_TRANSPORT_ATTEMPTS = 3
@@ -1050,6 +1048,12 @@ def _genai_required_number(mapping: Mapping[str, Any], key: str, label: str) -> 
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"GenAI policy {label}.{key} must be numeric")
     return float(value)
+
+
+def _genai_source_limit(value: Any) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError("genai_rows must be a non-negative integer")
+    return value
 
 
 def resolve_genai_policy(document: Any, *, product: str) -> GenAiPolicy:
@@ -1232,6 +1236,7 @@ class GenAiInstrumentRequest:
     clone_factor: int
     run_seed: int
     policy: GenAiPolicy
+    clone_start: int = 1
 
 
 @dataclass(frozen=True)
@@ -1295,12 +1300,6 @@ class GenAiGenerationResult:
     rows: Tuple[GenAiReplacementRow, ...]
     metrics: GenAiGenerationMetrics
     content_sha256: str
-
-
-class GenAiNoSuccessfulRequests(ValueError):
-    def __init__(self, result: GenAiGenerationResult) -> None:
-        super().__init__("no Oracle GenAI request succeeded")
-        self.result = result
 
 
 class OracleGenAiChatAdapter:
@@ -1482,8 +1481,8 @@ def build_genai_request(
     clone_factor: int,
     run_seed: int,
 ) -> GenAiInstrumentRequest:
-    if clone_factor < 1 or clone_factor > GENAI_MAX_FACTOR_K:
-        raise ValueError(f"GenAI clone_factor must be between 1 and {GENAI_MAX_FACTOR_K}")
+    if type(clone_factor) is not int or clone_factor < 1:
+        raise ValueError("GenAI clone_factor must be a positive integer")
     excluded = {
         (table, column)
         for table, columns in policy.excluded_context_columns.items()
@@ -1549,7 +1548,8 @@ def build_genai_request(
 
 def _genai_attempt_seed(request: GenAiInstrumentRequest, attempt_number: int) -> int:
     digest = hashlib.sha256(
-        f"{request.run_seed}:{request.root_num_if}:{attempt_number}".encode("ascii")
+        f"{request.run_seed}:{request.root_num_if}:{request.clone_start}:"
+        f"{attempt_number}".encode("ascii")
     ).digest()
     return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
 
@@ -1579,7 +1579,8 @@ def _build_genai_attempt(
         "response_contract": {"variants": [{"k": "integer", "values": {"target_id": "string"}}]},
     }
     retry_token = hashlib.sha256(
-        f"{request.root_num_if}:{request.run_seed}:{attempt_number}".encode("ascii")
+        f"{request.root_num_if}:{request.run_seed}:{request.clone_start}:"
+        f"{attempt_number}".encode("ascii")
     ).hexdigest()
     return GenAiGenerationAttempt(
         root_num_if=request.root_num_if,
@@ -1663,7 +1664,7 @@ def _fallback_genai_rows(
             attempt_count=attempt_count,
             differs_from_source=False,
         )
-        for clone in range(1, request.clone_factor + 1)
+        for clone in range(request.clone_start, request.clone_start + request.clone_factor)
         for cell in request.cells
     ]
 
@@ -1709,24 +1710,45 @@ def _genai_latency_summary(values: Sequence[float]) -> Dict[str, float]:
 
 def _generate_one_instrument(request: GenAiInstrumentRequest, adapter: Any):
     if len(request.context_json) > GENAI_MAX_CONTEXT_CHARS:
-        return _fallback_genai_rows(request, "CONTEXT_TOO_LARGE", 0), 0, 0, []
-    worst_case_response = {
-        "variants": [
-            {
-                "k": clone,
-                "values": {cell.target_id: "X" * cell.max_chars for cell in request.cells},
-            }
-            for clone in range(1, request.clone_factor + 1)
-        ]
+        return _fallback_genai_rows(request, "CONTEXT_TOO_LARGE", 0), 0, 0, [], 0
+    if not request.cells:
+        return [], 0, 0, [], 0
+    # Use the widest clone ordinal for a conservative, constant-memory batch size.
+    variant = {
+        "k": request.clone_start + request.clone_factor - 1,
+        "values": {cell.target_id: "X" * cell.max_chars for cell in request.cells},
     }
-    output_chars = len(_genai_canonical_json(worst_case_response))
-    if output_chars > 2 * request.policy.max_tokens:
-        return _fallback_genai_rows(request, "OUTPUT_BUDGET_EXCEEDED", 0), 0, 0, []
+    variant_chars = len(_genai_canonical_json(variant))
+    envelope_chars = len(_genai_canonical_json({"variants": []}))
+    batch_size = (2 * request.policy.max_tokens - envelope_chars + 1) // (variant_chars + 1)
+    if batch_size < 1:
+        return _fallback_genai_rows(request, "OUTPUT_BUDGET_EXCEEDED", 0), 0, 0, [], 0
+
+    rows: List[GenAiReplacementRow] = []
+    successes = errors = logical_attempts = 0
+    calls: List[Tuple[str, float]] = []
+    end = request.clone_start + request.clone_factor
+    for start in range(request.clone_start, end, batch_size):
+        batch = dataclasses.replace(
+            request, clone_start=start, clone_factor=min(batch_size, end - start)
+        )
+        batch_rows, batch_successes, batch_errors, batch_calls = _generate_genai_batch(
+            batch, adapter
+        )
+        rows.extend(batch_rows)
+        successes += batch_successes
+        errors += batch_errors
+        calls.extend(batch_calls)
+        logical_attempts += max((row.attempt_count for row in batch_rows), default=0)
+    return rows, successes, errors, calls, logical_attempts
+
+
+def _generate_genai_batch(request: GenAiInstrumentRequest, adapter: Any):
 
     cells = {cell.target_id: cell for cell in request.cells}
     unresolved = {
         (clone, cell.target_id)
-        for clone in range(1, request.clone_factor + 1)
+        for clone in range(request.clone_start, request.clone_start + request.clone_factor)
         for cell in request.cells
     }
     generated: Dict[Tuple[int, str], Tuple[str, int]] = {}
@@ -1770,7 +1792,7 @@ def _generate_one_instrument(request: GenAiInstrumentRequest, adapter: Any):
         unresolved.difference_update(accepted)
 
     rows: List[GenAiReplacementRow] = []
-    for clone in range(1, request.clone_factor + 1):
+    for clone in range(request.clone_start, request.clone_start + request.clone_factor):
         for cell in request.cells:
             identity = (clone, cell.target_id)
             accepted = generated.get(identity)
@@ -1815,15 +1837,12 @@ def generate_genai_replacements(
     max_concurrency: int = GENAI_DEFAULT_CONCURRENCY,
 ) -> GenAiGenerationResult:
     started = time.perf_counter()
-    if len(requests) > GENAI_MAX_SOURCE_INSTRUMENTS:
-        raise ValueError(
-            f"GenAI supports at most {GENAI_MAX_SOURCE_INSTRUMENTS} source instruments"
-        )
     if type(max_concurrency) is not int or max_concurrency < 1:
         raise ValueError("GenAI max_concurrency must be a positive integer")
     rows: List[GenAiReplacementRow] = []
     api_successes = 0
     request_errors = 0
+    logical_attempts = 0
     endpoint_calls: List[Tuple[str, float]] = []
     effective_concurrency = min(max_concurrency, max(1, len(requests)))
     with ThreadPoolExecutor(
@@ -1834,11 +1853,12 @@ def generate_genai_replacements(
             for request in requests
         }
         for future in as_completed(futures):
-            generated_rows, successes, errors, calls = future.result()
+            generated_rows, successes, errors, calls, attempts = future.result()
             rows.extend(generated_rows)
             api_successes += successes
             request_errors += errors
             endpoint_calls.extend(calls)
+            logical_attempts += attempts
     rows.sort(
         key=lambda row: (
             row.root_num_if,
@@ -1897,8 +1917,8 @@ def generate_genai_replacements(
         endpoint_status_counts[status] = endpoint_status_counts.get(status, 0) + 1
     metrics = GenAiGenerationMetrics(
         status=(
-            "FAILED" if requests and api_successes == 0
-            else "DEGRADED" if fallback_cells
+            "SKIPPED" if not requests
+            else "DEGRADED" if fallback_cells or api_successes == 0
             else "SUCCESS"
         ),
         source_instruments=len(requests),
@@ -1906,13 +1926,7 @@ def generate_genai_replacements(
         api_successes=api_successes,
         request_errors=request_errors,
         endpoint_call_count=api_successes + request_errors,
-        logical_attempts=sum(
-            max(
-                (row.attempt_count for row in rows if row.root_num_if == request.root_num_if),
-                default=0,
-            )
-            for request in requests
-        ),
+        logical_attempts=logical_attempts,
         duration_seconds=duration_seconds,
         configured_concurrency=max_concurrency,
         effective_concurrency=effective_concurrency,
@@ -1934,8 +1948,12 @@ def generate_genai_replacements(
     content = [row.record() for row in rows]
     content_hash = hashlib.sha256(_genai_canonical_json(content).encode("ascii")).hexdigest()
     result = GenAiGenerationResult(tuple(rows), metrics, content_hash)
-    if requests and api_successes == 0:
-        raise GenAiNoSuccessfulRequests(result)
+    if requests and metrics.generated_cells == 0:
+        logger.warning(
+            "GenAI enrichment was not executed successfully; keeping original texts. "
+            "sources=%d endpoint_calls=%d api_successes=%d status_counts=%s",
+            len(requests), metrics.endpoint_call_count, api_successes, status_counts,
+        )
     return result
 
 
@@ -1943,37 +1961,55 @@ def collect_genai_instruments(
     lotes: Mapping[str, DataFrame],
     provenances: Mapping[str, DataFrame],
     planos: Mapping[str, "PlanoTabela"],
+    *,
+    genai_rows: int,
+    seed: int,
 ) -> Tuple[GenAiInstrumentAggregate, ...]:
-    roots = {
-        _genai_identity_value(row[COL_NUM_IF]): []
-        for row in lotes[TABELA_RAIZ].select(COL_NUM_IF).collect()
-    }
-    for table in sorted(lotes):
-        provenance = provenances.get(table)
-        if provenance is None:
-            raise ValueError(f"GenAI context has no provenance for {table}")
-        pk_columns = list(planos[table].pk_cols)
-        frame = lotes[table]
-        joined = frame.join(
-            provenance.select(*pk_columns, ROOT_PROVENANCE_COL),
-            pk_columns,
-            "inner",
-        ).select(
-            F.col(ROOT_PROVENANCE_COL),
-            *[frame[column].alias(column) for column in frame.columns],
-        )
-        for row in joined.collect():
-            values = row.asDict(recursive=True)
-            root = _genai_identity_value(values.pop(ROOT_PROVENANCE_COL))
-            if root not in roots:
-                raise ValueError(f"GenAI provenance references unknown root {root}")
-            roots[root].append(
-                GenAiSourceRow(
-                    table=table,
-                    source_pk={column: values[column] for column in pk_columns},
-                    values=values,
-                )
+    """Collect only sampled aggregate context, never the full selected closure."""
+    genai_rows = _genai_source_limit(genai_rows)
+    if genai_rows == 0:
+        return ()
+    source_ids = lotes[TABELA_RAIZ].select(COL_NUM_IF).distinct()
+    # Spark's limit accepts only a JVM int; an oversized allowance should simply
+    # select all available sources rather than pass the configured value to Spark.
+    if genai_rows >= source_ids.count():
+        sampled = source_ids.persist()
+    else:
+        priority = F.sha2(F.concat(F.lit(f"{seed}:"), F.col(COL_NUM_IF).cast("string")), 256)
+        sampled = source_ids.orderBy(priority, F.col(COL_NUM_IF)).limit(genai_rows).persist()
+    try:
+        roots = {
+            _genai_identity_value(row[COL_NUM_IF]): []
+            for row in sampled.collect()
+        }
+        sampled_provenance = sampled.withColumnRenamed(COL_NUM_IF, ROOT_PROVENANCE_COL)
+        for table in sorted(lotes):
+            provenance = provenances.get(table)
+            if provenance is None:
+                raise ValueError(f"GenAI context has no provenance for {table}")
+            pk_columns = list(planos[table].pk_cols)
+            frame = lotes[table]
+            selected = provenance.join(sampled_provenance, ROOT_PROVENANCE_COL, "left_semi")
+            joined = frame.join(
+                selected.select(*pk_columns, ROOT_PROVENANCE_COL), pk_columns, "inner",
+            ).select(
+                F.col(ROOT_PROVENANCE_COL),
+                *[frame[column].alias(column) for column in frame.columns],
             )
+            for row in joined.toLocalIterator():
+                values = row.asDict(recursive=True)
+                root = _genai_identity_value(values.pop(ROOT_PROVENANCE_COL))
+                if root not in roots:
+                    raise ValueError(f"GenAI provenance references unknown root {root}")
+                roots[root].append(
+                    GenAiSourceRow(
+                        table=table,
+                        source_pk={column: values[column] for column in pk_columns},
+                        values=values,
+                    )
+                )
+    finally:
+        sampled.unpersist(blocking=False)
     return tuple(
         GenAiInstrumentAggregate(root_num_if=root, rows=tuple(roots[root]))
         for root in sorted(roots, key=Decimal)
@@ -2024,7 +2060,7 @@ class EngordaJob:
     reservation_uri: Optional[str] = None
     raw_uri: Optional[str] = None
     output_uri: Optional[str] = None
-    enable_genai: bool = False
+    genai_rows: int = 0
     genai_policy: Optional[str] = None
     genai_endpoint_id: Optional[str] = None
     genai_compartment_id: Optional[str] = None
@@ -3356,6 +3392,8 @@ def write_genai_artifacts(
     compartment_id: str,
     region: str,
     source_policy_uri: Optional[str] = None,
+    source_limit: Optional[int] = None,
+    seed: Optional[int] = None,
 ) -> Dict[str, Any]:
     artifact_root = artifact_root.rstrip("/")
     _assert_exact_output_absent(spark, artifact_root)
@@ -3393,6 +3431,8 @@ def write_genai_artifacts(
         "replacements_uri": replacements_uri,
         "replacements_sha256": result.content_sha256,
         "metrics": dataclasses.asdict(result.metrics),
+        "source_limit": source_limit,
+        "sampling_seed": seed,
     }
     manifest_sha256 = hashlib.sha256(
         _genai_canonical_json(manifest_body).encode("ascii")
@@ -3400,6 +3440,7 @@ def write_genai_artifacts(
     _write_json_artifact(spark, manifest_uri, {**manifest_body, "manifest_sha256": manifest_sha256})
     return {
         "enabled": True,
+        "source_limit": source_limit,
         "schema_version": GENAI_ARTIFACT_SCHEMA_VERSION,
         "artifact_root": artifact_root,
         "status": result.metrics.status,
@@ -10603,7 +10644,7 @@ def executa_clonagem(
     snapshot_faltantes: Optional[DataFrame] = None,
     snapshot_lote_counts: Optional[Mapping[str, int]] = None,
     specs_uri: Optional[str] = None,
-    enable_genai: bool = False,
+    genai_rows: int = 0,
     genai_execution: Optional[GenAiExecutionConfig] = None,
     genai_frozen: Optional[GenAiFrozenArtifacts] = None,
 ) -> Dict[str, dict]:
@@ -10620,6 +10661,7 @@ def executa_clonagem(
     O TIPO do instrumento é derivado do lote logo após a seleção e ANTES de
     qualquer alocação no Oracle (ver _deriva_tipo_oracle); tipo_oracle é apenas
     conferência opcional."""
+    genai_rows = _genai_source_limit(genai_rows)
     inicio = time.perf_counter()
     _validate_product_profile(product_profile)
     if phase not in ENGORDA_PHASES:
@@ -10672,9 +10714,7 @@ def executa_clonagem(
             isinstance(planned_artifact.get("genai"), Mapping)
             and planned_artifact["genai"].get("enabled") is True
         )
-        if enable_genai != planned_genai:
-            raise ValueError("materialize --enable-genai diverge do descriptor congelado no plano")
-        if enable_genai and (genai_frozen is None):
+        if planned_genai and (genai_frozen is None):
             raise ValueError("materialize GenAI exige descriptor e replacements validados")
         meu_reservation = reservation.get("meu_numero") or {}
         requested_meu_numero_prefix = (planned_artifact.get("meu_numero") or {}).get(
@@ -10926,7 +10966,7 @@ def executa_clonagem(
                 somente_ativos=somente_ativos,
                 nullify_columns=anular_cols,
                 permitir_lote_menor=ajusta_fator_k,
-                retain_provenance=enable_genai,
+                retain_provenance=genai_rows > 0,
                 produto=produto,
                 lastros_por_lote=lastros_por_lote,
             )
@@ -10953,8 +10993,6 @@ def executa_clonagem(
     # Materialize consumes the K already frozen by plan and never readjusts it.
     if phase != "materialize" and ajusta_fator_k:
         fator_k = _ajusta_fator_k_por_dominio(fator_k, n_instrumentos, len(valores))
-    if enable_genai and fator_k > GENAI_MAX_FACTOR_K:
-        raise ValueError(f"GenAI final adjusted fator_k must be <= {GENAI_MAX_FACTOR_K}")
 
     # Tipo do instrumento DERIVADO do lote — antes de qualquer round-trip Oracle.
     # É isto que substitui o antigo literal por produto e o que impede alocar
@@ -10982,7 +11020,7 @@ def executa_clonagem(
         lotes = selected_lotes
     else:
         closure_lote_counts = {}
-        provenance_out = {} if enable_genai else None
+        provenance_out = {} if genai_rows > 0 else None
         with _perf_timer("closure", product=product_profile.name, roots=len(valores)):
             lotes = calcula_lotes(
                 spark,
@@ -11023,7 +11061,7 @@ def executa_clonagem(
 
     active_genai_descriptor = dict(genai_frozen.descriptor) if genai_frozen is not None else None
     genai_replacements = genai_frozen.replacements if genai_frozen is not None else None
-    if enable_genai and phase != "materialize":
+    if genai_rows > 0 and phase != "materialize":
         if genai_execution is None:
             raise ValueError("GenAI execution configuration was not resolved")
         genai_policy = genai_execution.policy
@@ -11044,7 +11082,9 @@ def executa_clonagem(
             if genai_execution.adapter is None:
                 raise ValueError("GenAI adapter was not configured")
             _assert_exact_output_absent(spark, genai_execution.artifact_root)
-            aggregates = collect_genai_instruments(lotes, selected_provenances, planos)
+            aggregates = collect_genai_instruments(
+                lotes, selected_provenances, planos, genai_rows=genai_rows, seed=seed,
+            )
             requests = tuple(
                 build_genai_request(
                     aggregate,
@@ -11054,16 +11094,11 @@ def executa_clonagem(
                 )
                 for aggregate in aggregates
             )
-            generation_failure = None
-            try:
-                generation = generate_genai_replacements(
-                    requests,
-                    adapter=genai_execution.adapter,
-                    max_concurrency=genai_execution.max_concurrency,
-                )
-            except GenAiNoSuccessfulRequests as exc:
-                generation = exc.result
-                generation_failure = exc
+            generation = generate_genai_replacements(
+                requests,
+                adapter=genai_execution.adapter,
+                max_concurrency=genai_execution.max_concurrency,
+            )
             active_genai_descriptor = write_genai_artifacts(
                 spark,
                 genai_execution.artifact_root,
@@ -11073,9 +11108,9 @@ def executa_clonagem(
                 compartment_id=genai_execution.compartment_id,
                 region=genai_execution.region,
                 source_policy_uri=genai_execution.policy_uri,
+                source_limit=genai_rows,
+                seed=seed,
             )
-            if generation_failure is not None:
-                raise generation_failure
             if phase == "all":
                 genai_replacements = load_genai_replacements(spark, active_genai_descriptor)
     if selected_provenances is not None:
@@ -11658,14 +11693,8 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
     if job.n_instrumentos is not None:
         if type(job.n_instrumentos) is not int or job.n_instrumentos < 1:
             raise ValueError("n_instrumentos deve ser inteiro >= 1")
-    if job.enable_genai:
-        selected_count = len(job.num_ifs) if job.num_ifs is not None else job.n_instrumentos
-        if selected_count is not None and selected_count > GENAI_MAX_SOURCE_INSTRUMENTS:
-            raise ValueError(
-                f"GenAI supports at most {GENAI_MAX_SOURCE_INSTRUMENTS} source instruments"
-            )
-        if job.fator_k > GENAI_MAX_FACTOR_K:
-            raise ValueError(f"GenAI supports fator_k <= {GENAI_MAX_FACTOR_K}")
+    _genai_source_limit(job.genai_rows)
+    if job.genai_rows > 0 and job.phase != "materialize":
         if type(job.genai_concurrency) is not int or job.genai_concurrency < 1:
             raise ValueError("genai_concurrency must be a positive integer")
         if job.phase in {"all", "plan"}:
@@ -11737,7 +11766,6 @@ def _validate_engorda_job(job: EngordaJob) -> ProductProfile:
         "dry_run",
         "no_oracle",
         "somente_ativos",
-        "enable_genai",
     ):
         if type(getattr(job, field_name)) is not bool:
             raise ValueError(f"{field_name} precisa ser booleano")
@@ -11779,10 +11807,10 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
     else:
         config["DATAGEN_CLONE_PREFIX"] = _normalize_clone_prefix(config["DATAGEN_CLONE_PREFIX"])
     genai_artifact_root = job.genai_artifact_root
-    if job.enable_genai and job.phase == "plan" and not genai_artifact_root:
+    if job.genai_rows > 0 and job.phase == "plan" and not genai_artifact_root:
         genai_artifact_root = _default_genai_artifact_root(job.plan_uri)
     if (
-        job.enable_genai
+        job.genai_rows > 0
         and job.phase in {"all", "plan"}
         and _mesmo_ou_ancestral(clone_base_path(config), genai_artifact_root)
     ):
@@ -11802,7 +11830,7 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
 
     spark = create_spark_session(f"DataGenEngorda_{profile.name}")
     try:
-        if job.enable_genai and job.phase in {"all", "plan"} and not job.dry_run:
+        if job.genai_rows > 0 and job.phase in {"all", "plan"} and not job.dry_run:
             _assert_exact_output_absent(spark, genai_artifact_root)
         specs_uri = job.specs_uri or config["DATAGEN_SPECS_URI"]
         planned_artifact = None
@@ -11814,7 +11842,9 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
         genai_adapter = job.genai_adapter
         genai_execution = None
         genai_frozen = None
-        if job.enable_genai and job.phase in {"all", "plan"}:
+        if job.genai_rows == 0 and job.phase in {"all", "plan"}:
+            logger.info("GenAI skipped for product=%s: genai_rows=0; normal cloning.", profile.name)
+        if job.genai_rows > 0 and job.phase in {"all", "plan"}:
             resolved_genai_policy = resolve_genai_policy(
                 _read_json_artifact(spark, job.genai_policy),
                 product=profile.name,
@@ -11875,8 +11905,6 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
                 isinstance(planned_artifact.get("genai"), Mapping)
                 and planned_artifact["genai"].get("enabled") is True
             )
-            if job.enable_genai != planned_genai:
-                raise ValueError("materialize --enable-genai diverge do descriptor GenAI do plano")
             if planned_genai:
                 descriptor = dict(planned_artifact["genai"])
                 genai_frozen = GenAiFrozenArtifacts(
@@ -11970,7 +11998,7 @@ def executar_job(job: EngordaJob) -> Dict[str, dict]:
             snapshot_faltantes=snapshot_faltantes,
             snapshot_lote_counts=snapshot_lote_counts,
             specs_uri=specs_uri,
-            enable_genai=job.enable_genai,
+            genai_rows=job.genai_rows,
             genai_execution=genai_execution,
             genai_frozen=genai_frozen,
         )
@@ -12303,7 +12331,10 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--reservation-uri", default=None)
     parser.add_argument("--raw-uri", default=None)
     parser.add_argument("--output-uri", default=None)
-    parser.add_argument("--enable-genai", action="store_true")
+    parser.add_argument(
+        "--genai-rows", type=int, default=0,
+        help="Máximo de instrumentos fonte para GenAI; 0 desativa (padrão).",
+    )
     parser.add_argument("--genai-policy", default=None)
     parser.add_argument("--genai-endpoint-id", default=None)
     parser.add_argument("--genai-compartment-id", default=None)
@@ -12396,7 +12427,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             reservation_uri=args.reservation_uri,
             raw_uri=args.raw_uri,
             output_uri=args.output_uri,
-            enable_genai=args.enable_genai,
+            genai_rows=args.genai_rows,
             genai_policy=args.genai_policy,
             genai_endpoint_id=args.genai_endpoint_id,
             genai_compartment_id=args.genai_compartment_id,
